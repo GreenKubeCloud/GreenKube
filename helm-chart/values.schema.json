@@ -1,0 +1,347 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GreenKube Helm values",
+  "description": "Types and ranges of the GreenKube chart values (roadmap N2). Cross-field rules (Secret references, webhooks) stay in the templates. The 0.3.x keys marked deprecated are accepted for one minor release and mapped (docs/upgrading.md).",
+  "type": "object",
+  "definitions": {
+    "replicas": {"type": "integer", "minimum": 0, "maximum": 100},
+    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+    "optionalPort": {"type": "integer", "minimum": 0, "maximum": 65535},
+    "quantity": {"type": ["string", "integer", "number"]},
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {"type": "object", "additionalProperties": {"$ref": "#/definitions/quantity"}},
+        "limits": {"type": "object", "additionalProperties": {"$ref": "#/definitions/quantity"}}
+      }
+    },
+    "probe": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "path": {"type": "string", "pattern": "^/"},
+        "initialDelaySeconds": {"type": "integer", "minimum": 0},
+        "periodSeconds": {"type": "integer", "minimum": 1},
+        "timeoutSeconds": {"type": "integer", "minimum": 1},
+        "failureThreshold": {"type": "integer", "minimum": 1},
+        "successThreshold": {"type": "integer", "minimum": 1}
+      }
+    },
+    "duration": {"type": "string", "pattern": "^$|^[0-9]+(ms|s|m|h)$"},
+    "longDuration": {"type": "string", "pattern": "^[0-9]+(s|m|h|d)$"},
+    "ratio": {"type": "number", "minimum": 0, "maximum": 1},
+    "k8sName": {"type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", "maxLength": 253},
+    "allowlist": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1, "pattern": "^\\S+$"}
+    },
+    "deprecated": {"description": "0.3.x value, accepted and mapped for one minor release (docs/upgrading.md)."}
+  },
+  "properties": {
+    "tmp": {"type": "object", "properties": {"sizeLimit": {"$ref": "#/definitions/quantity"}}},
+    "api": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1, "maximum": 100},
+        "resources": {"$ref": "#/definitions/resources"},
+        "livenessProbe": {"$ref": "#/definitions/probe"},
+        "readinessProbe": {"$ref": "#/definitions/probe"}
+      }
+    },
+    "controller": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 0, "maximum": 10, "description": "0 only while migrating a 0.3.x SQLite install (docs/upgrading.md)."},
+        "resources": {"$ref": "#/definitions/resources"},
+        "metricsPort": {"$ref": "#/definitions/optionalPort"},
+        "leaderElection": {
+          "type": "object",
+          "properties": {
+            "leaseName": {"$ref": "#/definitions/k8sName"},
+            "leaseDurationSeconds": {"type": "integer", "minimum": 5, "maximum": 3600}
+          }
+        },
+        "startupProbe": {"$ref": "#/definitions/probe"},
+        "livenessProbe": {"$ref": "#/definitions/probe"},
+        "readinessProbe": {"$ref": "#/definitions/probe"}
+      }
+    },
+    "renderer": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1, "maximum": 20},
+        "servicePort": {"$ref": "#/definitions/port"},
+        "tmpSizeLimit": {"$ref": "#/definitions/quantity"},
+        "resources": {"$ref": "#/definitions/resources"},
+        "egressFirewall": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "privilegedInitContainer": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "properties": {
+        "replicas": {"$ref": "#/definitions/replicas"},
+        "metricsPort": {"$ref": "#/definitions/port"},
+        "resources": {"$ref": "#/definitions/resources"}
+      }
+    },
+    "automation": {
+      "type": "object",
+      "properties": {
+        "credentialsSecret": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", "maxLength": 253},
+        "repositoryAllowlist": {"$ref": "#/definitions/allowlist"},
+        "prPollIntervalSeconds": {"type": "integer", "minimum": 10, "maximum": 86400},
+        "syncPollIntervalSeconds": {"type": "integer", "minimum": 10, "maximum": 86400},
+        "syncTimeoutSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+        "discoveryInterval": {"$ref": "#/definitions/duration"},
+        "bindingTtl": {"$ref": "#/definitions/duration"},
+        "webhooks": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "secretNamespace": {"type": "string"},
+            "secretName": {"type": "string"},
+            "secretKey": {"type": "string"},
+            "providerId": {"type": "string"}
+          }
+        },
+        "providers": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": ["id", "type"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+              "type": {"type": "string", "enum": ["github", "gitlab", "gitea", "GitHub", "GitLab", "Gitea"]},
+              "apiBaseUrl": {"type": "string"},
+              "webBaseUrl": {"type": "string"},
+              "secretName": {"type": "string"},
+              "secretKey": {"type": "string"},
+              "secretNamespace": {"type": "string"},
+              "webhookSecretName": {"type": "string"},
+              "webhookSecretKey": {"type": "string"},
+              "webhookSecretNamespace": {"type": "string"},
+              "repositoryAllowlist": {"$ref": "#/definitions/allowlist"}
+            }
+          }
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "pauseDelivery": {"type": "boolean"},
+            "maxRiskLevel": {"type": "string", "enum": ["low", "medium", "high"]},
+            "minConfidence": {"$ref": "#/definitions/ratio"},
+            "minCoverage": {"$ref": "#/definitions/ratio"},
+            "minSamples": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "integer", "minimum": 1}]},
+            "maxOpenPullRequestsPerWorkload": {"type": "integer", "minimum": 1},
+            "cooldownMinutes": {"type": "integer", "minimum": 0},
+            "changeFreezeLabels": {"type": "array"},
+            "changeFreezeWindows": {"type": "array"},
+            "missingEvidence": {"type": "string", "enum": ["fail", "warn"]}
+          }
+        },
+        "pullRequests": {
+          "type": "object",
+          "properties": {
+            "draft": {"type": "boolean"},
+            "labels": {"type": "array", "items": {"type": "string"}},
+            "reviewers": {"type": "array", "items": {"type": "string"}},
+            "teamReviewers": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "pr": {
+          "type": "object",
+          "properties": {
+            "titlePrefix": {"type": "string", "maxLength": 32},
+            "template": {"type": "string"},
+            "defaultLabels": {"type": "boolean"},
+            "draftHighRisk": {"type": "boolean"},
+            "codeowners": {"type": "boolean"},
+            "commitStatus": {"type": "boolean"},
+            "lifecycleComments": {"type": "boolean"},
+            "lifecycleLookbackDays": {"type": "integer", "minimum": 1, "maximum": 365}
+          }
+        },
+        "enabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "boolean"}]},
+        "mode": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "string", "enum": ["", "inline", "worker", "disabled"]}]},
+        "workerMetricsPort": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"$ref": "#/definitions/port"}]}
+      }
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]},
+        "tag": {"type": ["string", "number"]},
+        "digest": {"type": "string", "pattern": "^$|^sha256:[0-9a-fA-F]{64}$"}
+      }
+    },
+    "initContainer": {"type": "object"},
+    "serviceAccount": {
+      "type": "object",
+      "properties": {"create": {"type": "boolean"}, "name": {"type": "string"}}
+    },
+    "rbac": {"type": "object", "properties": {"create": {"type": "boolean"}}},
+    "config": {
+      "type": "object",
+      "properties": {
+        "logLevel": {"type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "debug", "info", "warning", "error", "critical"]},
+        "logFormat": {"type": "string", "enum": ["json", "console"]},
+        "environment": {"type": "string", "enum": ["production", "development", "test"]},
+        "apiAuthMode": {"type": "string", "enum": ["session", "api_key", "oidc"]},
+        "externalUrl": {"type": "string", "pattern": "^$|^https?://[^\\s?#]+$"},
+        "electricityProvider": {"type": "string", "enum": ["electricity_maps", "wattnet"]},
+        "normalizationGranularity": {"type": "string", "enum": ["hour", "day", "none"]},
+        "intensityMaxAge": {"type": "string"},
+        "metricsCompressionAgeHours": {"type": "integer", "minimum": 1},
+        "k8sRequestTimeout": {"type": "number", "minimum": 0},
+        "db": {
+          "type": "object",
+          "properties": {
+            "schema": {"type": "string", "pattern": "^[A-Za-z0-9_]+$"},
+            "sslMode": {"type": "string", "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]},
+            "poolMinSize": {"type": "integer", "minimum": 1},
+            "poolMaxSize": {"type": "integer", "minimum": 1},
+            "statementTimeoutMs": {"type": "integer", "minimum": 0},
+            "type": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "string", "enum": ["postgres", "sqlite"]}]},
+            "path": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "string"}]}
+          }
+        },
+        "persistence": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "object"}]},
+        "api": {
+          "type": "object",
+          "properties": {
+            "host": {"type": "string"},
+            "port": {"$ref": "#/definitions/port"},
+            "enabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "boolean"}]},
+            "livenessProbe": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"$ref": "#/definitions/probe"}]},
+            "readinessProbe": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"$ref": "#/definitions/probe"}]}
+          }
+        },
+        "prometheus": {
+          "type": "object",
+          "properties": {
+            "url": {"type": "string"},
+            "verifyCerts": {"type": "boolean"},
+            "queryRangeStep": {"type": "string", "pattern": "^[0-9]+(s|m|h)$"},
+            "scrapeInterval": {"type": "string", "pattern": "^[0-9]+(s|m|h)$"},
+            "nodeInstanceLabel": {"type": "string"}
+          }
+        },
+        "opencost": {
+          "type": "object",
+          "properties": {"url": {"type": "string"}, "verifyCerts": {"type": "boolean"}}
+        },
+        "corsOrigins": {"type": "string"},
+        "trustedProxyIps": {"type": "string"},
+        "rootPath": {"type": "string", "pattern": "^$|^/"},
+        "recommendations": {
+          "type": "object",
+          "properties": {
+            "lookbackDays": {"type": "integer", "minimum": 1},
+            "maxMetricRows": {"type": "integer", "minimum": 1},
+            "limitsPolicy": {"type": "string", "enum": ["keep", "remove_cpu", "memory_equals_request"]},
+            "rankingProfile": {"type": "string", "enum": ["balanced", "carbon_first", "cost_first", "quick_wins", "low_risk"]},
+            "minSamples": {"type": "integer", "minimum": 1},
+            "scanInterval": {"type": "string", "pattern": "^[0-9]+(s|m|h)$"},
+            "verification": {
+              "type": "object",
+              "properties": {
+                "minSamples": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "integer", "minimum": 1}]}
+              }
+            },
+            "sourcePriority": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "string"}]},
+            "vpaEnabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": ["boolean", "string"]}]},
+            "karpenterEnabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": ["boolean", "string"]}]}
+          }
+        }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "properties": {
+        "pluginsEnabled": {"type": "boolean"},
+        "settings": {"type": "object"},
+        "priority": {"type": "string"}
+      }
+    },
+    "impact": {"type": "object"},
+    "auth": {
+      "type": "object",
+      "properties": {
+        "admin": {
+          "type": "object",
+          "properties": {
+            "username": {"type": "string", "minLength": 1},
+            "existingSecret": {"type": "string"},
+            "existingSecretKey": {"type": "string"}
+          }
+        },
+        "session": {
+          "type": "object",
+          "properties": {
+            "secureCookie": {"type": "string", "enum": ["auto", "always", "never"]},
+            "idleTimeout": {"$ref": "#/definitions/longDuration"},
+            "absoluteLifetime": {"$ref": "#/definitions/longDuration"},
+            "rememberLifetime": {"$ref": "#/definitions/longDuration"}
+          }
+        },
+        "login": {"type": "object", "properties": {"rateLimit": {"type": "string"}}}
+      }
+    },
+    "secrets": {"type": "object"},
+    "hooks": {"type": "object"},
+    "tests": {"type": "object"},
+    "postgres": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "auth": {
+          "type": "object",
+          "properties": {
+            "username": {"type": "string", "minLength": 1},
+            "password": {"type": "string"},
+            "database": {"type": "string", "minLength": 1}
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "size": {"$ref": "#/definitions/quantity"},
+            "storageClassName": {"type": "string"}
+          }
+        },
+        "resources": {"$ref": "#/definitions/resources"}
+      }
+    },
+    "monitoring": {
+      "type": "object",
+      "properties": {
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "additionalIngress": {"type": "array"},
+            "additionalEgress": {"type": "array"}
+          }
+        }
+      }
+    },
+    "profile": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "string", "enum": ["standalone", "production"]}]},
+    "replicaCount": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "integer", "minimum": 1}]},
+    "production": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "object"}]},
+    "collector": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "object"}]},
+    "rendererSandbox": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "object"}]},
+    "resources": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"$ref": "#/definitions/resources"}]},
+    "apiResources": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"$ref": "#/definitions/resources"}]}
+  }
+}

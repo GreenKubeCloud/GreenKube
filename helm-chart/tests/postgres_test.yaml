@@ -18,12 +18,15 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: should not render the StatefulSet when the app uses sqlite
+  # The full message (exact commands) is checked by scripts/helm-upgrade-check.sh.
+  - it: fails a SQLite upgrade before touching anything (F17)
     set:
       config.db.type: sqlite
+      config.persistence.enabled: true
     asserts:
-      - hasDocuments:
-          count: 0
+      - failedTemplate:
+          errorPattern: "config.db.type=sqlite is no longer supported"
+
 
   # --------------------------------------------------------------------------
   # Image

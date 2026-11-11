@@ -1,4 +1,4 @@
-{{- if .Values.config.api.enabled }}
+{{- $v := include "greenkube.values" . | fromYaml }}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -20,6 +20,5 @@ spec:
       resources:
         {{- toYaml .Values.tests.resources | nindent 8 }}
       command: ['wget']
-      args: ['--spider', '--timeout=5', 'http://{{ include "greenkube.fullname" . }}-api:{{ .Values.config.api.port }}/api/v1/health']
+      args: ['--spider', '--timeout=5', 'http://{{ include "greenkube.fullname" . }}-api:{{ $v.api.port }}/api/v1/health']
   restartPolicy: Never
-{{- end }}

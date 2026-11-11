@@ -1,33 +1,21 @@
 {{- $root := . -}}
 {{- if $root.Values.monitoring.networkPolicy.enabled -}}
-{{- $automationMode := include "greenkube.automationMode" $root -}}
-{{- $components := list -}}
-{{- if eq $root.Values.profile "production" -}}
-  {{- if $root.Values.config.api.enabled -}}
-    {{- $components = append $components "api" -}}
-  {{- end -}}
-  {{- $components = append $components "controller" -}}
-  {{- if and $root.Values.automation.enabled (eq $automationMode "worker") -}}
-    {{- $components = append $components "automation" -}}
-  {{- end -}}
-{{- else -}}
-  {{- $components = append $components "app" -}}
-  {{- if and $root.Values.automation.enabled (eq $automationMode "worker") -}}
-    {{- $components = append $components "automation-worker" -}}
-  {{- end -}}
+{{- $v := include "greenkube.values" $root | fromYaml -}}
+{{- $components := list "api" "controller" -}}
+{{- if gt (int ($v.worker.replicas | default 0)) 0 -}}
+  {{- $components = append $components "worker" -}}
 {{- end -}}
 {{- $additionalEgress := $root.Values.monitoring.networkPolicy.additionalEgress | default (list) -}}
 {{- if not (kindIs "slice" $additionalEgress) -}}
   {{- fail "monitoring.networkPolicy.additionalEgress must be a list of NetworkPolicy egress rules" -}}
 {{- end -}}
 {{- range $component := $components -}}
-{{- $apiComponent := or (eq $component "app") (eq $component "api") -}}
-{{- $workerComponent := or (eq $component "automation") (eq $component "automation-worker") -}}
-{{- $apiIngress := and $apiComponent $root.Values.config.api.enabled -}}
-{{- $workerIngress := and $workerComponent $root.Values.automation.enabled (eq $automationMode "worker") -}}
+{{- $apiComponent := eq $component "api" -}}
+{{- $apiIngress := $apiComponent -}}
+{{- $workerIngress := eq $component "worker" -}}
 {{- $customIngress := and $apiComponent $root.Values.monitoring.networkPolicy.additionalIngress -}}
 {{- $controllerMetricsPort := int (include "greenkube.controllerMetricsPort" $root) -}}
-{{- $controllerIngress := and (or (eq $component "app") (eq $component "controller")) (gt $controllerMetricsPort 0) -}}
+{{- $controllerIngress := and (eq $component "controller") (gt $controllerMetricsPort 0) -}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -56,16 +44,7 @@ spec:
               app.kubernetes.io/name: prometheus
       ports:
         - protocol: TCP
-          port: {{ $root.Values.config.api.port }}
-    # Allow the post-install/post-upgrade ready-check hook to reach the API.
-    - from:
-        - podSelector:
-            matchLabels:
-              {{- include "greenkube.selectorLabels" $root | nindent 14 }}
-              app.kubernetes.io/component: ready-check
-      ports:
-        - protocol: TCP
-          port: {{ $root.Values.config.api.port }}
+          port: {{ $v.api.port }}
     {{- end }}
     {{- if $workerIngress }}
     - from:
@@ -109,7 +88,7 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    {{- if and $root.Values.postgres.enabled (eq $root.Values.config.db.type "postgres") }}
+    {{- if include "greenkube.bundledPostgres" $root }}
     - to:
         - podSelector:
             matchLabels:
@@ -119,7 +98,6 @@ spec:
         - protocol: TCP
           port: 5432
     {{- end }}
-    {{- if and $root.Values.automation.enabled $root.Values.rendererSandbox.enabled }}
     - to:
         - podSelector:
             matchLabels:
@@ -127,8 +105,7 @@ spec:
               app.kubernetes.io/component: renderer-sandbox
       ports:
         - protocol: TCP
-          port: {{ $root.Values.rendererSandbox.servicePort }}
-    {{- end }}
+          port: {{ $v.renderer.servicePort | int }}
     {{- with $additionalEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

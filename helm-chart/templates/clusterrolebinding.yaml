@@ -1,4 +1,13 @@
 {{- if .Values.rbac.create -}}
+{{- $v := include "greenkube.values" . | fromYaml -}}
+{{- $components := list "controller" "api" -}}
+{{- if gt (int ($v.worker.replicas | default 0)) 0 -}}
+{{- $components = append $components "worker" -}}
+{{- end -}}
+{{- $subjects := list -}}
+{{- range $component := $components -}}
+{{- $subjects = append $subjects (include "greenkube.componentServiceAccountName" (dict "context" $ "component" $component)) -}}
+{{- end -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -10,15 +19,9 @@ roleRef:
   kind: ClusterRole
   name: {{ include "greenkube.fullname" . }}
 subjects:
+{{- range $name := $subjects | uniq }}
 - kind: ServiceAccount
-  name: {{ if eq .Values.profile "production" }}{{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "controller") }}{{ else }}{{ include "greenkube.serviceAccountName" . }}{{ end }}
-  namespace: {{ .Release.Namespace }}
-{{- if eq .Values.profile "production" }}
-- kind: ServiceAccount
-  name: {{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "api") }}
-  namespace: {{ .Release.Namespace }}
-- kind: ServiceAccount
-  name: {{ include "greenkube.componentServiceAccountName" (dict "context" . "component" "automation") }}
-  namespace: {{ .Release.Namespace }}
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
 {{- end }}
 {{- end }}

@@ -1,4 +1,6 @@
-{{- if and .Values.postgres.enabled (eq .Values.config.db.type "postgres") }}
+{{- /* Validates the values first: a 0.3.x SQLite release fails with the migration commands (F17). */ -}}
+{{- $_ := include "greenkube.values" . }}
+{{- if include "greenkube.bundledPostgres" . }}
 {{- /*
 A retained PostgreSQL volume is protected at run time by the credentials
 bootstrap hook, which refuses to generate a new password for it. A

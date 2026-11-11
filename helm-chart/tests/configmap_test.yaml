@@ -49,13 +49,16 @@ tests:
           path: data.DB_TYPE
           value: "postgres"
 
-  - it: should reflect sqlite db type
+  - it: always runs on PostgreSQL, even with the deprecated config.db.type set
     set:
-      config.db.type: sqlite
+      config.db.type: postgres
+      config.db.path: /data/old.db
     asserts:
       - equal:
           path: data.DB_TYPE
-          value: "sqlite"
+          value: "postgres"
+      - notExists:
+          path: data.DB_PATH
 
   - it: should set CLOUD_PROVIDER
     asserts:
@@ -208,14 +211,125 @@ tests:
           path: data.ROOT_PATH
           value: ""
 
-  - it: should omit API keys when api.enabled is false
+  - it: keeps the API settings with the deprecated config.api.enabled false
     set:
       config.api.enabled: false
     asserts:
-      - isNull:
-          path: data.API_HOST
-      - isNull:
+      - equal:
           path: data.API_PORT
+          value: "8000"
+
+  # --------------------------------------------------------------------------
+  # Always-on automation (F12) and 0.3.x compatibility (F17)
+  # --------------------------------------------------------------------------
+  - it: renders always-on automation defaults
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "false"
+      - equal:
+          path: data.AUTOMATION_REPOSITORY_ALLOWLIST
+          value: '["@discovered"]'
+      - equal:
+          path: data.GITOPS_DEFAULT_CREDENTIALS_SECRET
+          value: greenkube-git-credentials
+      - notExists:
+          path: data.AUTOMATION_ENABLED
+      - notExists:
+          path: data.AUTOMATION_MODE
+      - notMatchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: pauseDelivery
+
+  - it: passes pauseDelivery as its own setting
+    set:
+      automation.policy.pauseDelivery: true
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "true"
+
+  - it: maps automation.enabled=false of 0.3.x to pauseDelivery
+    set:
+      automation.enabled: false
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "true"
+
+  - it: maps automation.mode=disabled of 0.3.x to pauseDelivery
+    set:
+      automation.enabled: true
+      automation.mode: disabled
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "true"
+
+  - it: keeps delivery on for a 0.3.x install with automation enabled
+    set:
+      automation.enabled: true
+      automation.mode: inline
+    asserts:
+      - equal:
+          path: data.AUTOMATION_PAUSE_DELIVERY
+          value: "false"
+
+  - it: narrows the allowlist with explicit repositories
+    set:
+      automation.repositoryAllowlist:
+        - acme/payments
+        - acme/infra-*
+    asserts:
+      - equal:
+          path: data.AUTOMATION_REPOSITORY_ALLOWLIST
+          value: '["acme/payments","acme/infra-*"]'
+
+  - it: sets every sample gate from the single minSamples knob (N3)
+    set:
+      config.recommendations.minSamples: 12
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_MIN_SAMPLES
+          value: "12"
+      - equal:
+          path: data.VERIFICATION_MIN_SAMPLES
+          value: "12"
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"minSamples":12'
+
+  - it: still honours the deprecated per-gate minSamples knobs
+    set:
+      config.recommendations.minSamples: 12
+      automation.policy.minSamples: 20
+      config.recommendations.verification.minSamples: 30
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_MIN_SAMPLES
+          value: "12"
+      - equal:
+          path: data.VERIFICATION_MIN_SAMPLES
+          value: "30"
+      - matchRegex:
+          path: data.GITOPS_POLICY_JSON
+          pattern: '"minSamples":20'
+
+  - it: reads the source precedence from sources.priority (N3)
+    set:
+      sources.priority: greenkube,vpa
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_SOURCE_PRIORITY
+          value: greenkube,vpa
+
+  - it: maps config.recommendations.sourcePriority of 0.3.x
+    set:
+      config.recommendations.sourcePriority: karpenter,greenkube
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_SOURCE_PRIORITY
+          value: karpenter,greenkube
 
   # --------------------------------------------------------------------------
   # Recommendation engine config

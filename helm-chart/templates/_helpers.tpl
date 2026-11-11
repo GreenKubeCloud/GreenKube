@@ -132,7 +132,7 @@ Name of the chart-rendered Secret that holds credentials supplied in values.
 True when the chart deploys and owns the PostgreSQL database.
 */}}
 {{- define "greenkube.bundledPostgres" -}}
-{{- if and .Values.postgres.enabled (eq .Values.config.db.type "postgres") -}}true{{- end -}}
+{{- if .Values.postgres.enabled -}}true{{- end -}}
 {{- end -}}
 
 {{/*
@@ -217,7 +217,7 @@ Name of the credentials bootstrap hook resources (Job, ServiceAccount, Role).
 {{- $safeConfig := deepCopy .Values.config -}}
 {{- $_ := set $safeConfig "prometheus" (omit .Values.config.prometheus "url") -}}
 {{- $_ := set $safeConfig "opencost" (omit .Values.config.opencost "url") -}}
-{{- $config := dict "releaseName" .Release.Name "releaseNamespace" .Release.Namespace "profile" .Values.profile "config" $safeConfig "automation" .Values.automation "rendererSandbox" .Values.rendererSandbox "secretName" (include "greenkube.secretName" .) "kubeVersion" .Capabilities.KubeVersion.Version "apiVersions" .Capabilities.APIVersions -}}
+{{- $config := dict "releaseName" .Release.Name "releaseNamespace" .Release.Namespace "config" $safeConfig "automation" .Values.automation "sources" .Values.sources "impact" .Values.impact "auth" .Values.auth "effective" (include "greenkube.values" . | fromYaml) "secretName" (include "greenkube.secretName" .) "kubeVersion" .Capabilities.KubeVersion.Version "apiVersions" .Capabilities.APIVersions -}}
 {{- toJson $config | sha256sum -}}
 {{- end -}}
 
@@ -227,11 +227,8 @@ Project only the application Secret keys required by one component.
 {{- define "greenkube.applicationSecretItems" -}}
 {{- $context := .context -}}
 {{- $component := .component -}}
-{{- $keys := list -}}
-{{- if eq $context.Values.config.db.type "postgres" -}}
-  {{- $keys = append $keys "DB_CONNECTION_STRING" -}}
-{{- end -}}
-{{- if or (eq $component "api") (eq $component "controller") (eq $component "app") -}}
+{{- $keys := list "DB_CONNECTION_STRING" -}}
+{{- if or (eq $component "api") (eq $component "controller") -}}
   {{- range $key := list
       "ELECTRICITY_MAPS_TOKEN"
       "BOAVIZTA_TOKEN"
@@ -250,7 +247,7 @@ Project only the application Secret keys required by one component.
     {{- $keys = append $keys $key -}}
   {{- end -}}
 {{- end -}}
-{{- if or (eq $component "api") (eq $component "automation") (eq $component "automation-worker") -}}
+{{- if or (eq $component "api") (eq $component "worker") -}}
   {{- $keys = append $keys "GREENKUBE_API_KEY" -}}
 {{- end -}}
 {{- range $key := $keys }}
@@ -283,7 +280,7 @@ Secret (see greenkube.secretNameFor), and a Secret without keys is omitted.
   {{- end -}}
 {{- end -}}
 {{- $admin := ($context.Values.auth | default dict).admin | default dict -}}
-{{- if and $admin.existingSecret (has .component (list "api" "app")) }}
+{{- if and $admin.existingSecret (eq .component "api") }}
 - secret:
     name: {{ $admin.existingSecret }}
     items:
@@ -310,73 +307,66 @@ Secret (see greenkube.secretNameFor), and a Secret without keys is omitted.
 {{- end -}}
 
 {{/*
-Return the ServiceAccount used by a production component.
+Return the ServiceAccount of one component (api, controller, worker). With
+serviceAccount.create=false every component uses serviceAccount.name.
 */}}
 {{- define "greenkube.componentServiceAccountName" -}}
+{{- if .context.Values.serviceAccount.create -}}
 {{- printf "%s-%s" (include "greenkube.fullname" .context) .component | trunc 63 | trimSuffix "-" }}
+{{- else -}}
+{{- default "default" .context.Values.serviceAccount.name -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
-Return the production Lease name.
+Return the controller Lease name. The Lease is always rendered (F11).
 */}}
 {{- define "greenkube.leaseName" -}}
-{{- default (printf "%s-leader" (include "greenkube.fullname" .)) .Values.production.leaderElection.leaseName | trunc 63 | trimSuffix "-" }}
+{{- $v := include "greenkube.values" . | fromYaml -}}
+{{- default (printf "%s-leader" (include "greenkube.fullname" .)) ($v.controller.leaderElection | default dict).leaseName | trunc 63 | trimSuffix "-" }}
 {{- end -}}
 
 {{/*
-Return the configured automation mode, defaulting by deployment profile.
-*/}}
-{{- define "greenkube.automationMode" -}}
-{{- $mode := .Values.automation.mode | default "" -}}
-{{- if $mode -}}
-{{- $mode -}}
-{{- else if eq .Values.profile "production" -}}
-worker
-{{- else -}}
-inline
-{{- end -}}
-{{- end -}}
-
-{{/*
-"true" when GitOps delivery runs: automation enabled and a mode other than
-"disabled". The controller then runs plan execution and the automation controller
-loop (webhook outbox, PR polling, branch cleanup); see docs/architecture.md (M8, F8).
-*/}}
-{{- define "greenkube.automationDeliveryEnabled" -}}
-{{- and .Values.automation.enabled (ne (include "greenkube.automationMode" .) "disabled") -}}
-{{- end -}}
-
-{{/*
-Validate and return the controller metrics port (0 disables the listener). The
-standalone pod shares one network namespace between the controller and the API,
-so the ports must differ.
+Return the controller metrics/health port (0 disables the listener; the
+values schema bounds it).
 */}}
 {{- define "greenkube.controllerMetricsPort" -}}
-{{- $rawPort := .Values.collector.metricsPort | default 0 | toString -}}
-{{- if not (regexMatch "^[0-9]+$" $rawPort) -}}
-{{- fail "collector.metricsPort must be an integer between 0 (disabled) and 65535" -}}
-{{- end -}}
-{{- $port := int $rawPort -}}
-{{- if gt $port 65535 -}}
-{{- fail "collector.metricsPort must be an integer between 0 (disabled) and 65535" -}}
-{{- end -}}
-{{- if and (gt $port 0) (ne .Values.profile "production") .Values.config.api.enabled (eq $port (int .Values.config.api.port)) -}}
-{{- fail "collector.metricsPort must differ from config.api.port" -}}
-{{- end -}}
-{{- $port -}}
+{{- $v := include "greenkube.values" . | fromYaml -}}
+{{- $v.controller.metricsPort | default 0 | int -}}
 {{- end -}}
 
 {{/*
-Validate and return the dedicated worker metrics port.
+Return the dedicated worker metrics port.
 */}}
 {{- define "greenkube.workerMetricsPort" -}}
-{{- $rawPort := .Values.automation.workerMetricsPort | toString -}}
-{{- if not (regexMatch "^[0-9]+$" $rawPort) -}}
-{{- fail "automation.workerMetricsPort must be an integer between 1 and 65535" -}}
+{{- $v := include "greenkube.values" . | fromYaml -}}
+{{- $v.worker.metricsPort | default 8001 | int -}}
 {{- end -}}
-{{- $port := int $rawPort -}}
-{{- if or (lt $port 1) (gt $port 65535) -}}
-{{- fail "automation.workerMetricsPort must be an integer between 1 and 65535" -}}
+
+{{/*
+Name of the renderer Deployment and Service.
+*/}}
+{{- define "greenkube.rendererName" -}}
+{{- printf "%s-renderer" (include "greenkube.fullname" . | trunc 50 | trimSuffix "-") -}}
 {{- end -}}
-{{- $port -}}
+
+{{/*
+Name of the ConfigMap holding non-sensitive settings. 0.3.x rendered
+"<fullname>" as a Helm hook, which Helm cannot adopt into the release, so the
+regular resource has its own name (an upgrade leaves the old hook ConfigMap
+behind; docs/upgrading.md).
+*/}}
+{{- define "greenkube.configMapName" -}}
+{{- printf "%s-config" (include "greenkube.fullname" . | trunc 56 | trimSuffix "-") -}}
+{{- end -}}
+
+{{/*
+Probe timing fields shared by every probe.
+*/}}
+{{- define "greenkube.probeTimings" -}}
+initialDelaySeconds: {{ .initialDelaySeconds | default 5 }}
+periodSeconds: {{ .periodSeconds | default 10 }}
+timeoutSeconds: {{ .timeoutSeconds | default 5 }}
+failureThreshold: {{ .failureThreshold | default 3 }}
+successThreshold: {{ .successThreshold | default 1 }}
 {{- end -}}

@@ -1,4 +1,4 @@
-{{- if .Values.config.api.enabled }}
+{{- $v := include "greenkube.values" . | fromYaml }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -9,11 +9,10 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - port: {{ .Values.config.api.port }}
+    - port: {{ $v.api.port }}
       targetPort: http-api
       protocol: TCP
       name: http
   selector:
     {{- include "greenkube.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: {{ if eq .Values.profile "production" }}api{{ else }}app{{ end }}
-{{- end }}
+    app.kubernetes.io/component: api

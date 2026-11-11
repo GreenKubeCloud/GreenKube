@@ -1,31 +1,151 @@
 # Default values for greenkube.
-# This is a YAML-formatted file.
-# Declare variables to be passed into your templates.
-
-replicaCount: 1
+#
+# One install, one topology (roadmap F11): `helm install` with these defaults
+# deploys the full loop (api, controller, renderer and the bundled PostgreSQL)
+# sized for an evaluation cluster such as kind or minikube. High availability
+# is two numbers (api.replicas: 2, controller.replicas: 2), not another
+# install. There is no profile to choose and no feature flag to flip: GitOps
+# discovery, previews and pull-request delivery activate themselves when their
+# prerequisites appear (docs/installation.md).
+#
+# Upgrading from 0.3.x: profile, replicaCount, production.*, automation.enabled,
+# automation.mode, rendererSandbox.*, collector.*, resources, apiResources and
+# the SQLite values are still accepted for this minor release, mapped onto the
+# keys below and reported in the install notes (docs/upgrading.md).
 
 # Scratch space for archive snapshots and renderer request streaming.
 tmp:
   sizeLimit: 768Mi
 
-# Deployment profile. "standalone" preserves the single-pod controller/API
-# deployment; "production" renders independent API, controller, and
-# automation-worker Deployments. In both, the API is stateless request handling
-# and the controller runs every periodic loop (collection, scans, lifecycle,
-# discovery, sync, the automation controller loop and plan execution); see
-# docs/architecture.md "Process topology" (M8, F8).
-profile: standalone
+# ---------------------------------------------------------------------------
+# Components
+# ---------------------------------------------------------------------------
+# Stateless REST API, UI, webhook ingress and authentication. No background job.
+api:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # Liveness: process heartbeat only, never restarts the API for a slow dependency.
+  livenessProbe:
+    enabled: true
+    path: /api/v1/health/heartbeat
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  # Readiness: 503 until the controller has applied every database migration.
+  readinessProbe:
+    enabled: true
+    path: /api/v1/health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+    successThreshold: 1
 
+# Every leader-gated loop: collection, scans, lifecycle and measurement,
+# discovery, sync, the automation readiness reconciler, the automation
+# controller loop and plan execution. Runs the database migrations at startup
+# (PostgreSQL advisory lock). Extra replicas are hot standbys.
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: '1'
+      memory: 1Gi
+  # Port of the controller's /prometheus/metrics, /healthz, /readyz and /loops
+  # listener. The probes use it; 0 disables it (process probes then).
+  metricsPort: 9102
+  leaderElection:
+    # Empty: <release>-leader. The Lease is always rendered.
+    leaseName: ''
+    leaseDurationSeconds: 30
+  # Generous startup budget: a large upgrade can spend minutes in migrations.
+  startupProbe:
+    enabled: true
+    periodSeconds: 10
+    failureThreshold: 60
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+
+# Isolated Helm/Kustomize renderer: no Secrets, no service-account token and an
+# egress-deny NetworkPolicy. Always deployed; raw-manifest repositories never
+# call it. It probes whether that egress policy is enforced at startup and
+# daily; the setup checklist reports renderer_egress_unenforced otherwise.
+renderer:
+  replicas: 1
+  servicePort: 8090
+  tmpSizeLimit: 768Mi
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  # Defense in depth for CNIs that do not enforce NetworkPolicy: an init
+  # container installs a deny-all egress firewall (needs NET_ADMIN).
+  egressFirewall:
+    enabled: false
+    privilegedInitContainer: false
+
+# Optional dedicated plan executors for very large installations. The
+# controller always executes plans; operation leases make extra workers safe.
+worker:
+  replicas: 0
+  metricsPort: 8001
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# GitOps automation (always on; see docs/automation.md)
+# ---------------------------------------------------------------------------
+# Discovery runs whenever Argo CD or Flux CRDs are present. Pull-request
+# delivery activates within about a minute of creating the credentials Secret,
+# with no upgrade and no restart:
+#
+#   kubectl -n <namespace> create secret generic greenkube-git-credentials \
+#     --from-literal=token=<token with repository write access>
+#
+# The provider (GitHub, GitLab, Gitea) and its API URL are inferred from each
+# discovered repository host. List providers only for several credentials or
+# to pin a self-hosted URL.
 automation:
-  enabled: false
-  # Where plan operations execute. "inline": the controller only. "worker": the
-  # controller plus dedicated worker pods (production.components.automation.replicas,
-  # or the standalone automation-worker). The controller always runs the automation
-  # controller loop (webhook outbox, PR polling, branch cleanup, plan expiry,
-  # retention); the API never runs a worker. "disabled" turns delivery off.
-  mode: '' # Empty defaults to inline for standalone and worker for production.
-  # Port for the dedicated worker's authenticated control-loop metrics listener.
-  workerMetricsPort: 8001
+  # Secret in the release namespace read for inferred providers: key "token"
+  # (keys "appId" and "privateKey" are mounted for GitHub App authentication).
+  credentialsSecret: greenkube-git-credentials
+  # Repositories automation may open pull requests against, for inferred
+  # providers and for providers without their own repositoryAllowlist.
+  # "@discovered": repositories referenced by discovered Argo CD/Flux sources.
+  # An explicit list of "owner/repo" names or globs narrows it.
+  repositoryAllowlist:
+    - '@discovered'
   prPollIntervalSeconds: 120
   syncPollIntervalSeconds: 30
   # GitOps discovery refresh cadence and workload-binding freshness window.
@@ -41,22 +161,34 @@ automation:
     secretNamespace: ''
     secretName: ''
     secretKey: ''
-  # Git provider credentials are supplied only by Kubernetes Secret references.
-  # Each provider's Secret must be in the Helm release namespace.
+  # Explicit Git providers override the inference. Each provider's Secret
+  # must be in the Helm release namespace.
   providers: []
+  # Example:
+  # providers:
+  #   - id: github-main
+  #     type: github
+  #     apiBaseUrl: https://api.github.com
+  #     secretName: github-token
+  #     secretKey: token
+  #     repositoryAllowlist:      # optional, defaults to automation.repositoryAllowlist
+  #       - "acme/*"
   policy:
+    # Change freeze and incident switch: plan approval returns a policy error
+    # and no pull request is opened, while discovery, previews and measurement
+    # keep running. A policy, not a feature flag.
+    pauseDelivery: false
     maxRiskLevel: medium
     minConfidence: 0.6
-    minSamples: 36
     minCoverage: 0.5
     maxOpenPullRequestsPerWorkload: 1
     cooldownMinutes: 60
     changeFreezeLabels: []
     changeFreezeWindows: []
     # What rollout, controller-health and HPA/VPA/PDB gates do when discovery could
-    # not collect their live evidence: "fail" rejects the plan, "warn" allows it with
-    # a warning. Empty defaults to "fail" for profile=production, "warn" for standalone.
-    missingEvidence: ''
+    # not collect their live evidence: "fail" rejects the plan, "warn" allows it
+    # with a warning.
+    missingEvidence: fail
   pullRequests:
     draft: false
     labels: [] # Optional extra labels; missing labels are created where the provider allows it.
@@ -84,124 +216,6 @@ automation:
     # (synced, applied, measuring, outcome) for lifecycleLookbackDays after the merge.
     lifecycleComments: true
     lifecycleLookbackDays: 30
-  # Example:
-  # providers:
-  #   - id: github-main
-  #     type: github
-  #     apiBaseUrl: https://api.github.com
-  #     # secretNamespace is optional and, if set, must match the release namespace.
-  #     secretName: github-token
-  #     secretKey: token
-  #     repositoryAllowlist:
-  #       - "acme/*"
-
-rendererSandbox:
-  enabled: true
-  egressFirewall:
-    enabled: false
-    privilegedInitContainer: false
-  replicas: 1
-  servicePort: 8090
-  tmpSizeLimit: 768Mi
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 1Gi
-
-production:
-  migration:
-    enabled: true
-    backoffLimit: 6
-    image:
-      repository: busybox
-      tag: '1.37'
-      pullPolicy: IfNotPresent
-  leaderElection:
-    enabled: true
-    leaseName: ''
-    leaseDurationSeconds: 30
-    renewDeadlineSeconds: 10
-    retryPeriodSeconds: 2
-  components:
-    api:
-      replicas: 2
-      resources:
-        limits:
-          cpu: 500m
-          memory: 512Mi
-        requests:
-          cpu: 100m
-          memory: 128Mi
-      livenessProbe:
-        enabled: true
-        path: /api/v1/health/heartbeat
-        port: http-api
-        initialDelaySeconds: 10
-        periodSeconds: 30
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
-      readinessProbe:
-        enabled: true
-        path: /api/v1/health
-        port: http-api
-        initialDelaySeconds: 5
-        periodSeconds: 10
-        timeoutSeconds: 3
-        failureThreshold: 3
-        successThreshold: 1
-    controller:
-      replicas: 1
-      # The controller runs recommendation scans (E1); keep scan memory headroom.
-      resources:
-        limits:
-          cpu: 500m
-          memory: 1Gi
-        requests:
-          cpu: 100m
-          memory: 128Mi
-      livenessProbe:
-        enabled: true
-        initialDelaySeconds: 15
-        periodSeconds: 30
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
-      readinessProbe:
-        enabled: true
-        initialDelaySeconds: 5
-        periodSeconds: 10
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
-    automation:
-      # Dedicated plan executors (worker mode). They only execute queued plan
-      # operations; operation leases make several replicas safe (F8).
-      replicas: 1
-      resources:
-        limits:
-          cpu: 250m
-          memory: 256Mi
-        requests:
-          cpu: 50m
-          memory: 64Mi
-      livenessProbe:
-        enabled: true
-        initialDelaySeconds: 15
-        periodSeconds: 30
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
-      readinessProbe:
-        enabled: true
-        initialDelaySeconds: 5
-        periodSeconds: 10
-        timeoutSeconds: 5
-        failureThreshold: 3
-        successThreshold: 1
 
 image:
   repository: greenkube/greenkube
@@ -223,41 +237,10 @@ initContainer:
     tag: '1.37'
     pullPolicy: IfNotPresent
 
-# Probes for the collector process. The collector has no HTTP API, so
-# these process-heartbeat probes verify that its PID is still alive.
-collector:
-  # Port of the controller's Prometheus endpoint (/prometheus/metrics and
-  # /metrics). The controller runs collection, verification and the scheduled
-  # recommendation scans, so their control-loop metrics (collection health,
-  # provenance mix, verification outcomes, greenkube_optimization_runs_total,
-  # greenkube_last_successful_optimization_run_timestamp_seconds, ...) are
-  # served here, not by the API. The chart keeps the API key out of the
-  # controller, so the endpoint is unauthenticated; monitoring.networkPolicy
-  # restricts it to Prometheus. Exposed through the
-  # <release>-controller-metrics Service and, when
-  # monitoring.serviceMonitor.enabled, its own ServiceMonitor. 0 disables it;
-  # in the standalone profile it must differ from config.api.port.
-  metricsPort: 9102
-  livenessProbe:
-    enabled: true
-    initialDelaySeconds: 15
-    periodSeconds: 30
-    timeoutSeconds: 5
-    failureThreshold: 3
-    successThreshold: 1
-  readinessProbe:
-    enabled: true
-    initialDelaySeconds: 5
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 3
-    successThreshold: 1
-
 serviceAccount:
-  # Specifies whether a service account should be created
+  # Create one ServiceAccount per component (<release>-api, -controller, -worker).
   create: true
-  # The name of the service account to use.
-  # If not set and create is true, a name is generated using the fullname template
+  # With create=false: the existing ServiceAccount every component uses.
   name: ''
 
 rbac:
@@ -342,13 +325,9 @@ config:
     # server and over-estimated Scope 3 by 2–7× on low-carbon grids.
     defaultEmbodiedEmissionsKg: 100
 
-  # Database configuration
+  # PostgreSQL connection settings. SQLite is for `greenkube demo` and local
+  # development only; the chart always uses PostgreSQL (bundled or external).
   db:
-    # Supported: "postgres" (recommended), "sqlite" (standalone/dev)
-    # WARNING: "sqlite" is not recommended for production as data will be lost on pod restart.
-    type: postgres
-    # Path for the sqlite database file (only used if db.type is "sqlite")
-    path: /data/greenkube_data.db
     # Database schema (only used if db.type is "postgres")
     schema: public
     # SSL mode for PostgreSQL connections. Set to "disable" for in-cluster traffic
@@ -359,14 +338,6 @@ config:
     poolMaxSize: 10
     # Statement timeout in milliseconds (prevents runaway queries)
     statementTimeoutMs: 30000
-
-  # Persistence configuration for SQLite
-  persistence:
-    enabled: false
-    # Storage Class Name (leave empty for default)
-    storageClassName: ''
-    accessMode: ReadWriteOnce
-    size: 10Gi
 
   # Prometheus collector configuration
   prometheus:
@@ -417,31 +388,11 @@ config:
   # Requests wider than this return HTTP 400 to prevent loading millions of rows.
   metricsListMaxRangeDays: 30
 
-  # API server configuration
+  # API server listener (probes and replicas: see api.* above).
   api:
-    enabled: true
     host: 0.0.0.0
     port: 8000
 
-    # Liveness probe: restarts the container if the API becomes unresponsive.
-    livenessProbe:
-      enabled: true
-      path: /api/v1/health/heartbeat
-      initialDelaySeconds: 10
-      periodSeconds: 30
-      timeoutSeconds: 5
-      failureThreshold: 3
-      successThreshold: 1
-
-    # Readiness probe: removes the pod from service endpoints until the API is ready.
-    readinessProbe:
-      enabled: true
-      path: /api/v1/health
-      initialDelaySeconds: 5
-      periodSeconds: 10
-      timeoutSeconds: 3
-      failureThreshold: 3
-      successThreshold: 1
 
   # Default instance profile for energy estimation when an instance type is unknown
   defaults:
@@ -501,16 +452,6 @@ config:
     minMemoryBytes: '16777216'  # 16 MiB — quoted to prevent YAML float serialization
     # Tolerance for considering a recommendation "applied" (e.g. 0.25 = 25% deviation allowed)
     applyTolerance: 0.25
-    # --- Recommendation sources (connectors) ---
-    # VPA recommendation mode (updateMode: Off). When enabled, VPA recommendations
-    # replace native CPU/memory rightsizing for the same workload to avoid duplicates.
-    # Enabled by default; the source detects the CRD and skips cleanly when absent.
-    vpaEnabled: true
-    # Karpenter node pool consolidation recommendations. Enabled by default; the
-    # source detects the CRDs and skips cleanly when absent.
-    karpenterEnabled: true
-    # Source precedence used to arbitrate conflicts (highest priority first).
-    sourcePriority: vpa,karpenter,greenkube
     # --- Ranking & review ---
     # Time-to-live of a recommendation before it is considered expired (days).
     ttlDays: 14
@@ -528,7 +469,10 @@ config:
     # Cost of one engineer hour, used to weigh implementation effort. 0 ignores
     # effort, except in the quick_wins profile (at least 100 per hour).
     engineerHourCost: 0
-    # Minimum raw samples expected for a high-confidence recommendation.
+    # Minimum raw samples of evidence, used everywhere a sample count gates a
+    # decision: recommendation confidence, the plan policy gate and verification
+    # (one knob since 0.4; replaces automation.policy.minSamples and
+    # config.recommendations.verification.minSamples).
     minSamples: 36
     # Interval between scheduled recommendation scans. Scans run only in the
     # controller (leader-gated); the API enqueues on-demand runs through
@@ -538,8 +482,6 @@ config:
     verification:
       # Fixed measurement window after the rollout completes (baseline: same length, ending at the PR merge).
       windowHours: 72
-      # Minimum raw samples required before a verdict is rendered.
-      minSamples: 36
       # Projection accuracy below which a realized saving is flagged (reported only, not a gate).
       minSavingsRatio: 0.5
       # Per-pod p95 usage must stay below the applied per-pod request x this factor.
@@ -578,13 +520,17 @@ sources:
   # Load third-party sources installed in the image and registered under the
   # `greenkube.sources` Python entry points. GET /api/v1/sources lists them.
   pluginsEnabled: true
-  # Per-source settings keyed by source id; `enabled` is true, false or auto.
-  # Overrides config.recommendations.vpaEnabled / karpenterEnabled. Example:
+  # Per-source settings keyed by source id; `enabled` is true, false or auto
+  # (auto: the source probes its prerequisites, such as the VPA or Karpenter
+  # CRDs). Replaces config.recommendations.vpaEnabled / karpenterEnabled. Example:
   #   settings:
   #     greenkube.carbon_aware: { enabled: false }
   #     vpa: { enabled: auto }
   # Do not put credentials here: this map is rendered into the ConfigMap.
   settings: {}
+  # Source precedence used to arbitrate conflicts (highest priority first).
+  # Replaces config.recommendations.sourcePriority.
+  priority: vpa,karpenter,greenkube
 
 # ---------------------------------------------------------------------------
 # Impact Model (docs/methodology/impact-model.md)
@@ -619,7 +565,7 @@ impact:
 # With config.apiAuthMode=session (default) the UI uses accounts and
 # server-side sessions. On the first start the API creates the account
 # auth.admin.username with the password stored in the Secret
-# "<release>-initial-admin" (created once by the credentials bootstrap hook;
+# "<release>-initial-admin" (created once by the credentials bootstrap Job;
 # read it with the command printed by `helm install`). The UI asks for a new
 # password at first sign-in and the API then erases the initial one.
 # Machines (CI, Prometheus, scripts) use scoped API keys created in
@@ -653,7 +599,7 @@ auth:
 # Option A (default): leave existingSecret empty. Values set below are rendered
 # into the Secret "<release>-values". Credentials left empty (the API key and
 # the bundled PostgreSQL password) are generated once at install time by the
-# "<release>-credentials-bootstrap" hook into the Secret "<release>", which is
+# "<release>-credentials-bootstrap-*" Job into the Secret "<release>", which is
 # not part of the Helm release: upgrades and Argo CD/Flux syncs never rotate
 # it, and `helm uninstall` keeps it alongside the PostgreSQL volume. Rendering
 # never uses lookup or random functions, so `helm template` output is stable.
@@ -661,7 +607,7 @@ auth:
 #
 # Option B (recommended for production and GitOps): create the Secret manually
 # (or with External Secrets / Sealed Secrets), then set secrets.existingSecret
-# to its name. The chart renders no Secret, runs no bootstrap hook, and all
+# to its name. The chart renders no Secret, runs no credentials Job, and all
 # other secrets.* values are ignored.
 #
 #   kubectl create secret generic greenkube-secrets -n greenkube \
@@ -695,11 +641,11 @@ secrets:
   # Deprecated bootstrap API key (GREENKUBE_API_KEY): accepted as an admin
   # Bearer key for one more minor release. Prefer scoped API keys created in
   # Settings > API keys. Left empty, a key is generated once by the
-  # credentials bootstrap hook.
+  # credentials bootstrap Job.
   apiKey: ''
 
-  # PostgreSQL connection string (only used when db.type is "postgres" and
-  # postgres.enabled is false — i.e. bringing your own PostgreSQL instance)
+  # PostgreSQL connection string, only used with postgres.enabled=false
+  # (bring your own PostgreSQL instance)
   # Example: "postgresql://user:password@host:port/dbname"
   dbConnectionString: ''
 
@@ -709,21 +655,8 @@ secrets:
     password: ''
     bearerToken: ''
 
-# Pod resource requests and limits
-# -- Collector/scheduler container resources
-# This container runs periodic data collection (Prometheus, OpenCost, K8s API),
-# writes to the database and runs the scheduled recommendation scans. Memory
-# usage is proportional to the number of pods in the cluster. For clusters
-# with >200 pods, consider increasing limits.
-resources:
-  limits:
-    cpu: 500m
-    memory: 1Gi
-  requests:
-    cpu: 100m
-    memory: 128Mi
-
-# Security and resource settings for Helm lifecycle hook Jobs.
+# Security and resource settings for the credentials bootstrap Job (the chart
+# renders no Helm hook; the name is kept for compatibility).
 hooks:
   resources:
     requests:
@@ -773,17 +706,6 @@ tests:
       drop:
       - ALL
 
-# -- API container resources
-# This container serves the FastAPI REST API and the SPA frontend.
-# Recommendation scans run in the controller; the API only queues them.
-apiResources:
-  limits:
-    cpu: 250m
-    memory: 1Gi
-  requests:
-    cpu: 50m
-    memory: 128Mi
-
 # PostgreSQL configuration (custom statefulset)
 postgres:
   enabled: true
@@ -798,7 +720,7 @@ postgres:
   auth:
     username: greenkube
     # If left empty, a random password is generated once by the credentials
-    # bootstrap hook and kept in the Secret "<release>" across upgrades and
+    # bootstrap Job and kept in the Secret "<release>" across upgrades and
     # GitOps syncs. Set it here (or use secrets.existingSecret) to manage it
     # yourself.
     password: ''

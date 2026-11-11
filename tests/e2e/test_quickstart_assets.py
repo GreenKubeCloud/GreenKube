@@ -38,16 +38,20 @@ def _parse_quantity_mib(value: str) -> int:
     return int(value[:-2]) * units[value[-2:]]
 
 
-def test_policy_sample_gate_matches_recommendation_min_samples() -> None:
+def test_one_min_samples_knob_sets_every_sample_gate() -> None:
     values = _values()
-    assert values["automation"]["policy"]["minSamples"] == values["config"]["recommendations"]["minSamples"]
+    # N3: config.recommendations.minSamples also sets the policy and verification gates.
+    assert "minSamples" not in values["automation"]["policy"]
+    assert "minSamples" not in values["config"]["recommendations"]["verification"]
 
 
 def test_quickstart_accelerates_evidence() -> None:
     values = _values()
     assert values["config"]["prometheus"]["queryRangeStep"] == "30s"
     assert values["config"]["recommendations"]["minSamples"] <= 6
-    assert values["automation"]["enabled"] is True
+    # F12: automation is always on; no feature flag in the values.
+    assert "enabled" not in values["automation"]
+    assert "profile" not in values
     provider = values["automation"]["providers"][0]
     assert provider["type"] == "gitea"
     assert provider["repositoryAllowlist"] == ["greenkube/greenkube-e2e-quickstart"]
@@ -109,11 +113,13 @@ def test_quickstart_values_render_a_valid_configuration(monkeypatch: pytest.Monk
         check=True,
     )
     docs = [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
-    (configmap,) = [doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "greenkube"]
+    (configmap,) = [doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "greenkube-config"]
     data = configmap["data"]
     assert data["PROMETHEUS_QUERY_RANGE_STEP"] == "30s"
     assert data["RECOMMENDATION_MIN_SAMPLES"] == "6"
-    assert data["AUTOMATION_ENABLED"] == "true"
+    assert data["AUTOMATION_PAUSE_DELIVERY"] == "false"
+    assert data["VERIFICATION_MIN_SAMPLES"] == "6"
+    assert '"minSamples":6' in data["GITOPS_POLICY_JSON"]
 
     # The settings the controller and API will read must pass validation.
     for key, value in data.items():

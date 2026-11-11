@@ -34,8 +34,8 @@ def _pod_specs(doc: dict) -> list[dict]:
     "set_values",
     [
         (),
-        ("automation.enabled=true",),
-        ("profile=production", "automation.enabled=true", "monitoring.serviceMonitor.enabled=true"),
+        ("worker.replicas=1",),
+        ("worker.replicas=1", "monitoring.serviceMonitor.enabled=true", "renderer.egressFirewall.enabled=true"),
     ],
 )
 def test_named_ports_are_valid_iana_service_names(set_values: tuple[str, ...]) -> None:

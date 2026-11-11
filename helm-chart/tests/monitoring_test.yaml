@@ -110,7 +110,7 @@ tests:
           path: spec.endpoints[0].authorization.credentials.key
           value: GREENKUBE_API_KEY
 
-  - it: ServiceMonitor should not render when API is disabled
+  - it: ServiceMonitor still renders with the deprecated config.api.enabled false (the API is always deployed)
     set:
       monitoring.serviceMonitor.enabled: true
       config.api.enabled: false
@@ -118,7 +118,7 @@ tests:
       - templates/servicemonitor.yaml
     asserts:
       - hasDocuments:
-          count: 0
+          count: 1
 
   - it: ServiceMonitor should use the API key as bearer token when configured
     set:
@@ -205,6 +205,7 @@ tests:
       monitoring.networkPolicy.enabled: true
     templates:
       - templates/networkpolicy.yaml
+    documentIndex: 0
     asserts:
       - equal:
           path: spec.ingress[0].ports[0].port
@@ -223,9 +224,10 @@ tests:
               port: 8000
     templates:
       - templates/networkpolicy.yaml
+    documentIndex: 0
     asserts:
       - equal:
-          path: spec.ingress[2].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          path: spec.ingress[1].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
           value: ingress-nginx
 
   - it: NetworkPolicy should allow DNS and bundled PostgreSQL egress without broad internet access
@@ -267,20 +269,19 @@ tests:
               port: 443
     templates:
       - templates/networkpolicy.yaml
+    documentIndex: 0
     asserts:
       - equal:
-          path: spec.egress[2].to[0].ipBlock.cidr
+          path: spec.egress[3].to[0].ipBlock.cidr
           value: 203.0.113.0/24
       - equal:
-          path: spec.egress[2].ports[0].port
+          path: spec.egress[3].ports[0].port
           value: 443
 
-  - it: NetworkPolicy should cover production API, controller, and worker pods
+  - it: NetworkPolicy should cover the API, controller and worker pods
     set:
-      profile: production
-      automation.enabled: true
+      worker.replicas: 1
       monitoring.networkPolicy.enabled: true
-      automation.mode: worker
     templates:
       - templates/networkpolicy.yaml
     asserts:
@@ -297,7 +298,7 @@ tests:
       - documentIndex: 2
         equal:
           path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
-          value: automation
+          value: worker
       - documentIndex: 2
         equal:
           path: spec.ingress[0].ports[0].port
@@ -306,53 +307,16 @@ tests:
         equal:
           path: spec.egress[1].to[0].podSelector.matchLabels["app.kubernetes.io/component"]
           value: postgres
-
-  - it: NetworkPolicy should include standalone worker pods without requiring an API
-    set:
-      monitoring.networkPolicy.enabled: true
-      automation.enabled: true
-      automation.mode: worker
-      config.api.enabled: false
-    templates:
-      - templates/networkpolicy.yaml
-    asserts:
-      - hasDocuments:
-          count: 2
-      - documentIndex: 0
+      - documentIndex: 2
         equal:
-          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
-          value: app
-      - documentIndex: 1
-        equal:
-          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
-          value: automation-worker
-      - documentIndex: 1
-        equal:
-          path: spec.ingress[0].ports[0].port
-          value: 8001
-
-  - it: NetworkPolicy should still protect the production controller when API is disabled
-    set:
-      monitoring.networkPolicy.enabled: true
-      profile: production
-      config.api.enabled: false
-      automation.enabled: false
-    templates:
-      - templates/networkpolicy.yaml
-    asserts:
-      - hasDocuments:
-          count: 1
-      - equal:
-          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
-          value: controller
+          path: spec.egress[2].to[0].podSelector.matchLabels["app.kubernetes.io/component"]
+          value: renderer-sandbox
 
   - it: NetworkPolicy names should remain unique with a long release name
     set:
-      profile: production
       fullnameOverride: greenkube-component-networkpolicy-name-long-long-long-long-long
       monitoring.networkPolicy.enabled: true
-      automation.enabled: true
-      automation.mode: worker
+      worker.replicas: 1
     templates:
       - templates/networkpolicy.yaml
     asserts:
@@ -367,4 +331,4 @@ tests:
       - documentIndex: 2
         matchRegex:
           path: metadata.name
-          pattern: "-automation-netpol$"
+          pattern: "-worker-netpol$"
