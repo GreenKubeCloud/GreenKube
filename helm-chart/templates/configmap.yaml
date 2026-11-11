@@ -203,8 +203,8 @@ data:
   RECOMMENDATION_MIN_CPU_MILLICORES: {{ .minCpuMillicores | default 10 | int | quote }}
   RECOMMENDATION_MIN_MEMORY_BYTES: {{ .minMemoryBytes | default 16777216 | int | quote }}
   RECOMMENDATION_APPLY_TOLERANCE: {{ .applyTolerance | default 0.25 | quote }}
-  RECOMMENDATION_VPA_ENABLED: {{ .vpaEnabled | default true | quote }}
-  RECOMMENDATION_KARPENTER_ENABLED: {{ .karpenterEnabled | default true | quote }}
+  RECOMMENDATION_VPA_ENABLED: {{ if hasKey . "vpaEnabled" }}{{ .vpaEnabled | toString | quote }}{{ else }}"true"{{ end }}
+  RECOMMENDATION_KARPENTER_ENABLED: {{ if hasKey . "karpenterEnabled" }}{{ .karpenterEnabled | toString | quote }}{{ else }}"true"{{ end }}
   RECOMMENDATION_SOURCE_PRIORITY: {{ .sourcePriority | default "vpa,karpenter,greenkube" | quote }}
   RECOMMENDATION_TTL_DAYS: {{ .ttlDays | default 14 | int | quote }}
   RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
@@ -236,6 +236,12 @@ data:
   CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: {{ .bootstrapSamples | default 1000 | int | quote }}
   CHANGE_MEASUREMENT_EPSILON_RATIO: {{ if hasKey . "epsilonRatio" }}{{ .epsilonRatio | quote }}{{ else }}"0.02"{{ end }}
   {{- end }}
+  {{- end }}
+
+  # --- Recommendation sources (Source SDK) ---
+  {{- with .Values.sources }}
+  SOURCES_PLUGINS_ENABLED: {{ if hasKey . "pluginsEnabled" }}{{ .pluginsEnabled | toString | quote }}{{ else }}"true"{{ end }}
+  SOURCES_CONFIG: {{ .settings | default dict | toJson | quote }}
   {{- end }}
 
   # --- Impact Model ---

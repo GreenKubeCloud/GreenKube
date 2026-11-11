@@ -119,8 +119,8 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 
 | Helm value | Environment variable | Default | Description |
 |---|---|---|---|
-| `config.recommendations.vpaEnabled` | `RECOMMENDATION_VPA_ENABLED` | `true` | Read recommendation-mode VPAs (`updateMode: Off`). The source detects the CRD and skips cleanly when absent; native rightsizing for the same workload is then suppressed. |
-| `config.recommendations.karpenterEnabled` | `RECOMMENDATION_KARPENTER_ENABLED` | `true` | Karpenter NodePool consolidation recommendations. Auto-detects the CRDs. |
+| `config.recommendations.vpaEnabled` | `RECOMMENDATION_VPA_ENABLED` | `true` | Read recommendation-mode VPAs (`updateMode: Off`) through the `vpa` source. The source detects the CRD and skips cleanly when absent; native rightsizing for the same workload is then suppressed. `false` disables it (`sources.settings.vpa.enabled` overrides this flag). |
+| `config.recommendations.karpenterEnabled` | `RECOMMENDATION_KARPENTER_ENABLED` | `true` | NodePool consolidation recommendations (`greenkube.nodepool` source over Karpenter objects). Auto-detects the CRDs. `false` disables it (`sources.settings["greenkube.nodepool"].enabled` overrides this flag). |
 | `config.recommendations.lookbackDays` | `RECOMMENDATION_LOOKBACK_DAYS` | `14` | Lookback of recommendation scans (two weekly cycles). SQLite and PostgreSQL scans read per-target usage summaries from the `workload_usage_hourly` rollup, so memory grows with the number of workloads, not with the lookback. |
 | `config.recommendations.maxMetricRows` | `RECOMMENDATION_MAX_METRIC_ROWS` | `750000` | Hard bound on combined and container rows loaded by one recommendation scan on backends without the usage rollup (custom repositories). The lookback window is shortened automatically before loading above this bound. |
 | `config.recommendations.rightsizingIncreaseThreshold` | `RIGHTSIZING_INCREASE_THRESHOLD` | `0.9` | Recommend a request increase (reliability) when p99 usage exceeds this share of the request. |
@@ -149,6 +149,22 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.changeMeasurement.bootstrapSamples` | `CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES` | `1000` | Moving-block bootstrap resamples for the 90% confidence interval (100–100000). |
 | `config.recommendations.changeMeasurement.epsilonRatio` | `CHANGE_MEASUREMENT_EPSILON_RATIO` | `0.02` | Noise floor: `not_realized` when the interval's upper bound is at most this share of the counterfactual. |
 | `config.recommendations.scanInterval` | `RECOMMENDATION_SCAN_INTERVAL` | `1h` | Interval between scheduled recommendation scans, run by the leader controller only (`1m`–`24h`; units `s`, `m`, `h`). The controller also scans once right after its initial collection. On-demand scans are queued with `POST /api/v1/optimization/runs`. |
+
+### Recommendation sources (`sources`)
+
+Sources produce the signals recommendations are built from: one per native analyzer (`greenkube.rightsizing_cpu`, `greenkube.orphaned_lb`...), `vpa`, `greenkube.nodepool` and third-party plugins. `GET /api/v1/sources` lists them with their status. See [Recommendation sources](sources.md).
+
+| Helm value | Environment variable | Default | Description |
+|---|---|---|---|
+| `sources.pluginsEnabled` | `SOURCES_PLUGINS_ENABLED` | `true` | Load third-party sources installed in the image and registered under the `greenkube.sources` Python entry points. A plugin that fails to load is reported in `GET /api/v1/sources` (`problems`) and never stops the other sources. |
+| `sources.settings` | `SOURCES_CONFIG` | `{}` | Per-source settings keyed by source id, rendered as a JSON object. `enabled` is `true`, `false` or `auto` (run when the source's prerequisites are detected) and overrides `config.recommendations.vpaEnabled`/`karpenterEnabled`; other keys are validated by the source (unknown keys disable that source and are reported). Invalid JSON is rejected at startup. Do not put credentials here: the map is stored in the ConfigMap. |
+
+```yaml
+sources:
+  settings:
+    greenkube.carbon_aware: { enabled: false }   # turn one native analyzer off (its active advice goes stale)
+    vpa: { enabled: auto }
+```
 
 ### Impact Model (`impact`)
 

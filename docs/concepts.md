@@ -34,21 +34,24 @@ flowchart LR
 
 ## Sources
 
-A **source** produces optimization advice. GreenKube currently ships three:
+A **source** produces optimization advice as **signals** (one proposal for one target and capability), all in one schema ([Recommendation sources](sources.md)). GreenKube ships these, and third-party packages can add more through the Source SDK; `GET /api/v1/sources` lists them with their health and last run:
 
 | Source | What it contributes | How it is enabled |
 |---|---|---|
-| `greenkube` | Native analyzers: CPU and memory rightsizing, zombie pods, autoscaling candidates, off-peak scaling, idle namespaces, carbon-aware scheduling, node utilization, orphaned PersistentVolumes and LoadBalancers | Always on |
+| `greenkube.*` (v1 `source: greenkube`) | Native analyzers, one source each: CPU and memory rightsizing, zombie pods, autoscaling candidates, off-peak scaling, idle namespaces, carbon-aware scheduling, node utilization, orphaned PersistentVolumes and LoadBalancers | On by default; each can be disabled in `sources.settings` |
 | `vpa` | Container targets from VerticalPodAutoscalers in recommendation mode (`updateMode: Off`). This includes the VPAs that Goldilocks creates. | Enabled automatically when the VPA CRD exists |
-| `karpenter` | NodePool consolidation opportunities, computed by GreenKube from live NodePool and NodeClaim state | Enabled automatically when the Karpenter CRDs exist |
+| `greenkube.nodepool` (v1 `source: karpenter`) | NodePool consolidation opportunities, computed by GreenKube from live NodePool and NodeClaim state | Enabled automatically when the Karpenter CRDs exist |
 
 Each recommendation records its `source`, a source-specific reference (`source_ref`, for example `namespace/vpa-name`), and the list of every source that reported the same issue (`sources`).
 
 When several sources recommend the same change type for the same target, GreenKube currently keeps the recommendation from the highest-priority source (`RECOMMENDATION_SOURCE_PRIORITY`, default `vpa,karpenter,greenkube`).
 
+Signals of third-party sources are recorded and visible in the API; they will feed recommendations once the consensus engine combines the signals of every source.
+
 *(Planned)*
 - KRR, Kubecost, Polaris and cloud recommenders as additional sources.
-- A public API so that any tool can push recommendations.
+- Consensus across sources instead of the priority order.
+- A public API so that any tool can push signals.
 - **Consensus**: instead of picking one source by priority, GreenKube will combine their values and show how much they agree.
 
 ## Recommendation

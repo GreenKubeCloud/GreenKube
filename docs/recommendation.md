@@ -104,7 +104,7 @@ Each finished run records:
 
 1. Metrics are collected and written to storage by the normal GreenKube collection pipeline.
 2. `OptimizationEngine.run_scan()` builds an `OptimizationContext`: a recent metrics window plus, when available, node snapshots, HPA targets, orphaned PersistentVolumes and orphaned LoadBalancers.
-3. Enabled **sources** run over the context, each in isolation: the availability probe is bounded to 30 seconds and the collection to 5 minutes. A source that raises or times out is recorded as `failed` and the scan continues with the others. The native source runs the analyzers (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The VPA source reads recommendation-mode VPAs, and the Karpenter source evaluates NodePool consolidation from live NodePool/NodeClaim state.
+3. Enabled **sources** ([Source SDK](sources.md)) run over the context, each in isolation: the availability probe is bounded to 30 seconds and the collection to 5 minutes, a source failing three times in a row is skipped for 15 minutes, and each source's run and signals are recorded (`source_runs`, `source_signals`, `GET /api/v1/sources`). A source that raises or times out is recorded as `failed` and the scan continues with the others. Each native analyzer is its own source (`greenkube.rightsizing_cpu`...); together they form the v1 source `greenkube`, which is incomplete for the run when one of them fails, so none of its recommendations go stale. The native analyzers run (grouping metrics by stable target: Kubernetes owner kind/name when present, inferred Deployment from ReplicaSet-style pod names when possible, otherwise the pod name). The VPA source reads recommendation-mode VPAs, and the Karpenter source evaluates NodePool consolidation from live NodePool/NodeClaim state.
 4. Generated recommendations are **normalized, arbitrated and deduplicated**: when several sources own the same target, capability and type, the highest-priority source wins (VPA replaces native rightsizing for the same workload) and provenance is recorded in `sources`.
 5. Each recommendation is **enriched** with a review-grade evidence block, a risk/confidence/effort assessment, a machine-readable `patch` plan and an expiry date, then scored with its risk-adjusted expected value (EV, see below). Before persisting, the scan folds each source's measured track record into the score.
 6. Recommended CPU and memory requests are floored to configured minimums.
@@ -458,7 +458,8 @@ The lifecycle job (`RECOMMENDATION_LIFECYCLE_INTERVAL`, default every 5 minutes 
 | Scheduled scans and run queue | `src/greenkube/core/optimization/scan_service.py`, `src/greenkube/storage/{sqlite,postgres}/optimization_run_repository.py`, `src/greenkube/api/routers/optimization.py` |
 | Per-source reconciliation and run diff | `src/greenkube/core/recommendation_reconciliation.py` |
 | Analyzers | `src/greenkube/core/optimization/analyzers/` |
-| Sources (native, VPA, Karpenter) | `src/greenkube/core/optimization/providers/`, `registry.py` |
+| Source SDK (signals, runner, registry, contract checks) | `src/greenkube/signals/`, `src/greenkube/api/routers/sources.py`, `src/greenkube/storage/{sqlite,postgres}/signal_repository.py` |
+| Sources (native, VPA, NodePool) | `src/greenkube/core/optimization/providers/`, `registry.py` |
 | Dedup / arbitration / provenance | `src/greenkube/core/optimization/dedup.py` |
 | Evidence, risk, ranking | `src/greenkube/core/optimization/evidence.py`, `risks.py`, `scoring.py`, `enrich.py` |
 | Lifecycle, apply detection, verification | `src/greenkube/core/optimization/lifecycle.py`, `applied_detector.py`, `verifier.py` |

@@ -301,6 +301,43 @@ tests:
           path: data.KUBERNETES_METRICS_API_ENABLED
           value: "true"
 
+  - it: should disable the VPA and Karpenter connectors when set to false
+    set:
+      config.recommendations.vpaEnabled: false
+      config.recommendations.karpenterEnabled: false
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_VPA_ENABLED
+          value: "false"
+      - equal:
+          path: data.RECOMMENDATION_KARPENTER_ENABLED
+          value: "false"
+
+  - it: should load source plugins with no per-source settings by default
+    asserts:
+      - equal:
+          path: data.SOURCES_PLUGINS_ENABLED
+          value: "true"
+      - equal:
+          path: data.SOURCES_CONFIG
+          value: "{}"
+
+  - it: should render per-source settings as JSON
+    set:
+      sources.pluginsEnabled: false
+      sources.settings:
+        greenkube.carbon_aware:
+          enabled: false
+        vpa:
+          enabled: auto
+    asserts:
+      - equal:
+          path: data.SOURCES_PLUGINS_ENABLED
+          value: "false"
+      - equal:
+          path: data.SOURCES_CONFIG
+          value: '{"greenkube.carbon_aware":{"enabled":false},"vpa":{"enabled":"auto"}}'
+
   - it: should schedule recommendation scans hourly by default
     asserts:
       - equal:
