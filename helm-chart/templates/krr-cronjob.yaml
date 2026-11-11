@@ -7,6 +7,7 @@ JSON report to POST /api/v1/sources/krr/reports. Disabled by default.
 * The upload container (the GreenKube image, no extra tool) posts the report
   with an API key of scope signals:write read from sources.krr.job.apiKeySecret.
 */ -}}
+{{- include "greenkube.requireChartDefaults" . -}}
 {{- $job := .Values.sources.krr.job -}}
 {{- if $job.enabled }}
 {{- $v := include "greenkube.values" . | fromYaml }}

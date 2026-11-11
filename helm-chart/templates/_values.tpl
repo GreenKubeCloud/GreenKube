@@ -12,6 +12,7 @@ install notes print it). The values schema (N2) rejects these keys in the next
 minor release.
 */}}
 {{- define "greenkube.values" -}}
+{{- include "greenkube.requireChartDefaults" . -}}
 {{- $values := .Values -}}
 {{- $api := deepCopy ($values.api | default dict) -}}
 {{- $controller := deepCopy ($values.controller | default dict) -}}
@@ -238,4 +239,25 @@ Your SQLite data stays on the PersistentVolumeClaim {{ $fullname }}. Migrate in 
   2. run the one-shot Job of docs/upgrading.md, which mounts the claim at /data and runs:
      greenkube db copy --from sqlite://{{ $path }} --to "$DB_CONNECTION_STRING"
   3. helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reset-then-reuse-values --set controller.replicas=1
+{{- end -}}
+
+{{/*
+`helm upgrade --reuse-values` over a 0.3.x release replaces this chart's
+defaults with the old release's values, so every key added since (api,
+controller, renderer, sources...) is missing and templates would dereference
+nil. Stop before Helm changes anything, with the commands that work (F17).
+*/}}
+{{- define "greenkube.requireChartDefaults" -}}
+{{- $missing := list -}}
+{{- range $key := list "api" "controller" "renderer" "sources" -}}
+  {{- if not (hasKey $.Values $key) -}}
+    {{- $missing = append $missing $key -}}
+  {{- end -}}
+{{- end -}}
+{{- if $missing -}}
+  {{- fail (printf `the chart defaults are missing (%s): helm upgrade --reuse-values keeps the defaults of the release's previous chart, so it cannot upgrade a 0.3.x release.
+Upgrade with the new chart defaults and your own values instead (docs/upgrading.md):
+  helm upgrade %s <chart> -n %s --reset-then-reuse-values      (Helm 3.14 or later)
+  helm upgrade %s <chart> -n %s -f <your-values.yaml>         (any Helm version)` (join ", " $missing) .Release.Name .Release.Namespace .Release.Name .Release.Namespace) -}}
+{{- end -}}
 {{- end -}}
