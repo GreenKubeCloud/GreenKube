@@ -477,6 +477,10 @@ config:
     # Assumed monthly cost of a provisioned cloud LoadBalancer (USD), used to
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     loadBalancerCostPerMonth: 18.0
+    # Days a LoadBalancer or PersistentVolume must look unused continuously (zombie
+    # workloads and idle namespaces: be observed idle) before its deletion is
+    # recommended. Deletions are never automated; see docs/recommendation.md.
+    deletionMinUnusedDays: 7
     # If false, system namespaces (e.g., kube-system, coredns) will be excluded from recommendations
     recommendSystemNamespaces: false
     # Minimum realistic thresholds — recommendations below these are flagged as unrealistic

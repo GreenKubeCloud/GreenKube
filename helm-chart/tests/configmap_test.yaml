@@ -248,6 +248,20 @@ tests:
           path: data.RECOMMENDATION_LIMITS_POLICY
           value: "keep"
 
+  - it: should set the deletion evidence period
+    asserts:
+      - equal:
+          path: data.DELETION_MIN_UNUSED_DAYS
+          value: "7"
+
+  - it: should override the deletion evidence period
+    set:
+      config.recommendations.deletionMinUnusedDays: 14
+    asserts:
+      - equal:
+          path: data.DELETION_MIN_UNUSED_DAYS
+          value: "14"
+
   - it: should set RIGHTSIZING_CPU_THRESHOLD
     asserts:
       - equal:
