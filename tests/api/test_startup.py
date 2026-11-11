@@ -35,3 +35,12 @@ def test_optimization_factory_dependency_is_cached():
 
     assert get_optimization_engine.__name__ == "get_optimization_engine"
     assert factory_engine.cache_info().maxsize == 1
+
+
+def test_api_process_declares_no_background_loop():
+    """M8: the expiry sweep no longer runs in every API replica; the controller owns it."""
+    assert startup.API_BACKGROUND_LOOPS == ()
+    assert not hasattr(startup, "run_plan_expiry_loop")
+    api_app = importlib.import_module("greenkube.api.app")
+    assert not hasattr(api_app, "run_plan_expiry_loop")
+    assert not hasattr(api_app, "_inline_worker_factory")
