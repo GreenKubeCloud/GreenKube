@@ -16,6 +16,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, List, Optional, cast
 
+from greenkube.collectors.deletion_candidates import (
+    LOAD_BALANCER_KIND,
+    PERSISTENT_VOLUME_KIND,
+    attach_first_seen,
+    collect_namespace_info,
+)
 from greenkube.collectors.hpa_collector import HPACollector
 from greenkube.collectors.lb_collector import LoadBalancerCollector, enrich_orphaned_lb_costs
 from greenkube.collectors.pv_collector import PVCollector, enrich_orphaned_pv_costs
@@ -79,11 +85,14 @@ class ContextBuilder:
         self,
         config: Optional["Config"] = None,
         usage_repo: Optional["WorkloadUsageRepository"] = None,
+        deletion_candidate_repo: Optional[Any] = None,
     ):
         from greenkube.core.config import get_config
 
         self.config = config if config is not None else get_config()
         self.usage_repo = usage_repo
+        # First-seen history of deletion candidates; without it no deletion is recommended.
+        self.deletion_candidate_repo = deletion_candidate_repo
 
     async def build(
         self,
@@ -92,6 +101,10 @@ class ContextBuilder:
         namespace: Optional[str] = None,
     ) -> OptimizationContext:
         """Reads the configured lookback window and builds a full context."""
+        if self.deletion_candidate_repo is None:
+            from greenkube.storage.deletion_candidate_repository import deletion_candidate_repository_for
+
+            self.deletion_candidate_repo = deletion_candidate_repository_for(combined_repo)
         usage_repo = self.usage_repo if self.usage_repo is not None else usage_repository_for(combined_repo)
         if usage_repo is not None:
             return await self.build_from_rollup(usage_repo, node_repo, namespace=namespace)
@@ -368,6 +381,9 @@ class ContextBuilder:
         try:
             pv_collector = PVCollector()
             orphaned_volumes = await pv_collector.collect()
+            orphaned_volumes = await attach_first_seen(
+                self.deletion_candidate_repo, PERSISTENT_VOLUME_KIND, orphaned_volumes, end
+            )
         except Exception as e:
             logger.warning(
                 "Could not collect orphaned PersistentVolumes: %s. Proceeding without PV cleanup recommendations.",
@@ -389,6 +405,9 @@ class ContextBuilder:
         try:
             lb_collector = LoadBalancerCollector()
             orphaned_load_balancers = await lb_collector.collect()
+            orphaned_load_balancers = await attach_first_seen(
+                self.deletion_candidate_repo, LOAD_BALANCER_KIND, orphaned_load_balancers, end
+            )
         except Exception as e:
             logger.warning(
                 "Could not collect orphaned LoadBalancer Services: %s. Proceeding without LB cleanup recommendations.",
@@ -411,4 +430,5 @@ class ContextBuilder:
             "hpa_targets": hpa_targets,
             "persistent_volumes": orphaned_volumes,
             "load_balancers": orphaned_load_balancers,
+            "namespace_info": await collect_namespace_info(),
         }

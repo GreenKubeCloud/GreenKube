@@ -81,6 +81,78 @@ def mock_active_namespaces():
         yield m
 
 
+@pytest.fixture(autouse=True)
+def mock_namespace_info():
+    with patch(
+        "greenkube.core.optimization.context_builder.collect_namespace_info",
+        new=AsyncMock(return_value={}),
+    ) as m:
+        yield m
+
+
+class TestDeletionInputs:
+    """LB/PV candidates get their first-seen time; namespaces feed the deletion safety rules."""
+
+    async def test_candidates_get_first_seen_from_the_repository(self, node_repo, mock_side_collectors):
+        from greenkube.collectors.lb_collector import OrphanedLoadBalancer
+        from greenkube.collectors.pv_collector import OrphanedPV
+
+        _hpa, pv_cls, lb_cls = mock_side_collectors
+        lb_cls.return_value.collect = AsyncMock(
+            return_value=[OrphanedLoadBalancer(name="old-api", namespace="legacy", evidence=["no pod"])]
+        )
+        pv_cls.return_value.collect = AsyncMock(
+            return_value=[OrphanedPV(name="pvc-1", phase="Released", capacity_bytes=0, evidence=["released"])]
+        )
+        since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        repo = MagicMock()
+        repo.observe = AsyncMock(
+            side_effect=lambda kind, observations, now=None: {(o.namespace, o.name): since for o in observations}
+        )
+
+        with (
+            patch(
+                "greenkube.core.optimization.context_builder.enrich_orphaned_lb_costs",
+                new=AsyncMock(side_effect=lambda s, **_: s),
+            ),
+            patch(
+                "greenkube.core.optimization.context_builder.enrich_orphaned_pv_costs",
+                new=AsyncMock(side_effect=lambda v, **_: v),
+            ),
+        ):
+            context = await ContextBuilder(get_config(), deletion_candidate_repo=repo).build_from_metrics([], node_repo)
+
+        assert [lb.first_seen_at for lb in context.load_balancers or []] == [since]
+        assert [pv.first_seen_at for pv in context.persistent_volumes or []] == [since]
+        assert sorted(call.args[0] for call in repo.observe.await_args_list) == [
+            "LoadBalancerService",
+            "PersistentVolume",
+        ]
+        assert context.namespace_info == {}
+
+    async def test_incomplete_evaluation_is_not_recorded(self, node_repo, mock_side_collectors):
+        _hpa, pv_cls, lb_cls = mock_side_collectors
+        lb_cls.return_value.collect = AsyncMock(return_value=None)
+        pv_cls.return_value.collect = AsyncMock(return_value=None)
+        repo = MagicMock()
+        repo.observe = AsyncMock()
+
+        context = await ContextBuilder(get_config(), deletion_candidate_repo=repo).build_from_metrics([], node_repo)
+
+        assert context.load_balancers is None and context.persistent_volumes is None
+        repo.observe.assert_not_awaited()
+
+    async def test_sql_repositories_get_a_candidate_repository(self, tmp_path, node_repo):
+        from greenkube.storage.deletion_candidate_repository import DeletionCandidateRepository
+        from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
+
+        builder = ContextBuilder(get_config())
+        sql_repo = SQLiteCombinedMetricsRepository(MagicMock())
+        with patch.object(ContextBuilder, "build_from_rollup", new=AsyncMock(return_value="context")):
+            assert await builder.build(sql_repo, node_repo) == "context"
+        assert isinstance(builder.deletion_candidate_repo, DeletionCandidateRepository)
+
+
 class TestBuild:
     async def test_empty_metrics_still_collects_side_inputs(self, combined_repo, node_repo, mock_side_collectors):
         builder = ContextBuilder(get_config())

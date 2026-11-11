@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.workload_usage import POD_LEVEL, TargetKey, UsageSnapshot, WorkloadUsageSummary
@@ -42,6 +42,8 @@ class OptimizationContext:
     hpa_targets: Optional[Set[Tuple[str, str, str]]] = None
     persistent_volumes: Optional[List] = None
     load_balancers: Optional[List] = None
+    #: Namespace metadata by name for the deletion safety rules; None when unreadable.
+    namespace_info: Optional[Dict[str, Any]] = None
     usage: Optional[UsageSnapshot] = None
     _target_series_cache: Optional[Dict[Tuple[str, str, str], List[CombinedMetric]]] = field(
         default=None, init=False, repr=False, compare=False

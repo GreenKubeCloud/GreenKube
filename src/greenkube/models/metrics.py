@@ -224,6 +224,8 @@ class RecommendationEventType(str, Enum):
     ROLLBACK_REVIEW = "rollback_review"
     REVERTED = "reverted"
     FAILED = "failed"
+    #: A recommendation withdrawn because its evidence no longer holds (migration 0063).
+    RETIRED = "retired"
 
 
 class RiskLevel(str, Enum):
