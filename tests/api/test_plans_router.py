@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -791,3 +792,17 @@ def test_openapi_describes_strict_typed_plan_requests_and_responses(plan_api):
     assert "424" in paths["/api/v1/automation/plans"]["post"]["responses"]
     assert "429" in paths["/api/v1/automation/plans"]["post"]["responses"]
     assert "503" in paths["/api/v1/automation/plans"]["post"]["responses"]
+
+
+def test_openapi_keeps_typed_operations_in_action_plan_responses(plan_api):
+    client, _, _, _, _ = plan_api
+
+    schema = client.get("/api/v1/openapi.json").json()
+    components = schema["components"]["schemas"]
+    action_plan = next(definition for name, definition in components.items() if name.startswith("ActionPlanV3"))
+
+    items = action_plan["properties"]["operations"]["items"]
+    serialized = json.dumps(items)
+    for model in ("SetContainerResources", "DeleteResource", "AddHorizontalPodAutoscaler"):
+        assert f"#/components/schemas/{model}" in serialized
+    assert '"propertyName": "op"' in serialized

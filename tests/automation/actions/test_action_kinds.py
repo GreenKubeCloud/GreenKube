@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -75,9 +76,12 @@ def test_a_registered_kind_parses_and_round_trips_without_contract_changes() -> 
         action = ActionPlanV3.model_validate(_payload())
         assert isinstance(action.operations[0], SetMinReadySeconds)
         assert ACTION_KINDS.spec_for_action(action) is spec
-        dumped = action.model_dump(mode="json")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # no PydanticSerializationUnexpectedValue
+            dumped = action.model_dump(mode="json")
+            assert action.model_dump()["operations"] == [OPERATION]
+            assert ActionPlanV3.model_validate_json(action.model_dump_json()) == action
         assert dumped["operations"] == [OPERATION]
-        assert ActionPlanV3.model_validate_json(action.model_dump_json()) == action
 
         with pytest.raises(ValidationError, match="minReadySeconds"):
             ActionPlanV3.model_validate(

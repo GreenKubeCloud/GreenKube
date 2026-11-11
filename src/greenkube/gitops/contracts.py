@@ -451,11 +451,17 @@ def _serialize_operation(value: Any, handler: SerializerFunctionWrapHandler, inf
     return handler(value)
 
 
-ActionOperation = Annotated[
+_BuiltinOperation = Annotated[
     SetContainerResources | DeleteResource | AddHorizontalPodAutoscaler,
     Field(discriminator="op"),
+]
+
+ActionOperation = Annotated[
+    _BuiltinOperation,
     WrapValidator(_validate_operation),
-    WrapSerializer(_serialize_operation),
+    # The return type keeps the built-in discriminated union in the published
+    # serialization schema (OpenAPI); registered kinds serialize as plain objects.
+    WrapSerializer(_serialize_operation, return_type=_BuiltinOperation | dict[str, Any]),
 ]
 
 
