@@ -237,7 +237,7 @@
 		{#if loading && !suggestions.length}
 			<p class="text-sm text-dark-400" role="status">Loading…</p>
 		{:else if suggestionsUnsupported}
-			<p class="text-sm text-dark-400">This server does not suggest repositories yet; configure <code>automation.providers[].allowlist</code> in Helm values.</p>
+			<p class="text-sm text-dark-400">This server does not suggest repositories yet; configure <code>automation.repositoryAllowlist</code> in Helm values.</p>
 		{:else if suggestionsError}
 			<p class="text-sm text-amber-300" role="alert">{suggestionsError}</p>
 		{:else if !suggestions.length}
