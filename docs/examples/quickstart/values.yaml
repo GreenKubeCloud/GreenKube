@@ -33,6 +33,10 @@ config:
     # Every sample gate (recommendations, plan policy, verification):
     # 6 samples x 30s = 3 minutes of evidence.
     minSamples: 6
+    # The sample workloads are oversized, so their rightsizings are decreases,
+    # which wait for 7 days of observed coverage by default (weekly cycles).
+    # About 90 seconds here.
+    minDecreaseCoverageDays: 0.001
     # Scheduled scans every minute (default 1h); POST /api/v1/optimization/runs
     # still queues one on demand.
     scanInterval: 1m
