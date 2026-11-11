@@ -299,24 +299,30 @@ Analyzes `CombinedMetric` data to identify optimization opportunities (`src/gree
 
 **Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB inputs) → run enabled **sources** → normalize/arbitrate/deduplicate → attach an **evidence** block and a **risk/confidence/effort** assessment → compute the multi-criteria **ranking score** → persist and reconcile per source (a failed or incomplete source never blocks the others and never marks its recommendations stale).
 
-**Sources:**
+**Sources (Source SDK, `src/greenkube/signals/`, [developer guide](sources.md)):** every source implements one contract, `Source` (metadata, `discover()`, `health()`, `collect() -> SourceBatch` of v2 **signals**), and is registered in the `SourceRegistry`: built-ins in code (`core/optimization/registry.py`), third-party packages through the `greenkube.sources` Python entry points. `SOURCES_CONFIG` enables, disables or configures each source by id.
 
-1. **Native (`greenkube`)** — the built-in analyzers:
-   - **Zombie Pods:** workloads consuming cost with minimal energy.
-   - **Rightsizing (two-way):** request decreases for over-provisioned CPU/memory
+1. **Native analyzers (`greenkube.<analyzer>`)** — one source per analyzer, through the analyzer adapter (`signals/adapters.py`); their v1 recommendations keep `source: greenkube`:
+   - **Zombie Pods** (`greenkube.zombie`): workloads consuming cost with minimal energy.
+   - **Rightsizing, two-way** (`greenkube.rightsizing_cpu`, `greenkube.rightsizing_memory`): request decreases for over-provisioned CPU/memory
      (after a week of coverage) and reliability increases when p99 usage nears the
      request, from per-step usage percentiles and configured headroom.
-   - **Autoscaling Candidates:** high coefficient of variation / spike ratio,
+   - **Autoscaling Candidates** (`greenkube.autoscaling`): high coefficient of variation / spike ratio,
      skipping workloads already governed by an HPA.
-   - **Off-peak Scaling:** idle windows suggesting scale-to-zero schedules.
-   - **Idle Namespaces:** namespaces with minimal activity.
-   - **Carbon-Aware Scheduling:** workloads running during high-intensity periods.
-   - **Node optimization:** overprovisioned nodes.
-   - **Orphaned PV / LoadBalancer cleanup.**
+   - **Off-peak Scaling** (`greenkube.off_peak`): idle windows suggesting scale-to-zero schedules.
+   - **Idle Namespaces** (`greenkube.idle_namespace`): namespaces with minimal activity.
+   - **Carbon-Aware Scheduling** (`greenkube.carbon_aware`): workloads running during high-intensity periods.
+   - **Node optimization** (`greenkube.nodes`): overprovisioned nodes.
+   - **Orphaned PV / LoadBalancer cleanup** (`greenkube.orphaned_pv`, `greenkube.orphaned_lb`).
 
-2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same workload, avoiding duplicate advice.
+2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same workload, avoiding duplicate advice. Wrapped by the v1 connector adapter.
 
-3. **Karpenter (`karpenter`, optional)** — node-pool consolidation recommendations when compatible Karpenter CRDs are available.
+3. **NodePool consolidation (`greenkube.nodepool`, optional)** — GreenKube's heuristic over Karpenter NodePools and NodeClaims (not Karpenter's own advice) when the CRDs are available. Its v1 recommendations keep `source: karpenter`.
+
+4. **Plugins** — third-party sources installed in the image ([example](../examples/greenkube-source-example)). Their signals are recorded; they become recommendations once the consensus engine (roadmap E6) combines signals.
+
+**Isolation:** the `SourceRunner` runs each source with its own probe and collection timeouts, a rate limit (`min_interval_seconds`) and a circuit breaker (`failure_threshold` consecutive failures skip the source for `circuit_cooldown_seconds`). It drops signals that break the contract (another source id, an undeclared capability), trims raw payloads to 8 KiB and records an API-safe error code, never an exception message. A source that fails, times out, is skipped or returns a partial batch is not authoritative: its previous recommendations are kept, never marked stale. Native analyzers count as one v1 source (`greenkube`) in `optimization_runs.source_outcomes`, so one failing analyzer makes `greenkube` incomplete for that run.
+
+**Persistence:** each scan writes one `source_runs` row per source (status, health, signal and recommendation counts, consecutive failures, error code, diagnostics, linked to the optimization run) and upserts its signals into `source_signals`, one row per distinct `signal_id` (`sha256(source, target key, capability, proposal)`) with first/last sighting and the fingerprint of the v1 recommendation it supports. Both are kept 30 days. `GET /api/v1/sources` reports every source's status, health and last run.
 
 **Evidence, risk and ranking:** every recommendation carries observation window, utilization distribution, current vs proposed resources, expected savings and method, confidence, reliability risk, rollback conditions, a machine-readable patch plan and an expiry date. Recommendations are ranked by risk-adjusted expected value in one currency (`core/optimization/scoring.py`): projected value (cost plus carbon at a carbon price) times a success probability that combines confidence with each source's measured track record (`track_record.py`), minus the expected incident and effort costs. Ranking profiles (`balanced`, `carbon_first`, `cost_first`, `quick_wins`, `low_risk`) are presets over those parameters. Delivery eligibility (`eligibility.py`) is computed when a recommendation is read: action kind, GitOps binding, warm-up and the automation policy gates.
 
@@ -570,7 +576,8 @@ The controller's `collect_metrics` job is the only production writer of usage, e
 2. **Analysis:**
    ```
    OptimizationEngine.generate()
-   ├─ Run enabled sources (native analyzers, VPA)
+   ├─ Run enabled sources through the SourceRunner (native analyzers, VPA, NodePool, plugins)
+   ├─ Record each source's run and signals (source_runs, source_signals)
    ├─ Normalize provenance and arbitrate conflicts by capability/priority
    ├─ Deduplicate and clamp values to configured minimums
    ├─ Attach evidence, risk/confidence/effort and expiry
