@@ -173,11 +173,11 @@ async def list_recommendations(
     actor: str = Depends(get_authenticated_actor),
     refresh: bool = Query(False, description=_REFRESH_DESCRIPTION, deprecated=True),
 ):
-    """Read active recommendations; never runs analyzers or writes recommendations."""
+    """Read active recommendations (and ``pr_open`` ones); never runs analyzers or writes recommendations."""
     decision = _decision_request(profile, carbon_price)
     if refresh:
         await enqueue_refresh(run_repo, response, namespace=namespace, requested_by=actor)
-    records = await reco_repo.get_active_recommendations(namespace=namespace)
+    records = await reco_repo.get_active_recommendations(namespace=namespace, include_pr_open=True)
     return await _decide(records, decision, reco_repo, gitops_repo, pr_repo, service)
 
 
@@ -200,6 +200,9 @@ async def list_active_recommendations(
 ):
     """Return active recommendations from the database with their live decision.
 
+    Recommendations whose pull request is open (``pr_open``) are listed too,
+    with the ``pull_request_open`` eligibility blocker.
+
     Ordered by risk-adjusted expected value (``ranking_score``, currency per
     year) under the requested profile and carbon price, then value, projected
     cost and identity. Scores are absolute, so filters never reorder the
@@ -211,7 +214,7 @@ async def list_active_recommendations(
     if refresh:
         await enqueue_refresh(run_repo, response, namespace=namespace, requested_by=actor)
 
-    records = await reco_repo.get_active_recommendations(namespace=namespace)
+    records = await reco_repo.get_active_recommendations(namespace=namespace, include_pr_open=True)
     filtered = _filter_records(records, source, risk_level, capability)
     return await _decide(filtered, decision, reco_repo, gitops_repo, pr_repo, service)
 

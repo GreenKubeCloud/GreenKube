@@ -37,6 +37,9 @@ from greenkube.utils.date_utils import to_iso_z
 
 logger = logging.getLogger(__name__)
 
+#: Status predicate of the active listing, optionally with recommendations whose PR is open.
+_ACTIVE_LISTING_PREDICATE = {False: "status = 'active'", True: "status IN ('active', 'pr_open')"}
+
 #: Default order of active lists (E2, BUG-20): ranking score, then projected
 #: cost savings, NULLs last on both backends, then a stable id tie-break.
 ACTIVE_ORDER_BY = (
@@ -228,8 +231,12 @@ class SQLiteRecommendationRepository(RecommendationRepository):
     async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
         """Inserts or updates active recommendations using their full target identity.
 
-        Ignored recommendations are left untouched. Matching applied recommendations
-        are refreshed so future savings attribution reflects the latest observed state.
+        Ignored recommendations are left untouched. A recommendation whose pull
+        request is open (``pr_open``) is frozen: its baseline and proposal are
+        never rewritten and no duplicate is inserted. A matching applied
+        recommendation only has ``updated_at`` refreshed (and, for issues that
+        reappeared, its savings stopped); its ``current_*`` baseline and the
+        ``actual_*`` values detected after the change are never rewritten.
 
         Args:
             records: List of RecommendationRecord objects to upsert.
@@ -265,6 +272,15 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     await conn.execute(update_query, params)
                     continue
 
+                pr_open_where, pr_open_params = _identity_where_clause(r, status=RecommendationStatus.PR_OPEN.value)
+                cursor = await conn.execute(
+                    f"SELECT id FROM recommendation_history WHERE {pr_open_where} LIMIT 1",
+                    pr_open_params,
+                )
+                if await cursor.fetchone():
+                    # Frozen while its pull request is open (or merged and syncing).
+                    continue
+
                 applied_where, applied_params = _identity_where_clause(r, status="applied")
                 cursor = await conn.execute(
                     f"SELECT * FROM recommendation_history WHERE {applied_where} ORDER BY applied_at DESC LIMIT 1",
@@ -278,16 +294,12 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     await conn.execute(
                         """
                         UPDATE recommendation_history SET
-                            actual_cpu_request_millicores = ?,
-                            actual_memory_request_bytes = ?,
                             carbon_saved_co2e_grams = ?,
                             cost_saved = ?,
                             updated_at = ?
-                        WHERE id = ?
+                        WHERE id = ? AND status = 'applied'
                         """,
                         (
-                            refreshed.actual_cpu_request_millicores,
-                            refreshed.actual_memory_request_bytes,
                             refreshed.carbon_saved_co2e_grams,
                             refreshed.cost_saved,
                             to_iso_z(refreshed.updated_at) if refreshed.updated_at else now,
@@ -403,18 +415,22 @@ class SQLiteRecommendationRepository(RecommendationRepository):
     async def get_active_recommendations(
         self,
         namespace: Optional[str] = None,
+        *,
+        include_pr_open: bool = False,
     ) -> List[RecommendationRecord]:
         """Returns all currently active recommendations.
 
         Args:
             namespace: Optional namespace filter.
+            include_pr_open: Also return recommendations whose pull request is
+                open (``pr_open``), for listings that show them with their PR.
 
         Returns:
             A list of active RecommendationRecord objects.
         """
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
-            conditions = ["status = 'active'"]
+            conditions = [_ACTIVE_LISTING_PREDICATE[bool(include_pr_open)]]
             params: list = []
 
             if namespace:

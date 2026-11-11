@@ -725,6 +725,7 @@ async def test_recommendation_repository_lifecycle_round_trip(real_database: Rea
     )
     assert await repo.upsert_recommendations([regenerated]) == 1
     assert await repo.get_active_recommendations(namespace="prod") == []
+    assert applied.id is not None
     kept = await repo.get_recommendation_by_id(applied.id)
     assert kept is not None
     assert kept.actual_cpu_request_millicores == 300

@@ -212,6 +212,7 @@ class RecommendationEventType(str, Enum):
     UNIGNORED = "unignored"
     EXPIRED = "expired"
     PR_OPENED = "pr_opened"
+    PR_CLOSED = "pr_closed"
     PR_MERGED = "pr_merged"
     APPLIED = "applied"
     VERIFICATION_STARTED = "verification_started"

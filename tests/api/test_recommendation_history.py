@@ -143,7 +143,7 @@ class TestRecommendationsPersistence:
         mock_reco_repo.upsert_recommendations.assert_not_called()
         mock_reco_repo.reconcile_active_recommendations.assert_not_called()
         mock_combined_metrics_repo.read_combined_metrics.assert_not_called()
-        mock_reco_repo.get_active_recommendations.assert_called_once_with(namespace="prod")
+        mock_reco_repo.get_active_recommendations.assert_called_once_with(namespace="prod", include_pr_open=True)
 
     async def test_metrics_from_deleted_namespaces_are_excluded_from_recommendations(
         self,

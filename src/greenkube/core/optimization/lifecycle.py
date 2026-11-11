@@ -40,7 +40,12 @@ _ALLOWED_TRANSITIONS = {
         RecommendationStatus.EXPIRED.value,
         RecommendationStatus.PR_OPEN.value,
     },
-    RecommendationStatus.PR_OPEN.value: {RecommendationStatus.APPLIED.value, RecommendationStatus.FAILED.value},
+    RecommendationStatus.PR_OPEN.value: {
+        RecommendationStatus.APPLIED.value,
+        RecommendationStatus.FAILED.value,
+        # The pull request was closed unmerged or its action failed: offer it again.
+        RecommendationStatus.ACTIVE.value,
+    },
     RecommendationStatus.APPLIED.value: {
         RecommendationStatus.VERIFYING.value,
         RecommendationStatus.VERIFIED.value,

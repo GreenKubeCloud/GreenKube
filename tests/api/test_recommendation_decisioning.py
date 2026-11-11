@@ -80,7 +80,9 @@ RECORDS = [
 @pytest.fixture
 def decision_client(client, mock_reco_repo):
     mock_reco_repo.get_active_recommendations = AsyncMock(
-        side_effect=lambda namespace=None: [r for r in RECORDS if namespace in (None, r.namespace)]
+        side_effect=lambda namespace=None, include_pr_open=False: [
+            r for r in RECORDS if namespace in (None, r.namespace)
+        ]
     )
     mock_reco_repo.get_recommendation_by_id = AsyncMock(side_effect=lambda rec_id: RECORDS[rec_id - 1])
     mock_reco_repo.get_outcome_counts_by_source_capability = AsyncMock(return_value=[])
