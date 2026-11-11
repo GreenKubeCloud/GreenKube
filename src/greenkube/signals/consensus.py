@@ -265,6 +265,9 @@ class Consensus(BaseModel):
     #: Independent votes (one per engine family).
     independent_votes: int = 1
     votes: List[ConsensusVote] = Field(default_factory=list)
+    #: Sources that did not complete the scan and whose last known proposal (``{source_id: value}``)
+    #: still supports the record (E8). Filled by the engine, never by :func:`combine`.
+    last_known: Dict[str, int] = Field(default_factory=dict)
 
     @property
     def confidence_bonus(self) -> float:

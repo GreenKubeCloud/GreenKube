@@ -27,6 +27,7 @@ from greenkube.core.optimization.actions import build_action_plans
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.context_builder import ContextBuilder
 from greenkube.core.optimization.dedup import (
+    RESOURCE_FIELDS,
     apply_consensus_assessment,
     consensus_policy,
     consensus_refiner,
@@ -51,7 +52,7 @@ from greenkube.models.optimization_run import (
 )
 from greenkube.models.recommendation_v2 import with_v2_fields
 from greenkube.signals.adapters import adapt_recommendation_source, observed_window, workload_inventory
-from greenkube.signals.consensus import ConsensusPolicy
+from greenkube.signals.consensus import KIND_REQUEST_RESOURCES, ConsensusPolicy
 from greenkube.signals.runtime import SourceReport, SourceRunner, SourceRunRecord, legacy_outcomes
 from greenkube.signals.sdk import CollectContext, Source, SourceDeps
 
@@ -472,17 +473,30 @@ class OptimizationEngine:
         previous: List[RecommendationRecord],
         incomplete_sources: FrozenSet[str],
     ) -> List[Recommendation]:
-        """Keep the last known consensus while one of its sources is incomplete (E6, E8).
+        """Account for the last known vote of a supporting source that is incomplete (E6, E8).
 
         When a source that supported an active recommendation did not complete
-        this run and is missing from the new consensus, the remaining sources
-        must not overwrite the advice: the consensus would otherwise flap with
-        every transient outage of one connector. The last known record stays
-        until that source completes again (or the record expires).
+        this run, it is missing from the new consensus. Its last known
+        proposal (stored in the record's consensus votes) still counts, so the
+        advice does not flap with every transient outage of one connector, but
+        it never holds back a safer value:
+
+        * the new proposal is at least the previous one (a higher request, or
+          an increase replacing a decrease): the new recommendation is written;
+        * under ``safest``, every incomplete supporter's last known value is at
+          most the new proposal: ``safest`` of the new and last known votes is
+          the new proposal, which is written;
+        * otherwise (the new proposal is more aggressive than what the last
+          known votes support, or a non-numeric proposal) the last known
+          record stays until that source completes again (or expires).
+
+        A written recommendation keeps the incomplete sources among its
+        supporting sources, with their last known values in ``consensus.last_known``.
         """
         if not incomplete_sources or not previous:
             return recommendations
         previous_by_fp = {record.fingerprint: record for record in previous if record.fingerprint}
+        policy = consensus_policy(self.config)
         kept: List[Recommendation] = []
         for recommendation in recommendations:
             fingerprint = RecommendationRecord.from_recommendation(recommendation).fingerprint
@@ -492,12 +506,15 @@ class OptimizationEngine:
                 current_support = supporting_sources(recommendation.source, recommendation.sources)
                 missing = sorted((previous_support - current_support) & set(incomplete_sources))
                 if missing:
-                    logger.info(
-                        "Keeping last known recommendation %s while %s is incomplete.",
-                        fingerprint,
-                        ", ".join(missing),
-                    )
-                    continue
+                    merged = _with_last_known_votes(recommendation, before, missing, policy)
+                    if merged is None:
+                        logger.info(
+                            "Keeping last known recommendation %s while %s is incomplete.",
+                            fingerprint,
+                            ", ".join(missing),
+                        )
+                        continue
+                    recommendation = merged
             kept.append(recommendation)
         return kept
 
@@ -552,6 +569,77 @@ class OptimizationEngine:
             recommendation.action = plan
             patch = build_patch(recommendation, plan)
             recommendation.patch = RecommendationPatchV2.model_validate(patch) if patch is not None else None
+
+
+def _last_known_values(before: RecommendationRecord, missing: Sequence[str], resource: str) -> Dict[str, int]:
+    """``{source_id: value}`` of the incomplete sources' votes in ``before``'s consensus."""
+    consensus = before.consensus if isinstance(before.consensus, dict) else {}
+    if consensus.get("resource") != resource:
+        return {}
+    values: Dict[str, int] = {}
+    for vote in consensus.get("votes") or []:
+        if not isinstance(vote, dict) or vote.get("source") not in missing:
+            continue
+        value = vote.get("value")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            source_id = str(vote.get("source_id") or vote.get("source"))
+            values[source_id] = max(int(value), values.get(source_id, int(value)))
+    return values
+
+
+def _with_last_known_votes(
+    recommendation: Recommendation,
+    before: RecommendationRecord,
+    missing: Sequence[str],
+    policy: ConsensusPolicy,
+) -> Optional[Recommendation]:
+    """``recommendation`` supported by the incomplete sources' last known votes, or None to keep ``before``.
+
+    A higher request is always the safer one (a smaller decrease, or an
+    increase that protects reliability), so the new proposal is written when
+    it is not more aggressive than what the last known votes support.
+    """
+    resource = KIND_REQUEST_RESOURCES.get(str(getattr(recommendation.type, "value", recommendation.type)))
+    if resource is None:
+        return None
+    _current_field, proposed_field = RESOURCE_FIELDS[resource]
+    new_value = getattr(recommendation, proposed_field)
+    old_value = getattr(before, proposed_field)
+    if new_value is None or old_value is None:
+        return None
+    last_known = _last_known_values(before, missing, resource)
+    known_units = {
+        vote.get("source")
+        for vote in (before.consensus or {}).get("votes") or []
+        if isinstance(vote, dict) and vote.get("source_id") in last_known
+    }
+    every_vote_known = all(unit in known_units for unit in missing)
+    safer_or_equal = int(new_value) >= int(old_value)
+    safest_holds = (
+        policy is ConsensusPolicy.SAFEST
+        and every_vote_known
+        and all(value <= int(new_value) for value in last_known.values())
+    )
+    if not (safer_or_equal or safest_holds):
+        return None
+    sources = list(recommendation.sources or [])
+    for unit in missing:
+        if unit not in sources:
+            sources.append(unit)
+    update: Dict[str, object] = {"sources": sources}
+    if isinstance(recommendation.consensus, dict):
+        consensus = {**recommendation.consensus, "last_known": last_known}
+        update["consensus"] = consensus
+        if recommendation.evidence is not None and recommendation.evidence.consensus is not None:
+            update["evidence"] = recommendation.evidence.model_copy(update={"consensus": consensus})
+    logger.info(
+        "Recommendation %s follows the new proposal (%s) while %s is incomplete; last known votes: %s.",
+        before.fingerprint,
+        new_value,
+        ", ".join(missing),
+        last_known or "unknown",
+    )
+    return recommendation.model_copy(update=update)
 
 
 def _run_status(outcomes: List[SourceRunOutcome]) -> OptimizationRunStatus:

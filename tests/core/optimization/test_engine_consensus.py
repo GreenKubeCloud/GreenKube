@@ -171,6 +171,15 @@ class TestConsensusScan:
         record = await _only(repo)
         assert (record.source, record.recommended_cpu_request_millicores) == (SourceName.VPA, 200)
 
+    async def test_a_source_keeping_the_current_request_means_no_recommendation(self, repo):
+        # KRR reports 500m, the current request: under safest nothing should change.
+        engine = _engine([_krr(500), FakeConnector("greenkube", [_cpu(280)])])
+
+        persisted = await engine.refresh(AsyncMock(), AsyncMock(), repo)
+
+        assert persisted == []
+        assert await repo.get_active_recommendations() == []
+
 
 class TestRevisionsAcrossScans:
     async def test_a_new_consensus_value_is_a_new_revision(self, repo):
@@ -201,6 +210,52 @@ class TestPerSourceReconciliation:
         record = await _only(repo)
         assert record.recommended_cpu_request_millicores == 300
         assert record.revision == 1
+
+    async def test_a_failed_supporter_never_holds_back_a_safer_native_value(self, repo):
+        await _engine([_krr(250), FakeConnector("greenkube", [_cpu(280)])]).refresh(AsyncMock(), AsyncMock(), repo)
+        assert (await _only(repo)).recommended_cpu_request_millicores == 280
+
+        # KRR fails and the native analyzer now needs 400m: the 280m shrink must not survive.
+        await _engine([_krr(fail=True), FakeConnector("greenkube", [_cpu(400)])]).refresh(
+            AsyncMock(), AsyncMock(), repo
+        )
+
+        record = await _only(repo)
+        assert (record.recommended_cpu_request_millicores, record.revision) == (400, 2)
+        # KRR still supports the record through its last known vote.
+        assert "krr" in record.sources
+        assert (record.consensus or {})["last_known"] == {"krr": 250}
+
+    async def test_a_failed_supporter_never_holds_back_an_increase(self, repo):
+        await _engine([_krr(250), FakeConnector("greenkube", [_cpu(280)])]).refresh(AsyncMock(), AsyncMock(), repo)
+
+        await _engine([_krr(fail=True), FakeConnector("greenkube", [_cpu(700)])]).refresh(
+            AsyncMock(), AsyncMock(), repo
+        )
+
+        record = await _only(repo)
+        assert record.recommended_cpu_request_millicores == 700
+
+    async def test_safest_with_a_failed_supporter_follows_the_native_value_above_its_last_vote(self, repo):
+        await _engine([_krr(250), FakeConnector("greenkube", [_cpu(300)])]).refresh(AsyncMock(), AsyncMock(), repo)
+
+        # safest(native 260m, KRR last known 250m) = 260m.
+        await _engine([_krr(fail=True), FakeConnector("greenkube", [_cpu(260)])]).refresh(
+            AsyncMock(), AsyncMock(), repo
+        )
+
+        assert (await _only(repo)).recommended_cpu_request_millicores == 260
+
+    async def test_safest_with_a_failed_supporter_keeps_its_higher_last_vote(self, repo):
+        await _engine([_krr(320), FakeConnector("greenkube", [_cpu(280)])]).refresh(AsyncMock(), AsyncMock(), repo)
+
+        # safest(native 260m, KRR last known 320m) = 320m: the last known record stays.
+        await _engine([_krr(fail=True), FakeConnector("greenkube", [_cpu(260)])]).refresh(
+            AsyncMock(), AsyncMock(), repo
+        )
+
+        record = await _only(repo)
+        assert (record.recommended_cpu_request_millicores, record.revision) == (320, 1)
 
     async def test_a_failed_signal_only_source_never_makes_its_advice_stale(self, repo):
         await _engine([_krr(250)]).refresh(AsyncMock(), AsyncMock(), repo)
