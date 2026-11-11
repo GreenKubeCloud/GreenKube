@@ -1570,6 +1570,37 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             record = await self._get_plan_record_on_connection(connection, plan_id)
             return record.plan if record is not None else None
 
+    async def set_plan_delivery_mode(
+        self,
+        plan_id: str,
+        delivery_mode: str,
+        *,
+        expected_digest: str | None,
+        expected_statuses: Sequence[PlanStatus],
+    ) -> Plan | None:
+        """Record how an approved plan is delivered (F4), guarded by its digest and status."""
+        if delivery_mode not in ("direct", "patch", "ci"):
+            raise ValueError("delivery_mode must be direct, patch or ci")
+        statuses = tuple(dict.fromkeys(expected_statuses))
+        if not statuses:
+            raise ValueError("expected_statuses must not be empty")
+        placeholders = ", ".join("?" for _ in statuses)
+        digest_clause = "digest IS NOT DISTINCT FROM ?" if self._postgres else "digest IS ?"
+        async with self._transaction() as connection:
+            updated = await self._execute(
+                connection,
+                f"""
+                UPDATE automation_plans
+                SET delivery_mode = ?, updated_at = {self._now_expression}
+                WHERE plan_id = ? AND {digest_clause} AND status IN ({placeholders})
+                """,
+                (delivery_mode, plan_id, expected_digest, *(status.value for status in statuses)),
+            )
+            if not updated:
+                return None
+            record = await self._get_plan_record_on_connection(connection, plan_id)
+            return record.plan if record is not None else None
+
     async def _get_plan_record_on_connection(self, connection: Any, plan_id: str) -> AutomationPlanRecord | None:
         row = await self._fetchrow(connection, "SELECT * FROM automation_plans WHERE plan_id = ?", (plan_id,))
         if row is None:

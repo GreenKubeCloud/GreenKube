@@ -774,7 +774,10 @@ def test_openapi_describes_strict_typed_plan_requests_and_responses(plan_api):
     schema = client.get("/api/v1/openapi.json").json()
     paths = schema["paths"]
 
-    assert set(paths["/api/v1/automation/plans"]) == {"post"}
+    # GET lists plans by status and delivery mode (F4).
+    assert set(paths["/api/v1/automation/plans"]) == {"get", "post"}
+    assert set(paths["/api/v1/automation/plans/{plan_id}/patch"]) == {"get"}
+    assert set(paths["/api/v1/automation/plans/{plan_id}/delivery"]) == {"post"}
     assert set(paths["/api/v1/automation/plans/{plan_id}"]) == {"get", "delete"}
     assert "204" in paths["/api/v1/automation/plans/{plan_id}"]["delete"]["responses"]
     assert set(paths["/api/v1/automation/plans/{plan_id}/rollback-preview"]) == {"post"}

@@ -12,6 +12,7 @@ from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
+from greenkube.automation.delivery import DELIVERY_DIRECT, configured_delivery_mode
 from greenkube.automation.rollback import InversePlan, inverse_plan_id
 from greenkube.core.observability import elapsed, record_automation_failure, record_automation_plan, start_timer
 from greenkube.gitops.contracts import (
@@ -641,7 +642,26 @@ class AutomationPlanService:
             if approved is None:
                 raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "plan changed during approval")
 
-        if self.operation_enqueuer is not None:
+        # Delivery modes (F4): only "direct" queues an operation that writes to Git. A plan
+        # approved in "patch" or "ci" mode waits for a person or a CI job to report its PR.
+        mode = configured_delivery_mode()
+        recorder = getattr(self.repository, "set_plan_delivery_mode", None)
+        if approved.delivery_mode is None and not callable(recorder) and mode != DELIVERY_DIRECT:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                "this plan store cannot record an external delivery mode",
+            )
+        if approved.delivery_mode is None and callable(recorder):
+            recorded = await cast(Any, recorder)(
+                approved.plan_id,
+                mode,
+                expected_digest=approved.digest,
+                expected_statuses=(PlanStatus.APPROVED,),
+            )
+            if recorded is None:
+                raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "plan changed during approval")
+            approved = recorded
+        if self.operation_enqueuer is not None and approved.delivery_mode in (None, DELIVERY_DIRECT):
             if approved.digest is None:
                 raise AutomationPlanError(
                     AutomationErrorCode.RENDER_VALIDATION_FAILED,

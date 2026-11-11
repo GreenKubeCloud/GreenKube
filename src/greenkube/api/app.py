@@ -51,6 +51,7 @@ from greenkube.api.routers import gitops as gitops_router
 from greenkube.api.routers import health as health_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report, repository_bindings
 from greenkube.api.routers import optimization as optimization_router
+from greenkube.api.routers import plan_delivery as plan_delivery_router
 from greenkube.api.routers import plans as plans_router
 from greenkube.api.routers import recommendations_v2 as recommendations_v2_router
 from greenkube.api.routers import setup as setup_router
@@ -366,6 +367,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(setup_router.router, prefix="/api/v1", tags=["Setup"])
     app.include_router(automation_repositories_router.router, prefix="/api/v1", tags=["Automation"])
     app.include_router(automation_router.router, prefix="/api/v1", tags=["Automation"])
+    app.include_router(plan_delivery_router.router, prefix="/api/v1", tags=["Automation plans"])
     app.include_router(plans_router.router, prefix="/api/v1", tags=["Automation plans"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])
     app.include_router(health_router.router, prefix="/api/v1", tags=["Health"])

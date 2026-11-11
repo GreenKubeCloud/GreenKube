@@ -321,6 +321,7 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
         ),
         created_at=plan.created_at,
         expires_at=plan.expires_at,
+        delivery_mode=plan.delivery_mode,
     )
 
 

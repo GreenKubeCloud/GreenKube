@@ -1815,3 +1815,44 @@ async def test_provider_check_records_verification_without_touching_configuratio
     assert disabled is not None and disabled.status == "unverified"
     with pytest.raises(ValueError):
         await repository.record_provider_check("gitea-quickstart", "ready")
+
+
+@pytest.mark.asyncio
+async def test_delivery_mode_is_recorded_on_approved_plans_and_survives_resaves(gitops_store):
+    """F4: the delivery mode chosen at approval is persisted and listed with the plan."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+    assert (await repository.get_plan(plan.plan_id)).delivery_mode is None
+
+    # Only an approved plan with the expected digest gets a delivery mode.
+    approved_only = (PlanStatus.APPROVED,)
+    assert (
+        await repository.set_plan_delivery_mode(
+            plan.plan_id, "ci", expected_digest=plan.digest, expected_statuses=approved_only
+        )
+        is None
+    )
+    await repository.set_plan_status(plan.plan_id, PlanStatus.APPROVED)
+    assert (
+        await repository.set_plan_delivery_mode(
+            plan.plan_id, "ci", expected_digest="sha256:" + "f" * 64, expected_statuses=approved_only
+        )
+        is None
+    )
+    updated = await repository.set_plan_delivery_mode(
+        plan.plan_id, "ci", expected_digest=plan.digest, expected_statuses=approved_only
+    )
+
+    assert updated is not None and updated.delivery_mode == "ci"
+    assert [item.delivery_mode for item in await repository.list_plans(status=PlanStatus.APPROVED)] == ["ci"]
+    assert (await repository.save_plan(updated)).delivery_mode == "ci"
+    assert (await repository.set_plan_status(plan.plan_id, PlanStatus.PR_OPEN)).delivery_mode == "ci"
+    with pytest.raises(ValueError):
+        await repository.set_plan_delivery_mode(
+            plan.plan_id, "push", expected_digest=plan.digest, expected_statuses=approved_only
+        )

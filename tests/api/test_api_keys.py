@@ -76,18 +76,20 @@ def test_approve_scope_is_separate_from_write(tmp_path, monkeypatch):
     assert approve.status_code == 403
 
 
-def test_apply_pr_approves_a_plan_so_it_needs_the_approve_scope(tmp_path, monkeypatch):
-    """The compatibility endpoint approves and queues the validated digest (opens a PR)."""
+def test_delivery_reports_need_the_plans_deliver_scope(tmp_path, monkeypatch):
+    """A CI job reports the PR it opened with ``read`` + ``plans:deliver`` only (roadmap F4)."""
     with auth_harness(tmp_path, monkeypatch) as h:
         writer = _create(h, name="writer", scopes=("read", "write"))["key"]
-        approver = _create(h, name="approver", scopes=("read", "approve"))["key"]
-        denied = h.client.post("/api/v1/recommendations/1/apply-pr", json={}, headers=_bearer(writer))
-        allowed = h.client.post("/api/v1/recommendations/1/apply-pr", json={}, headers=_bearer(approver))
+        ci = _create(h, name="ci", scopes=("read", "plans:deliver"))["key"]
+        body = {"pr_url": "https://github.com/acme/gitops/pull/1", "head_sha": "a" * 40}
+        denied = h.client.post("/api/v1/automation/plans/p1/delivery", json=body, headers=_bearer(writer))
+        allowed = h.client.post("/api/v1/automation/plans/p1/delivery", json=body, headers=_bearer(ci))
+        approve = h.client.post("/api/v1/automation/plans/p1/approve", json={"digest": "x"}, headers=_bearer(ci))
 
     assert denied.status_code == 403
     assert denied.json()["detail"]["code"] == "INSUFFICIENT_SCOPE"
-    assert allowed.status_code != 403, allowed.text
-    assert allowed.status_code != 401, allowed.text
+    assert allowed.status_code not in {401, 403}, allowed.text
+    assert approve.status_code == 403
 
 
 def test_revoked_and_expired_keys_are_rejected(tmp_path, monkeypatch):
