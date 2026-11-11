@@ -6,7 +6,10 @@ import asyncio
 import base64
 import json
 import math
+import os
 import shutil
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -48,17 +51,94 @@ class RenderRequest(BaseModel):
     max_stderr_bytes: int
 
 
+#: The egress canary runs at startup and then daily (F6).
+EGRESS_PROBE_INTERVAL_SECONDS = 86_400.0
+EGRESS_PROBE_TIMEOUT_SECONDS = 3.0
+_egress_state: dict[str, Any] = {"enforced": None, "checked_at": None, "target": None}
+
+
+def egress_probe_target() -> tuple[str, int] | None:
+    """Where the canary connects: ``RENDERER_EGRESS_PROBE_TARGET`` (``host:port``), else the
+    Kubernetes API Service address, which every pod receives without DNS."""
+    override = os.getenv("RENDERER_EGRESS_PROBE_TARGET", "").strip()
+    if override:
+        host, _, port = override.rpartition(":")
+        return (host.strip("[]"), int(port)) if host and port.isdecimal() else None
+    host = os.getenv("KUBERNETES_SERVICE_HOST", "").strip()
+    port = os.getenv("KUBERNETES_SERVICE_PORT", "443").strip()
+    return (host, int(port)) if host and port.isdecimal() else None
+
+
+async def probe_egress(target: tuple[str, int] | None, *, timeout: float = EGRESS_PROBE_TIMEOUT_SECONDS) -> bool | None:
+    """True when egress is denied (the connection fails), False when it is open, None if unknown.
+
+    The renderer holds no Secrets and no service-account token, so an unenforced policy
+    is a warning (``renderer_egress_unenforced``), not a blocker.
+    """
+    if target is None:
+        return None
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(*target), timeout=timeout)
+    except (OSError, asyncio.TimeoutError):
+        return True
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return False
+
+
+async def refresh_egress_state() -> dict[str, Any]:
+    target = egress_probe_target()
+    enforced = await probe_egress(target)
+    _egress_state.update(
+        enforced=enforced,
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        target=f"{target[0]}:{target[1]}" if target else None,
+    )
+    return dict(_egress_state)
+
+
+async def _egress_canary_loop() -> None:
+    while True:
+        try:
+            await refresh_egress_state()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # never let the canary take the renderer down
+            _egress_state.update(enforced=None, checked_at=datetime.now(timezone.utc).isoformat())
+        await asyncio.sleep(EGRESS_PROBE_INTERVAL_SECONDS)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    task = asyncio.create_task(_egress_canary_loop(), name="renderer-egress-canary")
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 app = FastAPI(
     title="GreenKube Isolated Renderer",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
+    lifespan=_lifespan,
 )
 
 
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/status")
+async def status() -> dict[str, Any]:
+    """Egress canary result (F6), read by the controller's readiness reconciler."""
+    return {"status": "ok", "egress": dict(_egress_state)}
 
 
 @app.post("/render")
@@ -219,4 +299,4 @@ def _bounded_limit(value: object, maximum: int) -> int:
 
 
 if __name__ == "__main__":
-    run(app, host="0.0.0.0", port=8090, log_level="warning")
+    run(app, host="0.0.0.0", port=int(os.getenv("RENDERER_PORT", "8090")), log_level="warning")

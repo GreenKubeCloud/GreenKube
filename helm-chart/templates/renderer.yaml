@@ -127,6 +127,9 @@ spec:
           # Egress canary (F6): at startup and daily the renderer opens a TCP
           # connection to the Kubernetes API Service address (KUBERNETES_SERVICE_HOST,
           # no DNS needed). It must fail while the egress-deny policy is enforced.
+          env:
+            - name: RENDERER_PORT
+              value: {{ $renderer.servicePort | quote }}
           resources:
             {{- toYaml $renderer.resources | nindent 12 }}
           volumeMounts:
