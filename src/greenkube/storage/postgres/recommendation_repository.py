@@ -12,7 +12,12 @@ from enum import Enum
 from typing import Collection, List, Optional
 
 from ...core.recommendation_ranking import normalize_savings_metric
-from ...core.recommendation_realization import estimate_realized_savings, refresh_applied_recommendation
+from ...core.recommendation_realization import (
+    RECORDED_CHANGE_STATUSES,
+    absorbs_regenerated_recommendation,
+    estimate_realized_savings,
+    refresh_applied_recommendation,
+)
 from ...core.recommendation_reconciliation import may_mark_stale
 from ...models.metrics import (
     ApplyRecommendationRequest,
@@ -144,7 +149,9 @@ class PostgresRecommendationRepository(RecommendationRepository):
         never rewritten and no duplicate is inserted. A matching applied
         recommendation only has ``updated_at`` refreshed (and, for issues that
         reappeared, its savings stopped); its ``current_*`` baseline and the
-        ``actual_*`` values detected after the change are never rewritten.
+        ``actual_*`` values detected after the change are never rewritten. A
+        rightsizing that restates a change already verifying or verified
+        (see :func:`absorbs_regenerated_recommendation`) is dropped.
 
         Args:
             records: List of RecommendationRecord objects to upsert.
@@ -192,8 +199,8 @@ class PostgresRecommendationRepository(RecommendationRepository):
                   AND container_name IS NOT DISTINCT FROM $4
                   AND target_node IS NOT DISTINCT FROM $5
                   AND type = $6
-                  AND status IN ('pr_open', 'applied')
-                ORDER BY (status = 'pr_open') DESC, applied_at DESC NULLS LAST
+                  AND (status = 'pr_open' OR status = ANY($7::text[]))
+                ORDER BY (status = 'pr_open') DESC, applied_at DESC NULLS LAST, id DESC
                 LIMIT 1
             """
             applied_update_query = """
@@ -232,11 +239,18 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     r.container_name,
                     r.target_node,
                     type_val,
+                    list(RECORDED_CHANGE_STATUSES),
                 )
                 if applied_row and applied_row["status"] == RecommendationStatus.PR_OPEN.value:
                     # Frozen while its pull request is open (or merged and syncing).
                     count += 1
                     continue
+                if applied_row and applied_row["status"] != RecommendationStatus.APPLIED.value:
+                    if absorbs_regenerated_recommendation(row_to_record(applied_row), r, now):
+                        # The scan restates a change already recorded (lagging rollup):
+                        # never offer it again nor record it as a second change.
+                        continue
+                    applied_row = None
                 if applied_row:
                     refreshed = refresh_applied_recommendation(row_to_record(applied_row), r, observed_at=now)
                     await conn.execute(
