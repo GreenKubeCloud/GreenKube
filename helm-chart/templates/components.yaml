@@ -132,8 +132,6 @@ spec:
               value: {{ $root.Release.Namespace | quote }}
             {{- end }}
             {{- if eq $component "worker" }}
-            - name: AUTOMATION_MODE
-              value: worker
             - name: GREENKUBE_WORKER_METRICS_PORT
               value: {{ include "greenkube.workerMetricsPort" $root | quote }}
             {{- end }}

@@ -53,6 +53,12 @@ tests:
           content:
             name: DB_RUN_MIGRATIONS
             value: "false"
+      # automation.mode is gone (F12): the worker needs no mode switch.
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AUTOMATION_MODE
+            value: worker
 
   - it: renders a worker ServiceAccount only with a worker
     set:
