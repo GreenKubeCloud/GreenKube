@@ -7,7 +7,14 @@ from typing import Any, cast
 
 import pytest
 
-from greenkube.automation.git.base import GitCommitRequest, GitCommitResult, GitConflictError, GitFile, GitRepository
+from greenkube.automation.git.base import (
+    GitCommitRequest,
+    GitCommitResult,
+    GitConflictError,
+    GitFile,
+    GitRepository,
+    PullRequestInfo,
+)
 from greenkube.automation.plan_worker import plan_branch_name
 from greenkube.automation.rollback import inverse_plan_id
 from greenkube.gitops.contracts import (
@@ -369,3 +376,106 @@ async def test_reclaimed_plan_already_marked_pr_open_completes_its_operation():
     assert provider.commit_requests == []
     assert OperationStatus.SUCCEEDED
     assert BASE_CONTENT
+
+
+class TerminalPullRequestProvider(MovedHeadProvider):
+    """A provider whose open-PR lookup ignores closed and merged requests, like the real APIs."""
+
+    async def find_pull_request(self, repo: GitRepository, head: str, base: str):
+        pull_request = self.pull_requests.get((head, base))
+        if pull_request is None or pull_request.merged or pull_request.status != "open":
+            return None
+        return pull_request
+
+    async def find_terminal_pull_request(self, repo: GitRepository, head: str, base: str):
+        pull_request = self.pull_requests.get((head, base))
+        if pull_request is None or (pull_request.status == "open" and not pull_request.merged):
+            return None
+        return pull_request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("merged", [True, False], ids=["merged", "closed"])
+async def test_reclaimed_operation_adopts_a_pull_request_merged_or_closed_meanwhile(merged):
+    """D10 remainder (BUG-52): the PR was merged or closed while the operation lease was lost.
+
+    The reclaiming worker looked for an *open* PR only, so it re-created the deleted
+    branch, committed again and opened a duplicate PR. It must adopt the terminal PR
+    instead and let the lifecycle poller record the merge (MERGED, then SYNCED) or
+    the close.
+    """
+    provider = TerminalPullRequestProvider()
+    first_lease = _operation_lease(attempt=1)
+    reclaimed_lease = _operation_lease(attempt=2, worker_id="worker-2")
+    worker, operations, plans, pull_requests, _ = _recording_worker(
+        provider=provider,
+        revision=MOVED_HEAD,
+        leases=(first_lease, reclaimed_lease),
+    )
+    original_mark_succeeded = operations.mark_succeeded
+    lost = {"done": False}
+
+    async def lose_lease_once(lease, **kwargs):
+        if not lost["done"]:
+            lost["done"] = True
+            raise ConnectionError("database connection lost before mark_succeeded")
+        return await original_mark_succeeded(lease, **kwargs)
+
+    operations.mark_succeeded = lose_lease_once  # type: ignore[method-assign]
+    assert await worker.process_once("worker-1")
+    branch = plan_branch_name(_plan())
+    opened = provider.pull_requests[(branch, "main")]
+    head_sha = "f" * 40
+    provider.trees[head_sha] = dict(provider.branches[branch])
+
+    # Meanwhile a reviewer merges (or closes) the PR and the provider deletes the branch.
+    provider.pull_requests[(branch, "main")] = PullRequestInfo(
+        number=opened.number,
+        url=opened.url,
+        status="closed",
+        merged=merged,
+        raw={"head": {"ref": branch, "sha": head_sha}, "base": {"ref": "main"}, "merged": merged},
+    )
+    del provider.branches[branch]
+
+    assert await worker.process_once("worker-2")
+
+    # Only the first attempt's lost lease is recorded; the reclaim itself succeeds.
+    assert len(operations.failures) == 1, operations.failures
+    assert plans.plans["plan-1"].status is PlanStatus.PR_OPEN
+    assert len(provider.commit_requests) == 1, "no second commit on a re-created branch"
+    assert len(provider.pull_request_creations) == 1, "no duplicate pull request"
+    assert branch not in provider.branches
+    assert operations.successes and operations.successes[-1]["pull_request_number"] == opened.number
+    assert {record.pr_number for record in pull_requests.records} == {opened.number}
+    # The record stays pollable so the lifecycle reconciler observes the merge or the close.
+    assert {record.status for record in pull_requests.records} == {PullRequestStatus.OPEN}
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_operation_refuses_a_terminal_pull_request_with_other_content():
+    """A merged PR on the plan branch whose head lacks the planned files is not adopted: re-plan."""
+    provider = TerminalPullRequestProvider()
+    worker, operations, plans, pull_requests, _ = _recording_worker(
+        provider=provider,
+        revision=MOVED_HEAD,
+        leases=(_operation_lease(attempt=2),),
+    )
+    plans.plans["plan-1"] = plans.plans["plan-1"].model_copy(update={"status": PlanStatus.APPLYING})
+    branch = plan_branch_name(_plan())
+    other_sha = "9" * 40
+    provider.trees[other_sha] = dict(provider.base_tree)
+    provider.pull_requests[(branch, "main")] = PullRequestInfo(
+        number=55,
+        url="https://github.com/acme/gitops/pull/55",
+        status="closed",
+        merged=True,
+        raw={"head": {"ref": branch, "sha": other_sha}, "base": {"ref": "main"}, "merged": True},
+    )
+
+    assert await worker.process_once("worker-1")
+
+    assert plans.plans["plan-1"].status is PlanStatus.STALE
+    assert provider.commit_requests == []
+    assert provider.pull_request_creations == []
+    assert not any(record.pr_number == 55 for record in pull_requests.records)

@@ -1885,3 +1885,45 @@ async def test_bug_46_gitlab_resolves_the_landed_commit_of_squash_and_fast_forwa
     assert pull_request.merge_commit_source == expected_source
     assert project_route.call_count == project_reads
     await provider.close()
+
+
+@pytest.mark.parametrize("provider_name", ["github", "gitlab", "gitea"])
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_terminal_pull_request_returns_the_merged_request_of_the_exact_branch_pair(provider_name):
+    """D10: a reclaiming worker finds the plan branch's request merged while its lease was lost."""
+    provider, repo, endpoint, _, open_state, _ = _pull_request_lookup_case(provider_name)
+    head = "feature/green-kube"
+    base = "release/stable"
+    merged_state = "merged" if provider_name == "gitlab" else "closed"
+    merged = _pull_request_lookup_payload(provider_name, number=7, head=head, base=base, state=merged_state)
+    if provider_name != "gitlab":
+        merged["merged"] = True
+    records = [
+        _pull_request_lookup_payload(provider_name, number=1, head="feature/other", base=base, state=merged_state),
+        _pull_request_lookup_payload(provider_name, number=2, head=head, base="main", state=merged_state),
+        _pull_request_lookup_payload(provider_name, number=3, head=head, base=base, state=open_state),
+        merged,
+    ]
+    requests = []
+    respx.get(endpoint).mock(side_effect=lambda request: (requests.append(request), Response(200, json=records))[1])
+
+    pull_request = await provider.find_terminal_pull_request(repo, head=head, base=base)
+
+    assert pull_request is not None and pull_request.number == 7
+    assert requests[0].url.params["state"] in {"closed", "merged"}
+    await provider.close()
+
+
+@pytest.mark.parametrize("provider_name", ["github", "gitlab", "gitea"])
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_terminal_pull_request_ignores_open_requests(provider_name):
+    provider, repo, endpoint, _, open_state, _ = _pull_request_lookup_case(provider_name)
+    head = "feature/green-kube"
+    base = "release/stable"
+    payload = _pull_request_lookup_payload(provider_name, number=3, head=head, base=base, state=open_state)
+    respx.get(endpoint).mock(return_value=Response(200, json=[payload]))
+
+    assert await provider.find_terminal_pull_request(repo, head=head, base=base) is None
+    await provider.close()

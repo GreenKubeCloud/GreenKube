@@ -406,6 +406,9 @@ class _AuthorizedGitProvider(GitProvider):
             lambda: self._provider.find_pull_request(repo, head=head, base=base),
         )
 
+    async def find_terminal_pull_request(self, repo: GitRepository, head: str, base: str) -> PullRequestInfo | None:
+        return await self._call(repo, lambda: self._provider.find_terminal_pull_request(repo, head=head, base=base))
+
     async def get_pull_request(self, repo: GitRepository, number: int) -> PullRequestInfo:
         return await self._call(repo, lambda: self._provider.get_pull_request(repo, number))
 

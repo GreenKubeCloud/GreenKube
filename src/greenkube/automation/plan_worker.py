@@ -1664,7 +1664,7 @@ class PlanWorker:
                 plan.source.ref,
             )
             if pull_request is None:
-                return None
+                return await self._adopt_terminal_pull_request(execution, plan, target, branch)
             try:
                 self._validate_pull_request(pull_request, branch, plan.source.ref)
                 branch_state = await self._branch_state(execution, target, branch, _plan_on_committed_revision(plan))
@@ -1689,6 +1689,62 @@ class PlanWorker:
                 await target.provider.close()
             except Exception:
                 pass
+
+    async def _adopt_terminal_pull_request(
+        self,
+        execution: _Execution,
+        plan: Plan,
+        target: GitProviderTarget,
+        branch: str,
+    ) -> _PlanResult | None:
+        """Adopt the plan branch's PR that was merged or closed while the lease was lost (D10).
+
+        Providers list open requests only, so a request merged or closed meanwhile used
+        to fail the reclaim ("a previous pull-request record exists") or, without a
+        record, re-create the deleted branch and open a duplicate. The terminal request
+        is adopted when its head commit holds exactly the planned files; its record
+        stays pollable (``OPEN`` with its number) so the lifecycle reconciler records
+        the merge (then the sync) or the close through the usual verified path. A
+        terminal request on the deterministic branch with other content fails closed
+        (re-plan) instead of being duplicated.
+        """
+        # Optional on the protocol: adapters without the lookup keep the previous behavior.
+        finder = getattr(target.provider, "find_terminal_pull_request", None)
+        if not callable(finder):
+            return None
+        lookup = cast(Callable[..., Awaitable[PullRequestInfo | None]], finder)
+        pull_request = await self._git_call(execution, lookup, target.repository, branch, plan.source.ref)
+        if not isinstance(pull_request, PullRequestInfo):
+            return None
+        raw = pull_request.raw if isinstance(pull_request.raw, dict) else {}
+        head = raw.get("head")
+        base = raw.get("base")
+        head_ref = head.get("ref") if isinstance(head, dict) else raw.get("source_branch")
+        base_ref = base.get("ref") if isinstance(base, dict) else raw.get("target_branch")
+        if (isinstance(head_ref, str) and head_ref != branch) or (
+            isinstance(base_ref, str) and base_ref != plan.source.ref
+        ):
+            raise _replan_error("Provider returned a closed pull request for another branch pair.")
+        head_sha = _pull_request_head_sha(pull_request)
+        if head_sha is None:
+            raise _replan_error(
+                "A closed pull request exists for the deterministic plan branch but its head commit is unknown; "
+                "re-plan to avoid a duplicate."
+            )
+        branch_state = await self._branch_state(execution, target, head_sha, _plan_on_committed_revision(plan))
+        if branch_state != "applied":
+            raise _replan_error(
+                "A closed pull request on the deterministic plan branch does not hold the planned files; "
+                "re-plan to avoid a duplicate."
+            )
+        await self._record_open_pull_request(plan, target, branch, pull_request, commit_sha=head_sha)
+        logger.info(
+            "Adopted pull request #%s of plan %s, %s while its operation lease was lost.",
+            pull_request.number,
+            plan.plan_id,
+            "merged" if pull_request.merged else "closed",
+        )
+        return _PlanResult(target, branch, head_sha, pull_request)
 
     async def _finish_success(self, execution: _Execution, plan: Plan, result: _PlanResult) -> None:
         await self._heartbeat(execution, force=True)

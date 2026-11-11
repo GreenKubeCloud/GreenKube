@@ -39,6 +39,7 @@ from greenkube.automation.git.base import (
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
+    normalize_terminal_pull_request_match,
     parse_comment_id,
     parse_comment_list,
     parse_pull_request_list,
@@ -633,6 +634,41 @@ class GitLabProvider(GitProvider):
         if response.status_code == 404:
             raise GitProviderError(f"Merge request {number} not found in {repo.full_name}.")
         return await self._with_landed_commit(repo, normalize_pull_request(response.json(), repo=repo))
+
+    async def find_terminal_pull_request(self, repo: GitRepository, head: str, base: str) -> Optional[PullRequestInfo]:
+        """The most recently updated merged or closed merge request from ``head`` into ``base`` (D10)."""
+        if repo.provider != self.name:
+            raise GitProviderError(f"Pull-request lookup targets provider '{repo.provider}', not '{self.name}'.")
+        head = validate_git_ref(head, field="branch name")
+        base = validate_git_ref(base, field="base branch")
+        for state in ("merged", "closed"):
+            response = await self._request(
+                "GET",
+                f"/projects/{self._project(repo)}/merge_requests",
+                params={
+                    "state": state,
+                    "source_branch": head,
+                    "target_branch": base,
+                    "order_by": "updated_at",
+                    "sort": "desc",
+                    "per_page": "100",
+                },
+            )
+            if response.status_code == 404:
+                raise GitProviderError(f"Could not list merge requests in {repo.full_name}: project not found.")
+            for item in parse_pull_request_list(response, repo=repo):
+                match = normalize_terminal_pull_request_match(
+                    item,
+                    repo=repo,
+                    head=head,
+                    base=base,
+                    provider_head=item.get("source_branch"),
+                    provider_base=item.get("target_branch"),
+                    open_states=("opened",),
+                )
+                if match is not None:
+                    return match
+        return None
 
     async def find_pull_request(self, repo: GitRepository, head: str, base: str) -> Optional[PullRequestInfo]:
         if repo.provider != self.name:

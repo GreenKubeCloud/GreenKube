@@ -31,6 +31,7 @@ from greenkube.automation.git.base import (
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
+    normalize_terminal_pull_request_match,
     parse_comment_id,
     parse_comment_list,
     parse_pull_request_list,
@@ -637,6 +638,42 @@ class GitHubProvider(GitProvider):
             else:
                 page += 1
         raise GitProviderError("GitHub pull-request pagination exceeded the safety limit.")
+
+    async def find_terminal_pull_request(self, repo: GitRepository, head: str, base: str) -> Optional[PullRequestInfo]:
+        """The most recently updated merged or closed request from ``head`` into ``base`` (D10)."""
+        if repo.provider != self.name:
+            raise GitProviderError(f"Pull-request lookup targets provider '{repo.provider}', not '{self.name}'.")
+        head = validate_git_ref(head, field="branch name")
+        base = validate_git_ref(base, field="base branch")
+        response = await self._request(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/pulls",
+            params={
+                "state": "closed",
+                "head": f"{repo.owner}:{head}",
+                "base": base,
+                "sort": "updated",
+                "direction": "desc",
+                "per_page": "100",
+            },
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Could not list pull requests in {repo.full_name}: repository not found.")
+        for item in parse_pull_request_list(response, repo=repo):
+            pull_request_head = item.get("head")
+            pull_request_base = item.get("base")
+            match = normalize_terminal_pull_request_match(
+                item,
+                repo=repo,
+                head=head,
+                base=base,
+                provider_head=pull_request_head.get("ref") if isinstance(pull_request_head, dict) else None,
+                provider_base=pull_request_base.get("ref") if isinstance(pull_request_base, dict) else None,
+                open_states=("open",),
+            )
+            if match is not None:
+                return match
+        return None
 
     async def find_open_pull_request_for_branch(
         self,
