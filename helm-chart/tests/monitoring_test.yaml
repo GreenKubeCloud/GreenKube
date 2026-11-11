@@ -47,6 +47,32 @@ tests:
       - matchRegex:
           path: spec.groups[0].rules[0].expr
           pattern: 'queue="operations",state="stuck"'
+      - equal:
+          path: spec.groups[1].name
+          value: greenkube.controller
+      - equal:
+          path: spec.groups[1].rules[0].alert
+          value: GreenKubeControllerLoopFailing
+      - equal:
+          path: spec.groups[1].rules[1].alert
+          value: GreenKubeAutomationLoopStale
+      - equal:
+          path: spec.groups[1].rules[2].alert
+          value: GreenKubeNoActiveController
+      - matchRegex:
+          path: spec.groups[1].rules[0].annotations.description
+          pattern: '\{\{ \$labels.loop \}\}'
+
+  - it: should leave the controller loop alerts out when disabled
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.controllerAlerts: false
+    templates:
+      - templates/prometheusrule.yaml
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 1
 
   - it: should render ServiceMonitor when enabled
     set:

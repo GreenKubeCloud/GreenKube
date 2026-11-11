@@ -862,6 +862,11 @@ async def _async_start(last: Optional[str]):
             plan_executor=plan_executor,
             session_purge=_create_session_purge(get_db_manager()),
         )
+        # Persist the loop states so the API reports them (automation status).
+        from ..core.loops import LoopHeartbeatPublisher
+        from ..storage.controller_heartbeat_repository import get_controller_heartbeat_repository
+
+        registry.register(LoopHeartbeatPublisher(registry, get_controller_heartbeat_repository()).spec())
         logger.info("📈 Starting %d controller loops: %s", len(registry.names), ", ".join(registry.names))
         registry.start()
         logger.info("\nGreenKube is running. Press CTRL+C to exit.")

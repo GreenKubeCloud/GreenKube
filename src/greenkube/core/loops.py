@@ -16,6 +16,9 @@ by one :class:`LoopRegistry`:
   exponential backoff after ticks that raised or timed out (capped per loop).
   A failure a job reports itself (:func:`report_loop_failure`) is counted but does
   not back off, so jobs that handle their own errors keep their cadence.
+- **Persisted heartbeats.** :class:`LoopHeartbeatPublisher` writes the snapshot
+  of every replica to ``controller_heartbeats`` so the API reports controller
+  loop state (``GET /api/v1/automation/status``).
 - **Telemetry.** ``greenkube_loop_runs_total{loop,outcome}``,
   ``greenkube_loop_duration_seconds{loop}``,
   ``greenkube_loop_last_success_timestamp_seconds{loop}``,
@@ -32,18 +35,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import random
 import re
+import socket
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from greenkube.core.leader_election import LeaderGate, leader_fence_scope
 from greenkube.core.observability import record_loop_run, set_controller_leader
-from greenkube.core.scheduler import Scheduler
+from greenkube.core.scheduler import seconds_until_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -359,9 +364,7 @@ class LoopRegistry:
                 await self._tick(spec)
             while True:
                 await self._sleep(
-                    Scheduler.seconds_until_boundary(
-                        spec.interval_seconds, spec.align_offset_seconds, now=self._wall_time()
-                    )
+                    seconds_until_boundary(spec.interval_seconds, spec.align_offset_seconds, now=self._wall_time())
                 )
                 await self._tick(spec)
         if not spec.run_immediately:
@@ -502,6 +505,78 @@ class LoopRegistry:
         self._start_loop(spec)
 
 
+#: Name, cadence and retention of the loop that persists the registry snapshot.
+HEARTBEAT_LOOP_NAME = "controller-heartbeat"
+HEARTBEAT_INTERVAL_SECONDS = 30.0
+#: A controller heartbeat older than this is stale (four missed publications).
+HEARTBEAT_STALE_AFTER_SECONDS = 4 * HEARTBEAT_INTERVAL_SECONDS
+#: Rows of replicas silent for longer than this are pruned (replaced pods).
+HEARTBEAT_RETENTION = timedelta(days=1)
+
+
+def controller_instance_id() -> str:
+    """The replica's identity: the pod name in Kubernetes, else the host name."""
+    return (os.getenv("POD_NAME") or os.getenv("HOSTNAME") or socket.gethostname() or "controller").strip()
+
+
+class LoopHeartbeatPublisher:
+    """Persists the registry snapshot so other processes see the controller loop state.
+
+    The API process serves ``GET /api/v1/automation/status`` but runs no loops;
+    it reads these rows (``controller_heartbeats``) to report, per controller
+    replica, whether it leads, whether its loops are ready and each loop's
+    last success, failures and error code.
+    """
+
+    def __init__(
+        self,
+        registry: LoopRegistry,
+        repository: Any,
+        *,
+        instance_id: str | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self.registry = registry
+        self.repository = repository
+        self.instance_id = instance_id or controller_instance_id()
+        self._clock = clock
+        self.started_at = clock()
+        self._pruned_at: datetime | None = None
+
+    def spec(self) -> LoopSpec:
+        """The loop that publishes: on every replica, leader or standby."""
+        return LoopSpec(
+            HEARTBEAT_LOOP_NAME,
+            self.publish,
+            HEARTBEAT_INTERVAL_SECONDS,
+            leader_only=False,
+            run_immediately=True,
+            timeout_seconds=20.0,
+            max_backoff_multiplier=2,
+            description="Persists the controller loop states for the API (automation status).",
+        )
+
+    async def publish(self) -> None:
+        from greenkube.storage.controller_heartbeat_repository import ControllerHeartbeat
+
+        now = self._clock()
+        snapshot = self.registry.snapshot(now)
+        await self.repository.publish(
+            ControllerHeartbeat(
+                instance_id=self.instance_id,
+                role=str(snapshot["role"]),
+                leader=bool(snapshot["leader"]),
+                ready=bool(snapshot["ready"]),
+                heartbeat_at=now,
+                started_at=self.started_at,
+                loops=list(snapshot["loops"]),
+            )
+        )
+        if self._pruned_at is None or now - self._pruned_at >= timedelta(hours=1):
+            await self.repository.prune_before(now - HEARTBEAT_RETENTION)
+            self._pruned_at = now
+
+
 def _task_is_being_cancelled() -> bool:
     task = asyncio.current_task()
     return task is not None and task.cancelling() > 0
@@ -520,6 +595,7 @@ def _iso(value: datetime | None) -> str | None:
 
 
 __all__ = [
+    "LoopHeartbeatPublisher",
     "LoopRegistry",
     "LoopSpec",
     "LoopStatus",

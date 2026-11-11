@@ -833,6 +833,10 @@ monitoring:
     enabled: false
     namespace: monitoring
     additionalLabels: {}
+    # Controller loop alerts (GreenKubeControllerLoopFailing, GreenKubeAutomationLoopStale,
+    # GreenKubeNoActiveController). They read the controller metrics endpoint, so
+    # Prometheus must scrape it (collector.metricsPort and the controller ServiceMonitor).
+    controllerAlerts: true
 
   serviceMonitor:
     # Create a ServiceMonitor for Prometheus Operator to discover GreenKube metrics.

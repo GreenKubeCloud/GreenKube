@@ -189,11 +189,57 @@ async def list_open_pull_requests(
     return _externalize_pull_request_urls(await pr_repo.get_open_pull_requests())
 
 
+def get_controller_heartbeats() -> Any:
+    """The persisted controller loop heartbeats (dependency, overridable in tests)."""
+    from greenkube.storage.controller_heartbeat_repository import get_controller_heartbeat_repository
+
+    return get_controller_heartbeat_repository()
+
+
+async def _controller_state(repository: Any, now: datetime) -> dict[str, Any]:
+    """Controller loop state from the heartbeats each controller replica persists (M8)."""
+    from greenkube.core.loops import HEARTBEAT_RETENTION, HEARTBEAT_STALE_AFTER_SECONDS
+
+    state: dict[str, Any] = {
+        "available": True,
+        "healthy": False,
+        "leader": None,
+        "stale_after_seconds": HEARTBEAT_STALE_AFTER_SECONDS,
+        "instances": [],
+    }
+    try:
+        heartbeats = await repository.list_since(now - HEARTBEAT_RETENTION)
+    except Exception:
+        state["available"] = False
+        return state
+    for heartbeat in heartbeats:
+        age = heartbeat.age_seconds(now)
+        stale = age > HEARTBEAT_STALE_AFTER_SECONDS
+        state["instances"].append(
+            {
+                "instance_id": heartbeat.instance_id,
+                "role": heartbeat.role,
+                "leader": heartbeat.leader,
+                "ready": heartbeat.ready and not stale,
+                "stale": stale,
+                "heartbeat_at": _iso_utc(heartbeat.heartbeat_at),
+                "heartbeat_age_seconds": age,
+                "started_at": _iso_utc(heartbeat.started_at),
+                "loops": heartbeat.loops,
+            }
+        )
+        if heartbeat.leader and not stale and state["leader"] is None:
+            state["leader"] = heartbeat.instance_id
+            state["healthy"] = heartbeat.ready
+    return state
+
+
 @router.get("/automation/status")
 async def automation_status(
     http_request: Request,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
     repository: GitOpsRepository = Depends(get_gitops_binding_repository),
+    heartbeats: Any = Depends(get_controller_heartbeats),
 ):
     """Return secret-free automation readiness, worker health and queue depth."""
     from greenkube.core.config import get_config
@@ -250,6 +296,8 @@ async def automation_status(
     inline_loop = supervisor.health.snapshot(now) if supervisor is not None else None
     if inline_loop is not None and not inline_loop["ready"]:
         worker_healthy = False
+    # Controller loops run in the controller process: read their persisted heartbeats.
+    controller = await _controller_state(heartbeats, now)
     discovery_age = None
     if coverage is not None and coverage.last_refresh is not None:
         discovery_age = max(0.0, (now - ensure_utc(coverage.last_refresh)).total_seconds())
@@ -283,6 +331,8 @@ async def automation_status(
             # In-process loop supervision: state, heartbeat age, restarts, last error code (D9).
             "inline_loop": inline_loop,
         },
+        # Controller loop state per replica: leader, readiness, per-loop heartbeat and errors (M8).
+        "controller": controller,
         "queue": queue,
         "plans": (
             {
