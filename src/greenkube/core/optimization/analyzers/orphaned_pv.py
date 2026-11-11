@@ -1,19 +1,28 @@
 # src/greenkube/core/optimization/analyzers/orphaned_pv.py
-"""Orphaned PersistentVolume cleanup recommendations."""
+"""Cleanup recommendations for PersistentVolumes that appear unused.
 
+The collector (``greenkube.collectors.pv_collector``) only reports volumes
+whose claim is gone and that nothing else depends on, with the evidence; this
+analyzer additionally requires the condition to have persisted for
+``DELETION_MIN_UNUSED_DAYS`` and words the recommendation as a review.
+"""
+
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, List
 
+from greenkube.core.deletion_safety import format_days, min_unused_period
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.impact.types import CostSource
 from greenkube.models.metrics import Recommendation, RecommendationType
+from greenkube.utils.time import ensure_utc
 
 if TYPE_CHECKING:
     from greenkube.core.optimization.context import OptimizationContext
 
 
 class OrphanedPVAnalyzer(Analyzer):
-    """Identifies PersistentVolumes whose claims are gone or released."""
+    """Identifies released PersistentVolumes that have looked unused long enough, with evidence."""
 
     capability = "storage_cleanup"
 
@@ -24,31 +33,26 @@ class OrphanedPVAnalyzer(Analyzer):
             return recs
 
         cfg = self.config
+        now = ensure_utc(context.window_end or datetime.now(timezone.utc))
+        minimum = min_unused_period(cfg)
 
         for pv in persistent_volumes:
             name = getattr(pv, "name", None)
             if not name:
                 continue
+            evidence = [str(item) for item in (getattr(pv, "evidence", None) or []) if item]
+            first_seen = getattr(pv, "first_seen_at", None)
+            # No evidence or no proven duration: nothing to recommend (fail closed).
+            if not evidence or not isinstance(first_seen, datetime):
+                continue
+            unused_for = now - ensure_utc(first_seen)
+            if unused_for < minimum:
+                continue
 
             phase = getattr(pv, "phase", "") or ""
             capacity_bytes = getattr(pv, "capacity_bytes", 0) or 0
-            claim_namespace = getattr(pv, "claim_namespace", None)
-            claim_name = getattr(pv, "claim_name", None)
             reclaim_policy = getattr(pv, "reclaim_policy", "") or ""
-
             capacity_gib = capacity_bytes / (1024**3)
-            claim_label = f"{claim_namespace}/{claim_name}" if claim_namespace and claim_name else "unknown claim"
-
-            if phase.lower() == "released":
-                reason = (
-                    f"The PV is in 'Released' phase: its PVC {claim_label} was deleted but the "
-                    f"volume was not reclaimed (reclaim policy: {reclaim_policy or 'unknown'})."
-                )
-            else:
-                reason = (
-                    f"The PV references PVC {claim_label} which no longer exists in the cluster, "
-                    f"so the volume can never be bound or used."
-                )
 
             # Deletion releases the asset's current allocated rate (realization 1).
             # CO2e is not projected: the energy model does not cover storage.
@@ -80,18 +84,24 @@ class OrphanedPVAnalyzer(Analyzer):
                     )
                 )
 
+            since = ensure_utc(first_seen).strftime("%Y-%m-%d %H:%M UTC")
+            evidence_text = "; ".join(evidence + [f"unused continuously since {since} ({format_days(unused_for)})"])
             recs.append(
                 Recommendation(
                     pod_name=name,
                     type=RecommendationType.ORPHANED_PERSISTENT_VOLUME,
                     scope="cluster",
                     description=(
-                        f"PersistentVolume '{name}' is orphaned ({capacity_gib:.1f}GiB, "
-                        f"phase {phase or 'unknown'}, reclaim policy {reclaim_policy or 'unknown'}). "
-                        f"Deleting it releases {capacity_gib:.1f}GiB of provisioned storage."
+                        f"PersistentVolume '{name}' appears unused for {format_days(unused_for)} "
+                        f"({capacity_gib:.1f}GiB, phase {phase or 'unknown'}, reclaim policy "
+                        f"{reclaim_policy or 'unknown'}). Review its data (backups) before deleting: deleting it "
+                        f"releases {capacity_gib:.1f}GiB of provisioned storage and cannot be undone."
                         f"{description_savings}"
                     ),
-                    reason=reason,
+                    reason=(
+                        f"Evidence that it is unused: {evidence_text}. Add the annotation "
+                        f'greenkube.io/ignore="true" to the PersistentVolume to keep it.'
+                    ),
                     priority="medium",
                     **savings_fields,
                 )
