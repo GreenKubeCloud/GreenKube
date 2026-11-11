@@ -27,9 +27,11 @@ import asyncio
 import logging
 import secrets
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
 from greenkube.cli.worker_metrics import EmbeddedMetricsServer
 from greenkube.core.observability import generate_latest_observability
@@ -39,6 +41,9 @@ logger = logging.getLogger(__name__)
 CONTROLLER_METRICS_PATH = "/prometheus/metrics"
 #: Prometheus' default scrape path, served as an alias of ``CONTROLLER_METRICS_PATH``.
 CONTROLLER_METRICS_DEFAULT_PATH = "/metrics"
+CONTROLLER_LIVENESS_PATH = "/healthz"
+CONTROLLER_READINESS_PATH = "/readyz"
+CONTROLLER_LOOPS_PATH = "/loops"
 STARTUP_TIMEOUT_SECONDS = 10.0
 
 
@@ -58,33 +63,67 @@ def verify_scrape_token(request: Request) -> None:
         )
 
 
-def create_controller_metrics_app() -> FastAPI:
-    """Expose only this process's control-loop registry."""
+class LoopHealth(Protocol):
+    """Health view of the controller's loop registry (:class:`greenkube.core.loops.LoopRegistry`)."""
+
+    def ready(self) -> bool: ...
+
+    def snapshot(self) -> dict[str, Any]: ...
+
+
+def create_controller_metrics_app(health: LoopHealth | None = None) -> FastAPI:
+    """Expose this process's control-loop registry and the health of its loops (M8).
+
+    ``/healthz`` (process alive) and ``/readyz`` (every registered loop alive with a
+    fresh heartbeat; 503 otherwise) are unauthenticated probe endpoints that reveal
+    nothing but a verdict. ``/loops`` returns the per-loop snapshot (state, last
+    success, duration, consecutive failures, last error code) and, like the metrics,
+    requires the API key when the controller has one.
+    """
     app = FastAPI(
         title="GreenKube controller metrics",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(verify_scrape_token)],
     )
 
-    @app.get(CONTROLLER_METRICS_PATH, include_in_schema=False)
-    @app.get(CONTROLLER_METRICS_DEFAULT_PATH, include_in_schema=False)
+    @app.get(CONTROLLER_METRICS_PATH, include_in_schema=False, dependencies=[Depends(verify_scrape_token)])
+    @app.get(CONTROLLER_METRICS_DEFAULT_PATH, include_in_schema=False, dependencies=[Depends(verify_scrape_token)])
     async def prometheus_metrics() -> Response:
         return Response(
             content=generate_latest_observability(),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 
+    @app.get(CONTROLLER_LIVENESS_PATH, include_in_schema=False)
+    async def liveness() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get(CONTROLLER_READINESS_PATH, include_in_schema=False)
+    async def readiness() -> JSONResponse:
+        ready = True if health is None else bool(health.ready())
+        return JSONResponse(status_code=200 if ready else 503, content={"ready": ready})
+
+    @app.get(CONTROLLER_LOOPS_PATH, include_in_schema=False, dependencies=[Depends(verify_scrape_token)])
+    async def loops() -> dict[str, Any]:
+        if health is None:
+            return {"ready": True, "loops": []}
+        return health.snapshot()
+
     return app
 
 
-def create_controller_metrics_server(port: int, host: str = "0.0.0.0") -> EmbeddedMetricsServer:
+def create_controller_metrics_server(
+    port: int,
+    host: str = "0.0.0.0",
+    *,
+    health: LoopHealth | None = None,
+) -> EmbeddedMetricsServer:
     """Create the in-process listener; it never replaces the controller's signal handlers."""
     if type(port) is not int or not 1 <= port <= 65_535:
         raise ValueError("CONTROLLER_METRICS_PORT must be an integer between 1 and 65535.")
     config = uvicorn.Config(
-        create_controller_metrics_app(),
+        create_controller_metrics_app(health),
         host=host,
         port=port,
         log_level="warning",
@@ -127,6 +166,7 @@ async def start_controller_metrics_server(
     host: str = "0.0.0.0",
     *,
     startup_timeout: float = STARTUP_TIMEOUT_SECONDS,
+    health: LoopHealth | None = None,
 ) -> ControllerMetricsHandle | None:
     """Start the listener when ``port`` is set; return ``None`` when disabled or unavailable.
 
@@ -136,7 +176,7 @@ async def start_controller_metrics_server(
     if not port:
         logger.info("Controller metrics endpoint disabled (CONTROLLER_METRICS_PORT=0).")
         return None
-    server = create_controller_metrics_server(port, host)
+    server = create_controller_metrics_server(port, host, health=health)
     task = asyncio.create_task(_serve(server), name="controller-metrics")
     loop = asyncio.get_running_loop()
     deadline = loop.time() + startup_timeout

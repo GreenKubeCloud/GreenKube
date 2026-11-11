@@ -1,4 +1,8 @@
-"""API-process lifecycle of authentication: store, first admin and session purge."""
+"""Lifecycle of authentication: store and first admin (API), session purge (controller).
+
+The API starts no background loop (M8): the daily session purge is a controller
+loop (``session-purge``) that calls :func:`purge_sessions_once`.
+"""
 
 from __future__ import annotations
 
@@ -38,14 +42,20 @@ async def bootstrap_initial_admin(service: AuthService, *, attempts: int = 10) -
     return "failed"
 
 
+async def purge_sessions_once(service: AuthService) -> int:
+    """Delete expired and long-revoked sessions (idempotent)."""
+    purged = await service.purge_expired_sessions()
+    if purged:
+        logger.info("Purged %d expired session(s).", purged)
+    return purged
+
+
 async def run_session_purge_loop(service: AuthService, interval: float = PURGE_INTERVAL_SECONDS) -> None:
-    """Delete expired and long-revoked sessions once a day (every replica; the delete is idempotent)."""
+    """Standalone purge loop, kept for embedders; the controller schedules ``purge_sessions_once``."""
     await asyncio.sleep(random.uniform(60, 600))
     while True:
         try:
-            purged = await service.purge_expired_sessions()
-            if purged:
-                logger.info("Purged %d expired session(s).", purged)
+            await purge_sessions_once(service)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -54,7 +64,11 @@ async def run_session_purge_loop(service: AuthService, interval: float = PURGE_I
 
 
 def start_auth_runtime(app, db_manager) -> list[asyncio.Task]:
-    """Attach the account service to ``app.state`` and start its background tasks."""
+    """Attach the account service to ``app.state`` and bootstrap the first admin.
+
+    The bootstrap is a startup task that ends once the admin exists; the API runs no
+    periodic mutation (the session purge runs in the controller, M8).
+    """
     try:
         service = build_auth_service(db_manager)
     except Exception as error:
@@ -65,5 +79,4 @@ def start_auth_runtime(app, db_manager) -> list[asyncio.Task]:
     app.state.auth_service = service
     return [
         asyncio.create_task(bootstrap_initial_admin(service), name="auth-initial-admin"),
-        asyncio.create_task(run_session_purge_loop(service), name="auth-session-purge"),
     ]

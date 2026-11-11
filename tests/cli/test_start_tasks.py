@@ -182,43 +182,6 @@ def test_data_processor_is_resolved_from_factory():
 
 
 @pytest.mark.asyncio
-async def test_leader_gated_controller_callback_runs_only_for_the_lease_holder():
-    state = {"leader": False}
-    callback = AsyncMock()
-
-    def should_run():
-        return state["leader"]
-
-    guarded = start_module._leader_gated_callback(callback, should_run)
-    await guarded()
-    callback.assert_not_awaited()
-
-    state["leader"] = True
-    await guarded()
-    callback.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_leader_gated_callback_hands_the_job_a_fence_for_the_lease_holder():
-    from greenkube.core.leader_election import LeaderGate, current_leader_fence
-
-    class _Elector:
-        is_leader = True
-        fencing_token = 7
-
-    seen = []
-
-    async def job():
-        seen.append(current_leader_fence())
-
-    guarded = start_module._leader_gated_callback(job, LeaderGate(_Elector()))  # type: ignore[arg-type]
-    await guarded()
-
-    assert seen[0].enforced and seen[0].token == 7
-    assert not current_leader_fence().enforced
-
-
-@pytest.mark.asyncio
 async def test_run_recommendation_scan_ticks_the_scan_service_with_the_lease_gate():
     service = MagicMock()
     service.tick = AsyncMock(return_value=[object()])
@@ -364,76 +327,111 @@ async def test_refresh_dashboard_summary_handles_errors():
         await start_module.refresh_dashboard_summary()
 
 
+class _CapturingRegistry:
+    """Stands in for LoopRegistry: records the declared loops without running them."""
+
+    instances: list = []
+
+    def __init__(self, *, role="controller", leader=None):
+        self.role = role
+        self.leader = leader
+        self.specs = {}
+        self.started = False
+        self.stop = AsyncMock()
+        _CapturingRegistry.instances.append(self)
+
+    def set_leader(self, leader):
+        self.leader = leader
+
+    def register(self, spec):
+        assert spec.name not in self.specs
+        self.specs[spec.name] = spec
+        return spec
+
+    @property
+    def names(self):
+        return tuple(self.specs)
+
+    def start(self):
+        self.started = True
+
+
+def _controller_config(**overrides):
+    values = dict(
+        LOG_LEVEL="INFO",
+        LOG_FORMAT="console",
+        CLUSTER_NAME="test-cluster",
+        DB_TYPE="sqlite",
+        PROMETHEUS_QUERY_RANGE_STEP="5m",
+        NODE_ANALYSIS_INTERVAL="1h",
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 @pytest.mark.asyncio
-async def test_async_start_bootstraps_scheduler_and_initial_tasks(monkeypatch):
+async def test_async_start_registers_every_controller_loop_and_runs_initial_tasks(monkeypatch):
+    """M8: every periodic job is declared once in the loop registry, with its former cadence."""
+    _CapturingRegistry.instances.clear()
     db_manager = MagicMock()
     db_manager.connect = AsyncMock()
-    scheduler = MagicMock()
-    scheduler.add_job = MagicMock()
-    scheduler.add_job_from_string = MagicMock()
-    scheduler.stop = AsyncMock()
     stop_event = MagicMock()
     stop_event.wait = AsyncMock(return_value=None)
     loop = MagicMock()
-    monkeypatch.setattr(
-        "greenkube.automation.plan_runtime.initialize_gitops_provider_configs",
-        AsyncMock(),
-    )
+    monkeypatch.setattr("greenkube.automation.plan_runtime.initialize_gitops_provider_configs", AsyncMock())
     monkeypatch.setattr(
         "greenkube.gitops.discovery.runtime.create_gitops_discovery_runtime",
-        AsyncMock(return_value=SimpleNamespace(run_periodic=AsyncMock())),
+        AsyncMock(return_value=SimpleNamespace(run_once=AsyncMock(), interval_seconds=300.0)),
     )
+    monkeypatch.setattr("greenkube.core.loops.LoopRegistry", _CapturingRegistry)
+    monkeypatch.setattr(start_module, "_create_controller_plan_runtime", AsyncMock(return_value=None))
+    monkeypatch.setattr(start_module, "_create_session_purge", lambda _db: AsyncMock())
 
-    with patch(
-        "greenkube.cli.start.get_config",
-        return_value=SimpleNamespace(
-            LOG_LEVEL="INFO",
-            LOG_FORMAT="console",
-            CLUSTER_NAME="test-cluster",
-            DB_TYPE="sqlite",
-            PROMETHEUS_QUERY_RANGE_STEP="5m",
-            NODE_ANALYSIS_INTERVAL="1h",
-        ),
-    ):
+    with patch("greenkube.cli.start.get_config", return_value=_controller_config()):
         with patch("greenkube.core.db.get_db_manager", return_value=db_manager):
-            with patch("greenkube.cli.start.Scheduler", return_value=scheduler):
-                with patch(
-                    "greenkube.cli.start.collect_carbon_intensity_for_all_zones", new_callable=AsyncMock
-                ) as carbon:
-                    with patch("greenkube.cli.start.analyze_nodes", new_callable=AsyncMock) as analyze:
-                        with patch(
-                            "greenkube.cli.start.async_write_combined_metrics_to_database", new_callable=AsyncMock
-                        ) as write_metrics:
-                            with patch(
-                                "greenkube.cli.start.attribute_recommendation_savings", new_callable=AsyncMock
-                            ) as attribute:
-                                with patch("greenkube.cli.start.compress_metrics", new_callable=AsyncMock) as compress:
-                                    with patch(
-                                        "greenkube.cli.start.refresh_dashboard_summary", new_callable=AsyncMock
-                                    ) as refresh:
-                                        with patch("greenkube.cli.start.asyncio.Event", return_value=stop_event):
-                                            with patch(
-                                                "greenkube.cli.start.asyncio.get_running_loop", return_value=loop
-                                            ):
-                                                with patch(
-                                                    "greenkube.cli.start.run_recommendation_scan",
-                                                    new_callable=AsyncMock,
-                                                ) as scan:
-                                                    await start_module._async_start(last="1h")
+            with (
+                patch("greenkube.cli.start.collect_carbon_intensity_for_all_zones", new_callable=AsyncMock) as carbon,
+                patch("greenkube.cli.start.analyze_nodes", new_callable=AsyncMock) as analyze,
+                patch(
+                    "greenkube.cli.start.async_write_combined_metrics_to_database", new_callable=AsyncMock
+                ) as write_metrics,
+                patch("greenkube.cli.start.attribute_recommendation_savings", new_callable=AsyncMock) as attribute,
+                patch("greenkube.cli.start.compress_metrics", new_callable=AsyncMock) as compress,
+                patch("greenkube.cli.start.refresh_dashboard_summary", new_callable=AsyncMock) as refresh,
+                patch("greenkube.cli.start.run_recommendation_lifecycle", new_callable=AsyncMock),
+                patch("greenkube.cli.start.asyncio.Event", return_value=stop_event),
+                patch("greenkube.cli.start.asyncio.get_running_loop", return_value=loop),
+                patch("greenkube.cli.start.run_recommendation_scan", new_callable=AsyncMock) as scan,
+            ):
+                await start_module._async_start(last="1h")
 
-    db_manager.connect.assert_awaited_once()
-    assert scheduler.add_job.call_count == 3
-    assert scheduler.add_job_from_string.call_count == 5
-    scan_jobs = [
-        call for call in scheduler.add_job_from_string.call_args_list if call.args[0].__name__ == "recommendation_scan"
-    ]
-    assert len(scan_jobs) == 1
-    assert scan_jobs[0].args[1] == "15s"
-    assert scan_jobs[0].kwargs["skip_initial"] is True
+    registry = _CapturingRegistry.instances[-1]
+    assert registry.started
+    assert registry.names == (
+        "collection",
+        "carbon-intensity",
+        "node-analysis",
+        "savings-attribution",
+        "recommendation-lifecycle",
+        "recommendation-scan",
+        "metrics-compression",
+        "dashboard-summary",
+        "gitops-discovery",
+        "session-purge",
+    )
+    specs = registry.specs
+    assert all(spec.leader_only for spec in specs.values())
+    # Collection fires on step boundaries plus the safety lag; scans poll every 15s.
+    assert specs["collection"].interval_seconds == 300
+    assert specs["collection"].align_offset_seconds == 60.0
+    assert specs["recommendation-scan"].interval_seconds == 15
+    assert specs["node-analysis"].interval_seconds == 3600
+    # Jobs awaited once by the initial work do not run again at registry start.
+    for name in ("carbon-intensity", "metrics-compression", "dashboard-summary", "recommendation-scan"):
+        assert not specs[name].run_immediately
+    assert specs["gitops-discovery"].run_immediately
+    assert specs["gitops-discovery"].standby_recheck_seconds == 2.0
     scan.assert_awaited_once_with(should_continue=None, force=True)
-    add_job_kwargs = {call.args[0]: call.kwargs for call in scheduler.add_job.call_args_list}
-    assert add_job_kwargs[compress]["skip_initial"] is True
-    assert add_job_kwargs[refresh]["skip_initial"] is True
     carbon.assert_awaited_once()
     analyze.assert_awaited_once()
     write_metrics.assert_awaited_once_with(last="1h")
@@ -441,11 +439,68 @@ async def test_async_start_bootstraps_scheduler_and_initial_tasks(monkeypatch):
     compress.assert_awaited_once()
     refresh.assert_awaited_once()
     stop_event.wait.assert_awaited_once()
-    scheduler.stop.assert_awaited_once()
+    registry.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_async_start_tracks_and_cancels_gitops_discovery_after_provider_seeding():
+async def test_async_start_registers_automation_loops_only_with_a_plan_runtime(monkeypatch):
+    """F8: sync, the automation controller loop and plan execution run in the controller."""
+    _CapturingRegistry.instances.clear()
+    db_manager = MagicMock()
+    db_manager.connect = AsyncMock()
+    stop_event = MagicMock()
+    stop_event.wait = AsyncMock(return_value=None)
+    worker = SimpleNamespace(
+        pull_request_repository=object(),
+        plans=object(),
+        operations=object(),
+        provider_resolver=SimpleNamespace(provider_repository=object(), registry=object()),
+    )
+    plan_runtime = SimpleNamespace(worker=worker, plan_service=object(), gitops_repository=object())
+    sync_runtime = SimpleNamespace(run_once=AsyncMock(), interval_seconds=30.0)
+    monkeypatch.setattr("greenkube.automation.plan_runtime.initialize_gitops_provider_configs", AsyncMock())
+    monkeypatch.setattr(
+        "greenkube.gitops.discovery.runtime.create_gitops_discovery_runtime",
+        AsyncMock(return_value=SimpleNamespace(run_once=AsyncMock(), interval_seconds=300.0)),
+    )
+    monkeypatch.setattr("greenkube.core.loops.LoopRegistry", _CapturingRegistry)
+    monkeypatch.setattr(start_module, "_create_controller_plan_runtime", AsyncMock(return_value=plan_runtime))
+    monkeypatch.setattr(start_module, "_create_gitops_sync_runtime", lambda runtime, db: sync_runtime)
+    monkeypatch.setattr(start_module, "_create_session_purge", lambda _db: None)
+    monkeypatch.setenv("GITOPS_PR_POLL_INTERVAL", "120")
+    for name in (
+        "collect_carbon_intensity_for_all_zones",
+        "analyze_nodes",
+        "async_write_combined_metrics_to_database",
+        "attribute_recommendation_savings",
+        "run_recommendation_lifecycle",
+        "compress_metrics",
+        "refresh_dashboard_summary",
+        "run_recommendation_scan",
+    ):
+        monkeypatch.setattr(start_module, name, AsyncMock())
+
+    for mode, delivery in (("inline", True), ("worker", True), ("disabled", False)):
+        config = _controller_config(AUTOMATION_ENABLED=mode != "disabled", AUTOMATION_MODE=mode)
+        with patch("greenkube.cli.start.get_config", return_value=config):
+            with patch("greenkube.core.db.get_db_manager", return_value=db_manager):
+                with (
+                    patch("greenkube.cli.start.asyncio.Event", return_value=stop_event),
+                    patch("greenkube.cli.start.asyncio.get_running_loop", return_value=MagicMock()),
+                ):
+                    await start_module._async_start(last=None)
+        registry = _CapturingRegistry.instances[-1]
+        assert "gitops-sync" in registry.names
+        assert "automation-controller" in registry.names
+        assert ("plan-executor" in registry.names) is delivery, mode
+        controller = registry.specs["automation-controller"].func.__self__
+        assert controller.delivery_enabled is delivery
+        assert registry.specs["automation-controller"].leader_only
+        assert registry.specs["gitops-sync"].func is sync_runtime.run_once
+
+
+@pytest.mark.asyncio
+async def test_async_start_runs_and_cancels_gitops_discovery_after_provider_seeding(monkeypatch):
     order: list[str] = []
     discovery_started = asyncio.Event()
     discovery_stopped = asyncio.Event()
@@ -455,15 +510,13 @@ async def test_async_start_tracks_and_cancels_gitops_discovery_after_provider_se
         order.append("database")
 
     db_manager.connect = AsyncMock(side_effect=connect)
-    scheduler = MagicMock()
-    scheduler.add_job = MagicMock()
-    scheduler.add_job_from_string = MagicMock()
-    scheduler.stop = AsyncMock()
     processor = MagicMock()
     processor.close = AsyncMock()
 
     class _Runtime:
-        async def run_periodic(self):
+        interval_seconds = 300.0
+
+        async def run_once(self):
             task = asyncio.current_task()
             order.append("discovery")
             discovery_started.set()
@@ -490,65 +543,35 @@ async def test_async_start_tracks_and_cancels_gitops_discovery_after_provider_se
         order.append("runtime-build")
         return _Runtime()
 
-    loop = MagicMock()
-    with patch(
-        "greenkube.cli.start.get_config",
-        return_value=SimpleNamespace(
-            LOG_LEVEL="INFO",
-            LOG_FORMAT="console",
-            CLUSTER_NAME="test-cluster",
-            DB_TYPE="sqlite",
-            PROMETHEUS_QUERY_RANGE_STEP="5m",
-            NODE_ANALYSIS_INTERVAL="1h",
-        ),
+    monkeypatch.setattr(start_module, "_create_controller_plan_runtime", AsyncMock(return_value=None))
+    monkeypatch.setattr(start_module, "_create_session_purge", lambda _db: None)
+    for name in (
+        "collect_carbon_intensity_for_all_zones",
+        "analyze_nodes",
+        "async_write_combined_metrics_to_database",
+        "attribute_recommendation_savings",
+        "run_recommendation_lifecycle",
+        "compress_metrics",
+        "refresh_dashboard_summary",
+        "run_recommendation_scan",
     ):
+        monkeypatch.setattr(start_module, name, AsyncMock())
+    loop = MagicMock()
+    with patch("greenkube.cli.start.get_config", return_value=_controller_config()):
         with patch("greenkube.core.db.get_db_manager", return_value=db_manager):
-            with patch("greenkube.automation.plan_runtime.initialize_gitops_provider_configs", seed_provider_configs):
-                with patch(
-                    "greenkube.gitops.discovery.runtime.create_gitops_discovery_runtime",
-                    build_discovery_runtime,
-                ):
-                    with patch("greenkube.cli.start.Scheduler", return_value=scheduler):
-                        with patch("greenkube.cli.start.get_data_processor", return_value=processor):
-                            with patch(
-                                "greenkube.cli.start.collect_carbon_intensity_for_all_zones",
-                                new_callable=AsyncMock,
-                            ):
-                                with patch("greenkube.cli.start.analyze_nodes", new_callable=AsyncMock):
-                                    with patch(
-                                        "greenkube.cli.start.async_write_combined_metrics_to_database",
-                                        new_callable=AsyncMock,
-                                    ):
-                                        with patch(
-                                            "greenkube.cli.start.attribute_recommendation_savings",
-                                            new_callable=AsyncMock,
-                                        ):
-                                            with patch(
-                                                "greenkube.cli.start.run_recommendation_lifecycle",
-                                                new_callable=AsyncMock,
-                                            ):
-                                                with patch(
-                                                    "greenkube.cli.start.compress_metrics", new_callable=AsyncMock
-                                                ):
-                                                    with patch(
-                                                        "greenkube.cli.start.refresh_dashboard_summary",
-                                                        new_callable=AsyncMock,
-                                                    ):
-                                                        with patch(
-                                                            "greenkube.cli.start.asyncio.Event",
-                                                            return_value=_StopEvent(),
-                                                        ):
-                                                            with patch(
-                                                                "greenkube.cli.start.asyncio.get_running_loop",
-                                                                return_value=loop,
-                                                            ):
-                                                                await start_module._async_start(last=None)
+            with (
+                patch("greenkube.automation.plan_runtime.initialize_gitops_provider_configs", seed_provider_configs),
+                patch("greenkube.gitops.discovery.runtime.create_gitops_discovery_runtime", build_discovery_runtime),
+                patch("greenkube.cli.start.get_data_processor", return_value=processor),
+                patch("greenkube.cli.start.asyncio.Event", return_value=_StopEvent()),
+                patch("greenkube.cli.start.asyncio.get_running_loop", return_value=loop),
+            ):
+                await start_module._async_start(last=None)
 
     assert order[:3] == ["database", "provider-seed", "runtime-build"]
     assert "discovery" in order
-    assert "gitops-discovery-refresh" in order
+    assert "loop-gitops-discovery" in order
     assert discovery_stopped.is_set()
-    scheduler.stop.assert_awaited_once()
     processor.close.assert_awaited_once()
 
 
