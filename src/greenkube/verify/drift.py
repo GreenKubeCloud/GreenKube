@@ -68,6 +68,9 @@ REVERSAL_SETTLE = timedelta(hours=2)
 #: Interval of the drift monitor loop.
 DRIFT_MONITOR_INTERVAL_SECONDS = 3600.0
 _SECONDS_PER_YEAR = 365.25 * 24 * 3600
+#: The day each (change, measurement) was last assessed: drift is decided on complete days, so a
+#: realized change is read once per day (per process), not on every pass.
+_ASSESSED: Dict[tuple, datetime] = {}
 _SLOT = timedelta(hours=1)
 _MIN_COVERAGE = 0.5
 
@@ -208,6 +211,7 @@ class DriftMonitor:
         savings_repo: Any = None,
         settings: Optional[DriftSettings] = None,
         cluster_name: str = "default",
+        assessed: Optional[Dict[tuple, datetime]] = None,
     ):
         self.service = service
         self.changes = service.changes
@@ -215,6 +219,7 @@ class DriftMonitor:
         self.savings_repo = savings_repo
         self.settings = settings or DriftSettings.from_config(service.config)
         self.cluster_name = cluster_name
+        self._assessed = _ASSESSED if assessed is None else assessed
 
     async def run(self, now: Optional[datetime] = None) -> Dict[str, List[str]]:
         """One pass: returns the ids of the changes regressed, closed and reversed."""
@@ -253,6 +258,9 @@ class DriftMonitor:
         start = max(post_end, today - timedelta(days=DRIFT_LOOKBACK_DAYS))
         if today - start < timedelta(days=self.settings.sustained_days):
             return None
+        memo = (status.change_id, status.latest_measurement_id)
+        if self._assessed.get(memo) == today:
+            return None
         snapshot = await self.changes.get_snapshot_for_change(change.change_id)
         if snapshot is None:
             return None
@@ -264,6 +272,7 @@ class DriftMonitor:
         window = TimeWindow(start=start, end=today)
         monitored = hourly_buckets(await self.service._read_workload(change.target, window), window, step)
         assessment = assess_drift(snapshot.hours, post, monitored, self.settings)
+        self._assessed[memo] = today
         if not assessment.regressed:
             return None
         await self.changes.transition(

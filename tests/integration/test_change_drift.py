@@ -136,8 +136,14 @@ async def test_a_sustained_drift_regresses_the_change_and_reverses_its_accruals(
 
 async def test_a_holding_saving_stays_realized(database):  # noqa: F811
     scenario, change, _, _ = await _realized(database, drift_days=2)
-    result = await _monitor(scenario, _savings_repo(database)).run(now=hour_now() + timedelta(minutes=30))
+    monitor = _monitor(scenario, _savings_repo(database))
+    result = await monitor.run(now=hour_now() + timedelta(minutes=30))
     assert result == {"regressed": [], "closed": [], "reversed": []}
+    # Drift is decided on complete days: a second pass the same day reads no metrics.
+    reads = len(scenario.metrics.reads)
+    assert reads > 0
+    await monitor.run(now=hour_now() + timedelta(minutes=45))
+    assert len(scenario.metrics.reads) == reads
     status = await scenario.changes.get_status(change.change_id)
     assert status is not None and status.state is MeasurementState.REALIZED
     assert all(record_status(record) == "verified" for record in await scenario.records())
