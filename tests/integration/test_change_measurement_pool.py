@@ -103,3 +103,14 @@ async def test_a_steady_pool_adds_no_confounder(database):  # noqa: F811
     status, measurement = await _decide(scenario, change.change_id)
     assert status is not None and status.state is MeasurementState.REALIZED
     assert measurement.confounders == []
+
+
+async def test_a_capped_neighbour_read_is_reported(database, monkeypatch):  # noqa: F811
+    import greenkube.verify.service as service_module
+
+    monkeypatch.setattr(service_module, "POOL_MAX_OTHER_CHANGES", 1)
+    scenario = await _scenario(database)
+    change, _ = await scenario.apply()
+    status, measurement = await _decide(scenario, change.change_id)
+    assert status is not None and status.state is MeasurementState.REALIZED
+    assert [(item.kind, item.severity) for item in measurement.confounders] == [("pool_check_truncated", "mild")]

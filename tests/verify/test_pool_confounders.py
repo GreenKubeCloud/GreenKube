@@ -110,3 +110,15 @@ def test_a_change_to_a_neighbour_in_the_pool_lowers_confidence():
     assert [(item.kind, item.severity) for item in findings] == [("pool_change", "moderate")]
     assert findings[0].evidence["change_id"] == "change-web"
     assert not is_contaminated(findings)
+
+
+def test_a_truncated_pool_check_says_so():
+    change, plan = _setup()
+    pool = PoolContext(
+        pools=("general",),
+        pre=_samples(plan.pre.start, plan.pre.end, _steady),
+        post=_samples(plan.post.start, plan.post.end, _steady),
+        truncated=True,
+    )
+    findings = ConfounderDetector().detect(change, plan, pool=pool)
+    assert [(item.kind, item.severity) for item in findings] == [("pool_check_truncated", "mild")]

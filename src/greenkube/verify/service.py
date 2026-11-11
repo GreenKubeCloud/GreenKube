@@ -321,7 +321,14 @@ class ChangeMeasurementService:
             )
             if {getattr(row, "node", None) for row in rows} & pool_nodes:
                 neighbours.append(other)
-        return PoolContext(pools=tuple(pools), pre=pre_samples, post=post_samples, other_changes=tuple(neighbours))
+        return PoolContext(
+            pools=tuple(pools),
+            pre=pre_samples,
+            post=post_samples,
+            other_changes=tuple(neighbours),
+            # The read is capped: in a busier cluster later changes are not checked, and the measurement says so.
+            truncated=len(landed) >= POOL_MAX_OTHER_CHANGES,
+        )
 
     async def _collect_load(
         self, change: ChangeEvent, window: TimeWindow, buckets: Sequence[Any], *, retry_until: datetime, now: datetime

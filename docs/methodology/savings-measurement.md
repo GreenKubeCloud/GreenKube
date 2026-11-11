@@ -186,6 +186,7 @@ Values are **signed and never floored**: a cost increase is reported as a negati
 | The node pool's mean CPU capacity changed by more than 25% (the cluster autoscaler, `pool_capacity_change`) | moderate |
 | A change to another workload whose pods ran in the same node pool landed during the measurement (`pool_change`) | moderate |
 | Nodes were added to or removed from the pool during the post-window without a capacity shift (`autoscaler_activity`) | mild |
+| More than 50 changes landed during the measurement, so later ones were not checked for pool membership (`pool_check_truncated`) | mild |
 
 A severe confounder's detail is the reason of the `contaminated` outcome.
 

@@ -135,6 +135,8 @@ class PoolContext:
     pre: Tuple[PoolSample, ...]
     post: Tuple[PoolSample, ...]
     other_changes: Tuple[ChangeEvent, ...] = ()
+    #: More changes landed during the measurement than were read: the later ones were not checked.
+    truncated: bool = False
 
 
 def _pool_mix(samples: Sequence[PoolSample]) -> Dict[str, float]:
@@ -434,6 +436,16 @@ class ConfounderDetector:
                         "target": "/".join(other.target.key),
                         "rollout_completed_at": ensure_utc(other.rollout_completed_at).isoformat(),
                     },
+                )
+            )
+        if pool.truncated:
+            findings.append(
+                Confounder(
+                    kind="pool_check_truncated",
+                    severity="mild",
+                    detail=f"more changes landed during the measurement than were checked for node pool {pools}: "
+                    "a later change in the pool may be missed",
+                    evidence={"checked": len(pool.other_changes), "limit_reached": True},
                 )
             )
         return findings
