@@ -45,6 +45,10 @@ _DOMAIN_ERRORS: dict[AutomationErrorCode, tuple[int, str]] = {
     AutomationErrorCode.AMBIGUOUS_BINDING: (422, "The workload does not have one unambiguous resolved binding."),
     AutomationErrorCode.NEEDS_CHART_MAPPING: (422, "The workload requires a supported chart mapping before planning."),
     AutomationErrorCode.RENDER_VALIDATION_FAILED: (422, "The plan did not pass render validation."),
+    AutomationErrorCode.NO_EFFECTIVE_CHANGE: (
+        409,
+        "The source already declares the proposed requests; a pull request would change nothing.",
+    ),
     AutomationErrorCode.REQUIRES_CONTAINER_TARGET: (422, "The action requires a supported container target."),
     AutomationErrorCode.UNSAFE_PATH: (422, "The plan contains an unsafe repository path."),
     AutomationErrorCode.PROVIDER_NOT_READY: (424, "A required Git provider dependency is not ready."),

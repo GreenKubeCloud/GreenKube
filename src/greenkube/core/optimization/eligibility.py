@@ -78,6 +78,10 @@ CODES: Dict[str, Tuple[str, str]] = {
         "A pull request is already open for this recommendation.",
         "Review and merge or close the open pull request.",
     ),
+    "no_effective_change": (
+        "The proposed request equals the current one, so a pull request would change nothing.",
+        "No action is needed: the workload already runs this request. The next scan resolves the recommendation.",
+    ),
     "action_kind_unsupported": (
         "GreenKube cannot open pull requests for this kind of change yet.",
         "Apply the change manually, then mark the recommendation as applied so it is measured.",
@@ -233,6 +237,50 @@ def workload_key(record: Any) -> Optional[Tuple[str, str, str]]:
     if not namespace or not kind or not name:
         return None
     return str(namespace), str(kind), str(name)
+
+
+def proposes_no_change(record: Any) -> bool:
+    """True when a rightsizing proposal equals the current request after unit normalization.
+
+    Compares ``recommended_*`` with ``current_*`` and, when the record carries
+    a typed action, the action's quantity for its container (``1Gi`` equals
+    ``1024Mi``, ``0.5`` equals ``500m``), so a no-op never becomes a PR.
+    """
+    from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
+
+    rec_type = _text(getattr(record, "type", None))
+    if rec_type == "RIGHTSIZING_CPU":
+        resource, parser = "cpu", parse_cpu_quantity
+        current = getattr(record, "current_cpu_request_millicores", None)
+        recommended = getattr(record, "recommended_cpu_request_millicores", None)
+    elif rec_type == "RIGHTSIZING_MEMORY":
+        resource, parser = "memory", parse_memory_quantity
+        current = getattr(record, "current_memory_request_bytes", None)
+        recommended = getattr(record, "recommended_memory_request_bytes", None)
+    else:
+        return False
+    if current is None or recommended is None:
+        return False
+    if current == recommended:
+        return True
+    action = getattr(record, "action", None)
+    data = action.model_dump(mode="json") if hasattr(action, "model_dump") else action
+    container = getattr(record, "container_name", None)
+    if not isinstance(data, Mapping) or not container:
+        return False
+    for operation in data.get("operations") or []:
+        if not isinstance(operation, Mapping) or operation.get("container") != container:
+            continue
+        resources = operation.get("resources")
+        requests = resources.get("requests") if isinstance(resources, Mapping) else None
+        quantity = requests.get(resource) if isinstance(requests, Mapping) else None
+        if quantity is None:
+            continue
+        try:
+            return parser(quantity) == current
+        except Exception:
+            return False
+    return False
 
 
 def validate_action(record: Any) -> Tuple[Optional[List[int]], Optional[str]]:
@@ -460,6 +508,8 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
         recommendation_ids, action_code = validate_action(record)
         if action_code:
             blockers.append(_entry(action_code))
+        if proposes_no_change(record):
+            blockers.append(_entry("no_effective_change"))
 
     workload_ready = action_kind is not None and recommendation_ids is not None
     if not ctx.automation_configured:

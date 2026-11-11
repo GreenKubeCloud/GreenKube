@@ -93,6 +93,10 @@ _RECLAIMABLE_PLAN_STATUSES = frozenset({PlanStatus.APPLYING, PlanStatus.PR_OPEN}
 _RESULT = TypeVar("_RESULT")
 
 
+#: Plan status reason of a plan that failed closed because it would change nothing.
+NO_EFFECTIVE_CHANGE_REASON = "no_effective_change"
+
+
 class PlanWorkerError(RuntimeError):
     """A plan execution failure with its retry and lifecycle disposition."""
 
@@ -103,10 +107,12 @@ class PlanWorkerError(RuntimeError):
         retryable: bool = False,
         plan_status: PlanStatus | None = None,
         action_status: ActionStatus | None = None,
+        reason_code: str | None = None,
     ) -> None:
         self.retryable = retryable
         self.plan_status = plan_status
         self.action_status = action_status
+        self.reason_code = reason_code
         super().__init__(message)
 
 
@@ -671,7 +677,44 @@ class PlanWorker:
                 )
 
         self._validate_pre_apply_baseline(plan, baseline)
+        self._ensure_effective_change(plan, baseline)
         return plan
+
+    @staticmethod
+    def _ensure_effective_change(plan: Plan, baseline: PreApplyWorkloadBaseline) -> None:
+        """Fail closed before any Git mutation when the cluster already runs every proposed request.
+
+        A forward plan whose requests all equal the live requests, after unit
+        normalization (``1Gi`` == ``1024Mi``, ``0.5`` == ``500m``), would open a
+        pull request that changes nothing. The plan fails with the
+        ``no_effective_change`` reason and no branch, commit or PR is created;
+        apply detection then records the recommendation as applied, since the
+        proposal is already live. Rollback plans restore the recorded pre-apply
+        requests and are not checked here.
+        """
+        if plan.rollback_of_plan_id is not None:
+            return
+        proposed: list[tuple[int | None, int | None]] = []
+        for operation in plan.action.operations:
+            if not isinstance(operation, SetContainerResources):
+                return
+            live = baseline.container_requests.get(operation.container)
+            if live is None:
+                return
+            requests = operation.resources.requests
+            for resource, value in requests.items():
+                parsed = _parse_request_quantity(resource, value)
+                if parsed is None:
+                    return
+                proposed.append((parsed, live.cpu_millicores if resource == "cpu" else live.memory_bytes))
+        if proposed and all(value == current for value, current in proposed):
+            raise PlanWorkerError(
+                "no_effective_change: the workload already runs every proposed request, so a pull request would "
+                "change nothing; no branch or pull request was created.",
+                plan_status=PlanStatus.FAILED,
+                action_status=ActionStatus.FAILED,
+                reason_code=NO_EFFECTIVE_CHANGE_REASON,
+            )
 
     @staticmethod
     def _capture_pre_apply_baseline(
@@ -1725,7 +1768,11 @@ class PlanWorker:
                         expected_statuses=(plan.status,),
                         expected_digest=plan.digest,
                         actor="automation-worker",
-                        reason_code="worker_failure",
+                        reason_code=(
+                            error.reason_code
+                            if isinstance(error, PlanWorkerError) and error.reason_code
+                            else "worker_failure"
+                        ),
                     )
                     if updated is None:
                         raise PlanWorkerError(f"Plan {plan.plan_id!r} changed while recording failure.")
@@ -1789,6 +1836,20 @@ class PlanWorker:
                         actor="automation-worker",
                         plan_id=plan.plan_id,
                     )
+
+
+def _parse_request_quantity(resource: str, value: object) -> int | None:
+    """Normalize a proposed request to millicores or bytes; None when it cannot be compared."""
+    from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
+
+    parser = {"cpu": parse_cpu_quantity, "memory": parse_memory_quantity}.get(resource)
+    if parser is None or not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return None
+    try:
+        parsed = parser(value)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, int) and not isinstance(parsed, bool) else None
 
 
 def _plan_on_committed_revision(plan: Plan) -> Plan:

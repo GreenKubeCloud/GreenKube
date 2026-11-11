@@ -297,6 +297,7 @@ class FakePlanRepository:
             recommendation_id: ActionStatus.PLAN_READY for recommendation_id in plan.recommendation_ids
         }
         self.status_updates: list[tuple[str, PlanStatus]] = []
+        self.reason_codes: list[str | None] = []
 
     async def get_plan(self, plan_id: str) -> Plan | None:
         return self.plans.get(plan_id)
@@ -317,6 +318,7 @@ class FakePlanRepository:
         updated = plan.model_copy(update={"status": status})
         self.plans[plan_id] = updated
         self.status_updates.append((plan_id, status))
+        self.reason_codes.append(reason_code)
         return updated
 
     async def set_plan_pre_apply_baseline_if_absent(
@@ -1683,3 +1685,53 @@ async def test_plan_worker_merge_sync_and_apply_form_one_closed_loop():
     assert [item.status for item in applied] == [RecommendationStatus.APPLIED]
     assert plans.action_status[41] is ActionStatus.APPLIED
     assert plans.plans[plan.plan_id].status is PlanStatus.APPLIED
+
+
+@pytest.mark.asyncio
+async def test_plan_whose_requests_are_already_live_fails_closed_without_a_pull_request():
+    """no_effective_change: the cluster already runs 300m, so the PR would change nothing."""
+    reader = FakeWorkloadReader({("payments", "Deployment", "api"): _workload_snapshot(cpu_request_millicores=300)})
+    worker, operations, plans, pull_requests, provider = _worker(workload_reader=reader)
+
+    assert await worker.process_once("worker-1")
+
+    assert provider.branch_creations == []
+    assert provider.commit_requests == []
+    assert provider.pull_request_creations == []
+    assert pull_requests.records == []
+    assert plans.plans["plan-1"].status is PlanStatus.FAILED
+    assert plans.reason_codes[-1] == "no_effective_change"
+    assert set(plans.action_status.values()) == {ActionStatus.FAILED}
+    message, retryable = operations.failures[0]
+    assert message.startswith("no_effective_change") and retryable is False
+
+
+@pytest.mark.parametrize(
+    ("requests", "live", "no_op"),
+    [
+        ({"memory": "1Gi"}, (None, 1024 * 1024 * 1024), True),
+        ({"cpu": "0.5"}, (500, None), True),
+        ({"cpu": "500m", "memory": "1024Mi"}, (500, 1024 * 1024 * 1024), True),
+        ({"cpu": "500m", "memory": "512Mi"}, (500, 1024 * 1024 * 1024), False),
+        ({"cpu": "250m"}, (None, None), False),
+    ],
+)
+def test_effective_change_compares_normalized_quantities(requests, live, no_op):
+    plan = _plan()
+    action = plan.action.model_copy(
+        update={"operations": [SetContainerResources(container="api", resources=ContainerResources(requests=requests))]}
+    )
+    baseline = PreApplyWorkloadBaseline(
+        workload_uid="uid-api-1",
+        generation=7,
+        observed_generation=7,
+        container_requests={"api": {"cpu_millicores": live[0], "memory_bytes": live[1]}},
+    )
+    candidate = plan.model_copy(update={"action": action})
+    if no_op:
+        with pytest.raises(PlanWorkerError, match="no_effective_change") as error:
+            PlanWorker._ensure_effective_change(candidate, baseline)
+        assert error.value.reason_code == "no_effective_change"
+        assert error.value.plan_status is PlanStatus.FAILED and not error.value.retryable
+    else:
+        PlanWorker._ensure_effective_change(candidate, baseline)
