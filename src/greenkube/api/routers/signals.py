@@ -79,12 +79,22 @@ def _actor(request: Request) -> Optional[str]:
 
 
 async def _json_body(request: Request, limit: int) -> Any:
+    """The JSON body, read in chunks and refused as soon as it exceeds ``limit`` bytes.
+
+    A chunked body has no Content-Length: it is never buffered past the limit.
+    """
+    too_large = HTTPException(status_code=413, detail=f"Body larger than {limit} bytes.")
     length = request.headers.get("content-length")
-    if length is not None and length.isdigit() and int(length) > limit:
-        raise HTTPException(status_code=413, detail=f"Body larger than {limit} bytes.")
-    body = await request.body()
-    if len(body) > limit:
-        raise HTTPException(status_code=413, detail=f"Body larger than {limit} bytes.")
+    if length is not None:
+        if not length.isascii() or not length.isdigit():
+            raise HTTPException(status_code=400, detail="Invalid Content-Length.")
+        if len(length.lstrip("0")) > len(str(limit)) or int(length) > limit:
+            raise too_large
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > limit - len(body):
+            raise too_large
+        body.extend(chunk)
     try:
         return json.loads(body)
     except (ValueError, UnicodeDecodeError) as exc:

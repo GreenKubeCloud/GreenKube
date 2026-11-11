@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from greenkube.api.routers.signals import get_signal_inbox
+import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
+
+import greenkube.api.routers.signals as signals_router
+from greenkube.api.routers.signals import _json_body, get_signal_inbox
 from greenkube.auth.principal import required_scope
 from greenkube.signals.connectors.inbox import create_signal_inbox_repository
 from tests.api.auth_support import auth_harness  # pyrefly: ignore[missing-import]
@@ -147,3 +152,39 @@ def test_push_reaches_the_database_inbox(tmp_path, monkeypatch):
         stored = h.client.portal.call(lambda: create_signal_inbox_repository().current(source_id="push:ci"))
 
     assert [item.signal.signal_id for item in stored] == response.json()["signal_ids"]
+
+
+def test_oversized_chunked_body_is_refused_while_streaming(tmp_path, monkeypatch):
+    """A body without Content-Length is read in chunks and refused past the limit (never buffered whole)."""
+    monkeypatch.setattr(signals_router, "MAX_SIGNAL_BATCH_BYTES", 1024)
+
+    def chunks():
+        for _ in range(64):
+            yield b" " * 512
+
+    inbox = MemoryInbox()
+    with auth_harness(tmp_path, monkeypatch) as h:
+        h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
+        headers = {**_key(h, "signals:write"), "Content-Type": "application/json"}
+        chunked = h.client.post("/api/v1/signals", content=chunks(), headers=headers)
+        declared = h.client.post("/api/v1/signals", content=b" " * 2048, headers=headers)
+
+    assert chunked.status_code == 413
+    assert declared.status_code == 413
+    assert inbox.signals == {}
+
+
+async def test_json_body_stops_reading_at_the_limit():
+    """The body is not buffered past the limit: reading stops at the first chunk beyond it."""
+    received: list[int] = []
+
+    async def receive():
+        received.append(len(received))
+        return {"type": "http.request", "body": b" " * 512, "more_body": len(received) < 1000}
+
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive)
+    with pytest.raises(HTTPException) as raised:
+        await _json_body(request, 1024)
+
+    assert raised.value.status_code == 413
+    assert len(received) == 3
