@@ -118,3 +118,10 @@ def test_changed_fields_feed_policy_gates() -> None:
     fields = CONTAINER_RESOURCES.changed_fields([_op(requests={"CPU": "1"}, limits={"memory": "1Gi"})])
 
     assert fields == {("api", "cpu"), ("api", "memory")}
+
+
+def test_pr_section_describes_every_container_change() -> None:
+    section = CONTAINER_RESOURCES.pr_section([_op(requests={"cpu": "250m"}, limits={"memory": "1Gi"})])
+
+    assert section.label == "rightsizing"
+    assert section.lines == ("api: requests cpu=250m, limits memory=1Gi",)

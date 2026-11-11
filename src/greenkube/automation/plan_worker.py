@@ -828,7 +828,8 @@ class PlanWorker:
                 "The persisted pre-apply workload baseline is invalid; verify plan storage and retry.",
                 retryable=True,
             )
-        if not operation_subjects(plan.action).issubset(baseline.container_requests):
+        spec = action_kind_of(plan.action)
+        if spec is not None and not spec.baseline_covers(plan.action.operations, baseline):
             raise PlanWorkerError(
                 "The persisted pre-apply workload baseline does not include every action container; "
                 "create and approve a fresh plan before retrying.",

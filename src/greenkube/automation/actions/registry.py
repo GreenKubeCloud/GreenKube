@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 from greenkube.automation.actions.base import ActionKindSpec, UnknownActionKindError
@@ -138,7 +138,3 @@ def operation_subjects(action: ActionPlanV3) -> set[str]:
     """Sub-resources (container names) an action changes; empty for an unknown kind."""
     spec = action_kind_of(action)
     return spec.subjects(action.operations) if spec is not None else set()
-
-
-def kinds_by_name() -> Mapping[str, ActionKindSpec]:
-    return {spec.kind: spec for spec in ACTION_KINDS}
