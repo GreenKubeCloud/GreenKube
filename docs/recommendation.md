@@ -205,7 +205,7 @@ Native rightsizing proposes **decreases** (efficiency) and **increases** (reliab
 
 An increase must be defensible on its own: it costs money every hour and is reviewed by a human.
 
-1. **The statistic is per container and per replica.** The p99 is the hottest replica's steady usage, never a sum across replicas, pods or duplicate series (see [Usage summaries](#usage-summaries-memory-bounded-scans)).
+1. **The statistic is per container and per replica.** The p99 is taken over one point per replica and step, so it describes what a single replica uses, never a sum across replicas, pods or duplicate series (see [Usage summaries](#usage-summaries-memory-bounded-scans)).
 2. **Startup is not steady state.** The p99 excludes the warm-up after each container (re)start (`RIGHTSIZING_WARMUP_MINUTES`, default 10).
 3. **The target is p99 × `RIGHTSIZING_HEADROOM`** (default 1.2). The observed maximum (× 1.1) raises a memory target only when OOM kills or a working set above 90% of the limit show that peaks matter; a single spike otherwise does not size the request.
 4. **One step is capped** at `RIGHTSIZING_MAX_INCREASE_FACTOR` (default 2) × the current request, unless OOM kills back the increase. The reason states the cap and the uncapped target ("Capped at 2x the current request (usage suggests 1320MiB)"); the next scan re-evaluates once the step is applied.
