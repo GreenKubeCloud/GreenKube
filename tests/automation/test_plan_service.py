@@ -39,7 +39,12 @@ from greenkube.gitops.contracts import (
     ValidationResult,
     WorkloadSource,
 )
-from greenkube.gitops.planning.helm import HelmValuesNeedsMappingError, HelmValuesPlanner
+from greenkube.gitops.planning.helm import (
+    FluxHelmReleasePlanError,
+    HelmValuesNeedsMappingError,
+    HelmValuesPlanError,
+    HelmValuesPlanner,
+)
 from greenkube.gitops.planning.kustomize import KustomizePlanError
 from greenkube.gitops.planning.raw_manifest import (
     RawManifestPlanner,
@@ -236,13 +241,14 @@ class MemoryPlanRepository(AutomationPlanRepository):
 
 
 class FakeGitBlobResolver:
-    def __init__(self, sha: str = GIT_BLOB_SHA) -> None:
+    def __init__(self, sha: str = GIT_BLOB_SHA, content: str = DEPLOYMENT) -> None:
         self.sha = sha
+        self.content = content
         self.lookups: list[tuple[str, str, str]] = []
 
     async def get_blob_file(self, source: WorkloadSource, path: str, revision: str) -> GitBlobFile | None:
         self.lookups.append((source.provider_id, path, revision))
-        return GitBlobFile(path=path, content=DEPLOYMENT, blob_sha=self.sha)
+        return GitBlobFile(path=path, content=self.content, blob_sha=self.sha)
 
 
 class FakePlanRevisionResolver:
@@ -1192,3 +1198,62 @@ async def test_expire_due_plans_stales_expired_preview_and_clears_action_status(
     assert [item.plan_id for item in expired] == [plan.plan_id]
     assert expired[0].status is PlanStatus.STALE
     assert repository.action_status[42] is ActionStatus.NONE
+
+
+@pytest.mark.asyncio
+async def test_create_plan_fails_closed_when_the_manifest_already_declares_the_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A pull request that changes nothing is never planned (no_effective_change)."""
+    repository = MemoryPlanRepository()
+    already_applied = DEPLOYMENT.replace("cpu: 100m", "cpu: 300m").replace("memory: 128Mi", "memory: 256Mi")
+    resolver = FakeGitBlobResolver(content=already_applied)
+    source = _source()
+    service = _service(repository, resolver)
+
+    with pytest.raises(AutomationPlanError) as error:
+        await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source, already_applied))
+
+    assert error.value.code.value == "no_effective_change"
+    assert repository.plans == {}
+    assert repository.action_status == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("renderer", "planner_error"),
+    [
+        (
+            RendererKind.HELM_VALUES,
+            HelmValuesPlanError("the requested container resources are already present in the values file"),
+        ),
+        (
+            RendererKind.HELM_RELEASE,
+            FluxHelmReleasePlanError("the requested container resources are already present after post-rendering"),
+        ),
+        (
+            RendererKind.KUSTOMIZE,
+            KustomizePlanError("the requested container requests are already present in the rendered target"),
+        ),
+    ],
+)
+async def test_create_plan_maps_planner_no_op_errors_to_no_effective_change(
+    monkeypatch: pytest.MonkeyPatch, renderer: RendererKind, planner_error: Exception
+):
+    repository = MemoryPlanRepository()
+    source = _source(
+        renderer=renderer,
+        renderer_config={"overlay_path": "apps/payments"} if renderer is RendererKind.KUSTOMIZE else {},
+    )
+    planner = (
+        FakeKustomizePlanner(planner_error)
+        if isinstance(planner_error, KustomizePlanError)
+        else FakeHelmPlanner(renderer, planner_error)
+    )
+    service = AutomationPlanService(repository, planners={renderer: planner}, clock=lambda: NOW)
+
+    with pytest.raises(AutomationPlanError) as error:
+        await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
+
+    assert error.value.code.value == "no_effective_change"
+    assert repository.plans == {}

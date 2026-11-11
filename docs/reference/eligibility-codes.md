@@ -40,7 +40,7 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 | Code | Meaning | Fix |
 |---|---|---|
 | `not_active` | The recommendation is ignored, applied, stale, expired or being verified. | Un-ignore it, or wait for the next scan to refresh it. |
-| `pull_request_open` | A pull request is already open for this recommendation. | Review and merge or close it. |
+| `pull_request_open` | A pull request is already open for this recommendation (its status is `pr_open` until the merged change is observed in the cluster). | Review and merge or close it. |
 | `pull_requests_unavailable` | The open pull requests could not be read, so a duplicate cannot be ruled out. Reported for active recommendations GreenKube could otherwise deliver (fail closed). | Check the database connection, then retry. |
 
 ### Action kind and target
@@ -51,6 +51,7 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 | `deletion_requires_review` | A deletion (`ZOMBIE_POD`, `IDLE_NAMESPACE`, `ORPHANED_PERSISTENT_VOLUME`, `ORPHANED_LOAD_BALANCER`) is never automated: GreenKube shows why the resource appears unused, it cannot prove that nothing depends on it. See [Why GreenKube thinks a resource is unused](../recommendation.md#why-greenkube-thinks-a-resource-is-unused). | Check the evidence, confirm with the owners, delete the resource from Git (or with `kubectl` outside GitOps) and mark the recommendation applied. Annotate the resource with `greenkube.io/ignore="true"` if it is still needed. |
 | `action_unavailable` | A container rightsizing recommendation has no typed action: the workload owner or container is unknown, or the proposal does not lower the current request. | The next scan rebuilds the action once these are known; otherwise apply manually. |
 | `requires_container_target` | The action does not target exactly one named container of the workload. | Rescan once container metrics are collected; GreenKube never patches a whole pod spec. |
+| `no_effective_change` | The proposed request equals the current one after unit normalization (`1Gi` = `1024Mi`, `0.5` = `500m`), so a pull request would change nothing. Plan creation fails with the same code when the Git source already declares the proposal, and the plan worker fails the plan before any Git write when the cluster already runs it (the recommendation is then recorded as applied by apply detection). | No action is needed; the next scan resolves the recommendation. |
 
 ### Automation and GitOps binding
 

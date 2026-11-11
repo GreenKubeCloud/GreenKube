@@ -1449,7 +1449,16 @@ async def reconcile_gitops_providers(
     for provider in providers:
         previous = existing.get(provider.config.id)
         if previous is None or not _same_provider_configuration(previous, provider.config):
-            await repository.save_provider_config(provider.config)
+            config = provider.config
+            if previous is not None and _same_provider_connection(previous, config):
+                # Same endpoint and credential reference: keep what the last real call verified.
+                config = replace(
+                    config,
+                    status=previous.status,
+                    last_checked_at=previous.last_checked_at,
+                    last_error_code=previous.last_error_code,
+                )
+            await repository.save_provider_config(config)
 
         allowlist = set(await repository.list_provider_allowlists(provider.config.id))
         desired = set(provider.repositories)
@@ -1826,6 +1835,19 @@ def _same_provider_configuration(left: GitOpsProviderConfig, right: GitOpsProvid
         and left.secret_key == right.secret_key
         and left.enabled == right.enabled
         and left.capabilities == right.capabilities
+    )
+
+
+def _same_provider_connection(left: GitOpsProviderConfig, right: GitOpsProviderConfig) -> bool:
+    """Whether a verification of ``left`` still holds for ``right`` (same endpoint and credential)."""
+    return (
+        left.enabled
+        and right.enabled
+        and left.provider_type == right.provider_type
+        and left.api_base_url == right.api_base_url
+        and left.secret_namespace == right.secret_namespace
+        and left.secret_name == right.secret_name
+        and left.secret_key == right.secret_key
     )
 
 

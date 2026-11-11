@@ -52,6 +52,8 @@ def _record() -> RecommendationRecord:
         owner_name="api",
         current_cpu_request_millicores=1000,
         recommended_cpu_request_millicores=300,
+        # The recommendation existed before the change rolled out.
+        created_at=datetime.now(timezone.utc) - timedelta(hours=1),
     )
 
 

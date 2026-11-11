@@ -18,6 +18,7 @@ from greenkube.gitops.contracts import (
     configured_binding_ttl,
     sanitize_repository_url,
 )
+from greenkube.models.metrics import RecommendationEventType
 from greenkube.storage.base_gitops_repository import (
     MAX_PULL_REQUEST_POLLING_LEASE_SECONDS,
     MAX_WORKLOAD_BINDING_CANDIDATES,
@@ -62,6 +63,18 @@ from greenkube.utils.time import ensure_utc
 _PRUNE_BATCH_SIZE = 100
 _PLAN_HYDRATION_BATCH_SIZE = 500
 _MAX_PLAN_LIST_LIMIT = 10_000
+
+#: Provider states written after a real provider call (``unverified`` until the first one).
+PROVIDER_CHECK_STATUSES = frozenset({"verified", "error"})
+
+#: Action states in which a pull request for the recommendation is open, or
+#: merged and not yet observed in the cluster: the recommendation is ``pr_open``.
+_PR_IN_FLIGHT_ACTION_STATUSES = frozenset({ActionStatus.PR_OPEN, ActionStatus.MERGED, ActionStatus.SYNC_PENDING})
+#: Action states that release a ``pr_open`` recommendation back to ``active``
+#: (PR closed unmerged, failed or the plan cleared).
+_PR_RELEASED_ACTION_STATUSES = frozenset(
+    {ActionStatus.NONE, ActionStatus.GROUPED, ActionStatus.PLAN_READY, ActionStatus.CLOSED, ActionStatus.FAILED}
+)
 
 
 def _validate_list_limit(limit: int) -> None:
@@ -313,6 +326,42 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             row = await self._fetchrow(connection, "SELECT * FROM gitops_providers WHERE id = ?", (provider.id,))
             assert row is not None
             return row_to_gitops_provider(row)
+
+    async def record_provider_check(
+        self,
+        provider_id: str,
+        status: str,
+        *,
+        error_code: str | None = None,
+        checked_at: datetime | None = None,
+    ) -> bool:
+        """Record the outcome of a real provider call without touching its configuration.
+
+        ``status`` is ``verified`` after a successful authenticated call and
+        ``error`` (with ``error_code``) after an authentication or permission
+        failure. Returns whether an enabled provider row was updated.
+        """
+        if status not in PROVIDER_CHECK_STATUSES:
+            raise ValueError(f"unsupported provider check status {status!r}")
+        checked = ensure_utc(checked_at) if checked_at is not None else datetime.now(timezone.utc)
+        async with self._transaction() as connection:
+            updated = await self._execute(
+                connection,
+                """
+                UPDATE gitops_providers
+                SET status = ?, last_checked_at = ?, last_error_code = ?, updated_at = ?
+                WHERE id = ? AND enabled = ?
+                """,
+                (
+                    status,
+                    self._db_datetime(checked),
+                    error_code if status != "verified" else None,
+                    self._db_datetime(checked),
+                    provider_id,
+                    True,
+                ),
+            )
+        return bool(updated)
 
     async def get_provider_config(self, provider_id: str) -> GitOpsProviderConfig | None:
         async with self.db_manager.connection_scope() as connection:
@@ -1939,7 +1988,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             rows = await self._fetch(
                 connection,
                 f"""
-                SELECT id, action_status FROM recommendation_history
+                SELECT id, action_status, status FROM recommendation_history
                 WHERE id IN ({id_placeholders}){row_lock}
                 """,
                 ids,
@@ -1981,7 +2030,53 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                         "new_action_status": status.value,
                     },
                 )
+                await self._sync_recommendation_pr_status(connection, row, status, actor=actor, plan_ids=plan_ids)
             return updated
+
+    async def _sync_recommendation_pr_status(
+        self,
+        connection: Any,
+        row: Any,
+        action_status: ActionStatus,
+        *,
+        actor: str,
+        plan_ids: list[str],
+    ) -> None:
+        """Keep the recommendation lifecycle status in step with its pull request.
+
+        ``active`` becomes ``pr_open`` while a PR is open, merged or syncing, so
+        scans can no longer rewrite its baseline and proposal, and it returns to
+        ``active`` when the PR is closed unmerged or the action fails. Other
+        statuses (applied, rollback review, ...) are owned by the lifecycle and
+        never changed here. Written in the action-status transaction.
+        """
+        current = row["status"]
+        if action_status in _PR_IN_FLIGHT_ACTION_STATUSES and current == "active":
+            target, event_type = "pr_open", RecommendationEventType.PR_OPENED.value
+        elif action_status in _PR_RELEASED_ACTION_STATUSES and current == "pr_open":
+            target, event_type = "active", RecommendationEventType.PR_CLOSED.value
+        else:
+            return
+        recommendation_id = int(row["id"])
+        changed = await self._execute(
+            connection,
+            "UPDATE recommendation_history SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+            (target, self._db_datetime(datetime.now(timezone.utc)), recommendation_id, current),
+        )
+        if not changed:
+            return
+        await self._record_recommendation_audit_event(
+            connection,
+            recommendation_id,
+            event_type=event_type,
+            actor=actor,
+            details={
+                "plan_ids": plan_ids,
+                "previous_status": current,
+                "new_status": target,
+                "action_status": action_status.value,
+            },
+        )
 
     async def get_recommendation_action_status(self, recommendation_id: int) -> ActionStatus | None:
         async with self.db_manager.connection_scope() as connection:

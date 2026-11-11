@@ -1705,3 +1705,28 @@ spec:
     assert error.value.code is AutomationErrorCode.ROLLBACK_NOT_READY
     assert blobs.calls == [(source.id, path, original_revision)]
     assert snapshot_resolver.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_the_verification_of_an_unchanged_connection():
+    repository = MemoryGitOpsRepository()
+    configured = parse_gitops_providers_json(_provider_json())[0]
+    checked_at = datetime.now(timezone.utc)
+    await repository.save_provider_config(
+        replace(configured.config, capabilities={"stale": True}, status="verified", last_checked_at=checked_at)
+    )
+
+    # Only the capabilities changed: the endpoint and credential that were verified are the same.
+    await reconcile_gitops_providers(repository, [configured])
+    kept = repository.configs[configured.config.id]
+    assert (kept.status, kept.last_checked_at, kept.capabilities) == (
+        "verified",
+        checked_at,
+        configured.config.capabilities,
+    )
+
+    # A new endpoint must be verified again by a real call.
+    moved = replace(configured, config=replace(configured.config, api_base_url="https://api.other.test"))
+    await reconcile_gitops_providers(repository, [moved])
+    reset = repository.configs[configured.config.id]
+    assert (reset.status, reset.last_checked_at) == ("unverified", None)

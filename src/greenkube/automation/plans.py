@@ -256,6 +256,8 @@ class AutomationPlanService:
                     "the Helm values mapping is unsupported or did not preserve the exact target",
                 ) from exc
             except (HelmPlanError, HelmError, ValidationError) as exc:
+                if _is_no_effective_change(exc):
+                    raise _no_effective_change_error(exc) from exc
                 raise AutomationPlanError(
                     AutomationErrorCode.RENDER_VALIDATION_FAILED,
                     "Helm values render validation failed",
@@ -275,6 +277,8 @@ class AutomationPlanService:
                     "this Flux HelmRelease source is outside the validated local post-renderer subset",
                 ) from exc
             except (FluxHelmReleasePlanError, HelmPlanError, HelmError, ValidationError) as exc:
+                if _is_no_effective_change(exc):
+                    raise _no_effective_change_error(exc) from exc
                 raise AutomationPlanError(
                     AutomationErrorCode.RENDER_VALIDATION_FAILED,
                     "Flux HelmRelease render validation failed",
@@ -1101,6 +1105,8 @@ def _planner_error(
 ) -> AutomationPlanError:
     message = str(error)
     lowered = message.lower()
+    if _is_no_effective_change(error):
+        return _no_effective_change_error(error)
     if "ambiguous" in lowered or "duplicate resource identity" in lowered:
         code = AutomationErrorCode.AMBIGUOUS_BINDING
     elif "unsupported" in lowered or "must use the raw renderer" in lowered:
@@ -1111,6 +1117,23 @@ def _planner_error(
         code = AutomationErrorCode.RENDER_VALIDATION_FAILED
     prefix = "Kustomize" if renderer is RendererKind.KUSTOMIZE else "raw manifest"
     return AutomationPlanError(code, f"{prefix} planning failed: {message}")
+
+
+#: Planner messages that mean the source already declares the proposed requests.
+_NO_EFFECTIVE_CHANGE_MARKERS = ("already present", "does not change the target resource")
+
+
+def _is_no_effective_change(error: Exception) -> bool:
+    lowered = str(error).lower()
+    return any(marker in lowered for marker in _NO_EFFECTIVE_CHANGE_MARKERS)
+
+
+def _no_effective_change_error(error: Exception) -> AutomationPlanError:
+    """Fail closed: a plan whose rendered target does not change must never become a pull request."""
+    return AutomationPlanError(
+        AutomationErrorCode.NO_EFFECTIVE_CHANGE,
+        f"the source already declares the proposed requests, so a pull request would change nothing ({error})",
+    )
 
 
 def _safe_snapshot_path(path: str) -> bool:

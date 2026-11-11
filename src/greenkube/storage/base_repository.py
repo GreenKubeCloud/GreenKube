@@ -796,11 +796,15 @@ class RecommendationRepository(ABC):
     async def get_active_recommendations(
         self,
         namespace: Optional[str] = None,
+        *,
+        include_pr_open: bool = False,
     ) -> List[RecommendationRecord]:
         """Returns all currently active recommendations from the database.
 
         Args:
             namespace: Optional namespace filter.
+            include_pr_open: Also return recommendations whose pull request is
+                open (``pr_open``), for listings that show them with their PR.
 
         Returns:
             A list of active RecommendationRecord objects.

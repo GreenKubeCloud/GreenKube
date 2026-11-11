@@ -12,7 +12,12 @@ from enum import Enum
 from typing import Collection, List, Optional
 
 from ...core.recommendation_ranking import normalize_savings_metric
-from ...core.recommendation_realization import estimate_realized_savings, refresh_applied_recommendation
+from ...core.recommendation_realization import (
+    RECORDED_CHANGE_STATUSES,
+    absorbs_regenerated_recommendation,
+    estimate_realized_savings,
+    refresh_applied_recommendation,
+)
 from ...core.recommendation_reconciliation import may_mark_stale
 from ...models.metrics import (
     ApplyRecommendationRequest,
@@ -34,6 +39,9 @@ from ..recommendation_mapper import (
 from ..sqlite.recommendation_repository import MUTABLE_COLUMNS
 
 logger = logging.getLogger(__name__)
+
+#: Status predicate of the active listing, optionally with recommendations whose PR is open.
+_ACTIVE_LISTING_PREDICATE = {False: "status = 'active'", True: "status IN ('active', 'pr_open')"}
 
 #: Default order of active lists (E2, BUG-20): ranking score, then projected
 #: cost savings, NULLs last on both backends, then a stable id tie-break.
@@ -136,8 +144,14 @@ class PostgresRecommendationRepository(RecommendationRepository):
 
         Uses IS NOT DISTINCT FROM for NULL-safe matching so namespace, node,
         pod, and workload recommendations are all deduplicated on the right target.
-        Ignored recommendations are left untouched. Matching applied recommendations
-        are refreshed so future savings attribution reflects the latest observed state.
+        Ignored recommendations are left untouched. A recommendation whose pull
+        request is open (``pr_open``) is frozen: its baseline and proposal are
+        never rewritten and no duplicate is inserted. A matching applied
+        recommendation only has ``updated_at`` refreshed (and, for issues that
+        reappeared, its savings stopped); its ``current_*`` baseline and the
+        ``actual_*`` values detected after the change are never rewritten. A
+        rightsizing that restates a change already verifying or verified
+        (see :func:`absorbs_regenerated_recommendation`) is dropped.
 
         Args:
             records: List of RecommendationRecord objects to upsert.
@@ -176,6 +190,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
             ", ".join(f"${index}" for index in range(1, len(RECORD_COLUMNS) + 1)),
         )
         async with self.db_manager.connection_scope() as conn:
+            # A PR in flight wins over an older applied row of the same target.
             applied_select_query = """
                 SELECT * FROM recommendation_history
                 WHERE COALESCE(scope, 'pod') = $1
@@ -184,18 +199,16 @@ class PostgresRecommendationRepository(RecommendationRepository):
                   AND container_name IS NOT DISTINCT FROM $4
                   AND target_node IS NOT DISTINCT FROM $5
                   AND type = $6
-                  AND status = 'applied'
-                ORDER BY applied_at DESC
+                  AND (status = 'pr_open' OR status = ANY($7::text[]))
+                ORDER BY (status = 'pr_open') DESC, applied_at DESC NULLS LAST, id DESC
                 LIMIT 1
             """
             applied_update_query = """
                 UPDATE recommendation_history SET
-                    actual_cpu_request_millicores = $1,
-                    actual_memory_request_bytes = $2,
-                    carbon_saved_co2e_grams = $3,
-                    cost_saved = $4,
-                    updated_at = $5
-                WHERE id = $6
+                    carbon_saved_co2e_grams = $1,
+                    cost_saved = $2,
+                    updated_at = $3
+                WHERE id = $4 AND status = 'applied'
             """
             count = 0
             for r in records:
@@ -226,13 +239,22 @@ class PostgresRecommendationRepository(RecommendationRepository):
                     r.container_name,
                     r.target_node,
                     type_val,
+                    list(RECORDED_CHANGE_STATUSES),
                 )
+                if applied_row and applied_row["status"] == RecommendationStatus.PR_OPEN.value:
+                    # Frozen while its pull request is open (or merged and syncing).
+                    count += 1
+                    continue
+                if applied_row and applied_row["status"] != RecommendationStatus.APPLIED.value:
+                    if absorbs_regenerated_recommendation(row_to_record(applied_row), r, now):
+                        # The scan restates a change already recorded (lagging rollup):
+                        # never offer it again nor record it as a second change.
+                        continue
+                    applied_row = None
                 if applied_row:
                     refreshed = refresh_applied_recommendation(row_to_record(applied_row), r, observed_at=now)
                     await conn.execute(
                         applied_update_query,
-                        refreshed.actual_cpu_request_millicores,
-                        refreshed.actual_memory_request_bytes,
                         refreshed.carbon_saved_co2e_grams,
                         refreshed.cost_saved,
                         refreshed.updated_at,
@@ -349,11 +371,15 @@ class PostgresRecommendationRepository(RecommendationRepository):
     async def get_active_recommendations(
         self,
         namespace: Optional[str] = None,
+        *,
+        include_pr_open: bool = False,
     ) -> List[RecommendationRecord]:
         """Returns all currently active recommendations.
 
         Args:
             namespace: Optional namespace filter.
+            include_pr_open: Also return recommendations whose pull request is
+                open (``pr_open``), for listings that show them with their PR.
 
         Returns:
             A list of active RecommendationRecord objects.
@@ -361,7 +387,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
         async with self.db_manager.connection_scope() as conn:
             params: list = []
             idx = 1
-            conditions = ["status = 'active'"]
+            conditions = [_ACTIVE_LISTING_PREDICATE[bool(include_pr_open)]]
 
             if namespace:
                 conditions.append(f"namespace = ${idx}")

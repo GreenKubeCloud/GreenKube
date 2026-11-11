@@ -1776,3 +1776,42 @@ async def test_pr_polling_lease_expiry_and_fencing_prevent_stale_mutations(gitop
     next_owner = await repository.try_acquire_pr_polling_lease("worker-c", lease_seconds=30)
     assert next_owner is not None
     assert next_owner.fencing_token == successor.fencing_token + 1
+
+
+@pytest.mark.asyncio
+async def test_provider_check_records_verification_without_touching_configuration(gitops_store):
+    """A provider stayed "unverified" after successful pull requests (e2e defect)."""
+    repository, _, _ = gitops_store
+    await repository.save_provider_config(
+        GitOpsProviderConfig(
+            id="gitea-quickstart",
+            provider_type="gitea",
+            api_base_url="http://gitea.test/api/v1",
+            secret_namespace="greenkube",
+            secret_name="git-token",
+            secret_key="token",
+        )
+    )
+    await repository.save_provider_config(GitOpsProviderConfig(id="disabled", provider_type="gitea", enabled=False))
+    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    assert await repository.record_provider_check("gitea-quickstart", "verified") is True
+    verified = await repository.get_provider_config("gitea-quickstart")
+    assert verified is not None
+    assert (verified.status, verified.last_error_code) == ("verified", None)
+    assert verified.last_checked_at is not None and verified.last_checked_at >= before
+    assert (verified.api_base_url, verified.secret_name, verified.enabled) == (
+        "http://gitea.test/api/v1",
+        "git-token",
+        True,
+    )
+
+    assert await repository.record_provider_check("gitea-quickstart", "error", error_code="auth_failed") is True
+    failed = await repository.get_provider_config("gitea-quickstart")
+    assert failed is not None and (failed.status, failed.last_error_code) == ("error", "auth_failed")
+
+    assert await repository.record_provider_check("disabled", "verified") is False
+    disabled = await repository.get_provider_config("disabled")
+    assert disabled is not None and disabled.status == "unverified"
+    with pytest.raises(ValueError):
+        await repository.record_provider_check("gitea-quickstart", "ready")

@@ -290,6 +290,34 @@ class TestWarnings:
         ]
         assert result["can_open_pr"] is True
 
+    def test_no_effective_change_blocks_a_proposal_equal_to_the_current_request(self):
+        """A PR whose proposal equals the live request would change nothing (fail closed)."""
+        same = _record(current_cpu_request_millicores=300, recommended_cpu_request_millicores=300)
+        result = assess_eligibility(same, _ctx())
+        assert _codes(result) == ["no_effective_change"]
+        assert result["can_open_pr"] is False
+
+        # 1Gi and 1024Mi are the same request: the rounded action quantity equals the current value.
+        gib = 1024 * 1024 * 1024
+        memory_action = _action().model_copy(
+            update={
+                "operations": [
+                    SetContainerResources(container="api", resources=ContainerResources(requests={"memory": "1024Mi"}))
+                ]
+            }
+        )
+        rounded = _record(
+            type=RecommendationType.RIGHTSIZING_MEMORY,
+            current_cpu_request_millicores=None,
+            recommended_cpu_request_millicores=None,
+            current_memory_request_bytes=gib,
+            recommended_memory_request_bytes=gib - 300 * 1024,
+            action=memory_action,
+        )
+        assert "no_effective_change" in _codes(assess_eligibility(rounded, _ctx()))
+
+        assert "no_effective_change" not in _codes(assess_eligibility(_record(), _ctx()))
+
     def test_documented_codes(self):
         documented = (Path(__file__).resolve().parents[3] / "docs/reference/eligibility-codes.md").read_text("utf-8")
         for code in CODES:

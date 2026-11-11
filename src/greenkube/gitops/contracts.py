@@ -122,6 +122,7 @@ class AutomationErrorCode(StrEnum):
     PROVIDER_CAPABILITY_MISSING = "provider_capability_missing"
     AUTOMATION_BUDGET_EXHAUSTED = "automation_budget_exhausted"
     RENDER_VALIDATION_FAILED = "render_validation_failed"
+    NO_EFFECTIVE_CHANGE = "no_effective_change"
     REQUIRES_CONTAINER_TARGET = "requires_container_target"
     REVISION_CONFLICT = "revision_conflict"
     UNSAFE_PATH = "unsafe_path"

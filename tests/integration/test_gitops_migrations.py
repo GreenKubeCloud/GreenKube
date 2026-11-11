@@ -1236,7 +1236,8 @@ async def test_postgres_gitops_migrations_apply_to_empty_and_existing_schemas():
             "SELECT id, status, action_status FROM recommendation_history ORDER BY id"
         )
         assert [(row["id"], row["status"], row["action_status"]) for row in migrated_recommendations] == [
-            (101, "active", "pr_open"),
+            # 0061: a recommendation whose pull request is open is pr_open.
+            (101, "pr_open", "pr_open"),
             (102, "active", "none"),
         ]
         migrated_pr_rows = await connection.fetch(

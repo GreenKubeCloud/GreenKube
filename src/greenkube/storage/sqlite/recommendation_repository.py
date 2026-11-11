@@ -14,7 +14,12 @@ from typing import Collection, List, Optional
 import aiosqlite
 
 from greenkube.core.recommendation_ranking import normalize_savings_metric
-from greenkube.core.recommendation_realization import estimate_realized_savings, refresh_applied_recommendation
+from greenkube.core.recommendation_realization import (
+    RECORDED_CHANGE_STATUSES,
+    absorbs_regenerated_recommendation,
+    estimate_realized_savings,
+    refresh_applied_recommendation,
+)
 from greenkube.core.recommendation_reconciliation import may_mark_stale
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
@@ -36,6 +41,9 @@ from greenkube.storage.recommendation_mapper import (
 from greenkube.utils.date_utils import to_iso_z
 
 logger = logging.getLogger(__name__)
+
+#: Status predicate of the active listing, optionally with recommendations whose PR is open.
+_ACTIVE_LISTING_PREDICATE = {False: "status = 'active'", True: "status IN ('active', 'pr_open')"}
 
 #: Default order of active lists (E2, BUG-20): ranking score, then projected
 #: cost savings, NULLs last on both backends, then a stable id tie-break.
@@ -162,8 +170,9 @@ def _identity_key(record: RecommendationRecord) -> tuple:
     )
 
 
-def _identity_where_clause(record: RecommendationRecord, status: str = "active") -> tuple[str, list]:
+def _identity_where_clause(record: RecommendationRecord, status: str | tuple[str, ...] = "active") -> tuple[str, list]:
     """Builds a SQLite WHERE clause for NULL-safe recommendation identity matching."""
+    statuses = (status,) if isinstance(status, str) else tuple(status)
     return (
         "fingerprint = ? AND "
         "COALESCE(scope, 'pod') = ? "
@@ -171,7 +180,7 @@ def _identity_where_clause(record: RecommendationRecord, status: str = "active")
         "AND ((pod_name = ?) OR (pod_name IS NULL AND ? IS NULL)) "
         "AND ((container_name = ?) OR (container_name IS NULL AND ? IS NULL)) "
         "AND ((target_node = ?) OR (target_node IS NULL AND ? IS NULL)) "
-        "AND type = ? AND status = ?",
+        "AND type = ? AND status IN ({})".format(", ".join("?" for _ in statuses)),
         [
             record.fingerprint,
             record.scope or "pod",
@@ -184,7 +193,7 @@ def _identity_where_clause(record: RecommendationRecord, status: str = "active")
             record.target_node,
             record.target_node,
             _type_value(record),
-            status,
+            *statuses,
         ],
     )
 
@@ -228,8 +237,14 @@ class SQLiteRecommendationRepository(RecommendationRepository):
     async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
         """Inserts or updates active recommendations using their full target identity.
 
-        Ignored recommendations are left untouched. Matching applied recommendations
-        are refreshed so future savings attribution reflects the latest observed state.
+        Ignored recommendations are left untouched. A recommendation whose pull
+        request is open (``pr_open``) is frozen: its baseline and proposal are
+        never rewritten and no duplicate is inserted. A matching applied
+        recommendation only has ``updated_at`` refreshed (and, for issues that
+        reappeared, its savings stopped); its ``current_*`` baseline and the
+        ``actual_*`` values detected after the change are never rewritten. A
+        rightsizing that restates a change already verifying or verified
+        (see :func:`absorbs_regenerated_recommendation`) is dropped.
 
         Args:
             records: List of RecommendationRecord objects to upsert.
@@ -265,12 +280,32 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     await conn.execute(update_query, params)
                     continue
 
-                applied_where, applied_params = _identity_where_clause(r, status="applied")
+                pr_open_where, pr_open_params = _identity_where_clause(r, status=RecommendationStatus.PR_OPEN.value)
                 cursor = await conn.execute(
-                    f"SELECT * FROM recommendation_history WHERE {applied_where} ORDER BY applied_at DESC LIMIT 1",
-                    applied_params,
+                    f"SELECT id FROM recommendation_history WHERE {pr_open_where} LIMIT 1",
+                    pr_open_params,
                 )
-                applied_row = await cursor.fetchone()
+                if await cursor.fetchone():
+                    # Frozen while its pull request is open (or merged and syncing).
+                    continue
+
+                recorded_where, recorded_params = _identity_where_clause(r, status=RECORDED_CHANGE_STATUSES)
+                cursor = await conn.execute(
+                    f"SELECT * FROM recommendation_history WHERE {recorded_where} "
+                    "ORDER BY applied_at IS NULL, applied_at DESC, id DESC LIMIT 1",
+                    recorded_params,
+                )
+                recorded_row = await cursor.fetchone()
+                applied_row = (
+                    recorded_row
+                    if recorded_row is not None and recorded_row["status"] == RecommendationStatus.APPLIED.value
+                    else None
+                )
+                if recorded_row is not None and applied_row is None:
+                    if absorbs_regenerated_recommendation(row_to_record(recorded_row), r):
+                        # The scan restates a change already recorded (lagging rollup):
+                        # never offer it again nor record it as a second change.
+                        continue
                 if applied_row:
                     refreshed = refresh_applied_recommendation(
                         row_to_record(applied_row), r, observed_at=datetime.now(timezone.utc)
@@ -278,16 +313,12 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     await conn.execute(
                         """
                         UPDATE recommendation_history SET
-                            actual_cpu_request_millicores = ?,
-                            actual_memory_request_bytes = ?,
                             carbon_saved_co2e_grams = ?,
                             cost_saved = ?,
                             updated_at = ?
-                        WHERE id = ?
+                        WHERE id = ? AND status = 'applied'
                         """,
                         (
-                            refreshed.actual_cpu_request_millicores,
-                            refreshed.actual_memory_request_bytes,
                             refreshed.carbon_saved_co2e_grams,
                             refreshed.cost_saved,
                             to_iso_z(refreshed.updated_at) if refreshed.updated_at else now,
@@ -403,18 +434,22 @@ class SQLiteRecommendationRepository(RecommendationRepository):
     async def get_active_recommendations(
         self,
         namespace: Optional[str] = None,
+        *,
+        include_pr_open: bool = False,
     ) -> List[RecommendationRecord]:
         """Returns all currently active recommendations.
 
         Args:
             namespace: Optional namespace filter.
+            include_pr_open: Also return recommendations whose pull request is
+                open (``pr_open``), for listings that show them with their PR.
 
         Returns:
             A list of active RecommendationRecord objects.
         """
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
-            conditions = ["status = 'active'"]
+            conditions = [_ACTIVE_LISTING_PREDICATE[bool(include_pr_open)]]
             params: list = []
 
             if namespace:
