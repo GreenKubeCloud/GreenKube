@@ -555,6 +555,21 @@ config:
       epsilonRatio: 0.02
 
 # ---------------------------------------------------------------------------
+# Recommendation sources (Source SDK, docs/sources.md)
+# ---------------------------------------------------------------------------
+sources:
+  # Load third-party sources installed in the image and registered under the
+  # `greenkube.sources` Python entry points. GET /api/v1/sources lists them.
+  pluginsEnabled: true
+  # Per-source settings keyed by source id; `enabled` is true, false or auto.
+  # Overrides config.recommendations.vpaEnabled / karpenterEnabled. Example:
+  #   settings:
+  #     greenkube.carbon_aware: { enabled: false }
+  #     vpa: { enabled: auto }
+  # Do not put credentials here: this map is rendered into the ConfigMap.
+  settings: {}
+
+# ---------------------------------------------------------------------------
 # Impact Model (docs/methodology/impact-model.md)
 # ---------------------------------------------------------------------------
 impact:

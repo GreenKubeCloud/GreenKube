@@ -9,7 +9,7 @@ installed.
 
 import logging
 import math
-from typing import TYPE_CHECKING, Dict, List, Optional, Protocol, Tuple
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, FrozenSet, List, Optional, Protocol, Tuple
 
 from greenkube.collectors.karpenter_collector import KarpenterCollector, NodePoolInfo
 from greenkube.core.optimization.providers.base import RecommendationSource
@@ -20,6 +20,9 @@ from greenkube.models.metrics import (
     RecommendationType,
 )
 from greenkube.models.metrics import RecommendationSource as Source
+from greenkube.signals.adapters import RecommendationSourceAdapter
+from greenkube.signals.model import Capability, SignalOrigin
+from greenkube.signals.sdk import SourceDeps, SourceTier
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -190,3 +193,27 @@ def _removable_nodes(
         if (price := projector.node_hourly_price(name)) is not None and price > 0
     )
     return removable, [name for _price, name in priced[:removable]]
+
+
+class NodePoolSignalSource(RecommendationSourceAdapter):
+    """GreenKube's NodePool consolidation heuristic over Karpenter objects (roadmap E5, G5).
+
+    A GreenKube heuristic that reads Karpenter NodePools and NodeClaims, not
+    Karpenter's own advice, hence the native id ``greenkube.nodepool``. Its v1
+    recommendations keep ``source: karpenter`` for compatibility.
+    """
+
+    id: ClassVar[str] = "greenkube.nodepool"
+    display_name: ClassVar[str] = "GreenKube NodePool consolidation"
+    tier: ClassVar[SourceTier] = SourceTier.NATIVE
+    capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.NODE_POOL})
+    legacy_source: ClassVar[Optional[str]] = Source.KARPENTER.value
+    algorithm_name: ClassVar[Optional[str]] = "greenkube.nodepool"
+    signal_origin: ClassVar[SignalOrigin] = SignalOrigin.NATIVE
+    description: ClassVar[str] = "Under-utilized Karpenter NodePools that could consolidate onto fewer nodes."
+
+    def build_connector(self, deps: SourceDeps) -> RecommendationSource:
+        return KarpenterSource(deps.config)
+
+    def raw_payload(self, rec: Recommendation) -> Optional[Dict[str, Any]]:
+        return {"nodepool": rec.source_ref}

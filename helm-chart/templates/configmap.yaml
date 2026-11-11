@@ -238,6 +238,12 @@ data:
   {{- end }}
   {{- end }}
 
+  # --- Recommendation sources (Source SDK) ---
+  {{- with .Values.sources }}
+  SOURCES_PLUGINS_ENABLED: {{ if hasKey . "pluginsEnabled" }}{{ .pluginsEnabled | toString | quote }}{{ else }}"true"{{ end }}
+  SOURCES_CONFIG: {{ .settings | default dict | toJson | quote }}
+  {{- end }}
+
   # --- Impact Model ---
   {{- with .Values.impact }}
   {{- with .pricing }}

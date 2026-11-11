@@ -6,17 +6,22 @@ controller's scheduled ``recommendation_scan`` job (see
 :mod:`greenkube.core.optimization.scan_service`) is the only production caller
 that persists; API requests only enqueue runs.
 
-Every source runs in isolation (E8): a source that raises, times out, is
-unavailable or reports an incomplete result never blocks persistence of the
-others and never marks its previous recommendations stale.
+Sources are Source SDK sources (:mod:`greenkube.signals`, roadmap E5): one per
+native analyzer, VPA, the NodePool heuristic and third-party plugins. v1
+``RecommendationSource`` connectors passed by callers are wrapped by the SDK
+adapter. Every source runs in isolation (E8) through the
+:class:`~greenkube.signals.runtime.SourceRunner`: a source that raises, times
+out, is unavailable, rate limited, circuit-broken or reports an incomplete
+result never blocks persistence of the others and never marks its previous
+recommendations stale. Each source's run and signals are recorded in
+``source_runs``/``source_signals`` when a signal repository is configured.
 """
 
 import asyncio
 import logging
-import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
 
 from greenkube.core.optimization.actions import build_action_plans
 from greenkube.core.optimization.context import OptimizationContext
@@ -25,7 +30,7 @@ from greenkube.core.optimization.dedup import finalize_recommendations
 from greenkube.core.optimization.enrich import enrich_recommendations, rescore_with_track_record
 from greenkube.core.optimization.evidence import build_patch
 from greenkube.core.optimization.providers.base import RecommendationSource
-from greenkube.core.optimization.registry import build_sources, parse_source_priority
+from greenkube.core.optimization.registry import build_signal_sources, cluster_uid, parse_source_priority
 from greenkube.core.recommendation_reconciliation import RecommendationDiff, compute_diff
 from greenkube.models.metrics import Recommendation, RecommendationPatchV2, RecommendationRecord, RecommendationType
 from greenkube.models.optimization_run import (
@@ -36,11 +41,15 @@ from greenkube.models.optimization_run import (
     SourceRunOutcome,
     SourceRunStatus,
 )
+from greenkube.signals.adapters import adapt_recommendation_source, observed_window, workload_inventory
+from greenkube.signals.runtime import SourceReport, SourceRunner, SourceRunRecord, legacy_outcomes
+from greenkube.signals.sdk import CollectContext, Source, SourceDeps
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
     from greenkube.storage.base_optimization_run_repository import OptimizationRunRepository
     from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
+    from greenkube.storage.base_signal_repository import SignalRepository
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +65,8 @@ class GenerationResult:
 
     recommendations: List[Recommendation]
     source_outcomes: List[SourceRunOutcome] = field(default_factory=list)
+    #: Per-source run records and signals (Source SDK granularity).
+    source_reports: List[SourceReport] = field(default_factory=list)
 
     @property
     def incomplete_sources(self) -> FrozenSet[str]:
@@ -82,6 +93,7 @@ class ScanResult:
     diff: Optional[RecommendationDiff] = None
     run: Optional[OptimizationRun] = None
     error: Optional[str] = None
+    source_reports: List[SourceReport] = field(default_factory=list)
 
 
 class OptimizationEngine:
@@ -90,21 +102,33 @@ class OptimizationEngine:
     def __init__(
         self,
         config: Optional["Config"] = None,
-        sources: Optional[Sequence[RecommendationSource]] = None,
+        sources: Optional[Sequence[Union[Source, RecommendationSource]]] = None,
         run_repository: Optional["OptimizationRunRepository"] = None,
         *,
         probe_timeout_seconds: float = SOURCE_PROBE_TIMEOUT_SECONDS,
         collect_timeout_seconds: float = SOURCE_COLLECT_TIMEOUT_SECONDS,
+        signal_repository: Optional["SignalRepository"] = None,
     ):
         from greenkube.core.config import get_config
 
         self.config = config if config is not None else get_config()
+        self.cluster_uid = cluster_uid(self.config)
+        deps = SourceDeps(config=self.config, cluster_uid=self.cluster_uid)
         if sources is None:
-            sources = build_sources(self.config)
-        self.sources: List[RecommendationSource] = list(sources)
+            sources = build_signal_sources(self.config)
+        # v1 connectors keep working: the SDK adapter wraps them.
+        self.sources: List[Source] = [
+            source if isinstance(source, Source) else adapt_recommendation_source(source, deps) for source in sources
+        ]
         self.run_repository = run_repository
+        self.signal_repository = signal_repository
         self.probe_timeout_seconds = probe_timeout_seconds
         self.collect_timeout_seconds = collect_timeout_seconds
+        self.runner = SourceRunner(
+            probe_timeout_cap=probe_timeout_seconds,
+            collect_timeout_cap=collect_timeout_seconds,
+            on_failure=self._record_source_failure,
+        )
         # Compatibility view of the last ``generate`` call; scans use the
         # returned ``GenerationResult`` instead of shared instance state.
         self.failed_sources: List[str] = []
@@ -117,58 +141,61 @@ class OptimizationEngine:
         self.source_outcomes = result.source_outcomes
         return result.recommendations
 
+    @property
+    def source_group_count(self) -> int:
+        """Number of v1 sources (native analyzers count as one: ``greenkube``)."""
+        return len({type(source).legacy_source or source.source_id for source in self.sources})
+
+    def collect_context(self, context: OptimizationContext) -> CollectContext:
+        """What every source receives for this scan."""
+        # The inventory walks the usage snapshot: build it only for sources
+        # that do not already read the optimization context (plugins).
+        needs_inventory = any(type(source).legacy_source is None for source in self.sources)
+        return CollectContext(
+            cluster_uid=self.cluster_uid,
+            namespace=context.namespace,
+            window=observed_window(context),
+            deadline=datetime.now(timezone.utc) + timedelta(seconds=self.collect_timeout_seconds),
+            inventory=workload_inventory(context, self.cluster_uid)
+            if needs_inventory
+            else workload_inventory(None, ""),
+            optimization=context,
+        )
+
     async def collect(self, context: OptimizationContext) -> GenerationResult:
         """Runs every source in isolation and finalizes the combined output."""
-        recs: List[Recommendation] = []
-        outcomes: List[SourceRunOutcome] = []
-        for source in self.sources:
-            source_recs, outcome = await self._run_source(source, context)
-            recs.extend(source_recs)
-            outcomes.append(outcome)
+        previous = await self._previous_source_runs()
+        reports = await self.runner.run_all(self.sources, self.collect_context(context), previous)
+        recs: List[Recommendation] = [rec for report in reports for rec in report.recommendations]
         finalized = finalize_recommendations(recs, self.config)
-        return GenerationResult(enrich_recommendations(finalized, context, self.config), outcomes)
+        return GenerationResult(
+            enrich_recommendations(finalized, context, self.config),
+            legacy_outcomes(reports),
+            reports,
+        )
 
-    async def _run_source(
-        self, source: RecommendationSource, context: OptimizationContext
-    ) -> Tuple[List[Recommendation], SourceRunOutcome]:
-        source_name = str(getattr(source, "name", None) or repr(source))
-        started = time.monotonic()
-
-        def outcome(status: SourceRunStatus, count: int = 0, error: Optional[str] = None) -> SourceRunOutcome:
-            return SourceRunOutcome(
-                source=source_name,
-                status=status,
-                complete=status == SourceRunStatus.SUCCEEDED,
-                recommendation_count=count,
-                duration_seconds=round(max(time.monotonic() - started, 0.0), 3),
-                error=error,
-            )
-
+    async def _previous_source_runs(self) -> Dict[str, SourceRunRecord]:
+        """Each source's last persisted run (circuit breaker and rate limit across scans and restarts)."""
+        if self.signal_repository is None:
+            return {}
         try:
-            available = await asyncio.wait_for(source.is_available(), timeout=self.probe_timeout_seconds)
-            if not available:
-                logger.debug("Recommendation source '%s' is not available; skipping.", source_name)
-                return [], outcome(SourceRunStatus.UNAVAILABLE)
-            _reset_completeness(source)
-            collected = list(await asyncio.wait_for(source.collect(context), timeout=self.collect_timeout_seconds))
-        except asyncio.CancelledError:
-            raise
-        except TimeoutError:
-            logger.error("Recommendation source '%s' timed out; continuing without it.", source_name)
-            self._record_source_failure(source_name)
-            return [], outcome(SourceRunStatus.FAILED, error="timeout")
+            summaries = await self.signal_repository.latest_runs()
         except Exception as exc:
-            logger.exception("Recommendation source '%s' failed; continuing without it.", source_name)
-            self._record_source_failure(source_name)
-            return [], outcome(SourceRunStatus.FAILED, error=type(exc).__name__)
+            logger.warning("Could not read previous source runs (%s); using in-process state.", type(exc).__name__)
+            return {}
+        return {source_id: summary.latest for source_id, summary in summaries.items()}
 
-        # Seam for connectors that degrade gracefully (return a partial list
-        # instead of raising): they set ``last_collect_complete = False`` during
-        # ``collect()``. The engine resets the flag before every call.
-        if getattr(source, "last_collect_complete", True) is False:
-            logger.warning("Recommendation source '%s' returned an incomplete result.", source_name)
-            return collected, outcome(SourceRunStatus.INCOMPLETE, len(collected), "incomplete result")
-        return collected, outcome(SourceRunStatus.SUCCEEDED, len(collected))
+    async def record_source_runs(self, reports: List[SourceReport], run: Optional[OptimizationRun]) -> None:
+        """Persist each source's run and signals; a storage error never fails the scan."""
+        if self.signal_repository is None:
+            return
+        run_id = run.id if run is not None else None
+        for report in reports:
+            record = report.run.model_copy(update={"optimization_run_id": run_id})
+            try:
+                report.run = await self.signal_repository.record_run(record, report.signals)
+            except Exception as exc:
+                logger.warning("Could not record the run of source '%s' (%s).", report.source_id, type(exc).__name__)
 
     @staticmethod
     def _record_source_failure(source_name: str) -> None:
@@ -219,6 +246,7 @@ class OptimizationEngine:
         timer = start_timer()
         run = await self._start_run(run, namespace)
         outcomes: List[SourceRunOutcome] = []
+        reports: List[SourceReport] = []
         try:
             context = await self.build_context(combined_repo, node_repo, namespace=namespace)
             from greenkube.core.observability import record_recommendation_scan_resources
@@ -230,6 +258,8 @@ class OptimizationEngine:
             )
             generation = await self.collect(context)
             outcomes = generation.source_outcomes
+            reports = generation.source_reports
+            await self.record_source_runs(reports, run)
             # Scans score with priors; fold in each source's measured track record (I3).
             scored = await rescore_with_track_record(generation.recommendations, reco_repo, self.config)
             diff, persisted = await self._persist(
@@ -272,6 +302,7 @@ class OptimizationEngine:
             diff=diff,
             run=run,
             error=error,
+            source_reports=reports,
         )
 
     async def _start_run(self, run: Optional[OptimizationRun], namespace: Optional[str]) -> Optional[OptimizationRun]:
@@ -285,7 +316,7 @@ class OptimizationEngine:
                 requested_at=now,
                 started_at=now,
                 namespace=namespace,
-                analyzer_count=len(self.sources),
+                analyzer_count=self.source_group_count,
             )
         )
 
@@ -303,12 +334,12 @@ class OptimizationEngine:
             return run
         failed_count = sum(1 for o in outcomes if o.status in (SourceRunStatus.FAILED, SourceRunStatus.INCOMPLETE))
         if status == OptimizationRunStatus.FAILED and not outcomes:
-            failed_count = len(self.sources)
+            failed_count = self.source_group_count
         completion = OptimizationRunCompletion(
             status=status,
             completed_at=datetime.now(timezone.utc),
             recommendation_count=len(recommendations),
-            analyzer_count=len(self.sources),
+            analyzer_count=self.source_group_count,
             failed_analyzer_count=failed_count,
             new_count=len(diff.new) if diff is not None else None,
             changed_count=len(diff.changed) if diff is not None else None,
@@ -487,19 +518,6 @@ class OptimizationEngine:
             recommendation.action = plan
             patch = build_patch(recommendation, plan)
             recommendation.patch = RecommendationPatchV2.model_validate(patch) if patch is not None else None
-
-
-def _reset_completeness(source: RecommendationSource) -> None:
-    """Clear a connector's partial-result flag before each ``collect()`` call.
-
-    The flag describes one call; without the reset a single partial result
-    would keep the source "incomplete" (and its recommendations un-reconciled)
-    forever. Sources whose flag is read-only are left as they are.
-    """
-    try:
-        setattr(source, "last_collect_complete", True)
-    except (AttributeError, TypeError):
-        pass
 
 
 def _run_status(outcomes: List[SourceRunOutcome]) -> OptimizationRunStatus:

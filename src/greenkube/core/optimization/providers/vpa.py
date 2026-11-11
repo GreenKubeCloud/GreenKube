@@ -8,7 +8,7 @@ for the same workload so VPA advice is never duplicated or contradicted.
 """
 
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional, Protocol, Tuple
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, FrozenSet, List, Optional, Protocol, Tuple
 
 from greenkube.collectors.vpa_collector import VPACollector, VPARecommendation
 from greenkube.core.optimization.providers.base import RecommendationSource
@@ -16,6 +16,9 @@ from greenkube.core.optimization.statistics import latest_request_value, resourc
 from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
 from greenkube.models.metrics import RecommendationSource as Source
+from greenkube.signals.adapters import RecommendationSourceAdapter
+from greenkube.signals.model import Capability
+from greenkube.signals.sdk import SourceDeps, SourceTier
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -208,3 +211,28 @@ class VpaSource(RecommendationSource):
                     )
 
         return recs
+
+
+class VpaSignalSource(RecommendationSourceAdapter):
+    """VPA recommendation-mode targets as a Source SDK source (roadmap E5)."""
+
+    id: ClassVar[str] = "vpa"
+    display_name: ClassVar[str] = "Vertical Pod Autoscaler"
+    tier: ClassVar[SourceTier] = SourceTier.OSS
+    capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.CONTAINER_REQUESTS})
+    legacy_source: ClassVar[Optional[str]] = Source.VPA.value
+    algorithm_name: ClassVar[Optional[str]] = "vpa-recommender"
+    description: ClassVar[str] = "Container request targets of VPAs in recommendation mode (updateMode: Off)."
+
+    def build_connector(self, deps: SourceDeps) -> RecommendationSource:
+        return VpaSource(deps.config)
+
+    def raw_payload(self, rec: Recommendation) -> Optional[Dict[str, Any]]:
+        return {
+            "vpa": rec.source_ref,
+            "container": rec.container_name,
+            "target": {
+                "cpu_millicores": rec.recommended_cpu_request_millicores,
+                "memory_bytes": rec.recommended_memory_request_bytes,
+            },
+        }

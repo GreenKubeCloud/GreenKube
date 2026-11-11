@@ -331,6 +331,13 @@ class Config(BaseSettings):
     RECOMMENDATION_KARPENTER_ENABLED: bool = True
     # Source precedence for capability arbitration, highest priority first.
     RECOMMENDATION_SOURCE_PRIORITY: str = "vpa,karpenter,greenkube"
+    # Source SDK (roadmap E5, docs/sources.md). Load third-party sources
+    # registered under the `greenkube.sources` Python entry points.
+    SOURCES_PLUGINS_ENABLED: bool = True
+    # Per-source settings as a JSON object keyed by source id, e.g.
+    # {"vpa": {"enabled": "auto"}, "greenkube.carbon_aware": {"enabled": false}}.
+    # "enabled" is true, false or auto and overrides the RECOMMENDATION_*_ENABLED flags.
+    SOURCES_CONFIG: str = ""
 
     # --- Recommendation ranking & review ---
     # Time-to-live of a recommendation before it is considered expired.
@@ -560,6 +567,17 @@ class Config(BaseSettings):
         if value < 10_000:
             raise ValueError("RECOMMENDATION_MAX_METRIC_ROWS must be at least 10000")
         return value
+
+    @field_validator("SOURCES_CONFIG", mode="after")
+    @classmethod
+    def _validate_sources_config(cls, value: str) -> str:
+        from greenkube.signals.registry import parse_sources_config
+
+        try:
+            parse_sources_config(value.strip())
+        except ValueError as exc:
+            raise ValueError(f"SOURCES_CONFIG must be a JSON object keyed by source id: {exc}") from exc
+        return value.strip()
 
     @field_validator("RECOMMENDATION_SCAN_INTERVAL", mode="before")
     @classmethod

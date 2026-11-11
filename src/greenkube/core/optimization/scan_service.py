@@ -15,7 +15,8 @@ The controller runs :meth:`RecommendationScanService.tick` every
 The controller does not poll before its initial collection finished; it then
 runs one forced tick (``tick(force=True)``) so the first scan always sees the
 freshly collected data. Terminal runs older than :data:`RUN_RETENTION` are
-pruned whenever a cluster-wide run is queued.
+pruned whenever a cluster-wide run is queued, together with the source runs
+and source signals (roadmap E5) not seen for :data:`SOURCE_HISTORY_RETENTION`.
 
 API processes never scan: they only enqueue. Two API replicas plus one
 controller therefore produce exactly one scan per interval.
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from greenkube.core.optimization.engine import OptimizationEngine
     from greenkube.storage.base_optimization_run_repository import OptimizationRunRepository
     from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
+    from greenkube.storage.base_signal_repository import SignalRepository
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,8 @@ ABANDONED_RUN_AFTER = timedelta(minutes=30)
 MAX_RUNS_PER_TICK = 3
 #: Succeeded and failed runs older than this are deleted.
 RUN_RETENTION = timedelta(days=30)
+#: Source runs started, and source signals last seen, before this are deleted.
+SOURCE_HISTORY_RETENTION = timedelta(days=30)
 
 
 def _utcnow() -> datetime:
@@ -81,6 +85,8 @@ class RecommendationScanService:
         max_runs_per_tick: int = MAX_RUNS_PER_TICK,
         should_continue: Optional[Callable[[], bool]] = None,
         run_retention: timedelta = RUN_RETENTION,
+        signal_repository: Optional["SignalRepository"] = None,
+        source_history_retention: timedelta = SOURCE_HISTORY_RETENTION,
     ) -> None:
         if interval <= timedelta(0):
             raise ValueError("The recommendation scan interval must be positive.")
@@ -96,6 +102,8 @@ class RecommendationScanService:
         self.max_runs_per_tick = max(1, int(max_runs_per_tick))
         self.should_continue = should_continue
         self.run_retention = run_retention
+        self.signal_repository = signal_repository
+        self.source_history_retention = source_history_retention
 
     async def tick(self, *, force: bool = False) -> List[OptimizationRun]:
         """Run one scheduling cycle and return the runs executed by this process.
@@ -153,6 +161,15 @@ class RecommendationScanService:
             return
         if pruned:
             logger.info("Pruned %d optimization run(s) older than %s.", pruned, self.run_retention)
+        if self.signal_repository is None:
+            return
+        try:
+            pruned_sources = await self.signal_repository.prune(now - self.source_history_retention)
+        except Exception as exc:
+            logger.warning("Could not prune old source runs and signals (%s).", type(exc).__name__)
+            return
+        if pruned_sources:
+            logger.info("Pruned %d source run and signal row(s).", pruned_sources)
 
     async def _execute(self, run: OptimizationRun) -> OptimizationRun:
         from greenkube.core.optimization.context_builder import RecommendationScanLimitError
@@ -197,8 +214,9 @@ class RecommendationScanService:
 
 def _default_engine(run_repository: "OptimizationRunRepository") -> "OptimizationEngine":
     from greenkube.core.optimization.engine import OptimizationEngine
+    from greenkube.storage.base_signal_repository import create_signal_repository
 
-    return OptimizationEngine(run_repository=run_repository)
+    return OptimizationEngine(run_repository=run_repository, signal_repository=create_signal_repository())
 
 
 def create_recommendation_scan_service(
@@ -214,6 +232,7 @@ def create_recommendation_scan_service(
         get_recommendation_repository,
     )
     from greenkube.core.leader_election import process_identity
+    from greenkube.storage.base_signal_repository import create_signal_repository
 
     cfg = get_config()
     return RecommendationScanService(
@@ -224,4 +243,5 @@ def create_recommendation_scan_service(
         interval=cfg.recommendation_scan_interval,
         identity=identity or process_identity(),
         should_continue=should_continue,
+        signal_repository=create_signal_repository(),
     )
