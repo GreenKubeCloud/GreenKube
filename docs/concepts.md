@@ -199,9 +199,9 @@ The ledger accrues savings once per UTC hour slot and recommendation, with their
 
 | Process | Responsibilities |
 |---|---|
-| **Controller** (`greenkube start`) | Collection; carbon intensity; compression; GitOps discovery; sync observation; apply detection; verification; savings attribution. Uses leader election in production. |
-| **API** (`greenkube-api`) | REST API and dashboard; recommendation scans; plan creation and approval; webhooks. In standalone mode it also runs the automation worker inline. |
-| **Automation worker** (optional, production) | Executes approved plans, polls pull requests, cleans up branches |
+| **Controller** (`greenkube start`) | Every periodic loop: collection; carbon intensity; compression; recommendation scans; GitOps discovery; sync observation; apply detection; verification; savings attribution; plan execution; the automation controller loop (webhook outbox, PR polling, branch cleanup, plan expiry, retention). Uses leader election in production. |
+| **API** (`greenkube-api`) | Stateless: REST API and dashboard; plan preview and approval; webhook ingress. Runs no background loop, so it scales horizontally. |
+| **Automation worker** (optional) | Executes approved plan operations only, as extra capacity next to the controller |
 | **Renderer sandbox** | Renders Kustomize and Helm snapshots with no access to the database, provider tokens or service-account token |
 
 See [Architecture](architecture.md) for the detailed data flow.

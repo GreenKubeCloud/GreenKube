@@ -18,7 +18,7 @@ kubectl exec -it <pod-name> -n greenkube -- bash
 
 ### `greenkube start`
 
-Start the collector service: connects to the database, runs schema migrations, performs an initial collection, then schedules data collection, compression, dashboard summary refresh, the recommendation lifecycle job, and (when automation is enabled) the inline worker loop and discovery runtime.
+Start the controller: connects to the database, runs schema migrations, performs an initial collection, then runs every periodic loop in its loop registry: collection, compression, dashboard summary refresh, recommendation scans and lifecycle, GitOps discovery and sync and, when Git providers are configured, the automation controller loop and (when automation is enabled) plan execution. See [Process topology](architecture.md#process-topology).
 
 ```
 greenkube start [OPTIONS]
@@ -81,7 +81,7 @@ The production profile starts the plan worker as:
 python -m greenkube.cli.automation_worker
 ```
 
-It should run as a single replica (the chart still passes the deprecated, hidden `--queue plans` flag; `plans` is its only accepted value). The worker claims queued pull-request operations through database leases, polls linked provider pull requests, and exposes its authenticated control-loop metrics on `GREENKUBE_WORKER_METRICS_PORT` (Helm: `automation.workerMetricsPort`, default `8001`). Do not run it manually alongside `automation.mode=inline`; use the Helm chart so the mode and credentials are configured consistently.
+The worker is an optional extra plan executor: it claims queued plan operations through database leases and executes them, nothing else (the webhook outbox, PR polling, branch cleanup, plan expiry and retention run in the controller). Operation leases make several replicas safe. The chart still passes the deprecated, hidden `--queue plans` flag; `plans` is its only accepted value. The worker exposes its authenticated control-loop metrics on `GREENKUBE_WORKER_METRICS_PORT` (Helm: `automation.workerMetricsPort`, default `8001`). Use the Helm chart so the mode and credentials are configured consistently.
 
 ## Global flags
 

@@ -26,7 +26,7 @@ The chart has two profiles:
 
 | Profile | Workloads | Use it for |
 |---|---|---|
-| `standalone` (default) | Collector and API in one Deployment. Automation runs inline when enabled. | Evaluations, small clusters, local installations. |
+| `standalone` (default) | Controller and API in one Deployment. Automation runs in the controller container when enabled. | Evaluations, small clusters, local installations. |
 | `production` | Separate API, controller, and (when automation is enabled) automation worker Deployments. The controller uses a Kubernetes Lease for leader election; database migrations run as a Helm hook Job. | Production clusters and any installation that needs component isolation or horizontal API scaling. |
 
 The default chart values use `profile: standalone`, `config.environment: production`, `config.apiAuthMode: session` (sign in with an account; an initial admin password is generated), and a generated bootstrap API key for machines. GitOps automation is disabled until you explicitly enable it.
@@ -268,7 +268,7 @@ Replace `<64-hex-digest>` with the digest reported by your registry or CI. The r
 | `monitoring.prometheusRule.enabled` | `false` | Create alerts for stuck automation operations, sync failures, and stale workers. |
 | `monitoring.networkPolicy.enabled` | `false` | Restrict component ingress/egress. |
 | `automation.enabled` | `false` | Enable GitOps discovery, planning, pull requests, and apply tracking. |
-| `automation.mode` | profile-dependent | `inline` for standalone, `worker` for production. |
+| `automation.mode` | profile-dependent | `inline` for standalone (the controller executes plan operations), `worker` for production (dedicated worker pods execute them as well). The API never runs a worker. |
 | `automation.providers` | `[]` | Git provider definitions with Secret references and repository allowlists. |
 | `rendererSandbox.enabled` | `true` | Run Helm/Kustomize rendering in an isolated Pod. Required for automation-backed rendering in production. |
 
@@ -365,10 +365,10 @@ Install with `production-values.yaml` and, when you are ready, enable automation
 
 Production mode differences:
 
-- The API and controller run separately; enabling automation adds a dedicated worker Deployment.
-- The API can be scaled horizontally; the controller uses the `<release>-leader` Lease so only one controller runs collection, discovery, and sync observation.
+- The API and controller run separately; enabling automation adds a dedicated worker Deployment (extra plan executors).
+- The API is stateless and runs no background loop, so it can be scaled horizontally. The controller uses the `<release>-leader` Lease, so only one controller runs the loops: collection, scans, discovery, sync observation, plan execution and the automation controller loop.
 - Migrations run as a post-install/post-upgrade Job before the API is considered ready.
-- The automation worker is a single replica. It claims queued operations through database leases, so do not scale it manually.
+- The automation worker only executes plan operations. It claims them through database leases, so `production.components.automation.replicas` can be raised for large installations.
 - Production never serves anonymous requests: without a session or a valid API key the API answers `401`, and `503` when no authentication can be configured (for example the account store is unavailable and no bootstrap key is set).
 
 ### Production API-key handling

@@ -1,6 +1,6 @@
 # Observability and SLOs
 
-GreenKube exposes dashboard metrics and control-loop telemetry at `/prometheus/metrics`. The API endpoint is authenticated when `GREENKUBE_API_KEY` is configured and is scraped by the chart `ServiceMonitor`. In production worker mode, a separate ClusterIP Service and ServiceMonitor scrape the automation worker's own process-local control-loop registry; configure `secrets.apiKey` or `secrets.existingSecret` for bearer authentication. Control-loop metrics use bounded labels only; workload names and namespaces remain in the existing dashboard gauges.
+GreenKube exposes dashboard metrics and control-loop telemetry at `/prometheus/metrics`. The API endpoint is authenticated when `GREENKUBE_API_KEY` is configured and is scraped by the chart `ServiceMonitor`. In production worker mode, a separate ClusterIP Service and ServiceMonitor scrape the dedicated plan executors' own process-local control-loop registry; configure `secrets.apiKey` or `secrets.existingSecret` for bearer authentication. Every periodic job runs in the controller (see [Process topology](architecture.md#process-topology)), so the telemetry of the loops, of the automation loop (webhook outbox, PR polling, plan expiry) and of controller plan execution comes from the controller listener. Control-loop metrics use bounded labels only; workload names and namespaces remain in the existing dashboard gauges.
 
 Recommendation scans and verification run in the controller, so `greenkube_optimization_*`, `greenkube_recommendations_generated_total`, `greenkube_last_successful_optimization_run_timestamp_seconds` and `greenkube_verification_*` come from the controller's own listener (port `9102`, Service `<release>-controller-metrics`, scraped by the controller ServiceMonitor), not from the API. Every controller replica is scraped and only the Lease holder scans, so the queries below aggregate with `sum()` (counters) and `max()` (timestamps).
 
@@ -21,6 +21,8 @@ The targets below are example operational objectives, not service guarantees or 
 | Queue age at claim p95 | < 5 minutes | `histogram_quantile(0.95, sum by (le) (rate(greenkube_automation_queue_age_seconds_bucket[15m])))` |
 | Webhook ingress-to-response p95 | < 5 seconds | `histogram_quantile(0.95, sum by (le) (rate(greenkube_webhook_delivery_lag_seconds_bucket[15m])))` |
 | API availability | >= 99.9% | ingress/service HTTP metrics |
+| Controller loops healthy | every loop succeeded within 3 intervals | `time() - max by (loop) (greenkube_loop_last_success_timestamp_seconds)` against each loop's interval |
+| Exactly one active controller | 1 | `sum(greenkube_controller_leader)` |
 
 ## Alerting examples
 
@@ -75,6 +77,26 @@ groups:
     labels: { severity: warning }
     annotations:
       summary: "GitOps binding discovery has not completed successfully"
+  - alert: GreenKubeControllerLoopFailing
+    # A loop failed or timed out on its last three ticks (any loop, any replica).
+    expr: max by (loop) (greenkube_loop_consecutive_failures) >= 3
+    for: 10m
+    labels: { severity: warning }
+    annotations:
+      summary: "Controller loop {{ $labels.loop }} keeps failing; see /loops on the controller metrics port"
+  - alert: GreenKubeAutomationLoopStale
+    # The automation controller ticks every 5 s on the Lease holder.
+    expr: time() - max(greenkube_loop_last_success_timestamp_seconds{loop="automation-controller"}) > 600
+    for: 5m
+    labels: { severity: warning }
+    annotations:
+      summary: "Plan expiry, webhook outbox and PR polling have not completed for 10 minutes"
+  - alert: GreenKubeNoActiveController
+    expr: sum(greenkube_controller_leader) < 1
+    for: 5m
+    labels: { severity: critical }
+    annotations:
+      summary: "No controller replica holds the Lease: collection, scans and automation are stopped"
   - alert: GreenKubeGitOpsSyncTimeout
     expr: increase(greenkube_gitops_sync_timeouts_total[15m]) > 0
     for: 5m
@@ -82,6 +104,28 @@ groups:
     annotations:
       summary: "A merged GreenKube plan exceeded its GitOps sync timeout"
 ```
+
+## Controller loops
+
+Every periodic job of the controller is a registered loop (`src/greenkube/core/loops.py`, roadmap M8). The registry records, per loop:
+
+| Metric | Meaning |
+| --- | --- |
+| `greenkube_loop_runs_total{loop,outcome}` | Ticks by outcome: `success`, `failure` (the job raised or reported a failure), `timeout` (the tick exceeded the loop timeout), `skipped` (leader-only loop on a standby replica). |
+| `greenkube_loop_duration_seconds{loop}` | Duration of executed ticks (histogram). |
+| `greenkube_loop_last_success_timestamp_seconds{loop}` | Unix time of the last successful tick. |
+| `greenkube_loop_consecutive_failures{loop}` | Failed or timed-out ticks since the last success. |
+| `greenkube_controller_leader` | `1` on the replica that runs leader-only loops (the Lease holder, or any controller without leader election). |
+
+`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor` and `session-purge`.
+
+The same listener serves three more endpoints:
+
+- `/healthz`: liveness.
+- `/readyz`: `503` when a loop task died or a loop heartbeat is older than its staleness bound (interval × maximum backoff + timeout + 60 s).
+- `/loops`: a JSON snapshot with each loop's state (`idle`, `running`, `standby`, `backoff`, `crashed`), last success, last duration, consecutive failures and last error code. It requires the API key when the controller has one.
+
+Standby replicas report their leader-only loops as `standby`, which counts as healthy.
 
 ## Collection telemetry
 
