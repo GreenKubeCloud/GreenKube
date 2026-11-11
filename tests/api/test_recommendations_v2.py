@@ -127,6 +127,25 @@ class TestListV2:
     def test_unknown_status_is_rejected(self, client):
         assert client.get("/api/v2/recommendations", params={"status": "maybe"}).status_code == 422
 
+    def test_provenance_source_ids_are_listed_and_filterable(self, client, mock_reco_repo):
+        """Goldilocks votes under the VPA reconciliation unit; its id still reaches the UI badges (G1)."""
+        consensus = {**CONSENSUS, "source_ids": ["goldilocks", "vpa", "krr"]}
+        legacy = _record(id=15, consensus=None, sources=["greenkube"], source="greenkube")
+        mock_reco_repo.get_active_recommendations = AsyncMock(
+            return_value=[_record(consensus=consensus, sources=["vpa", "krr"]), legacy]
+        )
+        mock_reco_repo.get_queued_revisions = AsyncMock(return_value={})
+
+        items = client.get("/api/v2/recommendations").json()["items"]
+        by_id = {item["id"]: item for item in items}
+        assert by_id[12]["source_ids"] == ["goldilocks", "vpa", "krr"]
+        assert by_id[12]["sources"] == ["vpa", "krr"]
+        # A record without a consensus falls back to its reconciliation units.
+        assert by_id[15]["source_ids"] == ["greenkube"]
+
+        filtered = client.get("/api/v2/recommendations", params={"source": "goldilocks"}).json()["items"]
+        assert [item["id"] for item in filtered] == [12]
+
 
 class TestDetailV2:
     def test_detail_carries_the_revision_history(self, client, mock_reco_repo):
