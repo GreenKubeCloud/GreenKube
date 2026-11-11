@@ -16,7 +16,16 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.error import YAMLError
 
-from greenkube.automation.actions import ACTION_KINDS, ActionKindError, ActionKindSpec, PrimitiveApplyError
+from greenkube.automation.actions import (
+    ACTION_KINDS,
+    ActionKindError,
+    ActionKindSpec,
+    PrimitiveApplyError,
+    PrimitiveOp,
+    RemoveField,
+    SetField,
+    Support,
+)
 from greenkube.automation.actions.container_resources import (
     container_operations,
     find_container,
@@ -108,13 +117,12 @@ class RawManifestPlanner:
 
     renderer_kind = RendererKind.RAW
 
-    def supports(self, op: Any, binding: WorkloadSource) -> Any:
-        """Raw manifests express every field edit of an existing, bound resource."""
-        from greenkube.automation.actions import CreateResource, DeleteResource, Support
-
-        del binding
-        if isinstance(op, (CreateResource, DeleteResource)):
-            return Support.unsupported("raw manifest planning edits existing resources only")
+    def supports(self, op: PrimitiveOp, binding: WorkloadSource) -> Support:
+        """Raw manifests express every field edit of the bound resource (H6/H3 add create and delete)."""
+        if not isinstance(op, (SetField, RemoveField)):
+            return Support.unsupported(f"raw manifest planning does not support {op.op!r} primitives yet")
+        if op.ref != _binding_target(op.ref, binding):
+            return Support.unsupported("raw manifest planning edits the bound resource only")
         return Support.supported()
 
     def plan(
@@ -238,7 +246,17 @@ class RawManifestPlanner:
             or action.target.name != source.workload_name
         ):
             raise RawManifestPlanError("action target must match the resolved workload binding")
-        return _action_kind(action, RawManifestPlanError)
+        spec, operations = _action_kind(action, RawManifestPlanError)
+        try:
+            primitives = spec.compile(action.target, operations)
+        except ActionKindError as exc:
+            raise RawManifestPlanError(str(exc)) from exc
+        planner = RawManifestPlanner()
+        for primitive in primitives:
+            support = planner.supports(primitive, source)
+            if not support.ok:
+                raise RawManifestPlanError(support.reason or "the action cannot be expressed in a raw manifest")
+        return spec, operations
 
 
 def plan_raw_manifest(
@@ -433,6 +451,16 @@ def _matches_target(manifest: Mapping[str, Any], target: ResourceTarget) -> bool
             namespace == target.namespace
             or (namespace == "" and target.namespace != "" and target.kind in POD_SPEC_PATHS)
         )
+    )
+
+
+def _binding_target(ref: ResourceTarget, binding: WorkloadSource) -> ResourceTarget:
+    """The bound workload's identity, with the API version of ``ref`` (bindings carry no version)."""
+    return ResourceTarget(
+        api_version=ref.api_version,
+        kind=binding.workload_kind,
+        namespace=binding.namespace,
+        name=binding.workload_name,
     )
 
 

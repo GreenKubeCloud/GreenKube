@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 import pytest
 from pydantic import ValidationError
@@ -11,6 +12,8 @@ from pydantic import ValidationError
 from greenkube.automation.actions import (
     ACTION_KINDS,
     CONTAINER_RESOURCES,
+    ActionKindSpec,
+    CreateResource,
     UnknownActionKindError,
     action_kind_of,
     operation_subjects,
@@ -23,7 +26,9 @@ from greenkube.gitops.contracts import (
     DeleteResource,
     Plan,
     PlanStatus,
+    ResourceTarget,
     SetContainerResources,
+    TypedOperation,
 )
 from greenkube.gitops.planning.kustomize import KustomizePlanError, KustomizePlanner
 from greenkube.gitops.planning.raw_manifest import RawManifestPlanError
@@ -215,3 +220,37 @@ def test_rollback_explains_that_a_kind_without_an_inverse_cannot_be_rolled_back(
         updated = {path: forward.files[0].content or "" for path in files}
         with pytest.raises(UnsupportedRollbackError, match="baseline-derived inverse"):
             build_inverse_plan(plan, files, updated, "b" * 40)
+
+
+class _CreateHpa(TypedOperation):
+    op: Literal["test_create_hpa"] = "test_create_hpa"
+
+
+class _CreateHpaSpec(ActionKindSpec):
+    kind: ClassVar[str] = "test_create_hpa"
+    operation_model: ClassVar[type[TypedOperation]] = _CreateHpa
+    capability: ClassVar[str] = "test"
+
+    def compile(self, target: ResourceTarget, operations: Sequence[TypedOperation]) -> list[Any]:
+        return [
+            CreateResource(
+                manifest={
+                    "apiVersion": "autoscaling/v2",
+                    "kind": "HorizontalPodAutoscaler",
+                    "metadata": {"name": target.name, "namespace": target.namespace},
+                }
+            )
+        ]
+
+
+def test_strategies_refuse_primitives_they_cannot_express_yet(tmp_path: Path) -> None:
+    spec = _CreateHpaSpec()
+    ACTION_KINDS.register(spec)
+    try:
+        action = raw_cases._action(operations=[_CreateHpa()])
+        with pytest.raises(RawManifestPlanError, match="does not support 'create' primitives yet"):
+            raw_cases._plan(action=action)
+        with pytest.raises(KustomizePlanError, match="does not support 'create' primitives yet"):
+            _kustomize_plan(tmp_path, dict(kustomize_cases.BASE_FILES), action)
+    finally:
+        ACTION_KINDS.unregister(spec.kind)

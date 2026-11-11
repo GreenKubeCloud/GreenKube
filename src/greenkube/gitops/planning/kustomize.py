@@ -19,7 +19,7 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
-from greenkube.automation.actions import ACTION_KINDS, ActionKindSpec, Support
+from greenkube.automation.actions import ACTION_KINDS, ActionKindError, ActionKindSpec, Support
 from greenkube.automation.actions.primitives import (
     ListSelector,
     PathSegment,
@@ -391,12 +391,15 @@ def _validate_request(
     ):
         raise KustomizePlanError("action target must match the resolved workload binding")
     spec, operations = _action_kind(action, KustomizePlanError)
-    support = spec.renderer_support(RendererKind.KUSTOMIZE, operations)
-    if support.ok:
-        support = next(
-            (item for item in map(_primitive_support, spec.compile(action.target, operations)) if not item.ok),
-            support,
-        )
+    try:
+        support = spec.renderer_support(RendererKind.KUSTOMIZE, operations)
+        if support.ok:
+            support = next(
+                (item for item in map(_primitive_support, spec.compile(action.target, operations)) if not item.ok),
+                support,
+            )
+    except ActionKindError as exc:
+        raise KustomizePlanError(str(exc)) from exc
     if not support.ok:
         raise KustomizePlanError(support.reason or "the action cannot be expressed as a Kustomize patch")
     _validate_renderer_config(source)
