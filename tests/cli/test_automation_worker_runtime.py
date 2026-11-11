@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
 
@@ -8,6 +9,19 @@ from typer.testing import CliRunner
 from greenkube.automation.plan_runtime import PlanProvidersNotConfiguredError
 from greenkube.automation.plan_worker import PlanWorker
 from greenkube.cli import automation_worker
+from greenkube.storage.automation_capability_repository import SCOPE_GLOBAL, CapabilityRow
+
+
+@pytest.fixture(autouse=True)
+def _delivery_open(monkeypatch, request):
+    """Most tests exercise the queue loop with delivery active; gate tests opt out."""
+    if request.node.name.startswith("test_gate_"):
+        return
+
+    async def allowed() -> bool:
+        return True
+
+    monkeypatch.setattr(automation_worker, "delivery_allowed", allowed)
 
 
 @pytest.mark.asyncio
@@ -226,3 +240,136 @@ def test_worker_metrics_port_is_optional_and_bounded(monkeypatch):
     for value in ("", "0", "65536", "port", " 8001"):
         with pytest.raises(ValueError):
             automation_worker.parse_worker_metrics_port(value)
+
+
+# ------------------------------------------------------------------ delivery gate (F12)
+# Tests named test_gate_* use the real gate (see the _delivery_open fixture).
+
+
+def _capabilities(monkeypatch, rows=(), *, error: Exception | None = None, paused: bool = False) -> datetime:
+    from greenkube.storage import automation_capability_repository as capability_module
+
+    class Repository:
+        def __init__(self, _db):
+            if paused:
+                raise AssertionError("a paused worker does not read the capability table")
+
+        async def list_capabilities(self, scope=None):
+            if error is not None:
+                raise error
+            return list(rows)
+
+    monkeypatch.setattr(capability_module, "AutomationCapabilityRepository", Repository)
+    monkeypatch.setattr("greenkube.core.db.get_db_manager", lambda: object())
+    monkeypatch.setattr("greenkube.core.config.get_config", lambda: SimpleNamespace(automation_delivery_paused=paused))
+    return datetime.now(timezone.utc)
+
+
+def _row(subject: str, state: str, updated_at: datetime | None) -> CapabilityRow:
+    return CapabilityRow(SCOPE_GLOBAL, subject, state, {}, updated_at=updated_at)
+
+
+@pytest.mark.asyncio
+async def test_gate_paused_delivery_claims_nothing_but_keeps_the_heartbeat(monkeypatch):
+    """pauseDelivery must hold operations approved before a change freeze (F12)."""
+    from greenkube.core.observability import AUTOMATION_WORKER_UP
+
+    _capabilities(monkeypatch, paused=True)
+    claims: list[str | None] = []
+    heartbeats = 0
+    sleeps = 0
+
+    async def process_once(*, worker_id=None, plan_worker=None) -> bool:
+        claims.append(worker_id)
+        return True
+
+    def heartbeat() -> None:
+        nonlocal heartbeats
+        heartbeats += 1
+
+    async def fast_sleep(delay):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 3:
+            raise _StopLoop()
+
+    monkeypatch.setattr(automation_worker, "process_once", process_once)
+    monkeypatch.setattr(automation_worker.asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(_StopLoop):
+        await automation_worker._run_worker_loop(
+            poll_seconds=0.1, plan_worker=cast(PlanWorker, object()), heartbeat=heartbeat
+        )
+
+    assert claims == []
+    assert heartbeats == 3
+    assert AUTOMATION_WORKER_UP._value.get() == 0
+
+
+@pytest.mark.asyncio
+async def test_gate_worker_resumes_when_delivery_activates(monkeypatch):
+    states = iter([False, True, True])
+    claims: list[str | None] = []
+
+    async def gate() -> bool:
+        return next(states)
+
+    async def process_once(*, worker_id=None, plan_worker=None) -> bool:
+        claims.append(worker_id)
+        if len(claims) == 2:
+            raise _StopLoop()
+        return True
+
+    async def fast_sleep(delay):
+        return None
+
+    monkeypatch.setattr(automation_worker, "process_once", process_once)
+    monkeypatch.setattr(automation_worker.asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(_StopLoop):
+        await automation_worker._run_worker_loop(
+            poll_seconds=0.1, plan_worker=cast(PlanWorker, object()), delivery_gate=gate
+        )
+
+    assert len(claims) == 2
+
+
+@pytest.mark.asyncio
+async def test_gate_once_mode_returns_without_claiming_when_the_gate_fails(monkeypatch):
+    async def gate() -> bool:
+        raise RuntimeError("unreadable")
+
+    async def process_once(*, worker_id=None, plan_worker=None) -> bool:
+        raise AssertionError("gated workers never claim")
+
+    monkeypatch.setattr(automation_worker, "process_once", process_once)
+
+    await automation_worker._run_worker_loop(once=True, plan_worker=cast(PlanWorker, object()), delivery_gate=gate)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "age_minutes", "expected"),
+    [("active", 1, True), ("dormant", 1, False), ("active", 30, False)],
+)
+async def test_gate_follows_the_fresh_global_delivery_capability(monkeypatch, state, age_minutes, expected):
+    now = datetime.now(timezone.utc)
+    rows = [_row("preview", "active", now), _row("delivery", state, now - timedelta(minutes=age_minutes))]
+    _capabilities(monkeypatch, rows)
+
+    assert await automation_worker.delivery_allowed(now=now) is expected
+
+
+@pytest.mark.asyncio
+async def test_gate_fails_closed(monkeypatch):
+    now = _capabilities(monkeypatch, error=ConnectionError("database is restarting"))
+    assert await automation_worker.delivery_allowed(now=now) is False
+
+    _capabilities(monkeypatch, [])
+    assert await automation_worker.delivery_allowed(now=now) is False
+
+    _capabilities(monkeypatch, [_row("delivery", "active", None)])
+    assert await automation_worker.delivery_allowed(now=now) is False
+
+    _capabilities(monkeypatch, [_row("delivery", "active", now)], paused=True)
+    assert await automation_worker.delivery_allowed(now=now) is False
