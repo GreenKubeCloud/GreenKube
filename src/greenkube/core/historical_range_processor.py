@@ -51,6 +51,12 @@ CALCULATION_VERSION = f"{__version__}+range.3"
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
 _TIMESTAMP_TOLERANCE = 1e-3
+#: Smallest real cgroup memory figure: one page.
+_MEMORY_PAGE_BYTES = 4096
+#: Metrics API container usage may exceed its pod cgroup by this share (sampling skew) before it is refitted.
+POD_CGROUP_TOLERANCE = 0.05
+#: Estimation reason of container usage refitted to its pod cgroup (USER BUG 2).
+CONTAINER_USAGE_EXCEEDS_POD = "container_usage_exceeds_pod"
 
 
 class RangeCollectionError(RuntimeError):
@@ -200,7 +206,10 @@ class HistoricalRangeProcessor:
         """Return pod sums and per-container values for every sample of the chunk.
 
         A pod's value is the sum of its (deduplicated) containers, or its pod
-        cgroup value when only pod-level series exist.
+        cgroup value when only pod-level series exist. A pod cgroup working set
+        below one memory page is a gap in cAdvisor's stats (a running pod
+        always holds pages; Minikube reported 0 or 8 bytes for hours), not a
+        measurement: it is left out.
         """
         values, _nodes = cls._deduplicated_samples(results, chunk)
         pods: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
@@ -211,9 +220,49 @@ class HistoricalRangeProcessor:
                 if container:
                     containers[sample_start][(namespace, pod, container)] = value
                     pods[sample_start][(namespace, pod)] += value
-                elif (namespace, pod) not in named_pods:
+                elif (namespace, pod) not in named_pods and value >= _MEMORY_PAGE_BYTES:
                     pods[sample_start][(namespace, pod)] = value
         return pods, containers
+
+    @staticmethod
+    def _fit_to_pod_cgroup(
+        container_usage: dict[tuple[str, str, str], int],
+        filled: set[tuple[str, str, str]],
+        pod_usage: dict[tuple[str, str], float] | dict[tuple[str, str], int],
+        measured_pods: set[tuple[str, str]],
+    ) -> set[tuple[str, str, str]]:
+        """Scale Metrics API container usage down to its pod's cgroup when the sum exceeds it.
+
+        The containers of a pod live inside the pod cgroup, so their usage can
+        never add up to more than the pod's. Some kubelets (cri-dockerd, e.g.
+        Minikube's Docker driver) report a container working set that includes
+        page cache the pod cgroup's working set excludes: ~665Mi for a
+        container whose pod measures ~560Mi (USER BUG 2). When the sum of the
+        filled containers exceeds the pod cgroup value from Prometheus for the
+        same step by more than :data:`POD_CGROUP_TOLERANCE`, every container is
+        scaled by ``pod / sum``, keeping their split. Only pods whose
+        Prometheus value is the pod cgroup itself (no container series in
+        ``measured_pods``) are checked. Mutates ``container_usage`` and returns
+        the refitted keys, which the caller marks as estimated.
+        """
+        by_pod: dict[tuple[str, str], list[tuple[str, str, str]]] = defaultdict(list)
+        for key in filled:
+            by_pod[(key[0], key[1])].append(key)
+        refitted: set[tuple[str, str, str]] = set()
+        for pod_key, keys in by_pod.items():
+            if pod_key in measured_pods:
+                continue
+            pod_value = pod_usage.get(pod_key)
+            if pod_value is None or pod_value <= 0:
+                continue
+            total = sum(max(container_usage[key], 0) for key in keys)
+            if total <= pod_value * (1 + POD_CGROUP_TOLERANCE):
+                continue
+            factor = pod_value / total
+            for key in keys:
+                container_usage[key] = int(max(container_usage[key], 0) * factor)
+                refitted.add(key)
+        return refitted
 
     async def _query_range(self, chunk: CollectionWindow, query: str):
         return await self.prometheus_collector.collect_range(
@@ -823,11 +872,16 @@ class HistoricalRangeProcessor:
                     key: int(round(value)) for key, value in container_memory_samples.get(sample_key, {}).items()
                 }
                 container_sample_count_map = {}
+                refitted_containers: set[tuple[str, str, str]] = set()
                 # Point-in-time metrics-server usage only fills gaps of the latest
                 # sample of a current window, and only when it was measured during
                 # or after that sample (A5, BUG-05).  The row keeps its own
                 # timestamp and step duration.
                 if current_chunk and sample_key == latest_sample_ts:
+                    cpu_measured_pods = {(key[0], key[1]) for key in container_cpu_usage}
+                    memory_measured_pods = {(key[0], key[1]) for key in container_memory_usage}
+                    cpu_filled: set[tuple[str, str, str]] = set()
+                    memory_filled: set[tuple[str, str, str]] = set()
                     freshness_cutoff = max(now - timedelta(seconds=max(chosen_step_sec * 2, 60)), ts)
                     for usage in container_usages:
                         if (
@@ -840,12 +894,20 @@ class HistoricalRangeProcessor:
                         usage_added = False
                         if usage.cpu_usage_millicores is not None and container_key not in container_cpu_usage:
                             container_cpu_usage[container_key] = usage.cpu_usage_millicores
+                            cpu_filled.add(container_key)
                             usage_added = True
                         if usage.memory_usage_bytes is not None and container_key not in container_memory_usage:
                             container_memory_usage[container_key] = usage.memory_usage_bytes
+                            memory_filled.add(container_key)
                             usage_added = True
                         if usage_added:
                             container_sample_count_map[container_key] = 1
+                    # The pod cgroup bounds its containers (USER BUG 2): refit what contradicts it.
+                    refitted_containers = self._fit_to_pod_cgroup(
+                        container_cpu_usage, cpu_filled, range_cpu_usage_map, cpu_measured_pods
+                    ) | self._fit_to_pod_cgroup(
+                        container_memory_usage, memory_filled, range_memory_map, memory_measured_pods
+                    )
                 container_maps = (
                     PodResourceMaps(
                         container_cpu_usage_map=container_cpu_usage,
@@ -858,13 +920,17 @@ class HistoricalRangeProcessor:
                 for aggregate_metric in allocated.rows:
                     combined.append(aggregate_metric)
                     if container_maps is not None:
-                        combined.extend(
-                            self.assembler.assemble_container_metrics(
-                                [aggregate_metric],
-                                pod_metrics_list,
-                                container_maps,
-                            )
+                        container_rows = self.assembler.assemble_container_metrics(
+                            [aggregate_metric],
+                            pod_metrics_list,
+                            container_maps,
                         )
+                        if refitted_containers:
+                            container_rows = [
+                                _mark_refitted(row) if _container_key(row) in refitted_containers else row
+                                for row in container_rows
+                            ]
+                        combined.extend(container_rows)
 
             del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group
             del net_rx_by_sample, net_tx_by_sample, disk_read_by_sample, disk_write_by_sample
@@ -887,3 +953,13 @@ class HistoricalRangeProcessor:
 
         await self.calculator.clear_cache()
         return combined
+
+
+def _container_key(row: CombinedMetric) -> tuple[str, str, str]:
+    return (row.namespace or "", row.pod_name or "", row.container_name or "")
+
+
+def _mark_refitted(row: CombinedMetric) -> CombinedMetric:
+    """Flags a container row whose usage was scaled down to its pod cgroup (explicit evidence flag)."""
+    reasons = list(dict.fromkeys([*row.estimation_reasons, CONTAINER_USAGE_EXCEEDS_POD]))
+    return row.model_copy(update={"is_estimated": True, "estimation_reasons": reasons})
