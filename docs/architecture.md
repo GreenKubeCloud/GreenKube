@@ -5,7 +5,7 @@ This document describes the current technical architecture of GreenKube. GreenKu
 The architecture has four parts:
 
 - **Measurement layer:** collectors, the processor and storage. It produces per-workload usage, cost, energy and CO₂e, which feed both the recommendation evidence and the before/after comparison used for verification.
-- **Optimization engine:** sources, analyzers, arbitration, evidence and ranking.
+- **Optimization engine:** sources, analyzers, consensus, evidence and ranking.
 - **GitOps automation:** discovery, bindings, plans, the renderer sandbox, the worker, and sync.
 - **Verification and savings ledger.**
 
@@ -387,7 +387,7 @@ The composition root of the collection pipeline: it builds the collectors and co
 
 Analyzes `CombinedMetric` data to identify optimization opportunities (`src/greenkube/core/optimization/`). It runs only in the controller: the leader-gated `recommendation_scan` job (`scan_service.py`) queues a scheduled run every `RECOMMENDATION_SCAN_INTERVAL` and executes queued runs, including API requests from `POST /api/v1/optimization/runs`. The job stays idle until the controller's initial collection is done, which ends with one forced cluster-wide scan on the fresh data. API replicas never scan; their recommendation GET endpoints are read-only. Each run is persisted in `optimization_runs` with per-source health and the new/changed/resolved diff. The CLI does not expose a recommendation command.
 
-**Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB inputs) → run enabled **sources** → normalize/arbitrate/deduplicate → attach an **evidence** block and a **risk/confidence/effort** assessment → compute the multi-criteria **ranking score** → persist and reconcile per source (a failed or incomplete source never blocks the others and never marks its recommendations stale).
+**Pipeline:** build an `OptimizationContext` (metrics window + node/HPA/PV/LB inputs) → run enabled **sources** → combine their signals by **consensus** (one recommendation per target, capability and kind) and deduplicate → attach an **evidence** block and a **risk/confidence/effort** assessment → compute the multi-criteria **ranking score** → persist and reconcile per source (a failed or incomplete source never blocks the others and never marks its recommendations stale).
 
 **Sources (Source SDK, `src/greenkube/signals/`, [developer guide](sources.md)):** every source implements one contract, `Source` (metadata, `discover()`, `health()`, `collect() -> SourceBatch` of v2 **signals**), and is registered in the `SourceRegistry`: built-ins in code (`core/optimization/registry.py`), third-party packages through the `greenkube.sources` Python entry points. `SOURCES_CONFIG` enables, disables or configures each source by id.
 
@@ -408,9 +408,9 @@ Analyzes `CombinedMetric` data to identify optimization opportunities (`src/gree
 
 3. **NodePool consolidation (`greenkube.nodepool`, optional)** — GreenKube's heuristic over Karpenter NodePools and NodeClaims (not Karpenter's own advice) when the CRDs are available. Its v1 recommendations keep `source: karpenter`.
 
-4. **Plugins** — third-party sources installed in the image ([example](../examples/greenkube-source-example)). Their signals are recorded; they become recommendations once the consensus engine (roadmap E6) combines signals.
+4. **Plugins** — third-party sources installed in the image ([example](../examples/greenkube-source-example)). Their signals are recorded and become recommendations only through the consensus engine, under the plugin's own source id.
 
-**Isolation:** the `SourceRunner` runs each source with its own probe and collection timeouts, a rate limit (`min_interval_seconds`) and a circuit breaker (`failure_threshold` consecutive failures skip the source for `circuit_cooldown_seconds`). It drops signals that break the contract (another source id, an undeclared capability), trims raw payloads, evidence and source estimates to bounded sizes, ignores v1 recommendations from third-party sources (only built-in sources feed the v1 pipeline until consensus exists) and records an API-safe error code, never an exception message. A source that fails, times out, is skipped or returns a partial batch is not authoritative: its previous recommendations are kept, never marked stale. Native analyzers count as one v1 source (`greenkube`) in `optimization_runs.source_outcomes`, so one failing analyzer makes `greenkube` incomplete for that run.
+**Isolation:** the `SourceRunner` runs each source with its own probe and collection timeouts, a rate limit (`min_interval_seconds`) and a circuit breaker (`failure_threshold` consecutive failures skip the source for `circuit_cooldown_seconds`). It drops signals that break the contract (another source id, an undeclared capability), trims raw payloads, evidence and source estimates to bounded sizes, ignores v1 recommendations from third-party sources (third-party advice reaches recommendations only as signals, through consensus) and records an API-safe error code, never an exception message. A source that fails, times out, is skipped or returns a partial batch is not authoritative: its previous recommendations are kept, never marked stale. Native analyzers count as one v1 source (`greenkube`) in `optimization_runs.source_outcomes`, so one failing analyzer makes `greenkube` incomplete for that run.
 
 **Persistence:** each scan writes one `source_runs` row per source (status, health, signal and recommendation counts, consecutive failures, error code, diagnostics, linked to the optimization run) and upserts its signals into `source_signals`, one row per distinct `signal_id` (`sha256(source, target key, capability, kind, proposal without observed state or free text)`) with first/last sighting and the fingerprint of the v1 recommendation it supports. Both are kept 30 days. `GET /api/v1/sources` reports every source's status, health and last run.
 
@@ -668,7 +668,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
    OptimizationEngine.generate()
    ├─ Run enabled sources through the SourceRunner (native analyzers, VPA, NodePool, plugins)
    ├─ Record each source's run and signals (source_runs, source_signals)
-   ├─ Normalize provenance and arbitrate conflicts by capability/priority
+   ├─ Combine every source's signals by consensus (policy, agreement, per-source spread)
    ├─ Deduplicate and clamp values to configured minimums
    ├─ Attach evidence, risk/confidence/effort and expiry
    └─ Compute the expected value (EV) and its factors in currency, with the source track record

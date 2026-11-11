@@ -44,15 +44,13 @@ A **source** produces optimization advice as **signals** (one proposal for one t
 
 Each recommendation records its `source`, a source-specific reference (`source_ref`, for example `namespace/vpa-name`), and the list of every source that reported the same issue (`sources`).
 
-When several sources recommend the same change type for the same target, GreenKube currently keeps the recommendation from the highest-priority source (`RECOMMENDATION_SOURCE_PRIORITY`, default `vpa,karpenter,greenkube`).
+When several sources recommend the same change type for the same target, GreenKube combines their values by **consensus** (`RECOMMENDATION_CONSENSUS_POLICY`, default `safest`: the least aggressive value) and shows how much they agree, with the value of each source. Sources that run the same engine (Goldilocks and VPA) count once. See [Consensus across sources](recommendation.md#consensus-across-sources).
 
-Signals of third-party sources are recorded and visible in the API; they will feed recommendations once the consensus engine combines the signals of every source.
+Signals of third-party sources become recommendations through the same consensus.
 
 *(Planned)*
 - KRR, Kubecost, Polaris and cloud recommenders as additional sources.
-- Consensus across sources instead of the priority order.
 - A public API so that any tool can push signals.
-- **Consensus**: instead of picking one source by priority, GreenKube will combine their values and show how much they agree.
 
 ## Recommendation
 
