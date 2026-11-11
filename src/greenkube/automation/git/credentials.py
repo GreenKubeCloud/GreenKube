@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Protocol
 
 from greenkube.automation.git.base import GitProviderError
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig
+
+if TYPE_CHECKING:
+    from greenkube.automation.git.github_app import GitHubAppCredentials
 
 _DNS_LABEL = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 _SECRET_KEY = re.compile(r"[A-Za-z0-9._-]+")
@@ -101,6 +104,29 @@ class GitProviderCredentialResolver:
                 "verify the configured Secret key."
             )
         return token.strip()
+
+    async def resolve_credentials(self, provider: GitOpsProviderConfig) -> str | GitHubAppCredentials:
+        """A token, or the GitHub App id and private key of a ``privateKey`` reference (F3).
+
+        A GitHub provider whose Secret key is ``privateKey`` authenticates as a
+        GitHub App; its App id is the ``appId`` key of the same Secret.
+        """
+        from greenkube.automation.git.github_app import (
+            GITHUB_APP_ID_KEY,
+            GitHubAppCredentials,
+            GitHubAppError,
+            is_github_app_reference,
+        )
+
+        secret = await self.resolve(provider)
+        if not is_github_app_reference(provider.provider_type, provider.secret_key):
+            return secret
+        app_reference = replace(provider, secret_key=GITHUB_APP_ID_KEY)
+        app_id = await self.resolve(app_reference)
+        try:
+            return GitHubAppCredentials(app_id=app_id, private_key=secret)
+        except GitHubAppError as exc:
+            raise GitProviderCredentialError(str(exc)) from None
 
 
 def _is_dns_label(value: str) -> bool:

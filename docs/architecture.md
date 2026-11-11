@@ -544,7 +544,7 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - `GET /api/v1/recommendations` — Optimization suggestions
 - `GET /api/v1/recommendations/{id}` — Full evidence, risk, ranking, and lifecycle detail
 - `GET /api/v1/recommendations/{id}/events` — Recommendation audit trail
-- `POST /api/v1/recommendations/{id}/apply-pr` — Deprecated compatibility route through the validated GitOps plan path (use `/api/v1/automation/plans`)
+- `POST /api/v1/automation/plans` / `POST /api/v1/automation/plans/{id}/approve` — Validated GitOps plan preview and digest approval
 - `GET /api/v1/gitops/status` — Controller capability and discovery freshness
 - `GET /api/v1/gitops/bindings` — Workload binding pages and manual-resolution candidates
 - `POST /api/v1/gitops/refresh` — Explicit discovery refresh

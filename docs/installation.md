@@ -182,7 +182,7 @@ executors next to the controller.
 ## Optional: SSO and accounts
 
 Browser users sign in with accounts and server-side sessions; machines use scoped API keys created in
-**Settings > API keys** (`read`, `write`, `approve`, `signals:write`, `metrics:read`, `admin`). To provide the first
+**Settings > API keys** (`read`, `write`, `approve`, `plans:deliver`, `signals:write`, `metrics:read`, `admin`). To provide the first
 admin password yourself (GitOps), set `auth.admin.existingSecret`. SSO through an authentication proxy or OIDC is
 on the roadmap. See [Authentication](authentication.md).
 

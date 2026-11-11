@@ -318,10 +318,11 @@ class FakeGitHubServer(_RecordingServer):
         if method == "GET" and local == "/pulls":
             head = query.get("head", [None])[0]
             base = query.get("base", [None])[0]
+            state = query.get("state", ["open"])[0]
             matches = [
                 pull_request
                 for pull_request in self.pull_requests
-                if pull_request["state"] == "open"
+                if state in ("all", pull_request["state"])
                 and (head is None or head.split(":", 1)[-1] == pull_request["head"]["ref"])
                 and (base is None or base == pull_request["base"]["ref"])
             ]
@@ -445,10 +446,11 @@ class FakeGitLabServer(_RecordingServer):
         if method == "GET" and local == "/merge_requests":
             source = query.get("source_branch", [None])[0]
             target = query.get("target_branch", [None])[0]
+            state = query.get("state", ["all"])[0]
             matches = [
                 merge_request
                 for merge_request in self.pull_requests
-                if merge_request["state"] == "opened"
+                if state in ("all", merge_request["state"])
                 and (source is None or merge_request["source_branch"] == source)
                 and (target is None or merge_request["target_branch"] == target)
             ]
@@ -580,7 +582,10 @@ class FakeGiteaServer(_RecordingServer):
             missing = 0 if repository.is_ancestor(head, base) else 1
             return _json(200, {"total_commits": missing, "commits": []})
         if method == "GET" and local == "/pulls":
-            return _json(200, [pull_request for pull_request in self.pull_requests if pull_request["state"] == "open"])
+            state = query.get("state", ["open"])[0]
+            return _json(
+                200, [pull_request for pull_request in self.pull_requests if state in ("all", pull_request["state"])]
+            )
         if method == "POST" and local == "/pulls":
             number = len(self.pull_requests) + 1
             pull_request = {

@@ -1002,6 +1002,15 @@ class GitProvider(ABC):
             reason="This adapter does not implement provider-side pull-request lookup.",
         )
 
+    async def find_terminal_pull_request(
+        self, repo: GitRepository, head: str, base: str
+    ) -> Optional["PullRequestInfo"]:
+        """Finds the most recently updated merged or closed request for an exact branch pair (D10).
+
+        Adapters without the lookup return ``None``: the caller then behaves as before.
+        """
+        return None
+
     async def find_open_pull_request_for_branch(
         self,
         repo: GitRepository,
@@ -1469,6 +1478,33 @@ def normalize_open_pull_request_match(
         raise GitProviderError(f"{repo.provider} returned an invalid pull-request state.")
     pull_request = normalize_pull_request(data, repo=repo)
     if state not in open_states or provider_head != head or provider_base != base or pull_request.merged:
+        return None
+    return pull_request
+
+
+def normalize_terminal_pull_request_match(
+    data: dict,
+    *,
+    repo: GitRepository,
+    head: str,
+    base: str,
+    provider_head: object,
+    provider_base: object,
+    open_states: tuple[str, ...],
+) -> Optional[PullRequestInfo]:
+    """Normalizes a merged or closed request whose branch pair matches exactly (D10).
+
+    Open requests are left to :func:`normalize_open_pull_request_match`.
+    """
+    if not isinstance(provider_head, str) or not provider_head:
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request head branch.")
+    if not isinstance(provider_base, str) or not provider_base:
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request base branch.")
+    state = data.get("state")
+    if not isinstance(state, str) or not state:
+        raise GitProviderError(f"{repo.provider} returned an invalid pull-request state.")
+    pull_request = normalize_pull_request(data, repo=repo)
+    if provider_head != head or provider_base != base or (state in open_states and not pull_request.merged):
         return None
     return pull_request
 

@@ -537,15 +537,6 @@ export function getAutomationPlan(planId) {
 }
 
 /**
- * Read the execution state of one plan operation.
- * @param {string} operationId
- * @returns {Promise<Object>}
- */
-export function getAutomationOperation(operationId) {
-	return request(`${BASE}/automation/operations/${encodeURIComponent(operationId)}`);
-}
-
-/**
  * Approve a previously previewed plan using the digest returned by the API.
  * @param {string} planId
  * @param {string} digest
@@ -557,6 +548,31 @@ export function approveAutomationPlan(planId, digest) {
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ digest })
 	});
+}
+
+/**
+ * Report the pull request opened outside GreenKube for an approved plan (patch and ci modes, F4).
+ * @param {string} planId
+ * @param {string} prUrl
+ * @param {string|null} [headSha]
+ * @returns {Promise<Object>}
+ */
+export function reportPlanDelivery(planId, prUrl, headSha = null) {
+	const body = headSha ? { pr_url: prUrl, head_sha: headSha } : { pr_url: prUrl };
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}/delivery`, {}, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * URL of an approved plan as a git format-patch (patch mode, F4).
+ * @param {string} planId
+ * @returns {string}
+ */
+export function planPatchUrl(planId) {
+	return `${BASE}/automation/plans/${encodeURIComponent(planId ?? '')}/patch`;
 }
 
 /**

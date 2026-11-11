@@ -304,6 +304,22 @@ class BranchCleanupRuntime:
         plan = await _at_stage("plan_lookup", self.plan_repository.get_plan(plan_id))
         if plan is None or plan.plan_id != plan_id:
             return False
+        if getattr(plan, "delivery_mode", None) in ("patch", "ci"):
+            # A person or a CI job pushed this branch (F4): GreenKube never deletes it, and
+            # holds no write credentials for it. Mark it done so it is not selected again.
+            for record in page_records:
+                if record.repo and record.head_branch and record.provider_id == plan.source.provider_id:
+                    await _at_stage(
+                        "completion_persistence",
+                        self.pull_request_repository.mark_plan_branch_cleanup_complete(
+                            plan_id,
+                            provider_id=plan.source.provider_id,
+                            repo=record.repo,
+                            branch_name=record.head_branch,
+                        ),
+                    )
+                    break
+            return False
         try:
             expected_branch = plan_branch_name(plan)
             validate_greenkube_plan_branch(expected_branch)

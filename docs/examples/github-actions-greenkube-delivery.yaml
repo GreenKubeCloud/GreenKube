@@ -1,0 +1,84 @@
+# GreenKube "ci" delivery mode (roadmap F4) for GitHub Actions.
+#
+# Copy to .github/workflows/greenkube-delivery.yaml in the GitOps repository.
+# GreenKube runs with automation.delivery.mode: ci and holds no write token: this
+# workflow applies each approved plan with the workflow's own GITHUB_TOKEN, opens
+# the pull request and reports it back. GreenKube verifies the report through
+# the provider (repository, base branch, plan branch, head commit and exact file
+# changes) before it tracks the pull request to merge and sync.
+#
+# Repository secrets:
+#   GREENKUBE_URL      https://greenkube.example.com (reachable from the runner)
+#   GREENKUBE_API_KEY  an API key with only the "read" and "plans:deliver" scopes
+#
+# "Allow GitHub Actions to create and approve pull requests" must be enabled in
+# the repository (Settings > Actions > General) for gh pr create to work.
+name: GreenKube delivery
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: greenkube-delivery
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Deliver approved GreenKube plans
+        env:
+          GREENKUBE_URL: ${{ secrets.GREENKUBE_URL }}
+          GREENKUBE_API_KEY: ${{ secrets.GREENKUBE_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          auth=(-H "Authorization: Bearer ${GREENKUBE_API_KEY}")
+          api="${GREENKUBE_URL%/}/api/v1"
+
+          curl -fsS "${auth[@]}" "${api}/automation/plans?status=approved&delivery=ci" > plans.json
+          # Only the plans of this repository (the API returns credential-free repository URLs).
+          jq -c --arg repo "${REPOSITORY}" \
+            '.[] | select((.repository | ascii_downcase | sub("\\.git$"; "")) == ($repo | ascii_downcase))' \
+            plans.json > mine.jsonl || true
+
+          while IFS= read -r plan; do
+            id=$(jq -r .plan_id <<<"${plan}")
+            branch=$(jq -r .branch <<<"${plan}")
+            base=$(jq -r .base_branch <<<"${plan}")
+            revision=$(jq -r .base_revision <<<"${plan}")
+            echo "::group::Plan ${id} -> ${branch}"
+
+            # A pull request already opened for the plan branch (an earlier run that could not report it).
+            existing=$(gh pr list --head "${branch}" --base "${base}" --state all --json url,headRefOid --limit 1)
+            if [ "$(jq length <<<"${existing}")" -eq 0 ]; then
+              git fetch --quiet origin "${base}"
+              git switch --quiet -c "${branch}" "${revision}"
+              curl -fsS "${auth[@]}" -H "Accept: text/x-patch" "${api}/automation/plans/${id}/patch" > plan.patch
+              git am --3way plan.patch
+              git push --quiet origin "${branch}"
+              jq -r .body <<<"${plan}" > body.md
+              gh pr create --base "${base}" --head "${branch}" --title "$(jq -r .title <<<"${plan}")" --body-file body.md
+              existing=$(gh pr list --head "${branch}" --base "${base}" --state all --json url,headRefOid --limit 1)
+              git switch --quiet --detach
+            fi
+
+            jq -c '.[0] | {pr_url: .url, head_sha: .headRefOid}' <<<"${existing}" > delivery.json
+            curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
+              -X POST --data @delivery.json "${api}/automation/plans/${id}/delivery"
+            echo
+            echo "::endgroup::"
+          done < mine.jsonl

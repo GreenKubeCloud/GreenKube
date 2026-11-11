@@ -462,6 +462,19 @@ class Config(BaseSettings):
     # Secret (in the release namespace, mounted under GITOPS_SECRET_MOUNT) read for
     # inferred providers: key "token", or "appId" + "privateKey" for a GitHub App.
     GITOPS_DEFAULT_CREDENTIALS_SECRET: str = "greenkube-git-credentials"
+    # How approved plans are delivered (F4): "direct" (GreenKube opens the pull
+    # request), "patch" (an operator downloads the patch and opens it) or "ci" (a CI
+    # job applies the patch with its own token and reports the pull request back).
+    # patch and ci never need write credentials in the cluster.
+    AUTOMATION_DELIVERY_MODE: str = "direct"
+    # Policy-based auto-approval (F5), opt-in: a preview whose recommendations all
+    # meet these limits is approved without the extra click (still a reviewed PR).
+    # Contested consensus is never auto-approved, and a decrease needs native
+    # evidence or at least two independent consensus votes.
+    AUTOMATION_AUTO_APPROVE_ENABLED: bool = False
+    AUTOMATION_AUTO_APPROVE_MAX_RISK: str = "low"
+    AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE: float = Field(0.8, ge=0.0, le=1.0)
+    AUTOMATION_AUTO_APPROVE_CONTESTED: bool = False
     # Deprecated (0.3.x, removed in 0.5): automation is always on. An explicit
     # AUTOMATION_ENABLED=false or AUTOMATION_MODE=disabled pauses delivery.
     AUTOMATION_ENABLED: Optional[bool] = None
@@ -544,6 +557,32 @@ class Config(BaseSettings):
         if mode not in {"disabled", "inline", "worker"}:
             raise ValueError("AUTOMATION_MODE must be 'disabled', 'inline', or 'worker'.")
         return mode
+
+    @field_validator("AUTOMATION_DELIVERY_MODE", mode="after")
+    @classmethod
+    def _validate_delivery_mode(cls, value: str) -> str:
+        mode = (value or "").strip().lower() or "direct"
+        if mode not in {"direct", "patch", "ci"}:
+            raise ValueError("AUTOMATION_DELIVERY_MODE must be 'direct', 'patch' or 'ci'.")
+        return mode
+
+    @field_validator("AUTOMATION_AUTO_APPROVE_MAX_RISK", mode="after")
+    @classmethod
+    def _validate_auto_approve_max_risk(cls, value: str) -> str:
+        risk = (value or "").strip().lower()
+        if risk not in {"low", "medium", "high"}:
+            raise ValueError("AUTOMATION_AUTO_APPROVE_MAX_RISK must be 'low', 'medium' or 'high'.")
+        return risk
+
+    @field_validator("AUTOMATION_AUTO_APPROVE_CONTESTED", mode="after")
+    @classmethod
+    def _validate_auto_approve_contested(cls, value: bool) -> bool:
+        if value:
+            # Contested consensus is a hard stop (E6, F5): sources disagree, a human decides.
+            raise ValueError(
+                "AUTOMATION_AUTO_APPROVE_CONTESTED cannot be true: contested advice is never auto-approved."
+            )
+        return False
 
     @field_validator("AUTOMATION_REPOSITORY_ALLOWLIST", mode="after")
     @classmethod

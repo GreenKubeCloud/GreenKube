@@ -12,6 +12,7 @@ from greenkube.api.dependencies import (
     AutomationPlanApiService,
     get_authenticated_actor,
     get_automation_plan_service,
+    get_recommendation_repository,
 )
 from greenkube.api.schemas import (
     AutomationPlanApproveRequest,
@@ -22,8 +23,12 @@ from greenkube.api.schemas import (
     AutomationPlanSourceResponse,
     AutomationPlanValidationResponse,
 )
-from greenkube.automation.plans import AutomationPlanError
+from greenkube.auth.principal import Scope
+from greenkube.automation.plans import AutomationPlanError, maybe_auto_approve
+from greenkube.core.config import get_config
+from greenkube.core.optimization.eligibility import AutoApprovePolicy
 from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus, public_repository_url
+from greenkube.storage.base_repository import RecommendationRepository
 
 router = APIRouter()
 
@@ -105,8 +110,14 @@ async def create_automation_plan(
     request: AutomationPlanCreateRequest,
     http_request: Request,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
+    recommendations: RecommendationRepository = Depends(get_recommendation_repository),
 ) -> AutomationPlanResponse | JSONResponse:
-    """Prepare a plan from persisted recommendation actions and resolved sources."""
+    """Prepare a plan from persisted recommendation actions and resolved sources.
+
+    With ``automation.autoApprove`` (F5), a preview that meets the policy is approved in
+    the same request on behalf of the requester (who needs the ``approve`` scope);
+    otherwise ``auto_approve_blockers`` says why it waits for the approval click.
+    """
     if service is None:
         return _service_unavailable("plan_preparation_unavailable", "Server-side plan preparation is not configured.")
     try:
@@ -123,7 +134,29 @@ async def create_automation_plan(
             )
     except AutomationPlanError as error:
         return _domain_error_response(error)
-    return _plan_response(plan)
+    policy = AutoApprovePolicy.from_config(get_config())
+    if not policy.enabled:
+        return _plan_response(plan)
+    records = []
+    for recommendation_id in plan.recommendation_ids:
+        try:
+            record = await recommendations.get_recommendation_by_id(recommendation_id)
+        except Exception:
+            record = None
+        if record is not None:
+            records.append(record)
+    principal = getattr(http_request.state, "principal", None)
+    approved, blockers = await maybe_auto_approve(
+        service,
+        plan,
+        records,
+        actor=get_authenticated_actor(http_request),
+        policy=policy,
+        may_approve=bool(principal is not None and principal.has_scope(Scope.APPROVE.value)),
+    )
+    operation = await service.read_operation_for_plan(approved.plan_id) if not blockers else None
+    response = _plan_response(approved, operation)
+    return response.model_copy(update={"auto_approved": not blockers, "auto_approve_blockers": blockers})
 
 
 @router.get(
@@ -321,6 +354,7 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
         ),
         created_at=plan.created_at,
         expires_at=plan.expires_at,
+        delivery_mode=plan.delivery_mode,
     )
 
 

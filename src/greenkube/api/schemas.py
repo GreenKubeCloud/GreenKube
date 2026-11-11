@@ -16,7 +16,7 @@ from greenkube.gitops.contracts import (
     PlanStatus,
     RendererKind,
 )
-from greenkube.gitops.sha import SHA256_DIGEST
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.models.metrics import CombinedMetric, MetricsSummaryRow, TimeseriesCachePoint
 from greenkube.models.node import NodeInfo
 
@@ -254,6 +254,58 @@ class AutomationPlanResponse(GitOpsResponseModel):
     warnings: List[str] = Field(default_factory=list)
     warnings_truncated: bool = False
     validation: Optional[AutomationPlanValidationResponse] = None
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+    #: How the approved plan is delivered (F4): ``direct``, ``patch`` or ``ci``; None before approval.
+    delivery_mode: Optional[Literal["direct", "patch", "ci"]] = None
+    #: True when ``automation.autoApprove`` approved the plan with its preview (F5).
+    auto_approved: bool = False
+    #: Why ``automation.autoApprove`` did not approve the preview (empty when it is off or approved).
+    auto_approve_blockers: List[str] = Field(default_factory=list)
+
+
+class AutomationPlanDeliveryRequest(GitOpsResponseModel):
+    """A pull request opened outside GreenKube for an approved plan (``patch`` and ``ci`` modes, F4)."""
+
+    pr_url: StrictStr = Field(min_length=8, max_length=2048)
+    #: Head commit of the pull request; required in ``ci`` mode, optional for a ``patch`` link-back.
+    head_sha: Optional[StrictStr] = Field(default=None, pattern=rf"^(?:{GIT_OBJECT_SHA.pattern})$")
+
+
+class AutomationPlanDeliveryPullRequest(GitOpsResponseModel):
+    number: int
+    url: Optional[str] = None
+    head_sha: Optional[str] = None
+    #: ``branch`` (deterministic plan branch), ``trailer`` (GreenKube-Plan trailer) or ``recorded``.
+    linked_by: str
+
+
+class AutomationPlanDeliveryResponse(GitOpsResponseModel):
+    plan: AutomationPlanResponse
+    pull_request: AutomationPlanDeliveryPullRequest
+    #: False when the same pull request had already been recorded (idempotent report).
+    created: bool
+
+
+class AutomationPlanDeliveryItem(GitOpsResponseModel):
+    """One approved plan awaiting external delivery, with what a CI job needs to deliver it."""
+
+    plan_id: str
+    status: PlanStatus
+    delivery_mode: Optional[Literal["direct", "patch", "ci"]] = None
+    digest: Optional[str] = None
+    recommendation_ids: List[int]
+    repository: str
+    base_branch: str
+    base_revision: Optional[str] = None
+    #: Deterministic branch the pull request must come from.
+    branch: Optional[str] = None
+    #: ``GET`` path of the ``git format-patch`` mailbox.
+    patch_url: str
+    #: ``POST`` path of the delivery report.
+    delivery_url: str
+    title: Optional[str] = None
+    body: Optional[str] = None
     created_at: datetime
     expires_at: Optional[datetime] = None
 

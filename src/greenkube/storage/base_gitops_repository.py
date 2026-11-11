@@ -627,6 +627,20 @@ class AutomationPlanRepository(ABC):
             return existing
         return await self.save_plan(existing.model_copy(update={"pre_apply_baseline": baseline}))
 
+    async def set_plan_delivery_mode(
+        self,
+        plan_id: str,
+        delivery_mode: str,
+        *,
+        expected_digest: str | None,
+        expected_statuses: Sequence[PlanStatus],
+    ) -> Plan | None:
+        """Record how an approved plan is delivered (F4); SQL repositories update one column."""
+        plan = await self.get_plan(plan_id)
+        if plan is None or plan.digest != expected_digest or plan.status not in expected_statuses:
+            return None
+        return await self.save_plan(plan.model_copy(update={"delivery_mode": delivery_mode}))
+
     @abstractmethod
     async def get_plan(self, plan_id: str) -> Plan | None: ...
 

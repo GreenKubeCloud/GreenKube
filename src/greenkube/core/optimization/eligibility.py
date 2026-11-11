@@ -6,7 +6,7 @@ and, when it cannot, why and what would make it eligible (principle 6, fail
 closed, explain why)::
 
     {"can_open_pr": false,
-     "delivery_modes": ["manual"],
+     "delivery_modes": ["manual"],   # "direct", "patch" or "ci" first when a PR can be opened
      "blockers": [{"code": "warming_up", "message": "...", "fix": "..."}],
      "warnings": [{"code": "...", "message": "...", "fix": "..."}],
      "eligible_at": "2026-11-09T12:00:00+00:00",
@@ -212,6 +212,15 @@ CODES: Dict[str, Tuple[str, str]] = {
 }
 
 
+def _configured_delivery_mode() -> str:
+    from greenkube.automation.delivery import configured_delivery_mode
+
+    try:
+        return configured_delivery_mode()
+    except Exception:  # configuration errors surface elsewhere; eligibility stays readable
+        return DELIVERY_DIRECT
+
+
 def _entry(code: str, message: Optional[str] = None, fix: Optional[str] = None) -> Dict[str, str]:
     default_message, default_fix = CODES.get(code, ("", ""))
     return {"code": code, "message": message or default_message, "fix": fix or default_fix}
@@ -242,6 +251,8 @@ class EligibilityContext:
     #: evaluation failed, which blocks the recommendation (fail closed).
     policy_results: Mapping[int, Optional[AutomationPolicyResult]] = field(default_factory=dict)
     step_seconds: int = 300
+    #: Delivery mode of new approvals (F4): ``direct``, ``patch`` or ``ci``.
+    delivery_mode: str = field(default_factory=lambda: _configured_delivery_mode())
 
 
 def workload_key(record: Any) -> Optional[Tuple[str, str, str]]:
@@ -576,7 +587,9 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
 
     blockers = _dedupe(blockers)
     can_open_pr = not blockers
-    delivery_modes = ([DELIVERY_DIRECT] if can_open_pr else []) + ([DELIVERY_MANUAL] if active else [])
+    delivery_modes = ([ctx.delivery_mode or DELIVERY_DIRECT] if can_open_pr else []) + (
+        [DELIVERY_MANUAL] if active else []
+    )
     return {
         "can_open_pr": can_open_pr,
         "delivery_modes": delivery_modes,
@@ -688,3 +701,139 @@ def criticality_by_record(records: Sequence[Any], ctx: EligibilityContext) -> Di
         if criticality:
             result[rec_id] = criticality
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Policy-based auto-approval (roadmap F5)                                      #
+# --------------------------------------------------------------------------- #
+
+_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+#: Why ``automation.autoApprove`` left a preview for a human (docs/automation.md#auto-approval).
+AUTO_APPROVE_CODES: Dict[str, str] = {
+    "auto_approve_disabled": "automation.autoApprove is off.",
+    "approve_scope_missing": "The requester may not approve plans (approve scope).",
+    "plan_not_validated": "Only a validated, render-checked preview can be approved automatically.",
+    "rollback_plan": "Rollbacks are always approved by a person.",
+    "recommendation_missing": "A recommendation of the plan could not be read.",
+    "not_active": "A recommendation of the plan is not active.",
+    "risk_above_auto_approve": "A recommendation's risk is above automation.autoApprove.maxRisk.",
+    "confidence_below_auto_approve": "A recommendation's confidence is below automation.autoApprove.minConfidence.",
+    "consensus_contested": "Sources disagree on a recommendation: contested advice is never approved automatically.",
+    "decrease_without_native_evidence": (
+        "A decrease needs GreenKube's own usage evidence or at least two independent agreeing sources."
+    ),
+}
+
+
+@dataclass(frozen=True)
+class AutoApprovePolicy:
+    """``automation.autoApprove`` (F5): previews meeting these limits skip the extra click.
+
+    Off by default. Contested consensus is a hard stop whatever the settings, and a
+    request decrease also needs native evidence or two independent consensus votes.
+    """
+
+    enabled: bool = False
+    max_risk: str = "low"
+    min_confidence: float = 0.8
+
+    @classmethod
+    def from_config(cls, config: Any) -> "AutoApprovePolicy":
+        risk = str(getattr(config, "AUTOMATION_AUTO_APPROVE_MAX_RISK", "low") or "low").lower()
+        try:
+            confidence = float(getattr(config, "AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE", 0.8))
+        except (TypeError, ValueError):
+            confidence = 1.0
+        return cls(
+            enabled=bool(getattr(config, "AUTOMATION_AUTO_APPROVE_ENABLED", False)),
+            max_risk=risk if risk in _RISK_ORDER else "low",
+            min_confidence=confidence if math.isfinite(confidence) else 1.0,
+        )
+
+
+def is_contested(record: Any) -> bool:
+    """Contested consensus (E6): ``consensus.contested`` or a ``consensus_contested`` eligibility entry."""
+    consensus = getattr(record, "consensus", None)
+    if isinstance(consensus, Mapping) and consensus.get("contested"):
+        return True
+    if getattr(consensus, "contested", None) is True:
+        return True
+    eligibility = getattr(record, "eligibility", None)
+    if isinstance(eligibility, Mapping):
+        for entry in [*(eligibility.get("warnings") or []), *(eligibility.get("blockers") or [])]:
+            if isinstance(entry, Mapping) and entry.get("code") == "consensus_contested":
+                return True
+    return False
+
+
+def proposes_decrease(record: Any) -> bool:
+    """True when a proposal lowers the current CPU or memory request (unknown counts as a decrease)."""
+    rec_type = _text(getattr(record, "type", None))
+    if rec_type == "RIGHTSIZING_CPU":
+        current = getattr(record, "current_cpu_request_millicores", None)
+        recommended = getattr(record, "recommended_cpu_request_millicores", None)
+    elif rec_type == "RIGHTSIZING_MEMORY":
+        current = getattr(record, "current_memory_request_bytes", None)
+        recommended = getattr(record, "recommended_memory_request_bytes", None)
+    else:
+        return True
+    if not isinstance(current, (int, float)) or not isinstance(recommended, (int, float)):
+        return True
+    return recommended < current
+
+
+def has_native_evidence(record: Any) -> bool:
+    """GreenKube's own analyzers chose the proposal and its usage evidence has samples."""
+    evidence = getattr(record, "evidence", None)
+    if evidence is None or int(getattr(evidence, "sample_count", 0) or 0) <= 0:
+        return False
+    source = _text(getattr(record, "source", None)) or "greenkube"
+    if source == "greenkube" or source.startswith("greenkube."):
+        return True
+    consensus = getattr(record, "consensus", None)
+    chosen = consensus.get("chosen_from") if isinstance(consensus, Mapping) else getattr(consensus, "chosen_from", None)
+    return any(str(item) == "greenkube" or str(item).startswith("greenkube.") for item in chosen or [])
+
+
+def independent_votes(record: Any) -> int:
+    """Independent consensus votes behind a recommendation (one per engine family), 1 without consensus."""
+    consensus = getattr(record, "consensus", None)
+    if isinstance(consensus, Mapping):
+        value = consensus.get("independent_votes")
+    else:
+        value = getattr(consensus, "independent_votes", 1)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 1
+
+
+def auto_approve_blockers(records: Sequence[Any], policy: AutoApprovePolicy, *, expected: int) -> List[str]:
+    """Why ``policy`` does not approve a preview of ``records`` automatically (empty: approve it).
+
+    ``expected`` is the number of recommendations of the plan: a recommendation that
+    could not be read blocks (fail closed).
+    """
+    if not policy.enabled:
+        return ["auto_approve_disabled"]
+    blockers: List[str] = []
+    if expected <= 0 or len(records) != expected:
+        blockers.append("recommendation_missing")
+    limit = _RISK_ORDER.get(policy.max_risk, 0)
+    for record in records:
+        status = _text(getattr(record, "status", None)) or "active"
+        if status != "active":
+            blockers.append("not_active")
+        risk = _text(getattr(record, "risk_level", None))
+        if risk not in _RISK_ORDER or _RISK_ORDER[risk] > limit:
+            blockers.append("risk_above_auto_approve")
+        confidence = getattr(record, "confidence", None)
+        if (
+            not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not math.isfinite(float(confidence))
+            or confidence < policy.min_confidence
+        ):
+            blockers.append("confidence_below_auto_approve")
+        if is_contested(record):
+            blockers.append("consensus_contested")
+        if proposes_decrease(record) and not has_native_evidence(record) and independent_votes(record) < 2:
+            blockers.append("decrease_without_native_evidence")
+    return list(dict.fromkeys(blockers))

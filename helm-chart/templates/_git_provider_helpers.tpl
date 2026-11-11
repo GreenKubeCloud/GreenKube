@@ -170,6 +170,10 @@ Group Secret keys by Secret name so each referenced Secret is projected once.
   {{- if not (has $secretKey $keys) -}}
     {{- $keys = append $keys $secretKey -}}
   {{- end -}}
+  {{- /* A GitHub App (secretKey privateKey) also needs its appId from the same Secret (F3). */ -}}
+  {{- if and (eq (lower (get $provider "type" | toString)) "github") (eq $secretKey "privateKey") (not (has "appId" $keys)) -}}
+    {{- $keys = append $keys "appId" -}}
+  {{- end -}}
   {{- $_ := set $secretKeys $identity (dict "name" $secretName "namespace" $secretNamespace "keys" $keys) -}}
 {{- end -}}
 {{- $sources := list -}}

@@ -25,7 +25,6 @@ import {
 	getMetricsPage,
 	createAutomationPlan,
 	getAutomationPlan,
-	getAutomationOperation,
 	approveAutomationPlan,
 	cancelAutomationPlan,
 	previewAutomationPlanRollback,
@@ -213,22 +212,6 @@ describe('automation plan API', () => {
 
 		expect(result.status).toBe('sync_pending');
 		expect(fetch.mock.calls[0][0]).toBe('http://localhost:3000/api/v1/automation/plans/pln%2F1');
-	});
-
-	it('reads execution state for one encoded operation ID', async () => {
-		globalThis.fetch = mockFetchOk({
-			operation_id: 'operation/1',
-			status: 'running',
-			result: { plan_status: 'applying' }
-		});
-
-		const result = await getAutomationOperation('operation/1');
-
-		expect(result.status).toBe('running');
-		expect(fetch.mock.calls[0][0]).toBe(
-			'http://localhost:3000/api/v1/automation/operations/operation%2F1'
-		);
-		expect(fetch.mock.calls[0][1].method).toBeUndefined();
 	});
 });
 

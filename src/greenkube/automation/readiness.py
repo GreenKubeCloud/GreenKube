@@ -9,7 +9,9 @@ Capability      Active when
 discovery       Argo CD or Flux CRDs are present (re-probed every discovery run)
 preview         per repository: a provider serves its host, it is allowlisted,
                 credentials are mounted and a workload binding resolved
-delivery        a repository can be previewed and ``pauseDelivery`` is false
+delivery        a repository can be previewed and ``pauseDelivery`` is false;
+                its details name the delivery mode (``direct``, ``patch``,
+                ``ci``, F4): only ``direct`` needs write credentials
 sync_tracking   a provider has credentials (PR polling) or webhooks are set
 webhooks        a provider webhook Secret is configured
 measurement     always (applied changes are detected from the live state)
@@ -25,8 +27,9 @@ loop). Each tick:
    ``automation.providers`` entry serves: ``github.com`` and ``gitlab.com`` by
    name, self-hosted hosts by probing ``/api/v4/version`` (GitLab) and
    ``/api/v1/version`` (Gitea);
-3. binds the default credentials Secret (``greenkube-git-credentials``, key
-   ``token``) to exactly one inferred host and enables that provider only while the
+3. binds the default credentials Secret (``greenkube-git-credentials``: key
+   ``token``, or ``appId`` + ``privateKey`` for a GitHub App, F3) to exactly one
+   inferred host and enables that provider only while the
    Secret is mounted, so creating or deleting it activates or deactivates delivery
    without a restart (the kubelet refreshes the optional projected volume). The
    token goes to the host named by the Secret's optional ``host`` key, or, without
@@ -62,6 +65,7 @@ from urllib.parse import urlsplit
 
 from prometheus_client import Gauge
 
+from greenkube.automation.delivery import DELIVERY_DIRECT, configured_delivery_mode
 from greenkube.core.config import DISCOVERED_REPOSITORIES
 from greenkube.core.observability import REGISTRY
 from greenkube.gitops.contracts import BindingStatus
@@ -83,6 +87,10 @@ DEFAULT_CREDENTIALS_KEY = "token"
 DEFAULT_CREDENTIALS_HOST_KEYS = ("host", "apiBaseUrl")
 CREDENTIALS_HOST_AMBIGUOUS = "credentials_host_ambiguous"
 CREDENTIALS_HOST_MISMATCH = "credentials_host_mismatch"
+#: GitHub App credentials (``appId`` + ``privateKey``) only authenticate against GitHub (F3).
+GITHUB_APP_HOST_UNSUPPORTED = "github_app_host_unsupported"
+GITHUB_APP_ID_KEY = "appId"
+GITHUB_APP_PRIVATE_KEY = "privateKey"
 _MAX_HOST_VALUE_BYTES = 512
 #: A failed self-hosted probe is retried after this delay; a success is kept.
 PROBE_RETRY_SECONDS = 600.0
@@ -278,7 +286,12 @@ class CredentialsInspector:
     def provider_has_credentials(self, config: GitOpsProviderConfig) -> bool:
         if not config.secret_name or not config.secret_key:
             return False
-        return self._present(config.secret_namespace, config.secret_name, config.secret_key)
+        if not self._present(config.secret_namespace, config.secret_name, config.secret_key):
+            return False
+        if config.provider_type.strip().lower() == "github" and config.secret_key == GITHUB_APP_PRIVATE_KEY:
+            # A GitHub App needs its id next to the private key (F3).
+            return self._present(config.secret_namespace, config.secret_name, GITHUB_APP_ID_KEY)
+        return True
 
 
 # --------------------------------------------------------------------------- snapshot
@@ -451,7 +464,7 @@ class AutomationReadiness:
         credentials_host = (
             self._credentials.default_credentials_host(default_secret) if default_secret and default_kind else None
         )
-        _bind_default_credentials(hosts, credentials_host)
+        _bind_default_credentials(hosts, credentials_host, default_kind)
 
         changed = await self._apply_inferred_providers(
             hosts, providers, default_secret, default_kind, patterns, allowed
@@ -547,7 +560,10 @@ class AutomationReadiness:
                 provider_type=plan.inference.provider_type,
                 api_base_url=plan.inference.api_base_url,
                 secret_name=default_secret if bound else None,
-                secret_key=DEFAULT_CREDENTIALS_KEY if bound else None,
+                # A GitHub App authenticates with its private key; the registry reads appId next to it (F3).
+                secret_key=(GITHUB_APP_PRIVATE_KEY if default_kind == "github_app" else DEFAULT_CREDENTIALS_KEY)
+                if bound
+                else None,
                 enabled=bound and default_kind is not None,
             )
             previous = existing.get(provider_id)
@@ -624,6 +640,7 @@ class AutomationReadiness:
     ) -> ReadinessSnapshot:
         now = self._clock()
         paused = bool(getattr(self._config, "automation_delivery_paused", False))
+        mode = configured_delivery_mode(self._config)
         by_id = {p.id: p for p in providers}
         resolved_urls = _resolved_repository_urls(bindings)
         discovered_urls = set(_repository_urls(bindings))
@@ -663,6 +680,8 @@ class AutomationReadiness:
                     resolved=ref.repo_url in resolved_urls,
                     credentials_reason=None if plan.explicit else plan.credentials_reason,
                 )
+                # patch and ci modes (F4) deliver with read access only: a person or a CI job
+                # writes to Git, so delivery is exactly as available as previews.
                 if paused:
                     delivery = CapabilityState(STATE_DORMANT, "delivery_paused")
                 elif preview.active:
@@ -691,10 +710,12 @@ class AutomationReadiness:
         capabilities = {
             "discovery": self._discovery_state(bindings),
             "preview": _aggregate(repositories, "preview", empty_reason="no_repository_discovered"),
-            "delivery": (
+            "delivery": _with_details(
                 CapabilityState(STATE_DORMANT, "delivery_paused")
                 if paused
-                else _aggregate(repositories, "delivery", empty_reason="no_repository_discovered")
+                else _aggregate(repositories, "delivery", empty_reason="no_repository_discovered"),
+                mode=mode,
+                write_credentials_required=mode == DELIVERY_DIRECT,
             ),
             "sync_tracking": self._tracking_state(providers, default_kind, hosts),
             "webhooks": (
@@ -751,7 +772,9 @@ class AutomationReadiness:
         return CapabilityState(STATE_ACTIVE, None, details)
 
 
-def _bind_default_credentials(hosts: Mapping[str, _HostPlan], credentials_host: str | None) -> None:
+def _bind_default_credentials(
+    hosts: Mapping[str, _HostPlan], credentials_host: str | None, default_kind: str | None = None
+) -> None:
     """Decide which inferred host may receive the default token (at most one).
 
     The token belongs to one Git host. Sending it to every host a GitOps source
@@ -761,9 +784,15 @@ def _bind_default_credentials(hosts: Mapping[str, _HostPlan], credentials_host: 
     * the Secret names its host (``host`` or ``apiBaseUrl`` key): only that host;
     * otherwise: only when github.com or gitlab.com is the single inferred host.
       A probe-inferred self-hosted host always needs the ``host`` key.
+
+    GitHub App credentials follow the same rules and, in addition, are only ever
+    bound to a host inferred as GitHub (F3).
     """
     candidates = [plan for plan in hosts.values() if not plan.explicit and plan.inference is not None]
     for plan in candidates:
+        if default_kind == "github_app" and plan.inference is not None and plan.inference.provider_type != "github":
+            plan.credentials_bound, plan.credentials_reason = False, GITHUB_APP_HOST_UNSUPPORTED
+            continue
         if credentials_host is not None:
             plan.credentials_bound = plan.host == credentials_host
             plan.credentials_reason = None if plan.credentials_bound else CREDENTIALS_HOST_MISMATCH
@@ -829,12 +858,14 @@ def _preview_state(
     if provider is None or not credentials:
         if default_kind is not None and credentials_reason:
             return CapabilityState(STATE_DORMANT, credentials_reason)
-        if provider is not None and provider.id.startswith(INFERRED_PROVIDER_PREFIX) and default_kind == "github_app":
-            return CapabilityState(STATE_DORMANT, "github_app_not_supported")
         return CapabilityState(STATE_DORMANT, "credentials_missing")
     if not resolved:
         return CapabilityState(STATE_PENDING, "binding_unresolved")
     return CapabilityState(STATE_ACTIVE)
+
+
+def _with_details(state: CapabilityState, **details: Any) -> CapabilityState:
+    return replace(state, details={**state.details, **details})
 
 
 def _aggregate(repositories: Sequence[RepositoryState], attribute: str, *, empty_reason: str) -> CapabilityState:

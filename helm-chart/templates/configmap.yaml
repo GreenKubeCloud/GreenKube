@@ -27,6 +27,13 @@ data:
   AUTOMATION_PAUSE_DELIVERY: {{ $v.pauseDelivery | quote }}
   AUTOMATION_REPOSITORY_ALLOWLIST: {{ .Values.automation.repositoryAllowlist | default (list "@discovered") | toJson | quote }}
   GITOPS_DEFAULT_CREDENTIALS_SECRET: {{ include "greenkube.gitCredentialsSecretName" . | quote }}
+  {{- $delivery := .Values.automation.delivery | default dict }}
+  {{- $autoApprove := .Values.automation.autoApprove | default dict }}
+  # Delivery modes (F4) and policy-based auto-approval (F5).
+  AUTOMATION_DELIVERY_MODE: {{ $delivery.mode | default "direct" | quote }}
+  AUTOMATION_AUTO_APPROVE_ENABLED: {{ $autoApprove.enabled | default false | quote }}
+  AUTOMATION_AUTO_APPROVE_MAX_RISK: {{ $autoApprove.maxRisk | default "low" | quote }}
+  AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE: {{ hasKey $autoApprove "minConfidence" | ternary $autoApprove.minConfidence 0.8 | quote }}
   GITOPS_PR_POLL_INTERVAL: {{ $prPollInterval | quote }}
   GITOPS_DISCOVERY_INTERVAL: {{ .Values.automation.discoveryInterval | default "5m" | quote }}
   GITOPS_BINDING_TTL: {{ .Values.automation.bindingTtl | default "30m" | quote }}

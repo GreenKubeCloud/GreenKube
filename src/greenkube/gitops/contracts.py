@@ -153,6 +153,8 @@ class AutomationErrorCode(StrEnum):
     ROLLBACK_NOT_READY = "rollback_not_ready"
     ROLLBACK_UNSUPPORTED = "rollback_unsupported"
     ROLLBACK_CONFLICT = "rollback_conflict"
+    DELIVERY_MODE_MISMATCH = "delivery_mode_mismatch"
+    DELIVERY_NOT_VERIFIED = "delivery_not_verified"
 
 
 def _nonblank(value: str) -> str:
@@ -719,6 +721,10 @@ class Plan(ContractModel):
     pre_apply_baseline: PreApplyWorkloadBaseline | None = None
     # Branch head the worker committed on when it differs from the planned base revision (D7).
     committed_on_revision: str | None = Field(default=None, min_length=1)
+    # How the approved plan is delivered (F4): GreenKube opens the PR ("direct"), or an
+    # operator ("patch") or a CI job ("ci") applies the patch and reports the PR back.
+    # None for plans not approved yet, and for plans approved before delivery modes.
+    delivery_mode: Literal["direct", "patch", "ci"] | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime | None = None
 

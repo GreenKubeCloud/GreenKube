@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
@@ -13,6 +13,7 @@ from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
+from greenkube.automation.delivery import DELIVERY_DIRECT, configured_delivery_mode, effective_expiry
 from greenkube.automation.rollback import InversePlan, inverse_plan_id
 from greenkube.core.observability import elapsed, record_automation_failure, record_automation_plan, start_timer
 from greenkube.gitops.contracts import (
@@ -59,6 +60,8 @@ from greenkube.gitops.snapshots.models import (
 )
 from greenkube.storage.base_gitops_repository import AutomationPlanRepository
 from greenkube.utils.time import ensure_utc
+
+logger = logging.getLogger(__name__)
 
 _RAW_MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
 _REPLACEABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
@@ -630,7 +633,8 @@ class AutomationPlanService:
             raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, f"plan {plan_id!r} was not found")
 
         now = ensure_utc(self.clock())
-        if plan.status in _EXPIREABLE_STATUSES and plan.expires_at is not None and ensure_utc(plan.expires_at) <= now:
+        expiry = effective_expiry(plan)
+        if plan.status in _EXPIREABLE_STATUSES and expiry is not None and ensure_utc(expiry) <= now:
             await self._transition(plan, PlanStatus.STALE, actor=actor, reason_code="plan_expired")
             raise AutomationPlanError(AutomationErrorCode.PLAN_EXPIRED, "plan has expired")
         if plan.status not in {PlanStatus.VALIDATED, PlanStatus.APPROVED}:
@@ -675,7 +679,26 @@ class AutomationPlanService:
             if approved is None:
                 raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "plan changed during approval")
 
-        if self.operation_enqueuer is not None:
+        # Delivery modes (F4): only "direct" queues an operation that writes to Git. A plan
+        # approved in "patch" or "ci" mode waits for a person or a CI job to report its PR.
+        mode = configured_delivery_mode()
+        recorder = getattr(self.repository, "set_plan_delivery_mode", None)
+        if approved.delivery_mode is None and not callable(recorder) and mode != DELIVERY_DIRECT:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                "this plan store cannot record an external delivery mode",
+            )
+        if approved.delivery_mode is None and callable(recorder):
+            recorded = await cast(Any, recorder)(
+                approved.plan_id,
+                mode,
+                expected_digest=approved.digest,
+                expected_statuses=(PlanStatus.APPROVED,),
+            )
+            if recorded is None:
+                raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "plan changed during approval")
+            approved = recorded
+        if self.operation_enqueuer is not None and approved.delivery_mode in (None, DELIVERY_DIRECT):
             if approved.digest is None:
                 raise AutomationPlanError(
                     AutomationErrorCode.RENDER_VALIDATION_FAILED,
@@ -717,7 +740,8 @@ class AutomationPlanService:
         if plan is None or plan.expires_at is None or plan.status not in _EXPIREABLE_STATUSES:
             return plan
         current_time = ensure_utc(now if now is not None else self.clock())
-        if ensure_utc(plan.expires_at) > current_time:
+        expiry = effective_expiry(plan)
+        if expiry is None or ensure_utc(expiry) > current_time:
             return plan
         return await self._transition(plan, PlanStatus.STALE, reason_code="plan_expired")
 
@@ -744,7 +768,8 @@ class AutomationPlanService:
                 for plan in candidates
                 if plan.status in _EXPIREABLE_STATUSES
                 and plan.expires_at is not None
-                and ensure_utc(plan.expires_at) <= current_time
+                # Approved patch/ci plans wait longer for their pull request (F4).
+                and ensure_utc(cast(datetime, effective_expiry(plan))) <= current_time
             ),
             key=lambda item: (ensure_utc(cast(datetime, item.expires_at)), item.plan_id),
         )[:limit]
@@ -1193,3 +1218,55 @@ def _same_workload_binding(left: WorkloadSource, right: WorkloadSource) -> bool:
         right.workload_kind,
         right.workload_name,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Policy-based auto-approval hook (roadmap F5)                                 #
+# --------------------------------------------------------------------------- #
+
+
+class PlanApprover(Protocol):
+    async def approve_plan(self, plan_id: str, digest: str, *, actor: str = "system") -> Plan: ...
+
+
+async def maybe_auto_approve(
+    approver: PlanApprover,
+    plan: Plan,
+    recommendations: Sequence[Any],
+    *,
+    actor: str,
+    policy: Any,
+    may_approve: bool,
+) -> tuple[Plan, list[str]]:
+    """Approve a fresh preview on behalf of ``actor`` when ``automation.autoApprove`` allows it.
+
+    Returns the (possibly approved) plan and why it was not approved. The approval goes
+    through the same path as the human click (pauseDelivery, binding, policy and digest
+    checks); any refusal leaves the preview waiting for that click. Only a requester
+    who may approve plans (``approve`` scope) can trigger it, rollbacks never are, and
+    the rules of :func:`auto_approve_blockers` (contested consensus is a hard stop)
+    apply to every recommendation of the plan.
+    """
+    from greenkube.core.optimization.eligibility import auto_approve_blockers
+
+    if not getattr(policy, "enabled", False):
+        return plan, ["auto_approve_disabled"]
+    if not may_approve:
+        return plan, ["approve_scope_missing"]
+    if plan.status is not PlanStatus.VALIDATED or plan.digest is None:
+        return plan, ["plan_not_validated"]
+    if plan.rollback_of_plan_id is not None:
+        return plan, ["rollback_plan"]
+    blockers = auto_approve_blockers(recommendations, policy, expected=len(plan.recommendation_ids))
+    if blockers:
+        return plan, blockers
+    try:
+        approved = await approver.approve_plan(plan.plan_id, plan.digest, actor=f"autoapprove:{actor}"[:128])
+    except AutomationPlanError as error:
+        return plan, [error.code.value]
+    except Exception as error:
+        # The preview already exists: an unexpected failure (provider, resolver, store)
+        # must not turn its creation into a 500; it simply waits for the click.
+        logger.warning("Auto-approval of plan %s failed (%s).", plan.plan_id, type(error).__name__)
+        return plan, ["auto_approve_failed"]
+    return approved, []

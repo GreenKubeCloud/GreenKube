@@ -226,6 +226,7 @@ def row_to_automation_plan_record(
         policy_result=policy_result,
         pre_apply_baseline=baseline,
         committed_on_revision=_get(row, "committed_on_revision") or None,
+        delivery_mode=_delivery_mode(_get(row, "delivery_mode")),
         created_at=datetime_value(_get(row, "created_at")) or datetime.now(timezone.utc),
         expires_at=datetime_value(_get(row, "expires_at")),
     )
@@ -355,3 +356,8 @@ def row_to_worker_heartbeat(row: Any) -> WorkerHeartbeat:
         created_at=datetime_value(_get(row, "created_at")),
         updated_at=datetime_value(_get(row, "updated_at")),
     )
+
+
+def _delivery_mode(value: Any) -> Any:
+    """The persisted delivery mode (F4); an unknown value reads as None (fail closed: not CI-deliverable)."""
+    return value if value in ("direct", "patch", "ci") else None

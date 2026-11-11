@@ -297,6 +297,36 @@ async def test_list_expired_plans_returns_only_due_plans_oldest_expiry_first(sto
 
 
 @pytest.mark.asyncio
+async def test_list_expired_plans_skips_approved_external_plans_in_their_grace_period(store):
+    """F4: approved patch/ci plans in their delivery grace must not fill every expiry batch."""
+    from greenkube.automation.delivery import EXTERNAL_DELIVERY_GRACE
+
+    repository, _, _, _ = store
+    for index in range(3):
+        plan = _plan(f"ci-{index}", workload_name=f"ci-{index}", expires_in_minutes=index + 1)
+        await repository.save_plan(plan)
+        assert await repository.set_plan_status(plan.plan_id, PlanStatus.APPROVED) is not None
+        assert (
+            await repository.set_plan_delivery_mode(
+                plan.plan_id, "ci", expected_digest=plan.digest, expected_statuses=(PlanStatus.APPROVED,)
+            )
+            is not None
+        )
+    await repository.save_plan(_plan("preview", created_offset_minutes=10, expires_in_minutes=30))
+    live = (PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED)
+    now = _BASE_TIME + timedelta(hours=2)
+
+    assert [plan.plan_id for plan in await repository.list_expired_plans(now=now, statuses=live, limit=2)] == [
+        "preview"
+    ]
+    after_grace = now + EXTERNAL_DELIVERY_GRACE
+    assert [plan.plan_id for plan in await repository.list_expired_plans(now=after_grace, statuses=live, limit=2)] == [
+        "ci-0",
+        "ci-1",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_branch_cleanup_completion_is_recorded_on_the_pull_request_row(store):
     repository, pull_requests, manager, _ = store
     for plan_id in ("plan-done", "plan-pending", "plan-legacy"):

@@ -774,7 +774,10 @@ def test_openapi_describes_strict_typed_plan_requests_and_responses(plan_api):
     schema = client.get("/api/v1/openapi.json").json()
     paths = schema["paths"]
 
-    assert set(paths["/api/v1/automation/plans"]) == {"post"}
+    # GET lists plans by status and delivery mode (F4).
+    assert set(paths["/api/v1/automation/plans"]) == {"get", "post"}
+    assert set(paths["/api/v1/automation/plans/{plan_id}/patch"]) == {"get"}
+    assert set(paths["/api/v1/automation/plans/{plan_id}/delivery"]) == {"post"}
     assert set(paths["/api/v1/automation/plans/{plan_id}"]) == {"get", "delete"}
     assert "204" in paths["/api/v1/automation/plans/{plan_id}"]["delete"]["responses"]
     assert set(paths["/api/v1/automation/plans/{plan_id}/rollback-preview"]) == {"post"}
@@ -806,3 +809,82 @@ def test_openapi_keeps_typed_operations_in_action_plan_responses(plan_api):
     for model in ("SetContainerResources", "DeleteResource", "AddHorizontalPodAutoscaler"):
         assert f"#/components/schemas/{model}" in serialized
     assert '"propertyName": "op"' in serialized
+
+
+class _Recommendations:
+    def __init__(self, **overrides: Any) -> None:
+        from types import SimpleNamespace
+
+        values: dict[str, Any] = {
+            "id": 42,
+            "type": "RIGHTSIZING_CPU",
+            "status": "active",
+            "risk_level": "low",
+            "confidence": 0.95,
+            "current_cpu_request_millicores": 1000,
+            "recommended_cpu_request_millicores": 300,
+            "source": "greenkube",
+            "evidence": SimpleNamespace(sample_count=100),
+            "consensus": None,
+            "eligibility": None,
+        }
+        values.update(overrides)
+        self.record = SimpleNamespace(**values)
+
+    async def get_recommendation_by_id(self, recommendation_id: int):
+        return self.record if recommendation_id == 42 else None
+
+
+def _enable_auto_approve(monkeypatch: pytest.MonkeyPatch) -> None:
+    from greenkube.core.config import Config
+
+    monkeypatch.setattr(
+        "greenkube.api.routers.plans.get_config",
+        lambda: Config(AUTOMATION_AUTO_APPROVE_ENABLED=True),
+    )
+
+
+def test_create_auto_approves_an_eligible_preview_when_the_policy_allows_it(plan_api, monkeypatch):
+    """F5: automation.autoApprove skips the extra click; the plan is approved and queued."""
+    from greenkube.api.dependencies import get_recommendation_repository
+
+    client, app, repository, _, queue = plan_api
+    _enable_auto_approve(monkeypatch)
+    app.dependency_overrides[get_recommendation_repository] = lambda: _Recommendations()
+
+    response = client.post("/api/v1/automation/plans", json={"recommendation_ids": [42]})
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["auto_approved"] is True and body["auto_approve_blockers"] == []
+    assert body["status"] == "approved"
+    assert body["operation_id"] == "operation-plan-1"
+    assert len(queue.operations) == 1
+
+
+def test_create_keeps_a_contested_preview_for_the_approval_click(plan_api, monkeypatch):
+    from greenkube.api.dependencies import get_recommendation_repository
+
+    client, app, _, _, queue = plan_api
+    _enable_auto_approve(monkeypatch)
+    app.dependency_overrides[get_recommendation_repository] = lambda: _Recommendations(
+        consensus={"contested": True, "independent_votes": 3}
+    )
+
+    response = client.post("/api/v1/automation/plans", json={"recommendation_ids": [42]})
+
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "validated"
+    assert response.json()["auto_approved"] is False
+    assert response.json()["auto_approve_blockers"] == ["consensus_contested"]
+    assert queue.operations == {}
+
+
+def test_create_does_not_read_recommendations_when_auto_approve_is_off(plan_api):
+    client, _, _, _, queue = plan_api
+
+    response = client.post("/api/v1/automation/plans", json={"recommendation_ids": [42]})
+
+    assert response.status_code == 201
+    assert response.json()["auto_approved"] is False and response.json()["auto_approve_blockers"] == []
+    assert queue.operations == {}

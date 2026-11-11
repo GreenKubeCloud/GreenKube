@@ -389,12 +389,80 @@ async def test_snapshot_is_persisted_for_the_api(tmp_path):
     }
 
 
-async def test_github_app_credentials_are_reported_until_supported(tmp_path):
-    _write_token(tmp_path, key="appId", value="123")
-    _write_token(tmp_path, key="privateKey", value="pem")
+def _write_github_app(tmp_path, *, app_id: bool = True) -> None:
+    if app_id:
+        _write_token(tmp_path, key="appId", value="123")
+    _write_token(tmp_path, key="privateKey", value="-----BEGIN RSA PRIVATE KEY-----\n...")
+
+
+async def test_github_app_credentials_bind_to_the_inferred_github_provider(tmp_path):
+    """F3: appId + privateKey in the default Secret activate the inferred github.com provider."""
+    _write_github_app(tmp_path)
+    repository = FakeGitOpsRepository([GITHUB_REPO])
+    readiness = _readiness(repository, tmp_path)
+
+    await readiness.run_once()
+    snapshot = await readiness.run_once()
+
+    github = repository.providers["inferred-github.com"]
+    assert _secret_ref(github) == ("greenkube-git-credentials", "privateKey", True)
+    assert snapshot.repositories[0].credentials is True
+    assert snapshot.repositories[0].preview.active
+    assert snapshot.capabilities["delivery"].active
+
+
+async def test_github_app_credentials_are_never_bound_to_another_provider_type(tmp_path):
+    _write_github_app(tmp_path)
+    _write_token(tmp_path, key="host", value="gitlab.com")
+    repository = FakeGitOpsRepository([GITLAB_REPO])
+
+    snapshot = await _readiness(repository, tmp_path).run_once()
+
+    assert _secret_ref(repository.providers["inferred-gitlab.com"]) == (None, None, False)
+    assert snapshot.repositories[0].preview.reason == "github_app_host_unsupported"
+
+
+async def test_github_app_follows_the_token_host_binding_rules(tmp_path):
+    _write_github_app(tmp_path)
+    repository = FakeGitOpsRepository([GITHUB_REPO, ATTACKER_REPO])
+
+    snapshot = await _readiness(repository, tmp_path, prober=_gitlab_prober).run_once()
+
+    assert _secret_ref(repository.providers["inferred-github.com"]) == (None, None, False)
+    states = {repo.host: repo for repo in snapshot.repositories}
+    assert states["github.com"].preview.reason == "credentials_host_ambiguous"
+    assert states["evil.example"].preview.reason == "github_app_host_unsupported"
+
+
+async def test_a_github_app_private_key_without_its_app_id_is_not_credentials(tmp_path):
+    _write_github_app(tmp_path, app_id=False)
+
     snapshot = await _readiness(FakeGitOpsRepository([GITHUB_REPO]), tmp_path).run_once()
 
-    assert snapshot.repositories[0].preview.reason in {"github_app_not_supported", "credentials_missing"}
+    assert snapshot.repositories[0].preview.reason == "credentials_missing"
+    explicit = GitOpsProviderConfig(
+        id="github-app", provider_type="github", secret_name="greenkube-git-credentials", secret_key="privateKey"
+    )
+    assert CredentialsInspector(tmp_path).provider_has_credentials(explicit) is False
+    _write_token(tmp_path, key="appId", value="123")
+    assert CredentialsInspector(tmp_path).provider_has_credentials(explicit) is True
+
+
+@pytest.mark.parametrize(("mode", "write_required"), [("direct", True), ("patch", False), ("ci", False)])
+async def test_delivery_capability_reports_the_delivery_mode(tmp_path, mode, write_required):
+    """F4: patch and ci modes need no write credentials; the delivery capability says so."""
+    _write_token(tmp_path)
+    readiness = _readiness(FakeGitOpsRepository([GITHUB_REPO]), tmp_path, config=_config(AUTOMATION_DELIVERY_MODE=mode))
+
+    await readiness.run_once()
+    snapshot = await readiness.run_once()
+
+    delivery = snapshot.capabilities["delivery"]
+    assert delivery.active
+    assert delivery.details["mode"] == mode
+    assert delivery.details["write_credentials_required"] is write_required
+    global_row = next(row for row in snapshot.rows() if row.subject == "delivery")
+    assert global_row.payload["mode"] == mode
 
 
 @pytest.mark.parametrize("existing_status", ["verified", "error"])

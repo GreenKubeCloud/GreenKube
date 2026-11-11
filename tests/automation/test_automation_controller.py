@@ -581,3 +581,28 @@ async def test_two_controllers_never_run_the_automation_tick_concurrently(lease_
     assert overlap == 1
     # Released at the end of the tick: the other controller takes the next one.
     assert (await second.tick()).lease_acquired
+
+
+async def test_controller_links_external_deliveries_at_the_pr_poll_interval():
+    """F4: pull requests opened from a patch/ci plan branch are linked without a report."""
+    calls: list[str] = []
+    clock = _Clock()
+
+    class _Worker:
+        plans = _WorkerPlans(calls)
+        pull_request_repository = _PullRequests(calls)
+
+        async def link_external_deliveries(self):
+            calls.append("external_delivery")
+            return 1
+
+    controller = _controller(calls, delivery=True, clock=clock, worker=_Worker())
+
+    first = await controller.tick()
+    assert first.steps["external_delivery"] == "ok"
+    clock.advance(30)
+    assert (await controller.tick()).steps.get("external_delivery") in {None, "not_due"}
+    clock.advance(120)
+    await controller.tick()
+    assert calls.count("external_delivery") == 2
+    assert "external_delivery" not in (await _controller([], delivery=False).tick()).steps

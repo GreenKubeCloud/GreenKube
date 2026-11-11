@@ -758,30 +758,6 @@ class PullRequestRecord(BaseModel):
     sync_error_code: Optional[str] = Field(None, description="Latest synchronization error code.")
 
 
-class ApplyPrRequest(BaseModel):
-    """Request body for opening a pull request that applies a recommendation."""
-
-    base_branch: Optional[str] = Field(None, description="Override the discovery base branch.")
-    dry_run: bool = Field(False, description="When true, return the patch preview without touching Git.")
-
-
-class ApplyPrResponse(BaseModel):
-    """Result of an apply-pr request (dry run preview or opened pull request)."""
-
-    status: str = Field(..., description="dry_run, pr_open or error.")
-    policy_result: dict[str, Any] = Field(default_factory=dict)
-    provider: Optional[str] = Field(None, description="Git provider used.")
-    repo: Optional[str] = Field(None, description="Repository in owner/name form.")
-    base_branch: Optional[str] = Field(None, description="Target branch of the pull request.")
-    head_branch: Optional[str] = Field(None, description="Branch created by the bot.")
-    path: Optional[str] = Field(None, description="Manifest path that would be (or was) patched.")
-    patch: Optional[RecommendationPatchV2 | dict] = Field(None, description="Machine-readable action plan.")
-    diff: Optional[str] = Field(None, description="Unified diff preview.")
-    pr_url: Optional[str] = Field(None, description="Opened pull request URL.")
-    message: Optional[str] = Field(None, description="Human-readable outcome or error message.")
-    pull_request: Optional[PullRequestRecord] = Field(None, description="Persisted pull request attempt.")
-
-
 class IgnoreRecommendationRequest(BaseModel):
     """Request body for permanently ignoring a recommendation."""
 
