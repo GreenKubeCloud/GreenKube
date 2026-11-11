@@ -260,7 +260,7 @@ most important values are:
 | `automation.pr.draftHighRisk` | `true` | `GITOPS_PR_DRAFT_HIGH_RISK`: open high-risk plans as draft PRs. |
 | `automation.pr.codeowners` | `true` | `GITOPS_PR_CODEOWNERS`: request reviews from the CODEOWNERS of the touched paths. |
 | `automation.pr.commitStatus` | `true` | `GITOPS_PR_COMMIT_STATUS`: publish the `greenkube/validation` commit status on the PR head. |
-| `automation.pr.lifecycleComments` | `true` | `GITOPS_PR_LIFECYCLE_COMMENTS`: keep one GreenKube status comment up to date on merged PRs. |
+| `automation.pr.lifecycleComments` | `true` | `GITOPS_PR_LIFECYCLE_COMMENTS`: keep one GreenKube status comment up to date on merged PRs, and on open PRs whose plan has newer advice queued (E7). |
 | `automation.pr.lifecycleLookbackDays` | `30` | `GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS`: how long after the merge the status comment is refreshed (1–365). |
 
 Configure providers through Secret references:
