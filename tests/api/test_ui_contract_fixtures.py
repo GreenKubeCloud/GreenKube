@@ -71,10 +71,11 @@ def _repo_row(url: str, repository: str, *, allowlisted: bool, provider_type: st
     )
 
 
-REPOSITORIES = [
-    _repo_row(REPO, "acme/gitops", allowlisted=True, provider_type="github"),
-    _repo_row(OTHER_REPO, "platform/apps", allowlisted=False, provider_type="gitea"),
-]
+def _repositories() -> list[CapabilityRow]:
+    return [
+        _repo_row(REPO, "acme/gitops", allowlisted=True, provider_type="github"),
+        _repo_row(OTHER_REPO, "platform/apps", allowlisted=False, provider_type="gitea"),
+    ]
 
 
 def _healthy_services() -> dict[str, ServiceHealth]:
@@ -98,13 +99,13 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             {"id": "greenkube.rightsizing", "status": "healthy", "enabled": "auto"},
             {"id": "krr", "status": "failing", "enabled": "true"},
         ],
-        "rows": [
+        "rows": lambda: [
             *_globals(
                 delivery=("dormant", "credentials_host_ambiguous"),
                 sync_tracking=("dormant", "credentials_host_ambiguous"),
                 renderer=("active", "renderer_egress_unenforced"),
             ),
-            *REPOSITORIES,
+            *_repositories(),
         ],
         "heartbeat": None,
     },
@@ -112,20 +113,20 @@ SCENARIOS: dict[str, dict[str, Any]] = {
     "setup_status_host_mismatch": {
         "services": _healthy_services(),
         "sources": [{"id": "greenkube.rightsizing", "status": "healthy", "enabled": "auto"}],
-        "rows": [*_globals(delivery=("dormant", "credentials_host_mismatch")), REPOSITORIES[0]],
+        "rows": lambda: [*_globals(delivery=("dormant", "credentials_host_mismatch")), _repositories()[0]],
         "heartbeat": None,
     },
     # automation.policy.pauseDelivery=true: the only off switch.
     "setup_status_paused": {
         "services": _healthy_services(),
         "sources": [{"id": "greenkube.rightsizing", "status": "healthy", "enabled": "auto"}],
-        "rows": [*_globals(delivery=("dormant", "delivery_paused")), REPOSITORIES[0]],
+        "rows": lambda: [*_globals(delivery=("dormant", "delivery_paused")), _repositories()[0]],
         "heartbeat": None,
     },
     "setup_status_complete": {
         "services": _healthy_services(),
         "sources": [{"id": "greenkube.rightsizing", "status": "healthy", "enabled": "auto"}],
-        "rows": [*_globals(), REPOSITORIES[0]],
+        "rows": lambda: [*_globals(), _repositories()[0]],
         "heartbeat": "now",
     },
 }
@@ -171,7 +172,8 @@ def _fake_setup_inputs(monkeypatch, scenario: dict[str, Any]) -> None:
         return scenario["sources"]
 
     async def rows():
-        return scenario["rows"]
+        # Built per request: the readiness snapshot must be fresh (stamped now).
+        return scenario["rows"]()
 
     async def heartbeat():
         return _now() if scenario["heartbeat"] == "now" else None
@@ -206,7 +208,7 @@ class _Capabilities:
 
 
 def test_repository_suggestion_and_allowlist_fixtures(client, monkeypatch):
-    repository = _Capabilities([*_globals(), *REPOSITORIES])
+    repository = _Capabilities([*_globals(), *_repositories()])
     monkeypatch.setattr(automation_repositories, "_repository", lambda: repository)
 
     suggestions = client.get("/api/v1/automation/repositories/suggestions")
