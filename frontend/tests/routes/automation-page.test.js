@@ -2,7 +2,7 @@
  * Tests for GitOps discovery, manual binding resolution, and automation operations.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import AutomationPage from '../../src/routes/automation/+page.svelte';
 import * as api from '$lib/api.js';
 
@@ -153,9 +153,10 @@ describe('AutomationPage', () => {
 		const { container } = render(AutomationPage);
 
 		expect(await screen.findByRole('heading', { name: 'GitOps discovery' })).toBeInTheDocument();
-		expect(screen.getByText('Argo CD')).toBeInTheDocument();
-		expect(screen.getByText('Flux Kustomization')).toBeInTheDocument();
-		expect(screen.getByText('CRD not detected')).toBeInTheDocument();
+		expect(screen.getByRole('heading', { level: 3, name: 'Argo CD' })).toBeInTheDocument();
+		expect(screen.getByRole('heading', { level: 3, name: 'Flux' })).toBeInTheDocument();
+		expect(screen.getByText('Kustomizations')).toBeInTheDocument();
+		expect(screen.getByText(/CRD not detected/)).toBeInTheDocument();
 		expect(screen.getByText('80%')).toBeInTheDocument();
 		expect(
 			screen.getByText(/Controller availability, workload bindings, and current discovery coverage/i)
@@ -188,6 +189,39 @@ describe('AutomationPage', () => {
 		expect(container).not.toHaveTextContent('revision-secret');
 		expect(container).not.toHaveTextContent('raw-error-secret');
 		expect(container).not.toHaveTextContent('unsafe provider detail');
+	});
+
+	it('renders exactly one card per GitOps controller family with grouped Flux resource kinds', async () => {
+		render(AutomationPage);
+
+		const controllers = await screen.findByRole('list', { name: 'GitOps controllers' });
+		const cards = within(controllers).getAllByRole('article');
+		expect(cards).toHaveLength(2);
+		expect(cards.map((card) => card.getAttribute('data-family'))).toEqual(['argocd', 'flux']);
+
+		const argo = within(controllers).getByRole('article', { name: 'Argo CD' });
+		expect(within(argo).getByLabelText('Argo CD status: Detected')).toBeInTheDocument();
+
+		const flux = within(controllers).getByRole('article', { name: 'Flux' });
+		expect(within(flux).getByLabelText('Flux status: Degraded')).toBeInTheDocument();
+		expect(within(flux).getByText(/2 of 6 resource kinds available/)).toBeInTheDocument();
+		expect(within(flux).getAllByRole('listitem')).toHaveLength(6);
+		expect(within(flux).getByRole('list', { name: 'Reconcilers' })).toHaveTextContent('HelmReleases');
+		expect(within(flux).getByRole('list', { name: 'Sources' })).toHaveTextContent('GitRepositories');
+		expect(screen.queryByText('Flux Kustomization')).not.toBeInTheDocument();
+	});
+
+	it('summarises workload coverage in one panel instead of one card per status', async () => {
+		render(AutomationPage);
+
+		const coverageSection = await screen.findByRole('region', { name: 'Workload coverage' });
+		expect(within(coverageSection).getByRole('progressbar', { name: 'Workload coverage' })).toHaveAttribute(
+			'aria-valuenow',
+			'80'
+		);
+		const breakdown = within(coverageSection).getByRole('list', { name: 'Workload bindings by status' });
+		expect(within(breakdown).getAllByRole('listitem')).toHaveLength(6);
+		expect(within(breakdown).getByText('Resolved').closest('li')).toHaveTextContent('8');
 	});
 
 	it('shows a loading state while the read-only status requests are pending', () => {

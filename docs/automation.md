@@ -58,6 +58,8 @@ GreenKube needs read access to the GitOps APIs it discovers:
 
 The chart grants the corresponding read-only RBAC by default.
 
+The **Automation & GitOps** page shows one card per controller: Argo CD and Flux. Each card reports `Detected` (every resource kind is readable), `Not detected` (no CRD found), `Degraded` (only some kinds are readable; the card names the missing ones, and workloads reconciled through them cannot be bound) or `Unknown` (the status could not be read). The Flux card lists its reconcilers (Kustomizations, HelmReleases) and sources (GitRepositories, OCIRepositories, HelmRepositories, Buckets) with the status of each.
+
 ## Configure a provider
 
 Create the token Secret in the Helm release namespace. Do not put the token in `values.yaml`:
