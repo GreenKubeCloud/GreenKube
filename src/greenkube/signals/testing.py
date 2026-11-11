@@ -26,6 +26,7 @@ from greenkube.signals.sdk import (
     SourceBatch,
     SourceHealth,
     SourceHealthStatus,
+    emits_source_id,
     validate_source_class,
 )
 
@@ -46,7 +47,7 @@ def check_signal(source: Source, signal: SourceSignal, ctx: CollectContext) -> N
     """One signal: identity, declared capability, bounded raw payload and a stable JSON round trip."""
     cls = type(source)
     assert isinstance(signal, SourceSignal), f"{cls.id}: {type(signal).__name__} is not a SourceSignal"
-    assert signal.source_id == cls.id, f"{cls.id}: signal carries source_id {signal.source_id!r}"
+    assert emits_source_id(cls, signal.source_id), f"{cls.id}: signal carries source_id {signal.source_id!r}"
     declared = sorted(c.value for c in cls.capabilities)
     assert signal.capability in cls.capabilities, (
         f"{cls.id}: capability {signal.capability.value!r} is not declared in {declared}"
@@ -68,17 +69,23 @@ def check_v1_round_trip(source: Source, batch: SourceBatch) -> None:
     if not batch.recommendations:
         return
     assert cls.legacy_source, f"{cls.id}: returns v1 recommendations but declares no legacy_source"
-    by_fingerprint = {signal.provenance.legacy_fingerprint: signal for signal in batch.signals}
+    by_fingerprint: dict = {}
+    for signal in batch.signals:
+        by_fingerprint.setdefault(signal.provenance.legacy_fingerprint, []).append(signal)
     for rec in batch.recommendations:
         assert str(getattr(rec.source, "value", rec.source)) == cls.legacy_source, (
             f"{cls.id}: recommendation source {rec.source!r} differs from legacy_source {cls.legacy_source!r}"
         )
         fingerprint = RecommendationRecord.from_recommendation(rec).fingerprint
-        signal = by_fingerprint.get(fingerprint)
-        assert signal is not None, f"{cls.id}: recommendation {fingerprint} has no signal"
+        signals = by_fingerprint.get(fingerprint)
+        assert signals, f"{cls.id}: recommendation {fingerprint} has no signal"
+        # Several signals may support one recommendation (two VPAs agreeing on
+        # one container): one of them must reproduce it exactly.
         expected = rec.model_dump(mode="json", include=set(SOURCE_FIELDS))
-        rebuilt = recommendation_from_signal(signal).model_dump(mode="json", include=set(SOURCE_FIELDS))
-        assert rebuilt == expected, f"{cls.id}: v1 -> v2 -> v1 changes {_diff(expected, rebuilt)}"
+        rebuilt = [
+            recommendation_from_signal(signal).model_dump(mode="json", include=set(SOURCE_FIELDS)) for signal in signals
+        ]
+        assert expected in rebuilt, f"{cls.id}: v1 -> v2 -> v1 changes {_diff(expected, rebuilt[0])}"
 
 
 def _diff(expected: dict, rebuilt: dict) -> List[str]:

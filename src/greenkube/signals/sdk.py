@@ -202,6 +202,11 @@ class Source(ABC):
     legacy_source: ClassVar[Optional[str]] = None
     #: One-line description shown by ``GET /api/v1/sources``.
     description: ClassVar[str] = ""
+    #: Other source ids this built-in source may put on its signals: an exact id
+    #: (the VPA connector emits ``goldilocks`` signals for Goldilocks-managed VPAs)
+    #: or a prefix ending with ``:`` (``push:`` for replayed push batches).
+    #: Plugins must leave it empty: the registry rejects them otherwise.
+    also_emits: ClassVar[FrozenSet[str]] = frozenset()
 
     #: Set by the registry on every instance it creates (``builtin`` or
     #: ``plugin``); None for sources a caller builds directly. Not a plugin API.
@@ -233,6 +238,16 @@ class Source(ABC):
 PLUGIN_ORIGIN = "plugin"
 
 
+def emits_source_id(cls: type[Source], source_id: str) -> bool:
+    """Whether signals of ``cls`` may carry ``source_id`` (its own id or one of ``also_emits``)."""
+    if source_id == cls.id:
+        return True
+    for allowed in getattr(cls, "also_emits", frozenset()) or ():
+        if source_id == allowed or (allowed.endswith(":") and source_id.startswith(allowed) and source_id != allowed):
+            return True
+    return False
+
+
 def accepts_v1_recommendations(source: Source) -> bool:
     """Whether the runner passes ``SourceBatch.recommendations`` of ``source`` to the v1 pipeline.
 
@@ -259,6 +274,8 @@ def validate_source_class(cls: Any, *, builtin: bool = False) -> None:
         # source group (whose completeness drives stale reconciliation).
         if getattr(cls, "legacy_source", None) is not None:
             raise ValueError(f"source {source_id!r} must not set legacy_source: it is reserved for built-in sources")
+        if getattr(cls, "also_emits", None):
+            raise ValueError(f"source {source_id!r} must not set also_emits: it is reserved for built-in sources")
         if issubclass(cls, (AnalyzerSource, RecommendationSourceAdapter)):
             raise ValueError(f"source {source_id!r} must subclass Source, not a built-in adapter")
     if not isinstance(getattr(cls, "display_name", None), str) or not cls.display_name.strip():

@@ -8,8 +8,8 @@ recommendations.
 """
 
 import logging
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_custom_objects_api
@@ -37,9 +37,15 @@ class VPARecommendation:
     memory_lower_bytes: Optional[int] = None
     cpu_upper_millicores: Optional[int] = None
     memory_upper_bytes: Optional[int] = None
+    cpu_uncapped_millicores: Optional[int] = None
+    memory_uncapped_bytes: Optional[int] = None
+    #: Labels of the VPA object (Goldilocks provenance: ``creator=Fairwinds``, ``source=goldilocks``).
+    labels: Dict[str, str] = field(default_factory=dict)
 
 
-def _parse_container_recommendation(namespace: str, vpa_name: str, target_ref: dict, container: dict):
+def _parse_container_recommendation(
+    namespace: str, vpa_name: str, target_ref: dict, container: dict, labels: Optional[Dict[str, str]] = None
+):
     container_name = container.get("containerName") or ""
     if not container_name:
         return None
@@ -47,6 +53,7 @@ def _parse_container_recommendation(namespace: str, vpa_name: str, target_ref: d
     target = container.get("target") or {}
     lower = container.get("lowerBound") or {}
     upper = container.get("upperBound") or {}
+    uncapped = container.get("uncappedTarget") or {}
 
     return VPARecommendation(
         namespace=namespace,
@@ -60,11 +67,18 @@ def _parse_container_recommendation(namespace: str, vpa_name: str, target_ref: d
         memory_lower_bytes=parse_memory_quantity(lower.get("memory")),
         cpu_upper_millicores=parse_cpu_quantity(upper.get("cpu")),
         memory_upper_bytes=parse_memory_quantity(upper.get("memory")),
+        cpu_uncapped_millicores=parse_cpu_quantity(uncapped.get("cpu")),
+        memory_uncapped_bytes=parse_memory_quantity(uncapped.get("memory")),
+        labels={str(k): str(v) for k, v in (labels or {}).items()},
     )
 
 
 class VPACollector:
     """Collects recommendation-mode VPA container targets."""
+
+    def __init__(self) -> None:
+        #: VPAs skipped by the last ``collect()``, by update mode (``Auto``, ``Recreate``...).
+        self.skipped_by_mode: Dict[str, int] = {}
 
     async def collect(self) -> List[VPARecommendation]:
         """Fetches all recommendation-mode VPAs across namespaces.
@@ -74,6 +88,7 @@ class VPACollector:
             error (graceful degradation when the CRD is not installed).
         """
         recommendations: List[VPARecommendation] = []
+        self.skipped_by_mode = {}
 
         api = await get_custom_objects_api()
         if not api:
@@ -105,6 +120,7 @@ class VPACollector:
                 update_policy = spec.get("updatePolicy") or {}
                 update_mode = update_policy.get("updateMode") or spec.get("updateMode") or "Off"
                 if update_mode != "Off":
+                    self.skipped_by_mode[str(update_mode)] = self.skipped_by_mode.get(str(update_mode), 0) + 1
                     logger.debug(
                         "Skipping VPA %s/%s: updateMode is '%s' (GreenKube only reads recommendation mode).",
                         metadata.get("namespace"),
@@ -125,6 +141,7 @@ class VPACollector:
                         metadata.get("name") or "",
                         target_ref,
                         container,
+                        metadata.get("labels") or {},
                     )
                     if parsed:
                         recommendations.append(parsed)

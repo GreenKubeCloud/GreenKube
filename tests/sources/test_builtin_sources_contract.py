@@ -135,7 +135,11 @@ class TestVpaContract(SourceContract):
             memory_target_bytes=512 * MIB,
         )
         connector = VpaSource(Config(), collector=_FakeVpaCollector([vpa]))
-        return VpaSignalSource(SourceSettings(), deps(), connector=connector)
+
+        async def no_goldilocks_namespaces():
+            return []
+
+        return VpaSignalSource(SourceSettings(), deps(), connector=connector, namespace_lister=no_goldilocks_namespaces)
 
     def make_context(self):
         return collect_context(_vpa_context())
