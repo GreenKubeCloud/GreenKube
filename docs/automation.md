@@ -2,7 +2,61 @@
 
 GreenKube can turn eligible CPU and memory rightsizing recommendations into reviewed Git pull requests. The workflow is deliberately conservative: GreenKube discovers the workload's Git owner, renders the change in isolation, requires an exact-digest approval, opens one atomic multi-file PR, and only records the recommendation as applied after the GitOps controller has synced the merged revision and the live workload matches the plan.
 
-Automation is disabled by default. Everything below applies only after `automation.enabled=true`.
+Automation is always on: there is no feature flag. Each capability activates itself when its prerequisites
+appear and stays dormant, with a reason, when they are missing (see [Capability activation](#capability-activation)).
+`automation.policy.pauseDelivery: true` is the only off switch.
+
+## Capability activation
+
+The controller's `automation-readiness` loop reconciles every 60 seconds:
+
+| Capability | Active when | Otherwise |
+|---|---|---|
+| Discover | Argo CD or Flux CRDs are present (re-probed every discovery interval) | Dormant (`no_gitops_controller`) |
+| Preview | A discovered repository on a known provider host, allowlisted, with credentials and a resolved binding | Dormant with the blocker (`provider_unknown`, `not_allowlisted`, `credentials_missing`, `binding_unresolved`) |
+| Deliver | Preview + `pauseDelivery: false` | Dormant (`delivery_paused`, or the preview blocker) |
+| Sync tracking | A provider has credentials (PR polling) or webhooks are configured | Dormant; changes are still detected from the live state and measured |
+| Webhooks | A provider webhook Secret is configured | Polling only |
+| Renderer | The isolated renderer answers (warning `renderer_egress_unenforced` when its egress policy is not enforced) | Helm/Kustomize previews blocked |
+
+The result is stored in `automation_capabilities`, exported as `greenkube_capability_active{capability}`, and shown
+by `GET /api/v1/setup/status` (the setup checklist). The plan executor runs only while delivery is active; the
+webhook outbox and PR polling only while tracking is active. Creating or deleting the credentials Secret switches
+them within about a minute (the kubelet refreshes the optional projected volume), with no restart.
+
+### Provider inference
+
+For every repository host referenced by a discovered source that no explicit `automation.providers` entry
+serves, the reconciler infers a provider named `inferred-<host>`:
+
+- `github.com` is GitHub and `gitlab.com` is GitLab;
+- a self-hosted host is probed at `<scheme>://<host>/api/v4/version` (GitLab answers, `401` without a token) and
+  `/api/v1/version` (Gitea); a success is cached, a failure retried after 10 minutes;
+- an unidentified host stays dormant with `provider_unknown`: declare it explicitly.
+
+Inferred providers read the Secret `automation.credentialsSecret` (default `greenkube-git-credentials`), key
+`token`. They are enabled only while that key is mounted. `GET /api/v1/automation/repositories/suggestions` lists
+the discovered repositories with their inferred provider type, API URL and allowlist state.
+
+### Repository allowlist
+
+`automation.repositoryAllowlist` defaults to `["@discovered"]`: every repository referenced by a discovered Argo CD
+or Flux source. An explicit list of `owner/repo` names or segment globs narrows it. An administrator can allow more
+repositories from the suggestions (`POST /api/v1/automation/repositories/allowlist`, `admin` scope, `{"repo_urls":
+[...]}`); they are stored in the database and applied within a minute, and the response returns the equivalent
+values snippet for installs whose values are managed in Git.
+
+### Pause delivery
+
+```yaml
+automation:
+  policy:
+    pauseDelivery: true
+```
+
+For change freezes and incident response: plan approval returns `409 delivery_paused`, queued operations wait, and
+discovery, previews, PR tracking and measurement keep running. Recommendations show the `automation_disabled`
+blocker until it is set back to `false`.
 
 ## How it works
 
@@ -32,7 +86,8 @@ Components:
 | Discovery runtime | Reads Argo CD/Flux resources and live workloads, then persists generation-bound workload bindings. |
 | Renderer sandbox | Renders Helm/Kustomize plans from a bounded repository snapshot without database or provider credentials. |
 | Plan service | Resolves recommendation IDs to server-side actions, validates the source and rendered diff, and stores an expiring preview. |
-| Plan executor | Executes approved operations, creates commits and PRs. Runs in the controller (`plan-executor` loop) and, in `worker` mode, also in dedicated worker pods. |
+| Plan executor | Executes approved operations, creates commits and PRs. Runs in the controller (`plan-executor` loop, active while delivery is) and, with `worker.replicas`, also in dedicated worker pods. |
+| Readiness reconciler | Runs in the controller (`automation-readiness` loop): provider inference, credentials, allowlist, capability states. |
 | Automation controller loop | Runs in the controller, under one database lease: webhook outbox, PR polling, branch cleanup, plan expiry and retention. |
 | Controller runtime | Observes the Argo CD/Flux revision and readiness after merge (the landed commit or a descendant of it), then gates apply detection and verification. |
 | Webhook endpoint | Accepts signed GitHub/Gitea/GitLab delivery events. Polling remains the recovery path. |
@@ -41,14 +96,10 @@ Components:
 
 - Kubernetes cluster with GreenKube installed and healthy.
 - Argo CD and/or Flux controllers installed if you want discovery-driven plans. GreenKube only plans workloads it can bind to a supported Git source.
-- A CNI that enforces NetworkPolicy. The renderer sandbox relies on an egress-deny policy. If your CNI does not enforce NetworkPolicy:
-  - keep automation disabled, or
-  - set `rendererSandbox.egressFirewall.enabled=true` on clusters that permit `NET_ADMIN` and validate the resulting boundary, or
-  - leave rendering disabled and validate plans only through the API without applying them.
-- `rendererSandbox.egressFirewall.privilegedInitContainer` grants `NET_ADMIN` to a short-lived init container. Leave it disabled in production and enable it only after reviewing the cluster security model and validating the resulting egress boundary.
+- A CNI that enforces NetworkPolicy, for Kustomize and Helm sources. The renderer relies on an egress-deny policy and checks it with a canary at startup and daily. If it is not enforced, previews still work and the setup checklist reports `renderer_egress_unenforced`; set `renderer.egressFirewall.enabled=true` on clusters that permit `NET_ADMIN`, or use an enforcing CNI. Raw-manifest repositories never call the renderer.
+- `renderer.egressFirewall.privilegedInitContainer` grants `NET_ADMIN` to a short-lived init container. Leave it disabled in production and enable it only after reviewing the cluster security model and validating the resulting egress boundary.
 - Metrics Server or another source of per-container CPU/memory for evidence, apply detection, and verification.
-- A GitHub, GitLab, or Gitea repository containing the workload manifests, plus a token with read/write repository and pull-request permissions.
-- A repository allowlist. An empty allowlist denies every repository.
+- A GitHub, GitLab, or Gitea repository containing the workload manifests, plus a token with read/write repository and pull-request permissions in the Secret `greenkube-git-credentials` (key `token`).
 
 GreenKube needs read access to the GitOps APIs it discovers:
 
@@ -62,19 +113,18 @@ The **Automation & GitOps** page shows one card per controller: Argo CD and Flux
 
 ## Configure a provider
 
-Create the token Secret in the Helm release namespace. Do not put the token in `values.yaml`:
+Most installations need no provider configuration: create the default Secret in the release namespace (never
+put the token in `values.yaml`) and the provider is inferred from the repository host:
 
 ```bash
-kubectl -n greenkube create secret generic greenkube-git \
-  --from-file=github-token=./github-token
+kubectl -n greenkube create secret generic greenkube-git-credentials --from-file=token=./git-token
 ```
 
-Configure one or more providers:
+Declare providers explicitly for several credentials, a self-hosted URL that cannot be probed, or a separate
+Secret. Explicit providers win over inference for their host:
 
 ```yaml
 automation:
-  enabled: true
-  mode: worker          # default for profile=production; use inline for standalone
   providers:
     - id: github-main
       type: github      # github | gitlab | gitea
@@ -89,8 +139,8 @@ automation:
 Rules:
 
 - Provider `id` values must be unique.
-- `repositoryAllowlist` is mandatory and uses segment-aware globs. `acme/*` matches `acme/repo`, not `acme/team/repo`.
-- The Secret must be in the release namespace. Only the selected key is projected read-only into API/worker pods.
+- `repositoryAllowlist` uses segment-aware globs (`acme/*` matches `acme/repo`, not `acme/team/repo`). Without it, the provider uses `automation.repositoryAllowlist`; `@discovered` adds the discovered repositories of the provider's host.
+- The Secret must be in the release namespace. Only the selected key is projected read-only into the api, controller and worker pods.
 - Provider credentials are never rendered into a ConfigMap and are never returned by the API.
 - For GitLab, `apiBaseUrl` can point at a self-managed instance. For Gitea, point it at the Gitea API root (for example `https://gitea.example.com/api/v1`).
 - Set `webBaseUrl` when GreenKube must reach Gitea through an in-cluster API URL but users open pull requests through a different browser-reachable URL. It must be an HTTP(S) origin (no repository path or `/api/v1`); it is used only for pull-request links.
@@ -100,7 +150,7 @@ Rules:
 
 After configuring a Git provider, repository allowlist, and secure renderer boundary:
 
-1. Check `GET /api/v1/automation/status`. Automation must be enabled and ready, the provider token must be configured, and the worker must be healthy.
+1. Check the setup checklist (`/setup`, or `GET /api/v1/setup/status`): delivery must be active.
 2. In **Automation & GitOps**, confirm the target workload has a current, resolved binding to a repository allowed by the selected provider.
 3. In **Recommendations**, choose a CPU or memory rightsizing recommendation that offers **Preview plan**. Cards that cannot become a pull request list their blockers and how to fix them (the recommendation's `eligibility`). Review its **Evidence** before previewing.
 4. Select **Preview plan**. Review every policy check, source and rendered diff, validation result, and digest. Approve only the exact plan you intend to propose.
@@ -112,7 +162,7 @@ Automation does not create a PR for every visible recommendation. By default, ea
 
 Evidence coverage is the share of expected CPU or memory observation points present in the recommendation's observation window, sampled at the configured Prometheus query step. It is not the GitOps binding coverage displayed on the **Automation & GitOps** page; that separate ratio reports resolved workloads among discovered workloads.
 
-Inspect the recommendation's **Evidence** panel and its blockers, or read its `eligibility` through the API: `can_open_pr`, then each blocker's `code`, `message` and `fix` ([eligibility codes](reference/eligibility-codes.md)). Eligibility runs the same policy evaluator as plan creation, read-only. After opening the API port-forward and exporting the key as described in the [installation guide](installation.md#reach-the-frontend), run:
+Inspect the recommendation's **Evidence** panel and its blockers, or read its `eligibility` through the API: `can_open_pr`, then each blocker's `code`, `message` and `fix` ([eligibility codes](reference/eligibility-codes.md)). Eligibility runs the same policy evaluator as plan creation, read-only. After opening the API port-forward and exporting the key as described in the [installation guide](installation.md#optional-ingress-and-tls), run:
 
 ```bash
 REC_ID=123 # replace with the recommendation ID shown in GreenKube
@@ -226,7 +276,7 @@ Discovery also supplies live workload labels, rollout state, controller suspend/
 - `fail` rejects the plan with `policy_evidence_missing`.
 - `warn` allows it and adds a warning to `policy_result.warnings`.
 
-The chart defaults to `fail` for `profile: production` and `warn` for `standalone`.
+The chart defaults to `fail`.
 
 ## Pull-request options
 

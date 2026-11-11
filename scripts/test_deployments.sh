@@ -121,8 +121,8 @@ wait_for_pods() {
 
 check_api_health() {
     local ns="$1"
-    local pod_selector="${2:-app.kubernetes.io/name=greenkube,app.kubernetes.io/component=app}"
-    local container="${3:-greenkube-api}"
+    local pod_selector="${2:-app.kubernetes.io/name=greenkube,app.kubernetes.io/component=api}"
+    local container="${3:-api}"
     local port="${4:-8000}"
 
     log_info "Checking API health in $ns (port $port)..."
@@ -170,8 +170,8 @@ check_api_health_demo() {
 
 check_collector_logs() {
     local ns="$1"
-    local pod_selector="${2:-app.kubernetes.io/name=greenkube,app.kubernetes.io/component=app}"
-    local container="${3:-greenkube}"
+    local pod_selector="${2:-app.kubernetes.io/name=greenkube,app.kubernetes.io/component=controller}"
+    local container="${3:-controller}"
 
     log_info "Checking collector logs for errors in $ns..."
     local pod
@@ -289,7 +289,7 @@ if should_run 1; then
         --set monitoring.serviceMonitor.enabled=false \
         --set monitoring.networkPolicy.enabled=false 2>&1 | tail -5; then
 
-        if wait_for_pods "$NS" 2 && \
+        if wait_for_pods "$NS" 4 && \
            check_api_health "$NS" && \
            check_collector_logs "$NS"; then
             record_result 1 "PostgreSQL default" "PASS"
@@ -303,71 +303,31 @@ if should_run 1; then
 fi
 
 # ==========================================================================
-# SCENARIO 2: SQLite — No persistence, no token
+# SCENARIO 2: SQLite is refused with the migration commands (0.4, F17)
 # ==========================================================================
 if should_run 2; then
-    log_title "Scenario 2: SQLite — No persistence, no token"
-    NS="gk-test-sqlite"
-    cleanup_namespace "$NS"
-
-    if helm install greenkube "$CHART_DIR" \
-        -n "$NS" --create-namespace \
-        --set image.tag=0.2.3-test \
-        --set image.pullPolicy=Never \
-        --set config.db.type=sqlite \
-        --set postgres.enabled=false \
-        --set monitoring.serviceMonitor.enabled=false \
-        --set monitoring.networkPolicy.enabled=false 2>&1 | tail -5; then
-
-        if wait_for_pods "$NS" 1 && \
-           check_api_health "$NS" && \
-           check_collector_logs "$NS"; then
-            record_result 2 "SQLite (no persistence)" "PASS"
-        else
-            record_result 2 "SQLite (no persistence)" "FAIL"
-        fi
+    log_title "Scenario 2: SQLite values are refused with the migration commands"
+    if output=$(helm template test "$CHART_DIR" --set config.db.type=sqlite 2>&1); then
+        record_result 2 "SQLite refused" "FAIL"
+    elif grep -q "greenkube db copy --from sqlite://" <<<"$output"; then
+        record_result 2 "SQLite refused" "PASS"
     else
-        record_result 2 "SQLite (no persistence)" "FAIL"
+        record_result 2 "SQLite refused" "FAIL"
     fi
-    cleanup_namespace "$NS"
 fi
 
 # ==========================================================================
-# SCENARIO 3: SQLite — With persistence
+# SCENARIO 3: The former SQLite claim is kept after switching to PostgreSQL
 # ==========================================================================
 if should_run 3; then
-    log_title "Scenario 3: SQLite — With persistence (PVC)"
-    NS="gk-test-sqlite-pvc"
-    cleanup_namespace "$NS"
-
-    if helm install greenkube "$CHART_DIR" \
-        -n "$NS" --create-namespace \
-        --set image.tag=0.2.3-test \
-        --set image.pullPolicy=Never \
-        --set config.db.type=sqlite \
-        --set postgres.enabled=false \
-        --set config.persistence.enabled=true \
-        --set config.persistence.size=500Mi \
-        --set monitoring.serviceMonitor.enabled=false \
-        --set monitoring.networkPolicy.enabled=false 2>&1 | tail -5; then
-
-        if wait_for_pods "$NS" 1 && \
-           check_api_health "$NS"; then
-            # Verify PVC was created
-            if kubectl get pvc -n "$NS" 2>/dev/null | grep -q "greenkube"; then
-                log_pass "PVC created for SQLite persistence."
-                record_result 3 "SQLite with persistence" "PASS"
-            else
-                log_fail "PVC not created!"
-                record_result 3 "SQLite with persistence" "FAIL"
-            fi
-        else
-            record_result 3 "SQLite with persistence" "FAIL"
-        fi
+    log_title "Scenario 3: former SQLite claim kept (helm.sh/resource-policy: keep)"
+    if helm template test "$CHART_DIR" \
+        --set config.db.type=postgres \
+        --set config.persistence.enabled=true 2>/dev/null | grep -q "helm.sh/resource-policy: keep"; then
+        record_result 3 "Former SQLite claim kept" "PASS"
     else
-        record_result 3 "SQLite with persistence" "FAIL"
+        record_result 3 "Former SQLite claim kept" "FAIL"
     fi
-    cleanup_namespace "$NS"
 fi
 
 # ==========================================================================
@@ -404,7 +364,7 @@ EOF
         --set monitoring.serviceMonitor.enabled=false \
         --set monitoring.networkPolicy.enabled=false 2>&1 | tail -5; then
 
-        if wait_for_pods "$NS" 2 && \
+        if wait_for_pods "$NS" 4 && \
            check_api_health "$NS"; then
             # Verify custom config was applied
             local_config=$(kubectl get configmap -n "$NS" greenkube -o jsonpath='{.data.CLOUD_PROVIDER}' 2>/dev/null || true)
@@ -441,7 +401,7 @@ if should_run 5; then
         --set monitoring.serviceMonitor.enabled=false \
         --set monitoring.networkPolicy.enabled=false 2>&1 | tail -5; then
 
-        if wait_for_pods "$NS" 2 && \
+        if wait_for_pods "$NS" 4 && \
            check_api_health "$NS"; then
             # Verify the token was set in the secret
             token_set=$(kubectl get secret greenkube -n "$NS" -o jsonpath='{.data.ELECTRICITY_MAPS_TOKEN}' 2>/dev/null || true)
@@ -481,7 +441,7 @@ if should_run 6; then
         --set monitoring.serviceMonitor.enabled=false \
         --set monitoring.networkPolicy.enabled=false 2>&1 | tail -5; then
 
-        if wait_for_pods "$NS" 2 && \
+        if wait_for_pods "$NS" 4 && \
            check_api_health "$NS"; then
             # Verify config
             zone_config=$(kubectl get configmap -n "$NS" greenkube -o jsonpath='{.data.DEFAULT_ZONE}' 2>/dev/null || true)
@@ -520,13 +480,13 @@ if should_run 7; then
         --set monitoring.serviceMonitor.enabled=false \
         --set monitoring.networkPolicy.enabled=false 2>&1 | tail -5; then
 
-        if wait_for_pods "$NS" 2; then
+        if wait_for_pods "$NS" 4; then
             # Wait for API to be up
             sleep 10
-            pod=$(kubectl get pods -n "$NS" -l app.kubernetes.io/name=greenkube,app.kubernetes.io/component=app -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            pod=$(kubectl get pods -n "$NS" -l app.kubernetes.io/name=greenkube,app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 
             # Test that unauthenticated request is rejected
-            unauth_result=$(kubectl exec -n "$NS" "$pod" -c greenkube-api -- \
+            unauth_result=$(kubectl exec -n "$NS" "$pod" -c api -- \
                 python -c "
 import urllib.request, urllib.error
 try:
@@ -539,7 +499,7 @@ except Exception as e:
 " 2>/dev/null || echo "EXEC_FAILED")
 
             # Health endpoint should always work (no auth required)
-            health_result=$(kubectl exec -n "$NS" "$pod" -c greenkube-api -- \
+            health_result=$(kubectl exec -n "$NS" "$pod" -c api -- \
                 python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/v1/health').read().decode())" 2>/dev/null || echo "FAILED")
 
             if echo "$health_result" | grep -q '"status":"ok"'; then
@@ -630,19 +590,19 @@ if should_run 9; then
         ALL_TEMPLATES_OK=false
     fi
 
-    # 9b: SQLite
-    if helm template test "$CHART_DIR" --set config.db.type=sqlite --set postgres.enabled=false &>/dev/null; then
-        log_pass "Template: SQLite"
-    else
-        log_fail "Template: SQLite"
+    # 9b: SQLite is refused (PostgreSQL only since 0.4)
+    if helm template test "$CHART_DIR" --set config.db.type=sqlite &>/dev/null; then
+        log_fail "Template: SQLite must be refused"
         ALL_TEMPLATES_OK=false
+    else
+        log_pass "Template: SQLite refused"
     fi
 
-    # 9c: SQLite with persistence
-    if helm template test "$CHART_DIR" --set config.db.type=sqlite --set postgres.enabled=false --set config.persistence.enabled=true &>/dev/null; then
-        log_pass "Template: SQLite + persistence"
+    # 9c: High availability is two numbers
+    if helm template test "$CHART_DIR" --set api.replicas=2 --set controller.replicas=2 &>/dev/null; then
+        log_pass "Template: HA"
     else
-        log_fail "Template: SQLite + persistence"
+        log_fail "Template: HA"
         ALL_TEMPLATES_OK=false
     fi
 
@@ -677,11 +637,12 @@ if should_run 9; then
         ALL_TEMPLATES_OK=false
     fi
 
-    # 9g: API disabled
-    if helm template test "$CHART_DIR" --set config.api.enabled=false &>/dev/null; then
-        log_pass "Template: API disabled"
+    # 9g: Deprecated 0.3.x values are still accepted (mapped)
+    if helm template test "$CHART_DIR" --set config.api.enabled=false --set profile=production \
+        --set automation.enabled=true &>/dev/null; then
+        log_pass "Template: deprecated 0.3.x values"
     else
-        log_fail "Template: API disabled"
+        log_fail "Template: deprecated 0.3.x values"
         ALL_TEMPLATES_OK=false
     fi
 

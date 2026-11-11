@@ -220,7 +220,7 @@ The registry guarantees:
 
 A failed step is logged with an error code and does not stop the following steps. A tick in which no step is due (delivery off, between two expiry passes) returns without touching the lease row. A standby controller resets `greenkube_automation_worker_up` to 0 (`plan-executor` standby hook), so only the leader reports itself as an executor.
 
-**Profiles.** Until the single topology (F11) lands, both Helm profiles follow this split. In `profile: standalone`, the pod has two containers: the controller (`greenkube start`) and the API. In `profile: production`, `api`, `controller` and the optional `automation` worker are separate Deployments. `automation.mode` only decides whether dedicated workers execute operations in addition to the controller (`worker`) or not (`inline`). In both modes the API never runs a worker. `greenkube demo` runs the API only, on demo data, with no loop.
+**One topology (F11).** The chart renders `api`, `controller`, `renderer` and, with `worker.replicas`, `worker` Deployments from one template (`components.yaml`) sharing a container spec, plus the bundled PostgreSQL. The controller migrates the database at startup under a PostgreSQL advisory lock (`DB_RUN_MIGRATIONS=true` in the controller only); API replicas answer `503 migrating` on `/api/v1/health` until every shipped migration is applied, then stay ready (the answer is cached). The controller's readiness probe is `/readyz` of its loop registry. Automation is always on: the `automation-readiness` loop (`greenkube.automation.readiness`) switches delivery and PR tracking at run time (F12). The API never runs a worker. `greenkube demo` runs the API only, on demo data, with no loop.
 
 ## Architectural Principles
 
@@ -774,20 +774,21 @@ All configuration flows through `src/greenkube/core/config.py`:
 ```
 helm-chart/
 ├── Chart.yaml                 # Chart metadata
-├── values.yaml                # Standalone/default configuration
-├── values-production.yaml     # Production profile overlay
+├── values.yaml                # The one install topology (no profiles)
+├── values.schema.json         # Types and ranges of the values (N2)
 └── templates/
-    ├── deployment.yaml        # Standalone controller + API
-    ├── production-deployments.yaml # API, controller, automation worker
+    ├── _values.tpl            # Effective settings; maps the 0.3.x keys (F17)
+    ├── components.yaml        # api, controller and optional worker Deployments
     ├── api-service.yaml       # API/UI ClusterIP Service
     ├── controller-metrics-service.yaml # Controller metrics ClusterIP Service
     ├── controller-servicemonitor.yaml  # Controller metrics ServiceMonitor
-    ├── automation-worker.yaml # Standalone worker mode (plan executor only)
-    ├── configmap.yaml         # Non-secret config
-    ├── secret.yaml            # Tokens and credentials
-    ├── migration-job.yaml     # Production schema migration hook
-    ├── leader-lease.yaml      # Production controller Lease
-    ├── renderer-sandbox.yaml  # Isolated Helm/Kustomize renderer
+    ├── controller-role.yaml   # Namespaced Role for the controller Lease
+    ├── configmap.yaml         # Non-secret config (<release>-config)
+    ├── secret.yaml            # Credentials supplied in values
+    ├── credentials-bootstrap.yaml # Generated credentials, created once (N1)
+    ├── leader-lease.yaml      # Controller Lease (always rendered)
+    ├── renderer.yaml          # Isolated Helm/Kustomize renderer (always deployed)
+    ├── legacy-sqlite-pvc.yaml # Former SQLite claim kept during the 0.3.x upgrade
     ├── postgres-*.yaml        # PostgreSQL StatefulSet (optional)
     ├── serviceaccount.yaml    # K8s RBAC
     └── clusterrole.yaml       # Read permissions for nodes/pods/GitOps

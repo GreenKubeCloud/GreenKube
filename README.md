@@ -104,40 +104,26 @@ The demo includes a two-year sample history with recommendations, costs, emissio
 
 ### Install in your cluster
 
-```bash
-helm repo add greenkube https://GreenKubeCloud.github.io/GreenKube
-helm repo update
-helm install greenkube greenkube/greenkube \
-  -n greenkube \
-  --create-namespace
-```
-
-By default the chart uses the `standalone` profile, enables production authentication, and leaves GitOps automation disabled. You sign in as `admin`; read the initial password (you choose a new one at the first sign-in):
+One install, one sign-in, optionally one Secret:
 
 ```bash
-kubectl -n greenkube get secret greenkube-initial-admin \
-  -o jsonpath='{.data.password}' | base64 -d; echo
+helm repo add greenkube https://GreenKubeCloud.github.io/GreenKube && helm repo update
+helm install greenkube greenkube/greenkube -n greenkube --create-namespace
+
+# Sign in as admin with the initial password (you choose a new one at the first sign-in)
+kubectl -n greenkube get secret greenkube-initial-admin -o jsonpath='{.data.password}' | base64 -d; echo
+kubectl -n greenkube port-forward svc/greenkube-api 8000:8000   # open http://localhost:8000
+
+# Optional: let GreenKube open pull requests. Delivery activates within a minute, no upgrade, no restart.
+kubectl -n greenkube create secret generic greenkube-git-credentials --from-literal=token=<git token>
 ```
 
-Then open the dashboard:
-
-```bash
-kubectl -n greenkube port-forward svc/greenkube-api 8000:8000
-# Open http://localhost:8000 and sign in as admin
-```
-
-GreenKube discovers Prometheus, OpenCost, VPA, Karpenter, Argo CD and Flux automatically. The [Installation guide](docs/installation.md) covers production secrets, external databases, ingress and on-premises clusters.
-
-### Turn on pull requests
-
-GitOps automation is opt-in. It needs:
-
-- a workload managed by Argo CD or Flux;
-- a Git provider token stored in a Kubernetes Secret;
-- a repository allowlist;
-- for Kustomize and Helm sources, a renderer boundary enforced by your CNI.
-
-See [GitOps automation](docs/automation.md) for the step-by-step setup, supported layouts, webhooks, policy gates and rollback.
+There is no profile and no feature flag: the chart deploys the API, the controller, an isolated renderer and
+PostgreSQL, sized for kind or minikube. GreenKube discovers Prometheus, OpenCost, VPA, Karpenter, Argo CD and Flux,
+infers the Git provider of every discovered repository, and the **Setup** page lists what is active and the fix
+for anything missing. A pull request is never opened without your approval of a plan digest. The
+[Installation guide](docs/installation.md) covers external databases, Ingress/TLS and high availability;
+[Upgrading](docs/upgrading.md) covers 0.3.x installs.
 
 ### What GreenKube uses
 
@@ -157,7 +143,8 @@ See [GitOps automation](docs/automation.md) for the step-by-step setup, supporte
 | Document | Description |
 |----------|-------------|
 | [Concepts](docs/concepts.md) | The GreenKube loop and its vocabulary: sources, recommendations, plans, sync, verification and the ledger |
-| [Installation guide](docs/installation.md) | Helm installation, values, development and production profiles, API keys, frontend access |
+| [Installation guide](docs/installation.md) | One Helm install, sign-in, connecting Git; external PostgreSQL, Ingress/TLS, HA |
+| [Upgrading](docs/upgrading.md) | From 0.3.x: profiles, deprecated values, SQLite to PostgreSQL (`greenkube db copy`) |
 | [Your first pull request](docs/get-started/first-pr.md) | The whole loop on a local cluster with a sample app, Argo CD, Flux and Gitea (`make e2e`) |
 | [GitOps automation](docs/automation.md) | Discovery, plans, pull requests, sync, rollback and the security model |
 | [Recommendation lifecycle](docs/recommendation.md) | How recommendations are generated, ranked, applied, verified and recorded |
@@ -167,7 +154,7 @@ See [GitOps automation](docs/automation.md) for the step-by-step setup, supporte
 | [Power estimation methodology](docs/power_estimation_methodology.md) | How energy and CO₂e are estimated |
 | [Prometheus & Grafana](docs/prometheus-grafana.md) | ServiceMonitor setup and dashboard import |
 | [Observability and SLOs](docs/observability-slos.md) | Control-loop metrics, objectives and alerts |
-| [CLI reference](docs/cli.md) | `greenkube start`, `demo` and `version` |
+| [CLI reference](docs/cli.md) | `greenkube start`, `demo`, `db copy` and `version` |
 | [Roadmap](docs/roadmap.md) | Positioning, prioritized work, milestones and implementation specifications |
 | [Changelog](CHANGELOG.md) | Version history |
 

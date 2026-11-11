@@ -308,7 +308,7 @@ The controller (`greenkube start`: collection, compression, recommendation
 scans, verification, GitOps sync observation) serves its own process-local registry at
 `/prometheus/metrics` (also at Prometheus' default `/metrics` path) on
 `CONTROLLER_METRICS_PORT` (Helm
-`collector.metricsPort`, default `9102`; `0` disables it). The chart renders a
+`controller.metricsPort`, default `9102`; `0` disables it). The chart renders a
 `<release>-controller-metrics` ClusterIP Service and, with
 `monitoring.serviceMonitor.enabled=true`, a dedicated controller
 ServiceMonitor. Verification outcomes recorded by the controller are now
