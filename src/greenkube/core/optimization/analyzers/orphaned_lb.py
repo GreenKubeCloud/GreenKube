@@ -83,6 +83,16 @@ class OrphanedLBAnalyzer(Analyzer):
                     f" No cost saving: its address comes from {allocator}, a bare-metal allocator "
                     "with no cloud load-balancer billing."
                 )
+            elif not external_ip:
+                # Pending: no controller ever assigned an address (no cloud controller,
+                # an empty bare-metal pool), so no billed load balancer exists.
+                annual_cost = 0.0
+                releases = "removes a LoadBalancer request that was never provisioned"
+                cost_source = CostSource.NONE
+                cost_detail = "load_balancer_without_address"
+                description_savings = (
+                    " No cost saving: it has no external address, so no load balancer was provisioned for it."
+                )
             else:
                 annual_cost = cfg.LOAD_BALANCER_COST_PER_MONTH * 12
                 cost_source = CostSource.CUSTOM_RATE

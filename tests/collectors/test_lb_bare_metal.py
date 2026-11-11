@@ -75,6 +75,17 @@ def test_opencost_cost_still_wins_for_a_bare_metal_allocator():
 
 
 def test_cloud_load_balancer_keeps_the_configured_estimate():
-    rec = _analyze()
+    rec = _analyze(external_ip="203.0.113.10")
     assert rec.potential_savings_cost == pytest.approx(Config().LOAD_BALANCER_COST_PER_MONTH * 12)
     assert _assumptions(rec)["cost_source"] == "custom_rate"
+
+
+def test_load_balancer_without_an_address_projects_no_cost_saving():
+    # Pending: no provider ever assigned an address (MetalLB < 0.13 with an empty
+    # pool, no cloud controller), so no billed load balancer exists.
+    rec = _analyze()
+    assert rec.potential_savings_cost == 0.0
+    assert _assumptions(rec)["cost_source"] == "none"
+    assert _assumptions(rec)["cost_detail"] == "load_balancer_without_address"
+    assert "No cost saving" in rec.description
+    assert "stops its billing" not in rec.description
