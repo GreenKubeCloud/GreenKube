@@ -830,7 +830,7 @@ monitoring:
     # Controller loop alerts (GreenKubeControllerLoopFailing, GreenKubeAutomationLoopStale,
     # GreenKubeNoActiveController). They read the controller metrics endpoint, so they
     # render only when the controller ServiceMonitor does (serviceMonitor.enabled and
-    # collector.metricsPort > 0).
+    # controller.metricsPort > 0).
     controllerAlerts: true
 
   serviceMonitor:
