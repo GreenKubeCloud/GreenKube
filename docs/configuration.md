@@ -6,7 +6,7 @@ The Helm chart maps `values.yaml` settings to GreenKube's environment-based conf
 
 The chart supports two deployment profiles:
 
-- `profile: standalone` (default) deploys the collector and API together. When automation is enabled, the worker runs inline in the API process.
+- `profile: standalone` (default) deploys the controller and API together. When automation is enabled, the controller container executes plan operations and runs the automation controller loop; the API container runs no background loop.
 - `profile: production` renders separate API, controller, and (when automation is enabled) automation worker deployments. The controller uses a Kubernetes Lease for leader election and the migration Job runs before the API is considered ready. The standalone profile does not run a separate worker.
 
 The default values use `profile: standalone`, `config.environment: production`, `config.apiAuthMode: session` (account sign-in, see [Authentication](authentication.md)), and a generated bootstrap API key. The default profile is not a substitute for production authentication or network controls.
@@ -188,7 +188,7 @@ Automation is disabled by default. The full workflow, supported source layouts, 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `automation.enabled` | `false` | Enable discovery, planning, PR operations, sync observation, and apply detection. |
-| `automation.mode` | profile-dependent | `inline` (standalone), `worker` (production), or `disabled`. Empty uses the profile default. |
+| `automation.mode` | profile-dependent | `inline` (standalone): the controller executes plan operations. `worker` (production): dedicated worker pods execute them as well. `disabled`: no delivery. Empty uses the profile default. The API never runs a worker. |
 | `automation.discoveryInterval` | `5m` | Discovery refresh cadence (`1s`–`1h`). |
 | `automation.bindingTtl` | `30m` | Binding and manual-resolution freshness (`1s`–`24h`). |
 | `automation.prPollIntervalSeconds` | `120` | PR polling fallback interval (10–86400). |

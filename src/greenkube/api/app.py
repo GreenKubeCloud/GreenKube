@@ -53,15 +53,12 @@ from greenkube.api.routers import optimization as optimization_router
 from greenkube.api.routers import plans as plans_router
 from greenkube.api.routers import sources as sources_router
 from greenkube.api.routers import webhooks as webhooks_router
-from greenkube.api.startup import run_plan_expiry_loop
 from greenkube.auth.lifecycle import start_auth_runtime
 from greenkube.automation.plan_runtime import PlanRuntimeConfigurationError, build_plan_api_service
 from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
-from greenkube.automation.supervision import SupervisedLoop
 from greenkube.automation.webhook_runtime import create_webhook_processing_service
 from greenkube.core.config import get_config
 from greenkube.core.factory import get_savings_ledger_repository, get_summary_repository
-from greenkube.core.observability import record_automation_failure
 
 logger = logging.getLogger(__name__)
 _MANUAL_BINDING_RESOLUTION_PATH = re.compile(r"^/api/v1/gitops/bindings/[^/]+/[^/]+/[^/]+/resolve$")
@@ -219,11 +216,11 @@ async def lifespan(app: FastAPI):
 
     await get_db_manager().connect()
     logger.info("✅ Database connection established.")
-    # Account store, first-admin bootstrap and daily session purge (F14).
+    # Account store and first-admin bootstrap (F14); the session purge runs in the controller.
     app.state._auth_tasks = start_auth_runtime(app, get_db_manager())
 
     app.state.automation_plan_service = None
-    app.state._plan_worker_task = None
+    # No in-process automation loop runs in the API since M8; kept for the status routes.
     app.state.automation_loop_supervisor = None
     app.state.webhook_processing_service = None
     app.state.pull_request_lifecycle_reconciler = None
@@ -248,40 +245,12 @@ async def lifespan(app: FastAPI):
         app.state.automation_plan_service = plan_service
         if webhook_secret_dir and plan_service.worker is not None:
             app.state.pull_request_lifecycle_reconciler = create_pull_request_lifecycle_reconciler(plan_service.worker)
-        config = get_config()
-        if getattr(config, "AUTOMATION_ENABLED", False) and getattr(config, "AUTOMATION_MODE", "disabled") == "inline":
-            worker = plan_service.worker
-            if worker is not None:
-                # Supervised: a crashed or exited loop restarts with backoff and readiness
-                # reflects its heartbeat instead of the API staying ready over a dead queue (D9).
-                supervisor = SupervisedLoop(
-                    "inline-plan-worker",
-                    _inline_worker_factory(worker),
-                    on_failure=lambda _code: record_automation_failure("worker"),
-                )
-                app.state.automation_loop_supervisor = supervisor
-                app.state._plan_worker_task = supervisor.start()
 
-    # Start tracked background startup tasks so we can cancel them on shutdown.
-    # Recommendation scans run only in the leader controller (E1); the API
-    # queues runs through POST /api/v1/optimization/runs.
+    # The API is stateless request handling (M8): it starts no periodic job. Plan
+    # execution, plan expiry and retention, the webhook outbox, PR polling and the
+    # recommendation scans run in the controller's loop registry, so API replicas
+    # are safe to scale. Only the first-admin bootstrap above runs as a startup task.
     app.state._startup_tasks = []
-    plan_api_service = getattr(app.state, "automation_plan_service", None)
-    if plan_api_service is not None:
-        if callable(getattr(plan_api_service, "expire_due_plans", None)) and callable(
-            getattr(plan_api_service, "prune_retained_history", None)
-        ):
-            app.state._startup_tasks.append(
-                asyncio.create_task(
-                    run_plan_expiry_loop(plan_api_service),
-                    name="gitops-plan-expiry",
-                )
-            )
-        else:
-            logger.warning("Automation plan expiry and retention maintenance are unavailable.")
-    plan_worker_task = getattr(app.state, "_plan_worker_task", None)
-    if plan_worker_task is not None:
-        app.state._startup_tasks.append(plan_worker_task)
     app.state.ready = True
 
     yield
@@ -289,10 +258,6 @@ async def lifespan(app: FastAPI):
     app.state.ready = False
     # Cancel any tracked startup/background tasks
     try:
-        # Stop the supervisor first: a loop it restarted after a crash is not in _startup_tasks.
-        loop_supervisor = getattr(app.state, "automation_loop_supervisor", None)
-        if loop_supervisor is not None:
-            await loop_supervisor.stop()
         background = [*(getattr(app.state, "_startup_tasks", []) or []), *(getattr(app.state, "_auth_tasks", []) or [])]
         for t in background:
             if not t.done():
@@ -316,15 +281,6 @@ async def lifespan(app: FastAPI):
         logger.info("Kubernetes ApiClient closed.")
     except Exception:
         logger.exception("Failed to close Kubernetes ApiClient during shutdown.")
-
-
-def _inline_worker_factory(worker):
-    async def run_inline_worker(heartbeat) -> None:
-        from greenkube.cli.automation_worker import run_worker
-
-        await run_worker(plan_worker=worker, heartbeat=heartbeat)
-
-    return run_inline_worker
 
 
 def create_app(use_lifespan: bool = False) -> FastAPI:

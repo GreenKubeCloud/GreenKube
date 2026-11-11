@@ -59,45 +59,53 @@ async def test_api_lifespan_keeps_startup_available_without_provider_configurati
 
 
 @pytest.mark.asyncio
-async def test_api_lifespan_runs_and_cancels_inline_plan_worker_only_in_inline_mode(monkeypatch):
-    config = SimpleNamespace(AUTOMATION_ENABLED=True, AUTOMATION_MODE="inline")
+@pytest.mark.parametrize("mode", ["inline", "worker", "disabled"])
+async def test_api_lifespan_starts_no_background_mutation_in_any_mode(monkeypatch, mode):
+    """M8: API replicas are stateless; plan execution and the expiry sweep run in the controller."""
+    config = SimpleNamespace(AUTOMATION_ENABLED=mode != "disabled", AUTOMATION_MODE=mode)
     api_app, _ = _install_lifespan_dependencies(monkeypatch, config)
     automation_worker = importlib.import_module("greenkube.cli.automation_worker")
-    worker = object()
-    service = SimpleNamespace(worker=worker)
-    started = asyncio.Event()
-    cancelled = asyncio.Event()
+    calls: list[str] = []
+
+    class PlanService:
+        worker = object()
+
+        async def expire_due_plans(self):
+            calls.append("expire")
+            return []
+
+        async def prune_retained_history(self, *, cutoff):
+            calls.append("prune")
+            return {}
+
+        async def reconcile_exhausted_operations(self):
+            calls.append("reconcile")
+            return []
+
+    service = PlanService()
 
     async def build_plan_api_service(**kwargs):
         assert kwargs == {"connect_db": False}
         return service
 
-    async def run_worker(*, plan_worker, heartbeat=None):
-        assert plan_worker is worker
-        assert callable(heartbeat)
-        heartbeat()
-        started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
+    async def run_worker(**kwargs):
+        calls.append("worker")
 
     monkeypatch.setattr(api_app, "build_plan_api_service", build_plan_api_service)
     monkeypatch.setattr(automation_worker, "run_worker", run_worker)
     app = FastAPI()
 
     async with api_app.lifespan(app):
-        await asyncio.wait_for(started.wait(), timeout=1)
+        # Give any (forbidden) background task the chance to run a first iteration.
+        for _ in range(5):
+            await asyncio.sleep(0)
         assert app.state.automation_plan_service is service
-        assert len(app.state._startup_tasks) == 1
-        supervisor = app.state.automation_loop_supervisor
-        assert supervisor is not None and supervisor.health.ready()
+        assert app.state._startup_tasks == []
+        assert app.state.automation_loop_supervisor is None
+        assert all(task.get_name() == "auth-initial-admin" for task in app.state._auth_tasks)
 
-    assert cancelled.is_set()
-    # Shutdown stops the supervisor itself, so it cannot restart the loop afterwards.
-    assert supervisor.health.state == "stopped"
-    assert supervisor.task is not None and supervisor.task.done()
+    assert calls == []
+    assert not hasattr(api_app, "run_plan_expiry_loop")
 
 
 @pytest.mark.asyncio

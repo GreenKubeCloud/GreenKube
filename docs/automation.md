@@ -32,7 +32,8 @@ Components:
 | Discovery runtime | Reads Argo CD/Flux resources and live workloads, then persists generation-bound workload bindings. |
 | Renderer sandbox | Renders Helm/Kustomize plans from a bounded repository snapshot without database or provider credentials. |
 | Plan service | Resolves recommendation IDs to server-side actions, validates the source and rendered diff, and stores an expiring preview. |
-| Plan worker | Executes approved operations, creates commits and PRs, polls linked PRs, and reconciles terminal states. Runs inline in `standalone` or as a dedicated Deployment in `production`. |
+| Plan executor | Executes approved operations, creates commits and PRs. Runs in the controller (`plan-executor` loop) and, in `worker` mode, also in dedicated worker pods. |
+| Automation controller loop | Runs in the controller, under one database lease: webhook outbox, PR polling, branch cleanup, plan expiry and retention. |
 | Controller runtime | Observes the Argo CD/Flux revision and readiness after merge (the landed commit or a descendant of it), then gates apply detection and verification. |
 | Webhook endpoint | Accepts signed GitHub/Gitea/GitLab delivery events. Polling remains the recovery path. |
 
@@ -370,21 +371,26 @@ The **Recommendations** page exposes rollback preview from the Pull requests tab
 
 The default snapshot limits are 100 MiB compressed, 500 MiB extracted, 20,000 files, and 2 MiB per file.
 
-## Worker modes
+## Where automation runs
+
+All automation runs in the controller process (roadmap M8, F8). The API only handles requests: it previews and approves plans, and it writes provider webhooks to a durable outbox. It runs no worker and no expiry sweep, so API replicas are safe to scale. See [Process topology](architecture.md#process-topology).
+
+The controller runs two leader-gated loops:
+
+- `plan-executor` claims and executes queued plan operations (at most 10 per 5-second tick).
+- `automation-controller` runs one tick every 5 seconds under a single database lease. The tick drains the webhook outbox, polls open pull requests every `automation.prPollIntervalSeconds`, then cleans up branches, reconciles exhausted operations, expires plans (every 60 s) and runs retention (daily).
 
 | Mode | When | Behaviour |
 |---|---|---|
-| `inline` | Default for `standalone` when automation is enabled. | The API process starts the worker loop. |
-| `worker` | Default for `production` when automation is enabled. | A dedicated single-replica Deployment executes operations. Its authenticated metrics listener uses `automation.workerMetricsPort` (default 8001). |
-| `disabled` | Automation off. | No discovery, planning, or worker execution. |
+| `inline` | Default for `standalone` when automation is enabled. | Only the controller executes plan operations. |
+| `worker` | Default for `production` when automation is enabled. | The controller executes operations, and dedicated worker pods execute them too (`production.components.automation.replicas`, or the standalone `automation-worker`). Workers do nothing else. Operation leases make any number of executors safe. The workers' authenticated metrics listener uses `automation.workerMetricsPort` (default 8001). |
+| `disabled` | Automation off. | No plan execution, webhook outbox or PR polling. Plan expiry and retention still run while Git providers are configured. |
 
-Do not run inline and worker mode against the same database. Database leases prevent duplicate execution, but only one mode should be configured.
+Loops are supervised by the controller's loop registry:
 
-Worker loops are supervised:
-
-- An iteration that raises is logged with an error code and retried with jittered backoff.
-- A loop task that crashes or exits is restarted with backoff.
-- In inline mode, `GET /api/v1/health` returns `503` (`degraded`) and `GET /api/v1/automation/status` reports `ready: false` while the in-process loop is down or its heartbeat is stale. The readiness probe no longer reports a dead queue as ready. The chart's liveness probe uses `/api/v1/health/heartbeat`, so a stalled loop takes the pod out of the Service but does not restart the API container.
+- A tick that raises or times out is logged with an error code, counted in `greenkube_loop_runs_total{outcome="failure"|"timeout"}`, and retried with exponential backoff. The other loops keep running.
+- A loop task that crashes is restarted.
+- The controller serves `/readyz` and `/loops` on its metrics port, and the `greenkube_loop_*` metrics (see [Observability](observability-slos.md#controller-loops)). `GET /api/v1/automation/status` reports executor health through the worker heartbeats that every executor writes to the database.
 
 ## Intervals and operations
 
@@ -396,7 +402,7 @@ Worker loops are supervised:
 | `automation.syncPollIntervalSeconds` | `30` | Controller sync observation interval (10–86400). |
 | `automation.syncTimeoutSeconds` | `1800` | Time before an unsynced merged plan becomes `sync_failed` (60–86400). |
 
-A periodic reconciler fails an `applying` plan when its operation is terminal and no PR exists. The expiry sweep reads only the plans whose TTL elapsed, in bounded batches.
+The automation controller loop fails an `applying` plan when its operation is terminal and no PR exists. Its expiry step reads only the plans whose TTL elapsed, in bounded batches. It runs once per cluster, on the controller that holds the Lease, instead of in every API replica.
 
 A daily retention job removes rendered file contents and terminal operation/webhook rows older than 90 days:
 
@@ -406,9 +412,9 @@ A daily retention job removes rendered file contents and terminal operation/webh
 
 ## Observability
 
-- `GET /api/v1/automation/status` reports worker heartbeat age, the inline loop state (`worker.inline_loop`: state, heartbeat age, restarts, last error code), queue depth, plan backlog, discovery freshness, renderer configuration, and provider preflight/capability state. `token_configured` is `true` only when an enabled provider's credential Secret key resolves to a non-empty value; each provider also reports its own `token_configured`.
+- `GET /api/v1/automation/status` reports executor heartbeat age (`worker.inline_loop` is always `null` since the API runs no loop; loop state is on the controller's `/loops`), queue depth, plan backlog, discovery freshness, renderer configuration, and provider preflight/capability state. `token_configured` is `true` only when an enabled provider's credential Secret key resolves to a non-empty value; each provider also reports its own `token_configured`.
 - `GET /api/v1/automation/pull-requests` lists safe pending/open PR metadata.
-- `GET /prometheus/metrics` exposes control-loop metrics. In production worker mode, a separate Service/ServiceMonitor scrapes the worker's process-local registry.
+- `GET /prometheus/metrics` on the controller metrics port exposes the automation loop, PR polling and plan-execution metrics. In production worker mode, a separate Service/ServiceMonitor scrapes the dedicated executors' process-local registry.
 - Optional `monitoring.prometheusRule.enabled` installs alerts for stuck operations/plans, sync failures, webhook lag, and stale worker heartbeats.
 
 SLOs and example alert rules are documented in [Observability and SLOs](observability-slos.md). The full metric inventory is in [Prometheus and Grafana](prometheus-grafana.md).

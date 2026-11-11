@@ -11,10 +11,9 @@ import asyncio
 import logging
 import signal
 import traceback
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from functools import wraps
-from typing import Any, Optional, Set
+from typing import Optional, Set
 
 import typer
 from typing_extensions import Annotated
@@ -28,7 +27,7 @@ from ..core.factory import (
     get_node_repository,
     get_repository,
 )
-from ..core.scheduler import Scheduler
+from ..core.loops import report_loop_failure
 from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 from .utils import write_combined_metrics_to_database
 
@@ -53,6 +52,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
         em_collector = get_electricity_provider()
     except Exception as e:
         logger.error("Failed to initialize components for intensity collection: %s", e)
+        report_loop_failure(e)
         return
 
     try:
@@ -104,6 +104,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
                     logger.info("No new data to save for zone: %s", zone)
             except Exception as e:
                 logger.error("Failed to process data for zone %s: %s", zone, e)
+                report_loop_failure(e)
 
         await asyncio.gather(*(process_zone(zone) for zone in emaps_zones))
 
@@ -111,6 +112,7 @@ async def collect_carbon_intensity_for_all_zones() -> None:
 
     except Exception as e:
         logger.error("Failed to collect node zones: %s", e)
+        report_loop_failure(e)
     finally:
         await node_collector.close()
         await em_collector.close()
@@ -146,6 +148,7 @@ async def _recompute_combined_metrics(carbon_intensity_repository) -> None:
         logger.info("Recomputed %d combined metrics with consolidated intensities.", updated)
     except Exception as e:
         logger.error("Failed to recompute combined metrics with latest intensities: %s", e)
+        report_loop_failure(e)
 
 
 async def analyze_nodes() -> None:
@@ -158,6 +161,7 @@ async def analyze_nodes() -> None:
         node_repo = get_node_repository()
     except Exception as e:
         logger.error("Failed to initialize components for node analysis: %s", e)
+        report_loop_failure(e)
         return
 
     try:
@@ -178,6 +182,7 @@ async def analyze_nodes() -> None:
 
     except Exception as e:
         logger.error("Failed to analyze nodes: %s", e)
+        report_loop_failure(e)
     finally:
         if "node_collector" in locals():
             await node_collector.close()
@@ -224,6 +229,7 @@ async def attribute_recommendation_savings() -> None:
         )
     except Exception as e:
         logger.error("Savings attribution task failed: %s", e)
+        report_loop_failure(e)
     logger.info("--- Finished savings attribution task ---")
 
 
@@ -250,6 +256,7 @@ async def compress_metrics() -> None:
         )
     except Exception as e:
         logger.error("Metrics compression failed: %s", e)
+        report_loop_failure(e)
     logger.info("--- Finished metrics compression task ---")
 
 
@@ -277,6 +284,7 @@ async def refresh_dashboard_summary() -> None:
         logger.info("Dashboard summary refresh complete: %d rows upserted.", count)
     except Exception as e:
         logger.error("Dashboard summary refresh failed: %s", e)
+        report_loop_failure(e)
     logger.info("--- Finished dashboard summary refresh task ---")
 
 
@@ -364,6 +372,7 @@ async def run_recommendation_lifecycle() -> None:
                     logger.warning("Could not supersede savings for recommendation %s: %s", rec_id, exc)
     except Exception as e:
         logger.error("Recommendation lifecycle task failed: %s", e)
+        report_loop_failure(e)
     logger.info("--- Finished recommendation lifecycle task ---")
 
 
@@ -398,6 +407,7 @@ async def run_recommendation_scan(
             logger.info("Recommendation scan cycle executed %d run(s).", len(executed))
     except Exception as e:
         logger.error("Recommendation scan task failed: %s", e)
+        report_loop_failure(e)
 
 
 class _InitialControllerWork:
@@ -438,24 +448,6 @@ def _create_controller_leader_election(cfg):
         identity=process_identity(),
         api_provider=get_coordination_v1_api,
     )
-
-
-def _leader_gated_callback(
-    callback: Callable[[], Coroutine[Any, Any, None]],
-    should_run: Callable[[], bool] | None,
-) -> Callable[[], Coroutine[Any, Any, None]]:
-    if should_run is None:
-        return callback
-
-    @wraps(callback)
-    async def guarded() -> None:
-        if should_run():
-            with _leader_fence_scope(should_run):
-                await callback()
-        else:
-            logger.debug("Skipping controller task %s while this process is not the Lease holder.", callback.__name__)
-
-    return guarded
 
 
 def _leader_fence_scope(should_run: Callable[[], bool] | None):
@@ -517,31 +509,28 @@ async def _run_deferred_initial_controller_work(
             on_finished()
 
 
-async def _start_gitops_sync_observer(
-    db_manager,
-    *,
-    stop_event: asyncio.Event | None = None,
-    should_run: Callable[[], bool] | None = None,
-) -> asyncio.Task | None:
-    """Start bounded controller sync observation when Git providers are configured."""
+async def _create_controller_plan_runtime(db_manager):
+    """Compose the GitOps plan runtime for the controller, or ``None`` when Git providers are absent."""
     from ..automation.plan_runtime import (
         PlanProvidersNotConfiguredError,
         PlanRuntimeConfigurationError,
         create_plan_runtime,
     )
-    from ..automation.sync_runtime import create_gitops_sync_runtime
 
     try:
-        plan_runtime = await create_plan_runtime(db_manager=db_manager, connect_db=False)
+        return await create_plan_runtime(db_manager=db_manager, connect_db=False)
     except PlanProvidersNotConfiguredError as error:
-        logger.info("GitOps sync observation is idle: %s", error)
-        return None
+        logger.info("GitOps sync observation and automation loops are idle: %s", error)
     except PlanRuntimeConfigurationError as error:
-        logger.warning("GitOps sync observation is unavailable: %s", error)
-        return None
+        logger.warning("GitOps sync observation and automation loops are unavailable: %s", error)
     except Exception as error:
-        logger.warning("GitOps sync observation is unavailable (%s).", type(error).__name__)
-        return None
+        logger.warning("GitOps sync observation and automation loops are unavailable (%s).", type(error).__name__)
+    return None
+
+
+def _create_gitops_sync_runtime(plan_runtime, db_manager):
+    """Bounded sync observation with PR status comments (J5) over the plan runtime's repositories."""
+    from ..automation.sync_runtime import create_gitops_sync_runtime
 
     try:
         from ..automation.pr_feedback import create_pull_request_feedback_publisher
@@ -557,17 +546,198 @@ async def _start_gitops_sync_observer(
     except Exception as error:
         logger.warning("PR status comments are unavailable (%s).", type(error).__name__)
         feedback = None
-    runtime = create_gitops_sync_runtime(
+    return create_gitops_sync_runtime(
         plan_runtime.pull_requests,
         plan_runtime.gitops_repository,
         feedback=feedback,
     )
-    observer_stop_event = stop_event if stop_event is not None else asyncio.Event()
-    if should_run is None:
-        run_observer = runtime.run(observer_stop_event)
-    else:
-        run_observer = runtime.run(observer_stop_event, should_run=should_run)
-    return asyncio.create_task(run_observer, name="gitops-sync-observation")
+
+
+def automation_delivery_enabled(cfg) -> bool:
+    """GitOps delivery (plan execution, webhook outbox, PR polling) runs in this controller (F8)."""
+    mode = str(getattr(cfg, "AUTOMATION_MODE", "disabled") or "disabled")
+    return bool(getattr(cfg, "AUTOMATION_ENABLED", False)) and mode != "disabled"
+
+
+def _create_session_purge(db_manager):
+    """Daily purge of expired sessions (F14), moved from every API replica to the controller (M8)."""
+    try:
+        from ..auth.lifecycle import purge_sessions_once
+        from ..auth.service import build_auth_service
+
+        service = build_auth_service(db_manager)
+    except Exception as error:
+        logger.warning("Session purge is unavailable (%s).", type(error).__name__)
+        return None
+
+    async def session_purge() -> None:
+        await purge_sessions_once(service)
+
+    return session_purge
+
+
+# Timeouts bound a wedged tick; jobs that hold their own leases (collection
+# watermark, scan runs, plan operations) are not cancelled by the registry.
+_TIMEOUT_SHORT = 10 * 60.0
+_TIMEOUT_LONG = 30 * 60.0
+_STANDBY_RECHECK_SECONDS = 2.0
+
+
+def _register_controller_loops(
+    registry,
+    cfg,
+    *,
+    should_run,
+    initial_work: "_InitialControllerWork",
+    discovery_runtime,
+    sync_runtime=None,
+    automation_controller=None,
+    plan_executor=None,
+    session_purge=None,
+) -> None:
+    """Declare every periodic controller job in the loop registry (M8).
+
+    Cadences, skip-initial behaviour and leader gating are those the jobs had under
+    the previous scheduler; only the scheduling moved.
+    """
+    from ..core.loops import LoopSpec
+    from ..core.optimization.scan_service import RECOMMENDATION_SCAN_POLL_INTERVAL
+    from ..core.scheduler import parse_interval_seconds
+
+    step = parse_interval_seconds(cfg.PROMETHEUS_QUERY_RANGE_STEP)
+
+    async def recommendation_scan() -> None:
+        if not initial_work.done:
+            logger.debug("Recommendation scan poll waits for the initial controller work.")
+            return
+        await run_recommendation_scan(should_continue=should_run)
+
+    specs = [
+        # Fire right after each window closes (step boundary + safety lag); the
+        # job itself catches up every window missed since the watermark.
+        LoopSpec(
+            "collection",
+            scheduled_write_metrics,
+            step,
+            align_offset_seconds=_collection_offset_seconds(cfg),
+            description="Prometheus/OpenCost collection, Impact Model allocation and metric writes.",
+        ),
+        LoopSpec(
+            "carbon-intensity",
+            collect_carbon_intensity_for_all_zones,
+            3600,
+            timeout_seconds=_TIMEOUT_LONG,
+            description="Grid intensity history and combined-metric recompute.",
+        ),
+        LoopSpec(
+            "node-analysis",
+            analyze_nodes,
+            parse_interval_seconds(cfg.NODE_ANALYSIS_INTERVAL),
+            timeout_seconds=_TIMEOUT_SHORT,
+            description="Node inventory refresh.",
+        ),
+        LoopSpec(
+            "savings-attribution",
+            attribute_recommendation_savings,
+            step,
+            timeout_seconds=_TIMEOUT_LONG,
+            description="Hourly savings accrual of applied recommendations (C0.7).",
+        ),
+        LoopSpec(
+            "recommendation-lifecycle",
+            run_recommendation_lifecycle,
+            parse_interval_seconds(getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m")),
+            timeout_seconds=_TIMEOUT_LONG,
+            description="TTL expiry, apply detection, verification and change measurement.",
+        ),
+        LoopSpec(
+            "recommendation-scan",
+            recommendation_scan,
+            parse_interval_seconds(RECOMMENDATION_SCAN_POLL_INTERVAL),
+            description="Scheduled scans and API-queued optimization runs (E1).",
+        ),
+        LoopSpec(
+            "metrics-compression",
+            compress_metrics,
+            3600,
+            timeout_seconds=3600,
+            description="Hourly aggregation and pruning of raw metrics.",
+        ),
+        LoopSpec(
+            "dashboard-summary",
+            refresh_dashboard_summary,
+            3600,
+            timeout_seconds=_TIMEOUT_LONG,
+            description="Pre-computed dashboard summary refresh.",
+        ),
+        LoopSpec(
+            "gitops-discovery",
+            discovery_runtime.run_once,
+            float(getattr(discovery_runtime, "interval_seconds", 300.0)),
+            run_immediately=True,
+            jitter=0.0,
+            max_backoff_multiplier=1,
+            standby_recheck_seconds=_STANDBY_RECHECK_SECONDS,
+            timeout_seconds=_TIMEOUT_SHORT,
+            description="Argo CD/Flux discovery and workload bindings.",
+        ),
+    ]
+    if sync_runtime is not None:
+        specs.append(
+            LoopSpec(
+                "gitops-sync",
+                sync_runtime.run_once,
+                float(getattr(sync_runtime, "interval_seconds", 30.0)),
+                run_immediately=True,
+                jitter=0.0,
+                max_backoff_multiplier=1,
+                standby_recheck_seconds=_STANDBY_RECHECK_SECONDS,
+                timeout_seconds=_TIMEOUT_SHORT,
+                description="Sync observation of merged plans and PR status comments.",
+            )
+        )
+    if automation_controller is not None:
+        from ..automation.controller import AUTOMATION_CONTROLLER_INTERVAL_SECONDS
+
+        specs.append(
+            LoopSpec(
+                "automation-controller",
+                automation_controller.tick,
+                AUTOMATION_CONTROLLER_INTERVAL_SECONDS,
+                run_immediately=True,
+                standby_recheck_seconds=_STANDBY_RECHECK_SECONDS,
+                timeout_seconds=_TIMEOUT_SHORT,
+                description="Webhook outbox, PR polling, branch cleanup, plan expiry and retention (one DB lease).",
+            )
+        )
+    if plan_executor is not None:
+        from ..automation.controller import PLAN_EXECUTOR_INTERVAL_SECONDS
+
+        specs.append(
+            LoopSpec(
+                "plan-executor",
+                plan_executor.tick,
+                PLAN_EXECUTOR_INTERVAL_SECONDS,
+                run_immediately=True,
+                standby_recheck_seconds=_STANDBY_RECHECK_SECONDS,
+                on_standby=plan_executor.standby,
+                description="Claims and executes queued plan operations (operation leases).",
+            )
+        )
+    if session_purge is not None:
+        specs.append(
+            LoopSpec(
+                "session-purge",
+                session_purge,
+                86_400,
+                run_immediately=True,
+                standby_recheck_seconds=60.0,
+                timeout_seconds=_TIMEOUT_SHORT,
+                description="Deletes expired and long-revoked browser sessions (F14).",
+            )
+        )
+    for spec in specs:
+        registry.register(spec)
 
 
 async def _async_start(last: Optional[str]):
@@ -597,20 +767,23 @@ async def _async_start(last: Optional[str]):
     from ..gitops.discovery.runtime import create_gitops_discovery_runtime
 
     discovery_runtime = await create_gitops_discovery_runtime(db_manager=get_db_manager())
+    from ..core.loops import LoopRegistry
+
     controller_stop_event = asyncio.Event()
-    discovery_task = None
+    registry = LoopRegistry(role="controller")
     leader_election_task = None
     initial_work_task = None
     processor = None
-    scheduler = None
-    sync_task = None
+    plan_executor = None
     metrics_endpoint = None
     try:
-        # Serve the controller's own telemetry (scans, verification, collection,
-        # provenance mix; A12, BUG-14) on every replica, leader or standby.
+        # Serve the controller's own telemetry (loops, scans, verification, collection,
+        # provenance mix; A12, BUG-14, M8) and loop health on every replica, leader or standby.
         from .controller_metrics import start_controller_metrics_server
 
-        metrics_endpoint = await start_controller_metrics_server(getattr(cfg, "CONTROLLER_METRICS_PORT", 0))
+        metrics_endpoint = await start_controller_metrics_server(
+            getattr(cfg, "CONTROLLER_METRICS_PORT", 0), health=registry
+        )
         leader_election = _create_controller_leader_election(cfg)
         if leader_election is None:
             should_run = None
@@ -625,90 +798,50 @@ async def _async_start(last: Optional[str]):
                 leader_election.run(controller_stop_event),
                 name="controller-leader-election",
             )
+        registry.set_leader(should_run)
 
-        if should_run is None:
-            discovery_loop = discovery_runtime.run_periodic()
-        else:
-            discovery_loop = discovery_runtime.run_periodic(
-                stop_event=controller_stop_event,
-                should_run=should_run,
+        plan_runtime = await _create_controller_plan_runtime(get_db_manager())
+        sync_runtime = None
+        automation_controller = None
+        if plan_runtime is not None:
+            from ..automation.controller import PlanExecutor, create_automation_controller
+
+            sync_runtime = _create_gitops_sync_runtime(plan_runtime, get_db_manager())
+            delivery = automation_delivery_enabled(cfg)
+            automation_controller = create_automation_controller(plan_runtime, delivery_enabled=delivery)
+            if delivery:
+                plan_executor = PlanExecutor(plan_runtime.worker)
+            logger.info(
+                "Automation controller loop enabled (delivery %s).",
+                "on: plan execution, webhook outbox, PR polling" if delivery else "off: expiry and retention only",
             )
-        discovery_task = asyncio.create_task(discovery_loop, name="gitops-discovery-refresh")
-        sync_task = await _start_gitops_sync_observer(
-            get_db_manager(),
-            stop_event=controller_stop_event,
-            should_run=should_run,
-        )
 
         # Resolve the processor at the composition root before workers are
         # scheduled. This makes collector/repository wiring fail fast and keeps
         # scheduled jobs focused on vertical orchestration.
         processor = get_data_processor()
-        scheduler = Scheduler()
-        scheduler.add_job(
-            _leader_gated_callback(collect_carbon_intensity_for_all_zones, should_run),
-            interval_hours=1,
-            skip_initial=True,
-        )
-
-        # Fire right after each window closes (step boundary + safety lag); the
-        # job itself catches up every window missed since the watermark.
-        scheduler.add_job_from_string(
-            _leader_gated_callback(scheduled_write_metrics, should_run),
-            cfg.PROMETHEUS_QUERY_RANGE_STEP,
-            skip_initial=True,
-            align_offset_seconds=_collection_offset_seconds(cfg),
-        )
-        scheduler.add_job_from_string(
-            _leader_gated_callback(analyze_nodes, should_run),
-            cfg.NODE_ANALYSIS_INTERVAL,
-            skip_initial=True,
-        )
-        scheduler.add_job_from_string(
-            _leader_gated_callback(attribute_recommendation_savings, should_run),
-            cfg.PROMETHEUS_QUERY_RANGE_STEP,
-            skip_initial=True,
-        )
-        # Apply detection, verification and TTL expiry
-        scheduler.add_job_from_string(
-            _leader_gated_callback(run_recommendation_lifecycle, should_run),
-            getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m"),
-            skip_initial=True,
-        )
-        # Leader-gated recommendation scans: schedule on RECOMMENDATION_SCAN_INTERVAL
-        # and drain API run requests. The poll stays idle until the initial
-        # controller work (collection, then one forced scan) has finished.
-        from ..core.optimization.scan_service import RECOMMENDATION_SCAN_POLL_INTERVAL
-
+        # The recommendation scan poll stays idle until the initial controller work
+        # (collection, then one forced scan) has finished.
         initial_work = _InitialControllerWork()
-
-        async def recommendation_scan() -> None:
-            if not initial_work.done:
-                logger.debug("Recommendation scan poll waits for the initial controller work.")
-                return
-            await run_recommendation_scan(should_continue=should_run)
 
         async def initial_recommendation_scan() -> None:
             # Scan the data the initial collection just wrote, even when a
             # scan (e.g. from the previous pod) already covers the interval.
             await run_recommendation_scan(should_continue=should_run, force=True)
 
-        scheduler.add_job_from_string(
-            _leader_gated_callback(recommendation_scan, should_run),
-            RECOMMENDATION_SCAN_POLL_INTERVAL,
-            skip_initial=True,
+        _register_controller_loops(
+            registry,
+            cfg,
+            should_run=should_run,
+            initial_work=initial_work,
+            discovery_runtime=discovery_runtime,
+            sync_runtime=sync_runtime,
+            automation_controller=automation_controller,
+            plan_executor=plan_executor,
+            session_purge=_create_session_purge(get_db_manager()),
         )
-        # Compress old raw metrics into hourly aggregates every hour.
-        # skip_initial=True because both jobs are awaited once in the startup block below.
-        scheduler.add_job(_leader_gated_callback(compress_metrics, should_run), interval_hours=1, skip_initial=True)
-        # Refresh pre-computed dashboard summary every hour (after compression)
-        scheduler.add_job(
-            _leader_gated_callback(refresh_dashboard_summary, should_run),
-            interval_hours=1,
-            skip_initial=True,
-        )
-
-        logger.info("📈 Starting scheduler...")
+        logger.info("📈 Starting %d controller loops: %s", len(registry.names), ", ".join(registry.names))
+        registry.start()
         logger.info("\nGreenKube is running. Press CTRL+C to exit.")
 
         initial_tasks = (
@@ -755,17 +888,14 @@ async def _async_start(last: Optional[str]):
     finally:
         controller_stop_event.set()
         try:
-            if scheduler is not None:
-                await scheduler.stop()
+            await registry.stop()
         finally:
-            tasks = [
-                task
-                for task in (discovery_task, sync_task, leader_election_task, initial_work_task)
-                if task is not None
-            ]
+            tasks = [task for task in (leader_election_task, initial_work_task) if task is not None]
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if plan_executor is not None:
+                plan_executor.close()
             if processor is not None:
                 await processor.close()
             from .controller_metrics import stop_controller_metrics_server

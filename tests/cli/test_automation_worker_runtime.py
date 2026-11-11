@@ -1,7 +1,6 @@
 import asyncio
-from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Sequence, cast
+from typing import cast
 
 import pytest
 from typer.testing import CliRunner
@@ -9,41 +8,27 @@ from typer.testing import CliRunner
 from greenkube.automation.plan_runtime import PlanProvidersNotConfiguredError
 from greenkube.automation.plan_worker import PlanWorker
 from greenkube.cli import automation_worker
-from greenkube.gitops.contracts import PullRequestEvent
-from greenkube.storage.base_gitops_repository import WebhookDelivery
-
-
-class NoopBranchCleanup:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def cleanup_once(self) -> None:
-        self.calls += 1
-
-
-def stub_branch_cleanup(monkeypatch):
-    cleanup = NoopBranchCleanup()
-    monkeypatch.setattr(automation_worker, "_create_branch_cleanup_runtime", lambda _worker: cleanup)
-    return cleanup
 
 
 @pytest.mark.asyncio
 async def test_plans_queue_builds_production_runtime_without_injected_worker(monkeypatch):
     worker_ids: list[str] = []
-    recovery_calls: list[tuple[datetime, int]] = []
     from greenkube.core.observability import AUTOMATION_WORKER_HEARTBEAT_TIMESTAMP, AUTOMATION_WORKER_UP
-
-    cleanup = stub_branch_cleanup(monkeypatch)
 
     class PullRequestRepository:
         async def reconcile_open_pull_requests(self, *, stale_before, limit):
-            assert stale_before < datetime.now(timezone.utc)
-            assert limit > 0
-            recovery_calls.append((stale_before, limit))
-            return 2
+            raise AssertionError("pending-PR recovery runs in the controller's automation loop (F8)")
+
+    class Plans:
+        async def prune_worker_heartbeats(self, *, cutoff):
+            raise AssertionError("retention runs in the controller's automation loop (F8)")
+
+        async def list_pending_webhook_deliveries(self, **kwargs):
+            raise AssertionError("the webhook outbox is drained by the controller's automation loop (F8)")
 
     class PlanQueue:
         pull_request_repository = PullRequestRepository()
+        plans = Plans()
 
         async def process_once(self, worker_id: str) -> bool:
             assert AUTOMATION_WORKER_UP._value.get() == 1
@@ -65,8 +50,18 @@ async def test_plans_queue_builds_production_runtime_without_injected_worker(mon
     assert worker_ids
     assert AUTOMATION_WORKER_UP._value.get() == 0
     assert AUTOMATION_WORKER_HEARTBEAT_TIMESTAMP._value.get() > 0
-    assert cleanup.calls == 1
-    assert len(recovery_calls) == 1
+
+
+def test_dedicated_worker_only_executes_plan_operations():
+    """F8: the optional worker is an executor; housekeeping lives in the controller."""
+    for moved in (
+        "_process_pending_webhook_deliveries",
+        "_PullRequestPollerSupervisor",
+        "_create_pr_polling_runtime",
+        "_create_branch_cleanup_runtime",
+        "_run_startup_maintenance",
+    ):
+        assert not hasattr(automation_worker, moved), moved
 
 
 class _StopLoop(BaseException):
@@ -79,10 +74,6 @@ async def test_worker_loop_reuses_one_identity_for_all_claims(monkeypatch):
     worker_ids: list[str] = []
     stop_loop = _StopLoop("stop worker loop")
 
-    class Poller:
-        async def run(self, stop_event):
-            await stop_event.wait()
-
     async def process_once(*, worker_id=None, plan_worker=None) -> bool:
         assert plan_worker is worker
         assert isinstance(worker_id, str)
@@ -91,7 +82,6 @@ async def test_worker_loop_reuses_one_identity_for_all_claims(monkeypatch):
             raise stop_loop
         return True
 
-    monkeypatch.setattr(automation_worker, "_create_pr_polling_runtime", lambda _worker: Poller())
     monkeypatch.setattr(automation_worker, "process_once", process_once)
 
     with pytest.raises(_StopLoop, match="stop worker loop"):
@@ -108,10 +98,6 @@ async def test_worker_iteration_failures_are_logged_retried_and_heartbeat(monkey
     calls = 0
     heartbeats = 0
     delays: list[float] = []
-
-    class Poller:
-        async def run(self, stop_event):
-            await stop_event.wait()
 
     async def process_once(*, worker_id=None, plan_worker=None) -> bool:
         nonlocal calls
@@ -132,7 +118,6 @@ async def test_worker_iteration_failures_are_logged_retried_and_heartbeat(monkey
         delays.append(delay)
         await real_sleep(0)
 
-    monkeypatch.setattr(automation_worker, "_create_pr_polling_runtime", lambda _worker: Poller())
     monkeypatch.setattr(automation_worker, "process_once", process_once)
     monkeypatch.setattr(automation_worker.asyncio, "sleep", fast_sleep)
 
@@ -150,7 +135,6 @@ async def test_worker_iteration_failures_are_logged_retried_and_heartbeat(monkey
 @pytest.mark.asyncio
 async def test_worker_once_mode_still_surfaces_iteration_failures(monkeypatch):
     worker = cast(PlanWorker, object())
-    stub_branch_cleanup(monkeypatch)
 
     async def process_once(*, worker_id=None, plan_worker=None) -> bool:
         raise ConnectionError("boom")
@@ -159,104 +143,6 @@ async def test_worker_once_mode_still_surfaces_iteration_failures(monkeypatch):
 
     with pytest.raises(ConnectionError):
         await automation_worker._run_worker_loop(poll_seconds=0.1, once=True, plan_worker=worker)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("outcome", "expected_status", "expected_error"),
-    [
-        ("merged", "processed", None),
-        # D11 / BUG-53: unknown pull requests become terminal instead of retrying forever.
-        ("unlinked", "ignored", "pull_request_unlinked"),
-    ],
-)
-async def test_worker_reconciles_durable_webhook_outbox_delivery(monkeypatch, outcome, expected_status, expected_error):
-    event = PullRequestEvent(
-        provider_id="provider-main",
-        delivery_id="delivery-1",
-        repo="acme/platform",
-        number=42,
-        action="closed",
-        merged=True,
-        merge_commit_sha="a" * 40,
-    )
-
-    class Outbox:
-        def __init__(self) -> None:
-            self.delivery = WebhookDelivery(
-                id=1,
-                event_type="pull_request",
-                event=event,
-                status="retryable",
-                received_at=datetime.now(timezone.utc),
-                provider_id=event.provider_id,
-                delivery_id=event.delivery_id,
-            )
-
-        async def list_pending_webhook_deliveries(self, *, limit: int, stale_before: datetime):
-            return [self.delivery] if self.delivery.status == "retryable" else []
-
-        async def claim_webhook_delivery(self, provider_id: str, delivery_id: str, *, stale_before: datetime):
-            if (provider_id, delivery_id) != (event.provider_id, event.delivery_id):
-                return False
-            if self.delivery.status != "retryable":
-                return False
-            self.delivery = self.delivery.__class__(
-                id=self.delivery.id,
-                event_type=self.delivery.event_type,
-                event=self.delivery.event,
-                status="processing",
-                received_at=self.delivery.received_at,
-                provider_id=provider_id,
-                delivery_id=delivery_id,
-            )
-            return True
-
-        async def update_webhook_delivery(
-            self,
-            provider_id: str,
-            delivery_id: str,
-            *,
-            status: str,
-            processed_at=None,
-            error_code=None,
-            expected_statuses: Sequence[str] | None = None,
-        ) -> WebhookDelivery | None:
-            assert expected_statuses is not None
-            assert self.delivery.status in expected_statuses
-            self.delivery = self.delivery.__class__(
-                id=self.delivery.id,
-                event_type=self.delivery.event_type,
-                event=self.delivery.event,
-                status=status,
-                received_at=self.delivery.received_at,
-                processed_at=processed_at,
-                error_code=error_code,
-                provider_id=provider_id,
-                delivery_id=delivery_id,
-            )
-            return self.delivery
-
-    class Lifecycle:
-        calls = 0
-
-        async def reconcile(self, received_event, *, newly_deduplicated):
-            self.calls += 1
-            assert received_event == event
-            assert newly_deduplicated is True
-            return SimpleNamespace(outcome=SimpleNamespace(value=outcome))
-
-    outbox = Outbox()
-    worker = SimpleNamespace(plans=outbox)
-    lifecycle = Lifecycle()
-    monkeypatch.setattr(automation_worker, "create_pull_request_lifecycle_reconciler", lambda _: lifecycle)
-
-    assert await automation_worker._process_pending_webhook_deliveries(cast(PlanWorker, worker))
-    assert outbox.delivery.status == expected_status
-    assert outbox.delivery.error_code == expected_error
-    assert outbox.delivery.processed_at is not None
-    assert lifecycle.calls == 1
-    assert not await automation_worker._process_pending_webhook_deliveries(cast(PlanWorker, worker))
 
 
 def test_deprecated_queue_flag_accepts_only_plans(monkeypatch):
@@ -287,82 +173,10 @@ async def test_plans_queue_safely_idles_when_provider_json_is_absent(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_plan_worker_runtime_starts_and_cancels_pr_poller(monkeypatch):
-    started = asyncio.Event()
-    stopped = asyncio.Event()
-    worker = cast(PlanWorker, object())
-
-    class Poller:
-        async def run(self, stop_event):
-            started.set()
-            try:
-                await stop_event.wait()
-            finally:
-                stopped.set()
-
-    def create_poller(plan_worker):
-        assert plan_worker is worker
-        return Poller()
-
-    async def process_once(*, worker_id=None, plan_worker=None) -> bool:
-        assert plan_worker is worker
-        assert worker_id
-        return False
-
-    monkeypatch.setattr(automation_worker, "_create_pr_polling_runtime", create_poller)
-    monkeypatch.setattr(automation_worker, "process_once", process_once)
-    task = asyncio.create_task(automation_worker.run_worker(poll_seconds=10, plan_worker=worker))
-
-    await started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert stopped.is_set()
-
-
-@pytest.mark.asyncio
-async def test_pr_poller_failures_are_restarted_without_stopping_the_queue(monkeypatch, caplog):
-    """D9: a failing PR poller is logged and restarted with backoff; the queue keeps running."""
-    worker = cast(PlanWorker, object())
-    poller_runs = 0
-    processed = 0
-
-    class Poller:
-        async def run(self, _stop_event):
-            nonlocal poller_runs
-            poller_runs += 1
-            raise RuntimeError("polling lease database unavailable")
-
-    async def process_once(*, worker_id=None, plan_worker=None) -> bool:
-        nonlocal processed
-        assert plan_worker is worker
-        processed += 1
-        if processed >= 50:
-            raise _StopLoop()
-        await asyncio.sleep(0)
-        return True
-
-    monkeypatch.setattr(automation_worker, "_create_pr_polling_runtime", lambda _worker: Poller())
-    monkeypatch.setattr(automation_worker, "process_once", process_once)
-    monkeypatch.setattr(automation_worker, "backoff_delay", lambda *args, **kwargs: 0.0)
-
-    with caplog.at_level("ERROR", logger="greenkube.cli.automation_worker"):
-        with pytest.raises(_StopLoop):
-            await automation_worker.run_worker(poll_seconds=10, plan_worker=worker)
-
-    assert processed == 50
-    assert poller_runs >= 2
-    assert "pull-request polling runtime stopped" in caplog.text
-    assert "error_code=RuntimeError" in caplog.text
-
-
-@pytest.mark.asyncio
 async def test_dedicated_worker_supervises_metrics_listener_without_changing_queue_loop(monkeypatch):
     process_started = asyncio.Event()
     worker_metrics_ports: list[int] = []
     worker = cast(PlanWorker, object())
-    stub_branch_cleanup(monkeypatch)
 
     class MetricsServer:
         started = True
@@ -409,24 +223,3 @@ def test_worker_metrics_port_is_optional_and_bounded(monkeypatch):
     for value in ("", "0", "65536", "port", " 8001"):
         with pytest.raises(ValueError):
             automation_worker.parse_worker_metrics_port(value)
-
-
-def test_pr_poller_uses_plan_gitops_repository_for_database_lease(monkeypatch):
-    pull_requests = object()
-    gitops_repository = object()
-    worker = cast(
-        PlanWorker,
-        SimpleNamespace(
-            pull_request_repository=pull_requests,
-            plans=gitops_repository,
-            operations=object(),
-            provider_resolver=object(),
-        ),
-    )
-    reconciler = object()
-    monkeypatch.setattr(automation_worker, "create_pull_request_lifecycle_reconciler", lambda _worker: reconciler)
-
-    poller = automation_worker._create_pr_polling_runtime(worker)
-
-    assert poller.pull_request_repository is pull_requests
-    assert poller.lease_repository is gitops_repository

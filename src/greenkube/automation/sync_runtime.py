@@ -415,27 +415,42 @@ class GitOpsSyncRuntime:
                 errors=errors,
             )
 
+    async def run_once(self) -> GitOpsSyncCycleSummary:
+        """One observation cycle and the PR feedback refresh; re-raises a failed poll afterwards.
+
+        The controller loop registry (M8) calls this every sync interval.
+        """
+        failure: Exception | None = None
+        summary = GitOpsSyncCycleSummary()
+        try:
+            summary = await self.poll_once()
+        except Exception as error:
+            logger.warning("GitOps sync poll cycle failed (%s).", type(error).__name__)
+            failure = error
+        else:
+            if summary.selected:
+                logger.info(
+                    "GitOps sync poll completed: selected=%d synced=%d pending=%d failed=%d skipped=%d errors=%d",
+                    summary.selected,
+                    summary.synced,
+                    summary.pending,
+                    summary.failed,
+                    summary.skipped,
+                    summary.errors,
+                )
+        await self.reconcile_feedback()
+        if failure is not None:
+            raise failure
+        return summary
+
     async def run(self, stop_event: asyncio.Event, *, should_run: Callable[[], bool] | None = None) -> None:
         """Poll immediately and repeat until stopped or cancelled."""
         while not stop_event.is_set():
             if should_run is None or should_run():
                 try:
-                    summary = await self.poll_once()
-                except Exception as error:
-                    logger.warning("GitOps sync poll cycle failed (%s).", type(error).__name__)
-                else:
-                    if summary.selected:
-                        logger.info(
-                            "GitOps sync poll completed: "
-                            "selected=%d synced=%d pending=%d failed=%d skipped=%d errors=%d",
-                            summary.selected,
-                            summary.synced,
-                            summary.pending,
-                            summary.failed,
-                            summary.skipped,
-                            summary.errors,
-                        )
-                await self.reconcile_feedback()
+                    await self.run_once()
+                except Exception:
+                    pass
             else:
                 logger.debug("Skipping GitOps sync observation while this controller is not the Lease holder.")
 

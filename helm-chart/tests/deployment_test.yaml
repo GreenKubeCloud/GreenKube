@@ -196,10 +196,27 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: should disable inline processing and run the worker CLI in worker mode
+  - it: keeps the automation loop and plan execution in the controller in worker mode (F8)
     set:
       automation.enabled: true
       automation.mode: worker
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0]
+          value:
+            name: AUTOMATION_ENABLED
+            value: "true"
+      - equal:
+          path: spec.template.spec.containers[0].env[1]
+          value:
+            name: AUTOMATION_MODE
+            value: worker
+
+  - it: turns the controller automation loops off when automation is disabled
+    set:
+      automation.enabled: false
     templates:
       - templates/deployment.yaml
     asserts:
@@ -213,6 +230,21 @@ tests:
           value:
             name: AUTOMATION_MODE
             value: disabled
+
+  - it: runs no automation loop in the API container (M8)
+    set:
+      automation.enabled: true
+    templates:
+      - templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].command
+          value: ["greenkube-api"]
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: AUTOMATION_MODE
+            value: inline
 
   - it: should run exactly one standalone operation worker
     set:

@@ -8,13 +8,21 @@ replicaCount: 1
 tmp:
   sizeLimit: 768Mi
 
-# Deployment profile. "standalone" preserves the single-pod collector/API
+# Deployment profile. "standalone" preserves the single-pod controller/API
 # deployment; "production" renders independent API, controller, and
-# automation-worker Deployments.
+# automation-worker Deployments. In both, the API is stateless request handling
+# and the controller runs every periodic loop (collection, scans, lifecycle,
+# discovery, sync, the automation controller loop and plan execution); see
+# docs/architecture.md "Process topology" (M8, F8).
 profile: standalone
 
 automation:
   enabled: false
+  # Where plan operations execute. "inline": the controller only. "worker": the
+  # controller plus dedicated worker pods (production.components.automation.replicas,
+  # or the standalone automation-worker). The controller always runs the automation
+  # controller loop (webhook outbox, PR polling, branch cleanup, plan expiry,
+  # retention); the API never runs a worker. "disabled" turns delivery off.
   mode: '' # Empty defaults to inline for standalone and worker for production.
   # Port for the dedicated worker's authenticated control-loop metrics listener.
   workerMetricsPort: 8001
@@ -170,6 +178,8 @@ production:
         failureThreshold: 3
         successThreshold: 1
     automation:
+      # Dedicated plan executors (worker mode). They only execute queued plan
+      # operations; operation leases make several replicas safe (F8).
       replicas: 1
       resources:
         limits:

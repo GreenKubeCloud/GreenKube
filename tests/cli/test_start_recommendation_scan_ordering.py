@@ -98,7 +98,7 @@ def _install_controller(monkeypatch, runs: SQLiteOptimizationRunRepository, *, l
     db_manager.connect = AsyncMock()
     processor = MagicMock()
     processor.close = AsyncMock()
-    discovery = SimpleNamespace(run_periodic=AsyncMock())
+    discovery = SimpleNamespace(run_once=AsyncMock(), interval_seconds=300.0)
 
     monkeypatch.setattr(
         start_module,
@@ -118,7 +118,8 @@ def _install_controller(monkeypatch, runs: SQLiteOptimizationRunRepository, *, l
     monkeypatch.setattr(
         "greenkube.gitops.discovery.runtime.create_gitops_discovery_runtime", AsyncMock(return_value=discovery)
     )
-    monkeypatch.setattr(start_module, "_start_gitops_sync_observer", AsyncMock(return_value=None))
+    monkeypatch.setattr(start_module, "_create_controller_plan_runtime", AsyncMock(return_value=None))
+    monkeypatch.setattr(start_module, "_create_session_purge", lambda _db_manager: None)
     monkeypatch.setattr(
         start_module, "_create_controller_leader_election", lambda cfg: _Elector() if leader_election else None
     )

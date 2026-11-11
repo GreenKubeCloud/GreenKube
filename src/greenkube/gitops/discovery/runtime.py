@@ -239,6 +239,16 @@ class GitOpsDiscoveryRuntime:
                     refreshed_at_timestamp=result.refreshed_at.timestamp(),
                 )
 
+    async def run_once(self) -> DiscoveryRefreshResult:
+        """One logged refresh; a failure is logged and re-raised (controller loop registry, M8)."""
+        try:
+            result = await self.refresh()
+        except Exception as error:
+            _log_refresh_failure(error, self.interval_seconds)
+            raise
+        _log_refresh_success(result)
+        return result
+
     async def run_periodic(
         self,
         *,
@@ -250,11 +260,9 @@ class GitOpsDiscoveryRuntime:
         while not stop.is_set():
             if should_run is None or should_run():
                 try:
-                    result = await self.refresh()
-                except Exception as error:
-                    _log_refresh_failure(error, self.interval_seconds)
-                else:
-                    _log_refresh_success(result)
+                    await self.run_once()
+                except Exception:
+                    pass
             else:
                 logger.debug("Skipping GitOps discovery refresh while this controller is not the Lease holder.")
 

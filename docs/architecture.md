@@ -63,7 +63,7 @@ flowchart TB
             Bind["Workload<br/>bindings"]
             PlanSvc["Plan service<br/>snapshot + render + diff"]
             Renderer["Isolated<br/>renderer"]
-            Worker["Plan worker<br/>PR + polling"]
+            Worker["Plan executor + automation loop<br/>PR, webhooks, polling (controller)"]
             Sync["Controller sync<br/>+ apply detection"]
         end
 
@@ -124,7 +124,7 @@ flowchart TB
 
 ## Overview
 
-GreenKube runs scheduled collection and recommendation lifecycles alongside an API and dashboard for querying stored data. An optional GitOps automation path discovers workload sources, renders and validates plans, executes approved pull requests, and observes controller sync and apply state. The CLI starts the collector or a local demo; it does not provide ad-hoc report or recommendation commands.
+GreenKube runs scheduled collection and recommendation lifecycles in a controller process alongside a stateless API and dashboard for querying stored data (see [Process topology](#process-topology)). An optional GitOps automation path discovers workload sources, renders and validates plans, executes approved pull requests, and observes controller sync and apply state. The CLI starts the collector or a local demo; it does not provide ad-hoc report or recommendation commands.
 
 The system is designed around the principles of **Clean Architecture** and **Hexagonal Architecture**:
 - **Core Business Logic** (domain layer) is independent of infrastructure
@@ -133,6 +133,94 @@ The system is designed around the principles of **Clean Architecture** and **Hex
 - **Presentation Layer** (API, CLI, Dashboard) provides multiple interfaces
 
 All I/O operations use Python's `asyncio` for high-performance, non-blocking concurrent execution.
+
+## Process topology
+
+GreenKube runs as a small set of processes with one rule (roadmap M8, F8): **the API handles requests, the controller runs every loop.**
+
+```mermaid
+flowchart LR
+    Users["Browser / CI / Prometheus"] --> API
+    GitHooks["Git provider webhooks"] --> API
+
+    subgraph APIProc["api (Deployment, N replicas)"]
+        API["FastAPI<br/>REST · UI · webhook ingress · auth<br/><b>no background loop</b>"]
+    end
+
+    subgraph Ctrl["controller (Deployment, 1 leader + hot standbys)"]
+        Lease["Kubernetes Lease<br/>(leader election)"]
+        Registry["Loop registry<br/>core/loops.py"]
+        Lease --> Registry
+        Registry --> L1["collection · carbon-intensity · node-analysis"]
+        Registry --> L2["recommendation-scan · recommendation-lifecycle<br/>(apply detection, measurement)"]
+        Registry --> L3["savings-attribution · metrics-compression · dashboard-summary"]
+        Registry --> L4["gitops-discovery · gitops-sync"]
+        Registry --> L5["automation-controller<br/>(one DB lease: webhook outbox,<br/>PR polling, branch cleanup,<br/>plan expiry, retention)"]
+        Registry --> L6["plan-executor · session-purge"]
+    end
+
+    subgraph Worker["worker (optional Deployment)"]
+        W["Plan executor only"]
+    end
+
+    Renderer["renderer<br/>(isolated Helm/Kustomize)"]
+    DB[("PostgreSQL")]
+
+    API --> DB
+    Registry --> DB
+    W --> DB
+    L6 --> Renderer
+    API --> Renderer
+    L5 --> Git["GitHub / GitLab / Gitea"]
+    L6 --> Git
+    W --> Git
+```
+
+| Process | Runs | Scaling |
+|---|---|---|
+| `api` | Stateless request handling: REST, UI, webhook ingress (writes the durable outbox), authentication, plan previews and approvals. It starts **no periodic job**: no scans, no plan expiry sweep, no worker, no session purge. | Any number of replicas. |
+| `controller` | Every periodic loop, declared once in the loop registry. Leader-only loops run on the Lease holder; standbys keep their loops registered, skip their ticks, and take over within the Lease duration. | One leader plus optional hot standbys. |
+| `worker` (optional) | Claims and executes queued plan operations, nothing else. | Any number of replicas: operation leases make concurrent executors safe. |
+| `renderer` | Isolated Helm/Kustomize rendering. | Independent. |
+| PostgreSQL | All state; SQLite remains for `greenkube demo` and local development. | — |
+
+**Controller loops.** `greenkube start` registers these loops in `LoopRegistry` (`src/greenkube/core/loops.py`). Each loop declares a name, an interval, jitter, a leader-only flag, an optional timeout, and its backoff:
+
+| Loop | Interval | Leader-only | Timeout |
+|---|---|---|---|
+| `collection` | `PROMETHEUS_QUERY_RANGE_STEP`, aligned on window boundaries + `COLLECTION_SAFETY_LAG` | yes | — (watermarked) |
+| `carbon-intensity` | 1 h | yes | 30 min |
+| `node-analysis` | `NODE_ANALYSIS_INTERVAL` | yes | 10 min |
+| `savings-attribution` | `PROMETHEUS_QUERY_RANGE_STEP` | yes | 30 min |
+| `recommendation-lifecycle` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | yes | 30 min |
+| `recommendation-scan` | 15 s poll (scans every `RECOMMENDATION_SCAN_INTERVAL`) | yes | — (run leases) |
+| `metrics-compression`, `dashboard-summary` | 1 h | yes | 60 / 30 min |
+| `gitops-discovery` | `GITOPS_DISCOVERY_INTERVAL` | yes | 10 min |
+| `gitops-sync` | `GITOPS_SYNC_POLL_INTERVAL` | yes | 10 min |
+| `automation-controller` | 5 s tick; steps keep their own cadence | yes | 10 min |
+| `plan-executor` | 5 s, at most 10 operations per tick | yes | — (operation leases) |
+| `session-purge` | daily | yes | 10 min |
+
+`gitops-sync` and `automation-controller` are registered when the GitOps plan runtime is configured (`GITOPS_PROVIDERS_JSON`). The delivery part, meaning `plan-executor` plus the webhook outbox, PR polling, branch cleanup and pending-PR recovery steps, runs when `AUTOMATION_ENABLED` is true and `AUTOMATION_MODE` is not `disabled`. Plan expiry and retention run whenever the plan runtime exists, as the former API sweep did.
+
+The registry guarantees:
+
+- **Leader gating.** A leader-only tick runs only while the process holds the Lease. It runs inside a `LeaderFence` scope, so a job can re-check the Lease generation before it commits (A14). Loops that must react quickly to a takeover (`gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`) re-check the Lease every 2 s while on standby; the others keep their former cadence.
+- **Isolation.** Each loop has its own task. An exception or a timeout fails only that tick. A loop task that dies unexpectedly is restarted after 5 s. After ticks that raised or timed out, a loop backs off exponentially, up to 8× its interval. Aligned loops do not back off; they retry at the next boundary. Jobs that log and swallow their own errors call `report_loop_failure()`: the tick counts as failed in the metrics and the loop status, but it does not back off, so the job keeps its cadence (a single failing Electricity Maps zone, for example, does not slow down the hourly refresh of the healthy zones). A `CancelledError` raised from inside a job while the registry is not stopping fails that tick; it does not end the loop.
+- **Health.** On `CONTROLLER_METRICS_PORT` the controller serves `/healthz` (process alive), `/readyz` (every loop alive with a fresh heartbeat, otherwise `503`) and `/loops` (a per-loop JSON snapshot with state, last success, duration, consecutive failures and last error code; it requires the API key when the controller has one). Metrics are listed in [Observability and SLOs](observability-slos.md#controller-loops).
+
+**The automation controller loop** (`src/greenkube/automation/controller.py`) holds the database lease (the singleton `gitops_pr_polling_lease` row) for its whole tick. At most one process does automation housekeeping, even without Kubernetes leader election (standalone replicas, or old and new pods during a rollout). The tick runs these steps in order, renewing the lease and re-checking the Lease fence between steps:
+
+1. `operations`: reconcile plans whose operation exhausted its retries (every 60 s).
+2. `expiry`: mark plans past their TTL stale (every 60 s).
+3. `webhooks`: reconcile the durable webhook outbox (every tick, up to 5 batches of 10).
+4. `pr_polling`: poll one page of open pull requests, then branch cleanup (every `GITOPS_PR_POLL_INTERVAL`).
+5. `recovery`: quarantine stale pending pull-request attempts (once per process).
+6. `retention`: prune automation history older than 90 days and worker heartbeats older than 7 days (daily; a failed pass is retried on the next tick).
+
+A failed step is logged with an error code and does not stop the following steps. A tick in which no step is due (delivery off, between two expiry passes) returns without touching the lease row. A standby controller resets `greenkube_automation_worker_up` to 0 (`plan-executor` standby hook), so only the leader reports itself as an executor.
+
+**Profiles.** Until the single topology (F11) lands, both Helm profiles follow this split. In `profile: standalone`, the pod has two containers: the controller (`greenkube start`) and the API. In `profile: production`, `api`, `controller` and the optional `automation` worker are separate Deployments. `automation.mode` only decides whether dedicated workers execute operations in addition to the controller (`worker`) or not (`inline`). In both modes the API never runs a worker. `greenkube demo` runs the API only, on demo data, with no loop.
 
 ## Architectural Principles
 
@@ -616,7 +704,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
 3. **Approval and execution:**
    ```
    Exact digest approval
-   └─ Durable operation queue → worker revalidation
+   └─ Durable operation queue → executor revalidation (controller plan-executor loop, or an optional worker)
    └─ Atomic multi-file commit → deterministic branch → pull request
    ```
 
@@ -673,7 +761,7 @@ All configuration flows through `src/greenkube/core/config.py`:
 
 **Automation:**
 - `AUTOMATION_ENABLED` — Default: `false`
-- `AUTOMATION_MODE` — `disabled`, `inline`, or `worker`
+- `AUTOMATION_MODE` — `disabled`, `inline` (the controller executes plan operations) or `worker` (dedicated workers execute them as well); the API never runs a worker
 - `GITOPS_DISCOVERY_INTERVAL` / `GITOPS_BINDING_TTL`
 - `GITOPS_PROVIDERS_JSON` — Secret-reference provider registry
 - `GITOPS_RENDERER_URL` — isolated renderer service
@@ -687,12 +775,12 @@ helm-chart/
 ├── values.yaml                # Standalone/default configuration
 ├── values-production.yaml     # Production profile overlay
 └── templates/
-    ├── deployment.yaml        # Standalone collector + API
+    ├── deployment.yaml        # Standalone controller + API
     ├── production-deployments.yaml # API, controller, automation worker
     ├── api-service.yaml       # API/UI ClusterIP Service
     ├── controller-metrics-service.yaml # Controller metrics ClusterIP Service
     ├── controller-servicemonitor.yaml  # Controller metrics ServiceMonitor
-    ├── automation-worker.yaml # Standalone worker mode
+    ├── automation-worker.yaml # Standalone worker mode (plan executor only)
     ├── configmap.yaml         # Non-secret config
     ├── secret.yaml            # Tokens and credentials
     ├── migration-job.yaml     # Production schema migration hook

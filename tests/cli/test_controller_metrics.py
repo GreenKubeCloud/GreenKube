@@ -113,6 +113,41 @@ def test_controller_endpoint_also_answers_on_the_default_metrics_path(monkeypatc
     assert "greenkube_collection_run_duration_seconds_count" in response.text
 
 
+async def test_controller_endpoint_exposes_loop_health_and_readiness(monkeypatch):
+    """M8: probes read a verdict without credentials; the per-loop snapshot needs the API key."""
+    from greenkube.core.loops import LoopRegistry, LoopSpec
+
+    _configure_metrics_auth(monkeypatch, api_key="controller-secret")
+
+    async def job():
+        return None
+
+    registry = LoopRegistry()
+    registry.register(LoopSpec("collection", job, 60))
+    app = create_controller_metrics_app(registry)
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").json() == {"status": "ok"}
+        # Registered but never ticked: the controller is not ready yet.
+        assert client.get("/readyz").status_code == 503
+        await registry.run_once("collection")
+        assert client.get("/readyz").json() == {"ready": True}
+        assert client.get("/loops").status_code == 401
+        snapshot = client.get("/loops", headers={"Authorization": "Bearer controller-secret"}).json()
+
+    assert snapshot["role"] == "controller" and snapshot["ready"] is True
+    assert snapshot["loops"][0]["name"] == "collection"
+    assert snapshot["loops"][0]["last_outcome"] == "success"
+
+
+def test_controller_endpoint_is_ready_without_a_registry(monkeypatch):
+    _configure_metrics_auth(monkeypatch, api_key="")
+
+    with TestClient(create_controller_metrics_app()) as client:
+        assert client.get("/readyz").status_code == 200
+        assert client.get("/loops").json() == {"ready": True, "loops": []}
+
+
 def test_controller_metrics_port_must_be_valid():
     with pytest.raises(ValueError):
         create_controller_metrics_server(0)
@@ -274,7 +309,7 @@ def _install_controller(
     db_manager.connect = AsyncMock()
     processor = MagicMock()
     processor.close = AsyncMock()
-    discovery = SimpleNamespace(run_periodic=AsyncMock())
+    discovery = SimpleNamespace(run_once=AsyncMock(), interval_seconds=300.0)
 
     monkeypatch.setattr(
         start_module,
@@ -295,7 +330,8 @@ def _install_controller(
     monkeypatch.setattr(
         "greenkube.gitops.discovery.runtime.create_gitops_discovery_runtime", AsyncMock(return_value=discovery)
     )
-    monkeypatch.setattr(start_module, "_start_gitops_sync_observer", AsyncMock(return_value=None))
+    monkeypatch.setattr(start_module, "_create_controller_plan_runtime", AsyncMock(return_value=None))
+    monkeypatch.setattr(start_module, "_create_session_purge", lambda _db_manager: None)
     monkeypatch.setattr(start_module, "_create_controller_leader_election", lambda cfg: elector)
     monkeypatch.setattr(start_module, "get_data_processor", lambda: processor)
     for name in (
