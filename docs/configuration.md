@@ -162,7 +162,7 @@ Sources produce the signals recommendations are built from: one per native analy
 ```yaml
 sources:
   settings:
-    greenkube.carbon_aware: { enabled: false }   # turn one native analyzer off
+    greenkube.carbon_aware: { enabled: false }   # turn one native analyzer off (its active advice goes stale)
     vpa: { enabled: auto }
 ```
 

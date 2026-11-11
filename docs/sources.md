@@ -44,7 +44,7 @@ SourceSignal(
 )
 ```
 
-- `signal_id` is computed, never set: `sha256(source_id, target.key(), capability, proposal)`. The same proposal keeps the same id across scans; a changed proposal gets a new one.
+- `signal_id` is computed, never set: `sha256(source_id, target.key(), capability, kind, proposal identity)`. The proposal identity leaves out the observed state (`current`, and the `direction` derived from it) and free-text explanations (`reason`): they drift between scans without changing the advice. The same proposal keeps the same id across scans, and its stored row holds the latest state and reason; a changed proposed value gets a new id.
 - GreenKube's Impact Model computes the savings shown to users. `source_estimate` is only kept to compare your claim with the model.
 - Never invent values you do not have: optional fields stay `None` (an `HpaProposal` without bounds is valid).
 - Deletions (`DeletionProposal`) are review-only in this release: GreenKube never opens a deletion PR.
@@ -110,10 +110,10 @@ Scans run in the leader controller (`recommendation_scan`). For each enabled sou
 1. skips it when its **circuit** is open (`failure_threshold` consecutive failures, default 3, until `circuit_cooldown_seconds`, default 15 minutes, passed) or when its **rate limit** (`min_interval_seconds`) has not elapsed; the run is recorded `skipped` and the last known advice is kept;
 2. calls `discover()` then `health()` within `probe_timeout_seconds` (default 30 s); unavailable → `unavailable`;
 3. calls `collect()` within `collect_timeout_seconds` (default 5 min; the engine caps it at 5 min);
-4. validates the batch: signals with another `source_id` or an undeclared capability are dropped and make the batch incomplete; duplicates are merged; raw payloads over 8 KiB are replaced by a size marker; signals beyond `max_signals` are dropped;
+4. validates the batch: signals with another `source_id` or an undeclared capability are dropped and make the batch incomplete; duplicates are merged; raw payloads over 8 KiB are replaced by a size marker, as are `evidence.data` and `source_estimate` over 8 KiB, and evidence `summary`/`details` are cut at 4096 characters (diagnostic `evidence_trimmed`); v1 recommendations of a plugin are ignored (diagnostic `recommendations_ignored`); signals beyond `max_signals` are dropped;
 5. records the run in `source_runs` and upserts the signals in `source_signals` (one row per distinct signal, with first and last sighting; both kept 30 days).
 
-Run statuses: `succeeded` (authoritative), `incomplete`, `failed`, `unavailable`, `skipped`. Only `succeeded` lets reconciliation resolve previous advice of that source. Circuit and rate-limit state come from the persisted runs, so they survive controller restarts and leader changes.
+Run statuses: `succeeded` (authoritative), `incomplete`, `failed`, `unavailable`, `skipped`. Only `succeeded` lets reconciliation resolve previous advice of that source. Circuit and rate-limit state come from the persisted runs, so they survive controller restarts and leader changes; when the controller cannot record runs, its own newer in-process runs take precedence. Native analyzers run one after the other, each within its own collection timeout; they are synchronous, so a timeout is recorded only once the analyzer returns.
 
 `GET /api/v1/sources` derives a status per source: `healthy`, `degraded` (incomplete, skipped or degraded health), `failing` (failed, or explicitly `enabled: true` but unavailable), `unavailable`, `disabled`, `misconfigured` (invalid settings), `pending` (never ran) and `unregistered` (ran before, no longer installed).
 
@@ -145,7 +145,7 @@ sources:
     acme: { enabled: true, url: "http://acme.acme-system:8080" }
 ```
 
-`enabled` precedence: `sources.settings.<id>.enabled`, then `config.recommendations.vpaEnabled`/`karpenterEnabled` for `vpa`/`greenkube.nodepool`, then the source's `default_enabled` (`auto`). Settings are validated by the source's `settings_model`; an invalid entry disables that source only and is reported. The ConfigMap holds these settings: never put credentials in them. Read secrets from environment variables or mounted files in your source.
+`enabled` precedence: `sources.settings.<id>.enabled`, then `config.recommendations.vpaEnabled`/`karpenterEnabled` for `vpa`/`greenkube.nodepool`, then the source's `default_enabled` (`auto`). Settings are validated by the source's `settings_model`; an invalid entry disables that source only and is reported. Disabling a native analyzer (`greenkube.orphaned_lb: {enabled: false}`) stops its advice: its active recommendations are no longer produced and are marked stale on the next complete scan, like advice whose condition went away. The ConfigMap holds these settings: never put credentials in them. Read secrets from environment variables or mounted files in your source.
 
 ## Packaging a third-party source
 
