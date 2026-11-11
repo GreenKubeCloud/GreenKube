@@ -83,6 +83,26 @@ async def test_only_the_leader_runs_leader_only_loops():
 
 
 @pytest.mark.asyncio
+async def test_standby_hook_runs_only_when_a_leader_only_tick_is_skipped():
+    state = {"leader": True}
+    standby_calls = 0
+
+    def on_standby():
+        nonlocal standby_calls
+        standby_calls += 1
+        raise RuntimeError("hook errors are logged, not raised")
+
+    registry = LoopRegistry(leader=lambda: state["leader"])
+    registry.register(LoopSpec("with-hook", _noop, 60, on_standby=on_standby))
+
+    assert await registry.run_once("with-hook") == "success"
+    assert standby_calls == 0
+    state["leader"] = False
+    assert await registry.run_once("with-hook") == "skipped"
+    assert standby_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_without_leader_election_this_process_runs_every_loop():
     calls = 0
 
@@ -178,7 +198,69 @@ async def test_a_wedged_tick_times_out_and_the_loop_continues():
     assert await registry.run_once("wedged-loop") == "timeout"
     status = registry.status("wedged-loop")
     assert status.timeouts == 1 and status.last_error_code == "timeout"
-    assert status.state == "backoff"
+    assert status.state == "failing"
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_raised_by_the_job_itself_is_a_failure_not_a_registry_timeout():
+    async def provider_call_timing_out():
+        raise TimeoutError("provider read timeout")
+
+    registry = LoopRegistry()
+    registry.register(LoopSpec("own-timeout", provider_call_timing_out, 60, timeout_seconds=30))
+
+    assert await registry.run_once("own-timeout") == "failure"
+    status = registry.status("own-timeout")
+    assert status.timeouts == 0
+    assert status.last_error_code == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_a_stray_cancellation_inside_a_job_fails_the_tick_and_the_loop_keeps_running():
+    runs = 0
+
+    async def job():
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            inner = asyncio.get_running_loop().create_future()
+            inner.cancel()
+            await inner  # raises CancelledError although nobody cancelled the loop task
+
+    registry = LoopRegistry()
+    registry.register(LoopSpec("stray-cancel", job, 0.02, run_immediately=True, jitter=0, max_backoff_multiplier=1))
+    registry.start()
+    try:
+        for _ in range(200):
+            if runs >= 3:
+                break
+            await asyncio.sleep(0.01)
+        status = registry.status("stray-cancel")
+        assert runs >= 3
+        assert status.restarts == 0
+        assert status.state != "stopped"
+        assert status.failures >= 1
+    finally:
+        await registry.stop()
+    assert registry.status("stray-cancel").state == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_registry_still_cancels_a_running_tick():
+    started = asyncio.Event()
+
+    async def long_job():
+        started.set()
+        await asyncio.sleep(60)
+
+    registry = LoopRegistry()
+    registry.register(LoopSpec("long-job", long_job, 60, run_immediately=True))
+    registry.start()
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await asyncio.wait_for(registry.stop(), timeout=2)
+
+    assert registry.status("long-job").state == "stopped"
+    assert registry.status("long-job").failures == 0
 
 
 @pytest.mark.asyncio
@@ -234,16 +316,68 @@ async def test_a_crashed_loop_task_is_reported_and_restarted(monkeypatch):
 # -- cadence -----------------------------------------------------------------------------
 
 
-def test_failures_back_off_exponentially_up_to_the_cap():
+@pytest.mark.asyncio
+async def test_raised_failures_back_off_exponentially_up_to_the_cap():
+    async def raising():
+        raise ConnectionError("database restarting")
+
     registry = LoopRegistry(rng=lambda: 0.5)
-    spec = registry.register(LoopSpec("backoff-loop", _noop, 10, max_backoff_multiplier=8))
-    status = registry.status("backoff-loop")
+    spec = registry.register(LoopSpec("backoff-loop", raising, 10, max_backoff_multiplier=8))
 
     assert registry._next_delay(spec, "success", 2.0) == pytest.approx(8.0)
-    status.consecutive_failures = 1
+    assert await registry.run_once("backoff-loop") == "failure"
     assert registry._next_delay(spec, "failure", 0.0) == pytest.approx(20.0)
-    status.consecutive_failures = 5
-    assert registry._next_delay(spec, "timeout", 0.0) == pytest.approx(80.0)
+    for _ in range(4):
+        await registry.run_once("backoff-loop")
+    assert registry.status("backoff-loop").consecutive_failures == 5
+    assert registry._next_delay(spec, "failure", 0.0) == pytest.approx(80.0)
+
+
+@pytest.mark.asyncio
+async def test_reported_failures_keep_the_job_cadence_but_are_counted():
+    """A job that handles its own errors keeps its interval (no registry backoff)."""
+
+    async def self_handling_job():
+        try:
+            raise ConnectionError("electricity maps zone unavailable")
+        except ConnectionError as error:
+            report_loop_failure(error)
+
+    registry = LoopRegistry(rng=lambda: 0.5)
+    spec = registry.register(LoopSpec("reported-failure", self_handling_job, 3600, max_backoff_multiplier=8))
+    failures_before = _sample("greenkube_loop_runs_total", {"loop": "reported-failure", "outcome": "failure"})
+
+    for _ in range(4):
+        assert await registry.run_once("reported-failure") == "failure"
+        assert registry._next_delay(spec, "failure", 0.0) == pytest.approx(3600)
+
+    status = registry.status("reported-failure")
+    assert status.consecutive_failures == 4
+    assert status.state == "failing"
+    assert _sample("greenkube_loop_runs_total", {"loop": "reported-failure", "outcome": "failure"}) == (
+        failures_before + 4
+    )
+    assert _sample("greenkube_loop_consecutive_failures", {"loop": "reported-failure"}) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_reported_failure_resets_the_backoff_of_earlier_raised_failures():
+    raise_next = True
+
+    async def job():
+        if raise_next:
+            raise ConnectionError("down")
+        report_loop_failure("partial")
+
+    registry = LoopRegistry(rng=lambda: 0.5)
+    spec = registry.register(LoopSpec("mixed", job, 10, max_backoff_multiplier=8))
+
+    await registry.run_once("mixed")
+    await registry.run_once("mixed")
+    assert registry._next_delay(spec, "failure", 0.0) == pytest.approx(40.0)
+    raise_next = False
+    await registry.run_once("mixed")
+    assert registry._next_delay(spec, "failure", 0.0) == pytest.approx(10.0)
 
 
 def test_standby_loops_recheck_the_lease_sooner_than_their_interval():

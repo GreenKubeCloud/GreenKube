@@ -13,7 +13,9 @@ by one :class:`LoopRegistry`:
   that tick of that loop; the other loops keep running. A loop task that dies
   unexpectedly is restarted.
 - **Cadence.** Fixed rate with jitter, or aligned on wall-clock boundaries;
-  exponential backoff after failed ticks (capped per loop).
+  exponential backoff after ticks that raised or timed out (capped per loop).
+  A failure a job reports itself (:func:`report_loop_failure`) is counted but does
+  not back off, so jobs that handle their own errors keep their cadence.
 - **Telemetry.** ``greenkube_loop_runs_total{loop,outcome}``,
   ``greenkube_loop_duration_seconds{loop}``,
   ``greenkube_loop_last_success_timestamp_seconds{loop}``,
@@ -22,7 +24,7 @@ by one :class:`LoopRegistry`:
 
 The registry owns *scheduling only*: the business logic of each loop stays in its
 own module, and jobs that log their own errors can still mark the tick failed with
-:func:`report_loop_failure` without raising (so their cadence is unchanged).
+:func:`report_loop_failure` without raising (their cadence is unchanged).
 """
 
 from __future__ import annotations
@@ -68,6 +70,9 @@ class LoopSpec:
     ``standby_recheck_seconds`` makes a leader-only loop re-check the Lease sooner
     than its interval while this process is a standby, so it starts right after a
     takeover. ``max_backoff_multiplier=1`` disables the failure backoff.
+    ``on_standby`` is called (synchronously, errors logged) whenever a leader-only
+    tick is skipped because this process is a standby, e.g. to reset a gauge that
+    only the leader may report as up.
     """
 
     name: str
@@ -82,12 +87,15 @@ class LoopSpec:
     standby_recheck_seconds: float | None = None
     stale_after_seconds: float | None = None
     description: str = ""
+    on_standby: Callable[[], object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not LOOP_NAME_PATTERN.fullmatch(self.name):
             raise ValueError("loop name must match ^[a-z][a-z0-9-]{0,47}$")
         if not callable(self.func):
             raise ValueError(f"loop {self.name!r} needs a callable job")
+        if self.on_standby is not None and not callable(self.on_standby):
+            raise ValueError(f"loop {self.name!r}: on_standby must be callable")
         _require_positive(self.name, "interval_seconds", self.interval_seconds)
         if isinstance(self.jitter, bool) or not isinstance(self.jitter, (int, float)) or not 0 <= self.jitter < 1:
             raise ValueError(f"loop {self.name!r}: jitter must be in [0, 1)")
@@ -196,9 +204,11 @@ _current_tick: ContextVar[_TickReport | None] = ContextVar("greenkube_loop_tick"
 def report_loop_failure(error: BaseException | str | None = None) -> None:
     """Mark the current loop tick failed without raising.
 
-    For jobs that log and swallow their own errors (so their cadence and the
-    controller's initial work are unchanged) but must still show up in
-    ``greenkube_loop_runs_total{outcome="failure"}``. A no-op outside a loop tick.
+    For jobs that log and swallow their own errors but must still show up in
+    ``greenkube_loop_runs_total{outcome="failure"}``. A reported failure counts in
+    the metrics and the loop status but never triggers the registry backoff: the
+    job handled its error, so its cadence (and the controller's initial work) stays
+    exactly what it was before the registry. A no-op outside a loop tick.
     """
     report = _current_tick.get()
     if report is None:
@@ -239,6 +249,8 @@ class LoopRegistry:
         self._specs: dict[str, LoopSpec] = {}
         self._status: dict[str, LoopStatus] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        # Consecutive ticks that raised or timed out: only these back off.
+        self._backoff_streak: dict[str, int] = {}
         self._stopping = False
         self._started = False
 
@@ -312,7 +324,7 @@ class LoopRegistry:
 
     async def run_once(self, name: str) -> str:
         """Run one tick of ``name`` now (respecting leader gating); return its outcome."""
-        outcome, _ = await self._tick(self._specs[name])
+        outcome, _, _ = await self._tick(self._specs[name])
         return outcome
 
     # -- health -----------------------------------------------------------------------
@@ -355,23 +367,28 @@ class LoopRegistry:
         if not spec.run_immediately:
             await self._sleep(spec.interval_seconds)
         while True:
-            outcome, duration = await self._tick(spec)
+            outcome, duration, _ = await self._tick(spec)
             await self._sleep(self._next_delay(spec, outcome, duration))
 
     def _next_delay(self, spec: LoopSpec, outcome: str, duration: float) -> float:
-        status = self._status[spec.name]
         interval = float(spec.interval_seconds)
         if outcome == "skipped" and spec.standby_recheck_seconds is not None:
             return min(interval, float(spec.standby_recheck_seconds))
         delay = max(interval - duration, 0.0)
-        if outcome in {"failure", "timeout"} and status.consecutive_failures > 0:
-            multiplier = min(2**status.consecutive_failures, spec.max_backoff_multiplier)
+        streak = self._backoff_streak.get(spec.name, 0)
+        if outcome in {"failure", "timeout"} and streak > 0:
+            multiplier = min(2**streak, spec.max_backoff_multiplier)
             delay = max(delay, interval * multiplier)
         if spec.jitter:
             delay += delay * spec.jitter * (2 * self._rng() - 1)
         return max(delay, min(MIN_SLEEP_SECONDS, interval))
 
-    async def _tick(self, spec: LoopSpec) -> tuple[str, float]:
+    async def _tick(self, spec: LoopSpec) -> tuple[str, float, bool]:
+        """Run one tick; return ``(outcome, duration, raised)``.
+
+        ``raised`` is true when the job raised or timed out, the only outcomes that
+        back off; a failure reported with :func:`report_loop_failure` does not.
+        """
         status = self._status[spec.name]
         now = self._clock()
         status.heartbeat_at = now
@@ -382,7 +399,12 @@ class LoopRegistry:
             status.skipped += 1
             status.last_outcome = "skipped"
             record_loop_run(spec.name, "skipped", consecutive_failures=status.consecutive_failures)
-            return "skipped", 0.0
+            if spec.on_standby is not None:
+                try:
+                    spec.on_standby()
+                except Exception:
+                    logger.warning("Standby hook of controller loop %s failed.", spec.name, exc_info=True)
+            return "skipped", 0.0, False
 
         status.state = "running"
         status.last_started_at = now
@@ -392,27 +414,38 @@ class LoopRegistry:
         started = time.monotonic()
         outcome = "success"
         code: str | None = None
+        raised = False
+        deadline = asyncio.timeout(spec.timeout_seconds)
         try:
             fence = self._leader.fence() if spec.leader_only and isinstance(self._leader, LeaderGate) else None
             with leader_fence_scope(fence):
-                if spec.timeout_seconds is not None:
-                    await asyncio.wait_for(spec.func(), timeout=spec.timeout_seconds)
-                else:
+                async with deadline:
                     await spec.func()
         except asyncio.CancelledError:
-            status.state = "stopped"
-            raise
-        except TimeoutError:
-            outcome, code = "timeout", "timeout"
-            logger.error("Controller loop %s timed out after %.0fs.", spec.name, spec.timeout_seconds or 0)
+            if self._stopping or _task_is_being_cancelled():
+                status.state = "stopped"
+                raise
+            # A stray CancelledError from inside the job (e.g. an awaited future that
+            # someone else cancelled) must not end the loop for good.
+            outcome, code, raised = "failure", "cancelled", True
+            logger.error("Controller loop %s tick was cancelled from inside the job.", spec.name)
+        except TimeoutError as exc:
+            raised = True
+            if deadline.expired():
+                outcome, code = "timeout", "timeout"
+                logger.error("Controller loop %s timed out after %.0fs.", spec.name, spec.timeout_seconds or 0)
+            else:
+                outcome, code = "failure", error_code(exc)
+                logger.exception("Controller loop %s failed (error_code=%s).", spec.name, code)
         except Exception as exc:
-            outcome, code = "failure", error_code(exc)
+            outcome, code, raised = "failure", error_code(exc), True
             logger.exception("Controller loop %s failed (error_code=%s).", spec.name, code)
         else:
             if report.failed:
                 outcome, code = "failure", report.error_code
         finally:
             _current_tick.reset(token)
+        self._backoff_streak[spec.name] = self._backoff_streak.get(spec.name, 0) + 1 if raised else 0
 
         duration = time.monotonic() - started
         finished = self._clock()
@@ -433,7 +466,7 @@ class LoopRegistry:
             status.timeouts += 1 if outcome == "timeout" else 0
             status.last_failure_at = finished
             status.last_error_code = code
-            status.state = "backoff"
+            status.state = "failing"
         record_loop_run(
             spec.name,
             outcome,
@@ -441,7 +474,7 @@ class LoopRegistry:
             consecutive_failures=status.consecutive_failures,
             success_timestamp=success_timestamp,
         )
-        return outcome, duration
+        return outcome, duration, raised
 
     def _on_loop_done(self, spec: LoopSpec, task: asyncio.Task[None]) -> None:
         if self._stopping or task.cancelled():
@@ -467,6 +500,11 @@ class LoopRegistry:
         if self._stopping or spec.name not in self._specs or (task is not None and not task.done()):
             return
         self._start_loop(spec)
+
+
+def _task_is_being_cancelled() -> bool:
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 def _require_positive(name: str, attribute: str, value: object) -> None:
