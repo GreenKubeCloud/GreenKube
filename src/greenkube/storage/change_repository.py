@@ -516,6 +516,31 @@ class ChangeRepository:
             ],
         )
 
+    async def record_event(
+        self,
+        change_id: str,
+        event_type: str,
+        *,
+        actor: str = "system",
+        reason: str = "",
+        payload: Optional[dict] = None,
+        now: Optional[datetime] = None,
+    ) -> None:
+        """Append an event that does not change the state (e.g. ``savings_reversed``, C8)."""
+        moment = ensure_utc(now) if now is not None else datetime.now(timezone.utc)
+        async with self.db_manager.transaction() as conn:
+            await self._insert_event(
+                conn,
+                ChangeStateEvent(
+                    change_id=change_id,
+                    event_type=event_type,
+                    actor=actor,
+                    reason=reason,
+                    payload=payload or {},
+                    created_at=moment,
+                ),
+            )
+
     async def list_events(self, change_id: str) -> List[ChangeStateEvent]:
         rows = await self._select(
             "SELECT * FROM change_state_events WHERE change_id = ? ORDER BY id ASC",

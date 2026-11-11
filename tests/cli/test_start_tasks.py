@@ -413,6 +413,7 @@ async def test_async_start_registers_every_controller_loop_and_runs_initial_task
         "node-analysis",
         "savings-attribution",
         "recommendation-lifecycle",
+        "savings-drift",
         "recommendation-scan",
         "metrics-compression",
         "dashboard-summary",

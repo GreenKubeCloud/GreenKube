@@ -379,6 +379,17 @@ async def run_recommendation_lifecycle() -> None:
     logger.info("--- Finished recommendation lifecycle task ---")
 
 
+async def _run_drift_monitor() -> None:
+    """Drift monitor pass (C8); errors are logged and mark the tick failed."""
+    from ..verify.drift import run_drift_monitor
+
+    try:
+        await run_drift_monitor()
+    except Exception as e:
+        logger.error("Drift monitor task failed: %s", e)
+        report_loop_failure(e)
+
+
 def _collection_offset_seconds(cfg) -> float:
     from ..collectors.promql import parse_duration_seconds
 
@@ -606,6 +617,7 @@ def _register_controller_loops(
     from ..core.loops import LoopSpec
     from ..core.optimization.scan_service import RECOMMENDATION_SCAN_POLL_INTERVAL
     from ..core.scheduler import parse_interval_seconds
+    from ..verify.drift import DRIFT_MONITOR_INTERVAL_SECONDS
 
     step = parse_interval_seconds(cfg.PROMETHEUS_QUERY_RANGE_STEP)
 
@@ -652,6 +664,13 @@ def _register_controller_loops(
             parse_interval_seconds(getattr(cfg, "RECOMMENDATION_LIFECYCLE_INTERVAL", "5m")),
             timeout_seconds=_TIMEOUT_LONG,
             description="TTL expiry, apply detection, verification and change measurement.",
+        ),
+        LoopSpec(
+            "savings-drift",
+            _run_drift_monitor,
+            DRIFT_MONITOR_INTERVAL_SECONDS,
+            timeout_seconds=_TIMEOUT_LONG,
+            description="Drift monitor: regresses realized changes whose saving no longer holds (C8).",
         ),
         LoopSpec(
             "recommendation-scan",
