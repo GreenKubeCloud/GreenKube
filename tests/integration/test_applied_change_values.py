@@ -9,7 +9,9 @@ replays what the Minikube loop did to a 400m -> 10m rightsizing:
 * once applied, a scan that regenerates the recommendation from the lagging
   hourly rollup (current = the replaced 400m) never rewrites the ``actual_*``
   value detected after the change;
-* a pull request closed unmerged returns the recommendation to ``active``.
+* a pull request closed unmerged returns the recommendation to ``active``;
+* a scan within the rollup lag after the change never re-offers it;
+* migration 0061 clears the ``actual_*`` values the old rescans reverted.
 """
 
 import os
@@ -190,12 +192,173 @@ async def test_migration_aligns_recommendations_with_an_open_pull_request(databa
             await conn.execute("UPDATE recommendation_history SET action_status = 'pr_open' WHERE id = ?", (rec_id,))
             await conn.commit()
 
+    await _run_migration_0061(database)
+
+    assert (await _only_record(repo)).status is RecommendationStatus.PR_OPEN
+
+
+async def _run_migration_0061(database: DatabaseManager) -> None:
     from greenkube.core.migrations import runner
 
     script = Path(runner.__file__).parent / "scripts" / database.db_type / "0061_recommendation_pr_open_status.sql"
     async with database.connection_scope() as conn:
-        await conn.execute(script.read_text())
-        if database.db_type != "postgres":
+        if database.db_type == "postgres":
+            await conn.execute(script.read_text())
+        else:
+            await conn.executescript(script.read_text())
             await conn.commit()
 
-    assert (await _only_record(repo)).status is RecommendationStatus.PR_OPEN
+
+async def test_scan_within_the_rollup_lag_never_reoffers_a_change_being_verified(database):
+    """Seen on Minikube (recs 291/292): a scan 74 s after the merge re-offered 400m -> 10m."""
+    repo, _ = _repositories(database)
+    lifecycle = RecommendationLifecycle(repo)
+    now = datetime.now(timezone.utc)
+    await repo.upsert_recommendations([_cpu_record(current=400, recommended=10, created_at=now - timedelta(hours=1))])
+    rec_id = (await _only_record(repo)).id
+    assert rec_id is not None
+    await lifecycle.apply(
+        rec_id, actual_cpu=10, application_method="pr_merge", actor="detector", applied_at=now - timedelta(minutes=2)
+    )
+    await lifecycle.mark_verification_started(rec_id)
+
+    # The lagging rollup still reports 400m: same baseline, same or a nearby proposal.
+    for regenerated in (
+        _cpu_record(current=400, recommended=10, created_at=now),
+        _cpu_record(current=400, recommended=12, created_at=now),
+    ):
+        await repo.upsert_recommendations([regenerated])
+        kept = await _only_record(repo)
+        assert (kept.id, kept.status) == (rec_id, RecommendationStatus.VERIFYING)
+        assert (
+            kept.current_cpu_request_millicores,
+            kept.recommended_cpu_request_millicores,
+            kept.actual_cpu_request_millicores,
+        ) == (400, 10, 10)
+    assert await repo.get_active_recommendations(include_pr_open=True) == []
+
+    # Long after the change, the same advice means the request went back up: it is new advice.
+    await repo.update_recommendation_fields(rec_id, {"applied_at": now - timedelta(days=2)})
+    await repo.upsert_recommendations([_cpu_record(current=400, recommended=10, created_at=now)])
+    (offered,) = await repo.get_active_recommendations()
+    assert offered.id != rec_id and offered.current_cpu_request_millicores == 400
+
+
+async def test_new_advice_after_a_change_is_still_offered(database):
+    """Fresh data after the change (current = the live 10m) is a new recommendation, not a restatement."""
+    repo, _ = _repositories(database)
+    lifecycle = RecommendationLifecycle(repo)
+    now = datetime.now(timezone.utc)
+    await repo.upsert_recommendations([_cpu_record(current=400, recommended=10, created_at=now - timedelta(hours=1))])
+    rec_id = (await _only_record(repo)).id
+    assert rec_id is not None
+    await lifecycle.apply(rec_id, actual_cpu=10, application_method="pr_merge", actor="detector")
+    await lifecycle.mark_verification_started(rec_id)
+
+    await repo.upsert_recommendations([_cpu_record(current=10, recommended=25, created_at=now)])
+    (offered,) = await repo.get_active_recommendations()
+    assert offered.id != rec_id
+    assert (offered.current_cpu_request_millicores, offered.recommended_cpu_request_millicores) == (10, 25)
+
+
+def _recorded_change(
+    name: str,
+    *,
+    resource: str,
+    status: RecommendationStatus,
+    method: str,
+    current: int,
+    recommended: int,
+    actual: int,
+    cost_saved: float,
+) -> RecommendationRecord:
+    record = RecommendationRecord(
+        pod_name=name,
+        namespace="greenkube-e2e-apps",
+        container_name="web",
+        type=RecommendationType.RIGHTSIZING_CPU if resource == "cpu" else RecommendationType.RIGHTSIZING_MEMORY,
+        description="Rightsizing",
+        scope="workload",
+        owner_kind="Deployment",
+        owner_name=name,
+        status=status,
+        application_method=method,
+        applied_at=datetime.now(timezone.utc) - timedelta(days=3),
+        potential_savings_cost=86.0,
+        carbon_saved_co2e_grams=cost_saved,
+        cost_saved=cost_saved,
+    )
+    unit = "cpu_request_millicores" if resource == "cpu" else "memory_request_bytes"
+    return record.model_copy(
+        update={f"current_{unit}": current, f"recommended_{unit}": recommended, f"actual_{unit}": actual}
+    )
+
+
+async def test_migration_repairs_actual_values_reverted_by_old_rescans(database):
+    """0061: merged changes whose actual_* a rescan reverted to the baseline lose that false value."""
+    repo, _ = _repositories(database)
+    mib = 1024 * 1024
+    await repo.save_recommendations(
+        [
+            # Corrupted by the old refresh: actual == baseline, savings zeroed.
+            _recorded_change(
+                "web",
+                resource="cpu",
+                status=RecommendationStatus.VERIFIED,
+                method="pr_merge",
+                current=400,
+                recommended=10,
+                actual=400,
+                cost_saved=0.0,
+            ),
+            _recorded_change(
+                "web-mem",
+                resource="memory",
+                status=RecommendationStatus.VERIFYING,
+                method="pr_merge",
+                current=384 * mib,
+                recommended=16 * mib,
+                actual=384 * mib,
+                cost_saved=0.0,
+            ),
+            # Correct value after the change: untouched.
+            _recorded_change(
+                "worker",
+                resource="cpu",
+                status=RecommendationStatus.VERIFIED,
+                method="pr_merge",
+                current=300,
+                recommended=10,
+                actual=10,
+                cost_saved=50.0,
+            ),
+            # Detected outside a pull request with actual == current: genuinely unchanged, untouched.
+            _recorded_change(
+                "kube-rbac-proxy",
+                resource="memory",
+                status=RecommendationStatus.VERIFYING,
+                method="detected",
+                current=20 * mib,
+                recommended=23 * mib,
+                actual=20 * mib,
+                cost_saved=0.0,
+            ),
+        ]
+    )
+
+    await _run_migration_0061(database)
+
+    records = {
+        record.pod_name: record
+        for record in await repo.get_recommendations_by_statuses([status.value for status in RecommendationStatus])
+    }
+    web = records["web"]
+    assert (web.current_cpu_request_millicores, web.recommended_cpu_request_millicores) == (400, 10)
+    assert web.actual_cpu_request_millicores is None
+    assert web.cost_saved is None and web.carbon_saved_co2e_grams is None
+    assert web.status is RecommendationStatus.VERIFIED
+    assert records["web-mem"].actual_memory_request_bytes is None
+    assert records["web-mem"].current_memory_request_bytes == 384 * mib
+    assert records["worker"].actual_cpu_request_millicores == 10 and records["worker"].cost_saved == 50.0
+    assert records["kube-rbac-proxy"].actual_memory_request_bytes == 20 * mib
+    assert records["kube-rbac-proxy"].cost_saved == 0.0
