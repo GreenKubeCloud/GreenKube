@@ -109,8 +109,11 @@ class SQLiteSignalRepository(SignalRepository):
 
     async def latest_runs(self) -> Dict[str, SourceRunSummary]:
         latest = await self._rows(
+            # One aggregate pass instead of a correlated MAX(id) per row, which
+            # grew quadratically with run history (every scan reads this).
             """SELECT r.* FROM source_runs r
-            WHERE r.id = (SELECT MAX(id) FROM source_runs x WHERE x.source_id = r.source_id)""",
+            JOIN (SELECT source_id, MAX(id) AS id FROM source_runs GROUP BY source_id) latest
+              ON latest.id = r.id""",
             (),
         )
         successes = await self._rows(
