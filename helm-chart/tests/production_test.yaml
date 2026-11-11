@@ -223,7 +223,51 @@ tests:
             name: AUTOMATION_MODE
             value: worker
 
-  - it: disables inline automation in the production controller
+  - it: runs the automation loop and plan execution in the production controller (F8)
+    set:
+      profile: production
+      automation.enabled: true
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].env[0]
+          value:
+            name: AUTOMATION_ENABLED
+            value: "true"
+      - documentIndex: 1
+        equal:
+          path: spec.template.spec.containers[0].env[1]
+          value:
+            name: AUTOMATION_MODE
+            value: worker
+
+  - it: scales dedicated plan executors through their replica count (F8)
+    set:
+      profile: production
+      automation.enabled: true
+      production.components.automation.replicas: 3
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - documentIndex: 2
+        equal:
+          path: spec.replicas
+          value: 3
+
+  - it: requires at least one dedicated executor in worker mode
+    set:
+      profile: production
+      automation.enabled: true
+      production.components.automation.replicas: 0
+    templates:
+      - templates/production-deployments.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: "production.components.automation.replicas must be at least 1"
+
+  - it: disables the automation loops in the production controller without automation
     set:
       profile: production
     templates:

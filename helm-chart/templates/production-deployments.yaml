@@ -1,14 +1,16 @@
 {{- if eq .Values.profile "production" }}
 {{- $automationMode := include "greenkube.automationMode" . }}
-{{- if and .Values.automation.enabled (eq $automationMode "worker") (ne (int .Values.production.components.automation.replicas) 1) }}
-{{- fail "production automation worker replicas must be 1 to prevent duplicate operation processing" }}
+{{- if and .Values.automation.enabled (eq $automationMode "worker") (lt (int .Values.production.components.automation.replicas) 1) }}
+{{- fail "production.components.automation.replicas must be at least 1 in worker mode (set automation.mode=inline to run plan execution in the controller only)" }}
 {{- end }}
 {{- $root := . }}
 {{- range $component := list "api" "controller" "automation" }}
 {{- $enabled := or (eq $component "controller") (and (eq $component "api") $root.Values.config.api.enabled) (and (eq $component "automation") $root.Values.automation.enabled (eq $automationMode "worker")) }}
 {{- if $enabled }}
 {{- $cfg := index $root.Values.production.components $component }}
-{{- $usesGitProviders := or (eq $component "api") (eq $component "automation") (and (eq $component "controller") $root.Values.automation.enabled (eq $automationMode "inline")) }}
+{{- /* The controller runs plan execution, PR polling, sync and plan expiry (M8, F8). */}}
+{{- $usesGitProviders := true }}
+{{- $deliveryEnabled := eq (include "greenkube.automationDeliveryEnabled" $root) "true" }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -18,7 +20,8 @@ metadata:
     {{- include "greenkube.labels" $root | nindent 4 }}
     app.kubernetes.io/component: {{ $component }}
 spec:
-  replicas: {{ if eq $component "automation" }}1{{ else }}{{ $cfg.replicas }}{{ end }}
+  # Dedicated workers only execute plan operations; operation leases make extra replicas safe (F8).
+  replicas: {{ $cfg.replicas }}
   selector:
     matchLabels:
       {{- include "greenkube.selectorLabels" $root | nindent 6 }}
@@ -112,10 +115,12 @@ spec:
             - name: GREENKUBE_WORKER_METRICS_PORT
               value: {{ include "greenkube.workerMetricsPort" $root | quote }}
             {{- else if eq $component "controller" }}
+            # Every leader-gated loop runs here, including the automation controller
+            # loop and plan execution whenever automation is on (M8, F8).
             - name: AUTOMATION_ENABLED
-              value: {{ and $root.Values.automation.enabled (eq $automationMode "inline") | quote }}
+              value: {{ $deliveryEnabled | quote }}
             - name: AUTOMATION_MODE
-              value: {{ ternary "inline" "disabled" (and $root.Values.automation.enabled (eq $automationMode "inline")) | quote }}
+              value: {{ ternary $automationMode "disabled" $deliveryEnabled | quote }}
             {{- end }}
             {{- if and (eq $component "api") (has $root.Values.config.apiAuthMode (list "api_key" "session")) }}
             - name: GREENKUBE_API_KEY

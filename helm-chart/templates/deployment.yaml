@@ -6,8 +6,8 @@ metadata:
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
 spec:
-  # NOTE (ARCH-009): The pod runs two containers — the collector/scheduler and
-  # the API server. Both use explicitly projected database credentials. The
+  # NOTE (ARCH-009, M8): The pod runs two containers — the controller (every
+  # periodic loop, including automation and plan execution) and the stateless API. Both use explicitly projected database credentials. The
   # collector writes metrics with ON CONFLICT DO UPDATE semantics, so the API
   # may briefly serve stale or partially-updated data between collection cycles.
   # This eventual-consistency trade-off is acceptable for a monitoring tool and
@@ -94,10 +94,12 @@ spec:
           # using valueFrom. These explicit env entries take precedence over
           # envFrom and avoid any chance of multi-line rendering issues.
           env:
+            # The controller runs the automation controller loop and plan execution
+            # whenever automation is on, in either mode (M8, F8); the API runs none.
             - name: AUTOMATION_ENABLED
-              value: {{ and .Values.automation.enabled (eq (include "greenkube.automationMode" .) "inline") | quote }}
+              value: {{ include "greenkube.automationDeliveryEnabled" . | quote }}
             - name: AUTOMATION_MODE
-              value: {{ ternary "inline" "disabled" (and .Values.automation.enabled (eq (include "greenkube.automationMode" .) "inline")) | quote }}
+              value: {{ ternary (include "greenkube.automationMode" .) "disabled" (eq (include "greenkube.automationDeliveryEnabled" .) "true") | quote }}
             {{- if eq .Values.config.db.type "postgres" }}
             - name: DB_SCHEMA
               value: {{ .Values.config.db.schema | quote }}
@@ -147,9 +149,8 @@ spec:
 
           volumeMounts:
             {{ include "greenkube.applicationSecretVolumeMount" (dict "volumeName" "controller-secrets") | nindent 12 }}
-            {{- if and .Values.automation.enabled (eq (include "greenkube.automationMode" .) "inline") }}
+            # Plan execution, PR polling, sync observation and plan expiry run here.
             {{ include "greenkube.gitProviderVolumeMount" . | nindent 12 }}
-            {{- end }}
             - name: tmp
               mountPath: /tmp
             {{- if eq .Values.config.db.type "sqlite" }}
@@ -245,9 +246,7 @@ spec:
         {{- if .Values.config.api.enabled }}
         {{ include "greenkube.applicationSecretVolume" (dict "context" . "component" "api" "volumeName" "api-secrets") | nindent 8 }}
         {{- end }}
-        {{- if or .Values.config.api.enabled (and .Values.automation.enabled (eq (include "greenkube.automationMode" .) "inline")) }}
         {{ include "greenkube.gitProviderVolume" . | nindent 8 }}
-        {{- end }}
         {{- if .Values.config.api.enabled }}
         {{ include "greenkube.webhookSecretVolume" . | nindent 8 }}
         {{- end }}

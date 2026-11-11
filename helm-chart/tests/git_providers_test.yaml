@@ -213,7 +213,8 @@ tests:
                         path: shared-git-auth/github-token
                       - key: gitea-token
                         path: shared-git-auth/gitea-token
-      - notContains:
+      # The controller runs plan execution, PR polling, sync and plan expiry (M8, F8).
+      - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: git-provider-secrets
@@ -258,7 +259,7 @@ tests:
             mountPath: /etc/greenkube/git-providers
             readOnly: true
 
-  - it: mounts provider keys only into production API and plans worker
+  - it: mounts provider keys into the production API, controller and plans worker
     set:
       profile: production
       automation.enabled: true
@@ -292,7 +293,7 @@ tests:
             mountPath: /etc/greenkube/git-providers
             readOnly: true
       - documentIndex: 1
-        notContains:
+        contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: git-provider-secrets

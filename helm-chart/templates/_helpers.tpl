@@ -338,6 +338,15 @@ inline
 {{- end -}}
 
 {{/*
+"true" when GitOps delivery runs: automation enabled and a mode other than
+"disabled". The controller then runs plan execution and the automation controller
+loop (webhook outbox, PR polling, branch cleanup); see docs/architecture.md (M8, F8).
+*/}}
+{{- define "greenkube.automationDeliveryEnabled" -}}
+{{- and .Values.automation.enabled (ne (include "greenkube.automationMode" .) "disabled") -}}
+{{- end -}}
+
+{{/*
 Validate and return the controller metrics port (0 disables the listener). The
 standalone pod shares one network namespace between the controller and the API,
 so the ports must differ.
