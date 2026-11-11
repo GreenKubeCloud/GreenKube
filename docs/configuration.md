@@ -220,7 +220,7 @@ most important values are:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `automation.credentialsSecret` | `greenkube-git-credentials` | `GITOPS_DEFAULT_CREDENTIALS_SECRET`. Secret in the release namespace read for inferred providers: key `token` (keys `appId` and `privateKey` are mounted for GitHub App credentials). Mounted as an optional volume into the api, controller and worker. |
+| `automation.credentialsSecret` | `greenkube-git-credentials` | `GITOPS_DEFAULT_CREDENTIALS_SECRET`. Secret in the release namespace read for inferred providers: key `token`, optional key `host` (or `apiBaseUrl`) naming the one Git host the token is sent to (keys `appId` and `privateKey` are mounted for GitHub App credentials). Mounted as an optional volume into the api, controller and worker. |
 | `automation.repositoryAllowlist` | `["@discovered"]` | `AUTOMATION_REPOSITORY_ALLOWLIST`. Repositories PRs may target, for inferred providers and providers without their own allowlist. `@discovered` means every repository referenced by a discovered Argo CD/Flux source; an explicit list of `owner/repo` names or segment globs narrows it. Repositories allowed from the setup checklist (`POST /api/v1/automation/repositories/allowlist`) are added. |
 | `automation.policy.pauseDelivery` | `false` | `AUTOMATION_PAUSE_DELIVERY`. The only off switch: plan approval returns `delivery_paused` (409) and no PR is opened, while discovery, previews and measurement keep running. |
 | `automation.discoveryInterval` | `5m` | Discovery refresh cadence (`1s`–`1h`). |

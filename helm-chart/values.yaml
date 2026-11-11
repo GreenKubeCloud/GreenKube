@@ -131,14 +131,19 @@ worker:
 # with no upgrade and no restart:
 #
 #   kubectl -n <namespace> create secret generic greenkube-git-credentials \
-#     --from-literal=token=<token with repository write access>
+#     --from-literal=token=<token with repository write access> \
+#     --from-literal=host=github.com
+#
+# The token is only sent to the host named by "host" (or, without that key, to
+# github.com or gitlab.com when it is the only discovered host).
 #
 # The provider (GitHub, GitLab, Gitea) and its API URL are inferred from each
 # discovered repository host. List providers only for several credentials or
 # to pin a self-hosted URL.
 automation:
-  # Secret in the release namespace read for inferred providers: key "token"
-  # (keys "appId" and "privateKey" are mounted for GitHub App authentication).
+  # Secret in the release namespace read for inferred providers: key "token",
+  # optional key "host" (or "apiBaseUrl") binding it to one Git host (keys
+  # "appId" and "privateKey" are mounted for GitHub App authentication).
   credentialsSecret: greenkube-git-credentials
   # Repositories automation may open pull requests against, for inferred
   # providers and for providers without their own repositoryAllowlist.

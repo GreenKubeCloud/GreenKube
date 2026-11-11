@@ -31,11 +31,22 @@ serves, the reconciler infers a provider named `inferred-<host>`:
 
 - `github.com` is GitHub and `gitlab.com` is GitLab;
 - a self-hosted host is probed at `<scheme>://<host>/api/v4/version` (GitLab answers, `401` without a token) and
-  `/api/v1/version` (Gitea); a success is cached, a failure retried after 10 minutes;
+  `/api/v1/version` (Gitea); a success is cached, a failure retried after 10 minutes. The probe is an
+  unauthenticated GET from the controller to a host a discovered source names: it carries no credential and
+  follows no redirect; restrict the controller egress to your Git hosts if outbound requests matter to you;
 - an unidentified host stays dormant with `provider_unknown`: declare it explicitly.
 
 Inferred providers read the Secret `automation.credentialsSecret` (default `greenkube-git-credentials`), key
-`token`. They are enabled only while that key is mounted. `GET /api/v1/automation/repositories/suggestions` lists
+`token`. One token belongs to one Git host, and the reconciler binds it to at most one inferred provider:
+
+- the host named by the Secret's optional `host` key (or `apiBaseUrl`, reduced to its host);
+- without that key, `github.com` or `gitlab.com` when it is the only inferred host.
+
+Every other inferred provider keeps no Secret reference and stays disabled, with `credentials_host_mismatch` (the
+key names another host) or `credentials_host_ambiguous` (no key, and several hosts or a self-hosted one). The token
+is therefore never sent to a host it was not issued for, even when someone who can create an Argo CD Application or
+a Flux GitRepository points it at a server they control. The bound provider is enabled only while `token` is
+mounted. `GET /api/v1/automation/repositories/suggestions` lists
 the discovered repositories with their inferred provider type, API URL and allowlist state.
 
 ### Repository allowlist
@@ -54,7 +65,8 @@ automation:
     pauseDelivery: true
 ```
 
-For change freezes and incident response: plan approval returns `409 delivery_paused`, queued operations wait, and
+For change freezes and incident response: plan approval returns `409 delivery_paused`, queued operations wait (in
+the controller and in dedicated `worker` replicas, which claim nothing while delivery is paused or dormant), and
 discovery, previews, PR tracking and measurement keep running. Recommendations show the `automation_disabled`
 blocker until it is set back to `false`.
 
@@ -117,7 +129,8 @@ Most installations need no provider configuration: create the default Secret in 
 put the token in `values.yaml`) and the provider is inferred from the repository host:
 
 ```bash
-kubectl -n greenkube create secret generic greenkube-git-credentials --from-file=token=./git-token
+kubectl -n greenkube create secret generic greenkube-git-credentials --from-file=token=./git-token \
+  --from-literal=host=github.com
 ```
 
 Declare providers explicitly for several credentials, a self-hosted URL that cannot be probed, or a separate

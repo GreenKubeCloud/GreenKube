@@ -95,8 +95,10 @@ printing these steps. Your data stays on the claim `<release>` (it was mounted a
 2. Copy the data with the one-shot Job below. `greenkube db copy` migrates a working copy of the SQLite file to
    the current schema (the source file is never written), then copies recommendations, their events, the
    savings ledger, change measurements and the GitOps state (providers, bindings, plans, pull requests) into
-   PostgreSQL. Reruns are safe: rows already present are skipped. Add `--include-metrics` to copy the metric
-   history too (large; otherwise it is re-collected).
+   PostgreSQL. Add `--include-metrics` to copy the metric history too (large; otherwise it is re-collected).
+   Ids are copied as they are, so the copy refuses a target whose tables already hold rows the source also has
+   (a controller that already ran against it): copy into the fresh, empty database. To resume an interrupted copy
+   into the same database, rerun with `--allow-nonempty`; rows already present are skipped.
 
    ```yaml
    # greenkube-db-copy.yaml — kubectl -n greenkube apply -f greenkube-db-copy.yaml
@@ -143,7 +145,10 @@ printing these steps. Your data stays on the claim `<release>` (it was mounted a
    ```
 
    If your release used `config.db.path`, replace `/data/greenkube_data.db` with it. The working copy needs
-   free space about the size of the SQLite file in `/work`.
+   free space about the size of the SQLite file in `/work`. If the 0.3.x pod was killed without a clean shutdown,
+   `greenkube_data.db-wal` and `-shm` files sit next to the database and SQLite needs write access to read them:
+   if the Job fails with `attempt to write a readonly database` or `unable to open database file`, drop
+   `readOnly: true` from the `data` mount (the source file is still never modified by the copy itself).
 
 3. Start the controller:
 

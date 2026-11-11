@@ -49,11 +49,12 @@ Welcome to
    Secret and set secrets.existingSecret instead.
 {{- end }}
 
-4. Connect Git (optional): GitOps discovery is already running. To let
+{{ if eq (.Values.config.apiAuthMode | default "session") "session" }}4{{ else }}3{{ end }}. Connect Git (optional): GitOps discovery is already running. To let
    GreenKube open pull requests, create one Secret; delivery activates within
    one to two minutes, with no upgrade and no restart:
      kubectl -n {{ .Release.Namespace }} create secret generic {{ include "greenkube.gitCredentialsSecretName" . }} \
-       --from-literal=token=<token with write access to your GitOps repositories>
+       --from-literal=token=<token with write access to your GitOps repositories> \
+       --from-literal=host=<the Git host of that token, e.g. github.com>
 {{- if $v.pauseDelivery }}
    automation.policy.pauseDelivery is true: no pull request is opened until you set it to false.
 {{- end }}

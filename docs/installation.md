@@ -28,8 +28,14 @@ with no upgrade and no restart:
 
 ```bash
 kubectl -n greenkube create secret generic greenkube-git-credentials \
-  --from-literal=token=<token with write access to the repositories>
+  --from-literal=token=<token with write access to the repositories> \
+  --from-literal=host=github.com   # the one Git host this token belongs to
 ```
+
+The token is only ever sent to the host named by `host` (`apiBaseUrl` is accepted too). Without that key it is
+used only when every discovered repository lives on `github.com`, or every one on `gitlab.com`. It is never sent to
+a self-hosted host the key does not name, so a GitOps source pointing at a server someone else controls cannot
+receive it. Repositories on other hosts need an explicit provider ([Automation](automation.md#configure-a-provider)).
 
 **3. Done.** The **Setup** page (`/setup`, or `GET /api/v1/setup/status`) shows what is active and, for anything
 missing, the exact fix. Recommendations appear once enough evidence is collected (about 3 hours with the default
@@ -241,6 +247,7 @@ not authenticate against the existing database) and prints the recovery command.
 | `helm install` fails with a values schema error | A value has the wrong type or is out of range. | Fix the value named in the message; see [Configuration](configuration.md). |
 | `helm upgrade` fails with `config.db.type=sqlite is no longer supported` | A 0.3.x SQLite release. | Follow [Upgrading from SQLite](upgrading.md#from-a-sqlite-install). |
 | Setup checklist: delivery `credentials_missing` | No Git credentials are mounted. | Create `greenkube-git-credentials` ([Connect Git](#optional-connect-git)); allow a minute for the kubelet to project it. |
+| Setup checklist: delivery `credentials_host_ambiguous` or `credentials_host_mismatch` | The token is not bound to a host, and repositories use several hosts or a self-hosted one; or the `host` key names a host no repository uses. | Add (or fix) the `host` key of `greenkube-git-credentials`; declare explicit providers for the other hosts. |
 | Setup checklist: `renderer_egress_unenforced` | The network plugin does not enforce NetworkPolicy. | Use a CNI that does, or `--set renderer.egressFirewall.enabled=true`. Previews still work. |
 | Dashboard shows no data | Prometheus is unreachable or not discovered. | Set `config.prometheus.url`. |
 | API returns `401` / `403 CSRF_REJECTED` | No session, a wrong key, or a proxy that strips headers. | Sign in again; forward `Origin` and `X-CSRF-Token`. |
