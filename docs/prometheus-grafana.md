@@ -332,7 +332,8 @@ send it as a bearer token. Outside Kubernetes, `greenkube start` also listens on
 
 ## 4. Grafana dashboard
 
-A pre-built dashboard is available at `dashboards/greenkube-grafana.json`.
+A pre-built dashboard, **GreenKube — Savings & Footprint**, is available at `dashboards/greenkube-grafana.json`. Its uid
+stays `greenkube-fingreenops` so that existing imports and links keep working.
 
 ### Import
 
