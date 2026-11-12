@@ -273,6 +273,7 @@ automation:
     maxRisk: low
     minConfidence: 0.8
     contested: false
+    increases: false
 ```
 
 Off by default. When enabled, **Open PR** (`POST /api/v1/automation/plans`) approves the fresh preview in the same
@@ -286,11 +287,13 @@ A preview is auto-approved only when:
 - no recommendation has a contested consensus (`consensus.contested` or the `consensus_contested` warning): a hard
   stop, whatever the settings (`contested` accepts only `false`);
 - every decrease of a request is backed by GreenKube's own usage evidence or by at least two independent consensus
-  votes.
+  votes;
+- no recommendation raises a request, unless `increases: true`: an increase is a reliability fix that costs money,
+  so a person approves it by default (roadmap H1).
 
 Otherwise the plan waits for the click and the response lists `auto_approve_blockers`: `approve_scope_missing`,
 `rollback_plan`, `not_active`, `recommendation_missing`, `risk_above_auto_approve`, `confidence_below_auto_approve`,
-`consensus_contested`, `decrease_without_native_evidence`, the approval's error code (for example `delivery_paused`), or
+`consensus_contested`, `decrease_without_native_evidence`, `increase_requires_approval`, the approval's error code (for example `delivery_paused`), or
 `auto_approve_failed` when the approval failed unexpectedly (the preview is kept).
 
 ## Create and validate a pull request
@@ -349,7 +352,37 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
 
 | Kind | Operation | What it changes | Renderers | Rollback | Apply detection |
 |---|---|---|---|---|---|
-| `container_resources` | `set_container_resources` | CPU/memory requests (and, on raw manifests and Helm, limits) of named containers of a `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, `ReplicaSet`, `ReplicationController` or `Pod` | Raw, Kustomize (requests only), Helm values, Flux HelmRelease post-renderer | Restores the recorded pre-apply requests (request-only changes) | Live per-container request within tolerance of the planned value |
+| `container_resources` | `set_container_resources` | CPU/memory requests (decreases and reliability increases) and limits (set, raise, remove the CPU limit) of named containers and native sidecars of a `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, Argo `Rollout`, `ReplicaSet`, `ReplicationController` or `Pod` | Raw, Kustomize, Helm values and Flux HelmRelease post-renderer (requests and limit values; no limit removal or sidecars) | Restores the recorded pre-apply requests (request-only changes) | Live per-container request within tolerance of the planned value |
+
+### Container resources v2: increases, limits, sidecars (H1)
+
+- **Increases.** A request increase (p99 close to the request, OOM kills, a working set near the memory limit) opens
+  a pull request like a decrease. It is a reliability fix: the PR carries the `reliability` label, shows the change
+  as a projected **cost** (never as a saving) and the risk it reduces, and it is never auto-approved unless
+  `automation.autoApprove.increases` is `true`. Sizing keeps the rules of [How GreenKube sizes
+  increases](recommendation.md#how-greenkube-sizes-increases) (per-replica p99 bounded by the pod, warm-up excluded,
+  one step capped at `rightsizingMaxIncreaseFactor`).
+- **Limits.** The limit advice of the rightsizing rules (`config.recommendations.limitsPolicy`) travels with the
+  request change as `evidence.limit_changes`:
+  - an increase raises a CPU limit below the new request or throttled, and a memory limit below the request or
+    110% of the observed maximum; it never lowers a limit;
+  - `remove_cpu` removes the CPU limit (raw manifests: the key is deleted; Kustomize: a `cpu: null` strategic-merge
+    deletion in the managed patch);
+  - `memory_equals_request` sets the memory limit to the request (decreases) or raises it to at least 110% of the
+    observed maximum (increases);
+  - with the default `keep`, a decrease never touches limits.
+  A memory limit is never removed. A request above an unchanged limit fails closed (the action is not built, and
+  planning rejects any rendered `request > limit`).
+- **Native sidecars and init containers.** Scans read the pod specs and record where each container lives:
+  a native sidecar (init container with `restartPolicy: Always`) is addressed in `initContainers`. Helm planners map
+  `spec.containers` only and refuse sidecar edits with an explanation.
+- **Workload kinds.** `CronJob` (through `spec.jobTemplate`), `Job` and Argo `Rollout` (`argoproj.io/v1alpha1`,
+  inline `spec.template`; a Rollout with `workloadRef` fails closed) are addressable targets. Recommendations reach
+  them once the owner and GitOps binding of the workload are resolved.
+- **Rollback.** Request-only changes (containers and native sidecars) roll back automatically; a change that edits
+  limits is reverted by reverting its pull request, and the PR says so.
+- **Measurement.** An increase is measured on reliability: the OOM-kill rate after the rollout is compared with the
+  rate the recommendation observed before it (see [Verification](verification.md)).
 
 Every other recommendation type remains visible but shows "Manual change required" and cannot open a PR. Every plan, whatever its kind, is render-validated the same way: the rendered resources after the edit must differ from the rendered resources before it by exactly the kind's expected change (the fields it sets, plus the resources it creates or deletes), and the kind's invariants must hold (for container resources, every request stays within its limit). Anything else fails closed.
 

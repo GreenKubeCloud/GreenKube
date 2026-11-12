@@ -885,6 +885,26 @@ tests:
           path: data.AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE
           value: "0.9"
 
+  - it: never auto-approves request increases by default (H1)
+    asserts:
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_INCREASES
+          value: "false"
+
+  - it: passes the opt-in to auto-approve request increases (H1)
+    set:
+      automation.autoApprove.increases: true
+    asserts:
+      - equal:
+          path: data.AUTOMATION_AUTO_APPROVE_INCREASES
+          value: "true"
+
+  - it: rejects a non-boolean increases opt-in (H1)
+    set:
+      automation.autoApprove.increases: sometimes
+    asserts:
+      - failedTemplate: {}
+
   - it: rejects an unknown delivery mode
     set:
       automation.delivery.mode: push

@@ -20,6 +20,7 @@ from greenkube.core.optimization.eligibility import (
     has_native_evidence,
     is_contested,
     proposes_decrease,
+    proposes_increase,
 )
 from greenkube.gitops.contracts import AutomationErrorCode, PlanStatus
 
@@ -124,7 +125,8 @@ def test_a_decrease_from_external_sources_needs_two_independent_votes():
 
     assert auto_approve_blockers([one_vote], POLICY, expected=1) == ["decrease_without_native_evidence"]
     assert auto_approve_blockers([two_votes], POLICY, expected=1) == []
-    assert not proposes_decrease(increase) and auto_approve_blockers([increase], POLICY, expected=1) == []
+    assert not proposes_decrease(increase)
+    assert auto_approve_blockers([increase], AutoApprovePolicy(True, "low", 0.8, increases=True), expected=1) == []
     assert has_native_evidence(_record(source="krr", consensus={"chosen_from": ["greenkube.rightsizing_cpu"]}))
 
 
@@ -221,3 +223,24 @@ async def test_an_unexpected_approval_failure_leaves_the_preview_for_the_click()
     )
 
     assert result is plan and blockers == ["auto_approve_failed"]
+
+
+def test_an_increase_is_never_auto_approved_without_the_opt_in():
+    """H1: a request increase is a reliability fix that costs money; a person approves it by default."""
+    increase = _record(current_cpu_request_millicores=200, recommended_cpu_request_millicores=400)
+    memory_increase = _record(
+        type="RIGHTSIZING_MEMORY",
+        current_memory_request_bytes=256 * 2**20,
+        recommended_memory_request_bytes=512 * 2**20,
+    )
+    assert proposes_increase(increase) and proposes_increase(memory_increase)
+    assert not proposes_increase(_record())
+    for record in (increase, memory_increase):
+        assert auto_approve_blockers([record], POLICY, expected=1) == ["increase_requires_approval"]
+    assert "autoApprove.increases" in AUTO_APPROVE_CODES["increase_requires_approval"]
+    opted_in = AutoApprovePolicy.from_config(
+        Config(AUTOMATION_AUTO_APPROVE_ENABLED=True, AUTOMATION_AUTO_APPROVE_INCREASES=True)
+    )
+    assert opted_in.increases
+    assert auto_approve_blockers([increase], opted_in, expected=1) == []
+    assert not AutoApprovePolicy.from_config(Config()).increases

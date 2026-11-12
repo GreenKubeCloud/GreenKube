@@ -211,11 +211,14 @@ automation:
   # click; it is still a pull request, still reviewed in Git. Contested consensus
   # is never auto-approved (contested must stay false), and a decrease also needs
   # GreenKube's own usage evidence or two independent agreeing sources.
+  # increases: also auto-approve request increases (reliability fixes that cost
+  # money, roadmap H1); off by default, so a person approves every increase.
   autoApprove:
     enabled: false
     maxRisk: low
     minConfidence: 0.8
     contested: false
+    increases: false
   pullRequests:
     draft: false
     labels: [] # Optional extra labels; missing labels are created where the provider allows it.

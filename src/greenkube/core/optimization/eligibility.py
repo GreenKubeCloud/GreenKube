@@ -353,7 +353,9 @@ def validate_action(record: Any) -> Tuple[Optional[List[int]], Optional[str]]:
     if len(set(containers)) != len(containers) or container not in containers:
         return None, "requires_container_target"
     for op in operations:
-        requests = ((op.get("resources") or {}) if isinstance(op, Mapping) else {}).get("requests")
+        resources = ((op.get("resources") or {}) if isinstance(op, Mapping) else {}) or {}
+        requests = resources.get("requests") if isinstance(resources, Mapping) else None
+        limits = resources.get("limits", {}) if isinstance(resources, Mapping) else None
         if (
             not isinstance(op, Mapping)
             or op.get("op") != "set_container_resources"
@@ -365,9 +367,25 @@ def validate_action(record: Any) -> Tuple[Optional[List[int]], Optional[str]]:
                 resource not in ("cpu", "memory") or not isinstance(quantity, str) or not quantity.strip()
                 for resource, quantity in requests.items()
             )
+            or not _valid_limit_edits(op, limits)
         ):
             return None, "requires_container_target"
     return list(ids), None
+
+
+def _valid_limit_edits(op: Mapping[str, Any], limits: Any) -> bool:
+    """Container resources v2 (H1): CPU/memory limits, a removed CPU limit and a known container list."""
+    removals = op.get("remove_limits", [])
+    if not isinstance(limits, Mapping) or not isinstance(removals, list):
+        return False
+    if any(
+        resource not in ("cpu", "memory") or not isinstance(quantity, str) or not quantity.strip()
+        for resource, quantity in limits.items()
+    ):
+        return False
+    if any(resource != "cpu" for resource in removals) or set(removals) & set(limits):
+        return False
+    return op.get("container_kind", "container") in ("container", "sidecar", "init")
 
 
 def warm_up(record: Any, policy: AutomationPolicyConfig, step_seconds: int, now: datetime) -> tuple:
@@ -722,6 +740,10 @@ AUTO_APPROVE_CODES: Dict[str, str] = {
     "decrease_without_native_evidence": (
         "A decrease needs GreenKube's own usage evidence or at least two independent agreeing sources."
     ),
+    "increase_requires_approval": (
+        "A request increase is a reliability fix that costs money; set automation.autoApprove.increases to "
+        "approve increases automatically."
+    ),
 }
 
 
@@ -736,6 +758,8 @@ class AutoApprovePolicy:
     enabled: bool = False
     max_risk: str = "low"
     min_confidence: float = 0.8
+    #: Also approve request increases (H1, ``automation.autoApprove.increases``).
+    increases: bool = False
 
     @classmethod
     def from_config(cls, config: Any) -> "AutoApprovePolicy":
@@ -748,6 +772,7 @@ class AutoApprovePolicy:
             enabled=bool(getattr(config, "AUTOMATION_AUTO_APPROVE_ENABLED", False)),
             max_risk=risk if risk in _RISK_ORDER else "low",
             min_confidence=confidence if math.isfinite(confidence) else 1.0,
+            increases=getattr(config, "AUTOMATION_AUTO_APPROVE_INCREASES", False) is True,
         )
 
 
@@ -780,6 +805,22 @@ def proposes_decrease(record: Any) -> bool:
     if not isinstance(current, (int, float)) or not isinstance(recommended, (int, float)):
         return True
     return recommended < current
+
+
+def proposes_increase(record: Any) -> bool:
+    """True when a proposal raises the current CPU or memory request (a reliability fix, H1)."""
+    rec_type = _text(getattr(record, "type", None))
+    if rec_type == "RIGHTSIZING_CPU":
+        current = getattr(record, "current_cpu_request_millicores", None)
+        recommended = getattr(record, "recommended_cpu_request_millicores", None)
+    elif rec_type == "RIGHTSIZING_MEMORY":
+        current = getattr(record, "current_memory_request_bytes", None)
+        recommended = getattr(record, "recommended_memory_request_bytes", None)
+    else:
+        return False
+    if not isinstance(current, (int, float)) or not isinstance(recommended, (int, float)):
+        return False
+    return recommended > current
 
 
 def has_native_evidence(record: Any) -> bool:
@@ -836,4 +877,6 @@ def auto_approve_blockers(records: Sequence[Any], policy: AutoApprovePolicy, *, 
             blockers.append("consensus_contested")
         if proposes_decrease(record) and not has_native_evidence(record) and independent_votes(record) < 2:
             blockers.append("decrease_without_native_evidence")
+        if proposes_increase(record) and not policy.increases:
+            blockers.append("increase_requires_approval")
     return list(dict.fromkeys(blockers))
