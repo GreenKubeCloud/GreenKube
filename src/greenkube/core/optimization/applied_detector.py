@@ -447,7 +447,14 @@ class K8sWorkloadReader:
                     continue
                 containers = _resource_field(pod_spec, "containers")
                 cpu, memory, container_requests = _sum_requests(containers)
-                request_values, request_values_valid = _read_container_request_values(containers)
+                # Native sidecars (init containers with restartPolicy Always) run for the pod's
+                # lifetime and are rightsized like containers (H1); classic init containers are not.
+                sidecars = [
+                    container
+                    for container in _resource_field(pod_spec, "init_containers", "initContainers") or []
+                    if _resource_field(container, "restart_policy", "restartPolicy") == "Always"
+                ]
+                request_values, request_values_valid = _read_container_request_values([*(containers or []), *sidecars])
                 status = _resource_field(item, "status")
                 namespace = _resource_field(metadata, "namespace")
                 name = _resource_field(metadata, "name")

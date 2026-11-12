@@ -1,4 +1,9 @@
-"""Pod-template workload kinds that container-level action kinds can address."""
+"""Pod-template workload kinds that container-level action kinds can address.
+
+Argo Rollouts (``argoproj.io/v1alpha1 Rollout``) keep an inline pod template at
+``spec.template``; a Rollout that references a Deployment (``spec.workloadRef``)
+has no template and fails closed when planned.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ WORKLOAD_API_VERSIONS: Mapping[str, frozenset[str]] = {
     "Pod": frozenset({"v1"}),
     "ReplicaSet": frozenset({"apps/v1"}),
     "ReplicationController": frozenset({"v1"}),
+    "Rollout": frozenset({"argoproj.io/v1alpha1"}),
     "StatefulSet": frozenset({"apps/v1"}),
 }
 
@@ -26,6 +32,7 @@ POD_SPEC_PATHS: Mapping[str, tuple[str, ...]] = {
     "Pod": ("spec",),
     "ReplicaSet": ("spec", "template", "spec"),
     "ReplicationController": ("spec", "template", "spec"),
+    "Rollout": ("spec", "template", "spec"),
     "StatefulSet": ("spec", "template", "spec"),
 }
 
@@ -37,7 +44,15 @@ ACTION_API_VERSIONS: Mapping[str, str] = {
     "Job": "batch/v1",
     "ReplicaSet": "apps/v1",
     "ReplicationController": "v1",
+    "Rollout": "argoproj.io/v1alpha1",
     "StatefulSet": "apps/v1",
+}
+
+#: Pod-spec list of each container kind (H1): native sidecars and init containers live in ``initContainers``.
+CONTAINER_LISTS: Mapping[str, str] = {
+    "container": "containers",
+    "sidecar": "initContainers",
+    "init": "initContainers",
 }
 
 

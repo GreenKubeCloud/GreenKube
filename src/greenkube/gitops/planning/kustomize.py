@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError
+from ruamel.yaml.representer import RoundTripRepresenter
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from greenkube.automation.actions import ACTION_KINDS, ActionKindError, ActionKindSpec, Support
@@ -24,6 +25,7 @@ from greenkube.automation.actions.primitives import (
     ListSelector,
     PathSegment,
     PrimitiveOp,
+    RemoveField,
     SetField,
     field_operations,
     format_path,
@@ -407,8 +409,9 @@ def _validate_request(
 
 
 def _primitive_support(op: PrimitiveOp) -> Support:
-    """Kustomize v1 writes ``SetField`` edits under ``spec`` addressed by ``name`` list keys."""
-    if not isinstance(op, SetField):
+    """Kustomize writes ``SetField`` edits (and ``RemoveField`` as a ``null`` strategic-merge
+    deletion, H1) under ``spec`` addressed by ``name`` list keys."""
+    if not isinstance(op, (SetField, RemoveField)):
         return Support.unsupported(f"Kustomize planning does not support {op.op!r} primitives yet")
     segments = op.segments
     if segments[0] != "spec":
@@ -423,10 +426,10 @@ def _patch_fields(
     target: ResourceTarget,
     operations: Sequence[TypedOperation],
 ) -> dict[tuple[PathSegment, ...], Any]:
+    # A removed field is written as ``null``: a strategic merge patch deletes it (H1 limits).
     return {
-        primitive.segments: primitive.value
+        primitive.segments: primitive.value if isinstance(primitive, SetField) else None
         for primitive in field_operations(spec.compile(target, operations))
-        if isinstance(primitive, SetField)
     }
 
 
@@ -1261,10 +1264,21 @@ def _patch_content(
     yaml = YAML(typ="rt", pure=True)
     yaml.indent(mapping=2, sequence=4, offset=2)
     yaml.width = 4_096
+    yaml.Representer = _PatchRepresenter
     stream = io.StringIO()
     yaml.dump(patch, stream)
     content = stream.getvalue()
     return content if content.endswith("\n") else f"{content}\n"
+
+
+class _PatchRepresenter(RoundTripRepresenter):
+    """Round-trip representer writing ``None`` as an explicit ``null`` (H1: a removed limit is a
+    strategic-merge deletion); a subclass, so other YAML dumps keep their representation."""
+
+
+_PatchRepresenter.add_representer(
+    type(None), lambda representer, _: representer.represent_scalar("tag:yaml.org,2002:null", "null")
+)
 
 
 def _patch_node(tree: Mapping[PathSegment, Any], rendered: Any) -> CommentedMap:

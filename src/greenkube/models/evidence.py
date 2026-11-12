@@ -44,6 +44,22 @@ class ProposedChange(BaseModel):
     change_ratio: Optional[float] = None
 
 
+class LimitChange(BaseModel):
+    """A container limit change a rightsizing proposal carries into its pull request (H1).
+
+    ``set`` writes ``proposed`` (millicores or bytes); ``remove`` deletes the limit.
+    GreenKube never lowers a limit below the proposed request and never removes a
+    memory limit.
+    """
+
+    resource: Literal["cpu", "memory"]
+    action: Literal["set", "remove"]
+    current: Optional[int] = None
+    proposed: Optional[int] = None
+    #: Why: ``below_request``, ``throttling``, ``below_floor`` or ``policy``.
+    reason: str = ""
+
+
 class RollbackCondition(BaseModel):
     """A condition that should trigger review or rollback after apply."""
 
@@ -125,3 +141,8 @@ class RecommendationEvidence(BaseModel):
     generated_by: str = "greenkube"
     #: Consensus across sources (roadmap E6): policy, agreement, contested flag and per-source spread.
     consensus: Optional[dict[str, Any]] = None
+    #: Limit changes delivered with the request change (H1); empty: limits stay as they are.
+    limit_changes: List[LimitChange] = Field(default_factory=list)
+    #: Pod-spec list of the container (H1): ``container``, ``sidecar`` (native sidecar) or ``init``;
+    #: None when the scan did not read the pod spec (treated as ``container``).
+    container_kind: Optional[Literal["container", "sidecar", "init"]] = None

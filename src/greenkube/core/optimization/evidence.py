@@ -2,10 +2,11 @@
 """Builds review-grade evidence blocks for generated recommendations."""
 
 import logging
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, List, Literal, Optional, Sequence
 
 from greenkube.core.optimization.statistics import latest_request_value, percentile, usage_stats
 from greenkube.models.evidence import (
+    LimitChange,
     ProposedChange,
     RecommendationEvidence,
     ResourceSnapshot,
@@ -304,6 +305,17 @@ def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optio
     summary = usage_summary_for(rec, context)
     oom_events = getattr(summary, "oom_kill_count", None)
     throttling = getattr(summary, "throttling_ratio", None)
+    # Container limits and the limit changes delivered with the request change (H1).
+    current = current.model_copy(
+        update={
+            "cpu_limit_millicores": _positive_int(getattr(summary, "cpu_limit", None)),
+            "memory_limit_bytes": _positive_int(getattr(summary, "memory_limit", None)),
+        }
+    )
+    limit_changes = _limit_changes(rec, context, summary)
+    for change in limit_changes:
+        field_name = "cpu_limit_millicores" if change.resource == "cpu" else "memory_limit_bytes"
+        proposed = proposed.model_copy(update={field_name: change.proposed})
 
     sample_count = max((cpu_usage.sample_count if cpu_usage else 0), (memory_usage.sample_count if memory_usage else 0))
     coverage = max(
@@ -333,4 +345,43 @@ def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optio
         savings_method=_savings_method(rec),
         rollback_conditions=_rollback_conditions(rec, cpu_usage, memory_usage, proposed),
         generated_by=rec.source.value if hasattr(rec.source, "value") else str(rec.source),
+        limit_changes=limit_changes,
+        container_kind=_container_kind(summary),
     )
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return int(value)
+
+
+def _container_kind(summary: Any) -> Optional[Literal["container", "sidecar", "init"]]:
+    kind = getattr(summary, "container_kind", None)
+    if kind == "sidecar" or kind == "init" or kind == "container":
+        return kind
+    return None
+
+
+def _limit_changes(rec: Recommendation, context: "OptimizationContext", summary: Any) -> List[LimitChange]:
+    """Limit edits the rightsizing rules deliver with this request change (H1), empty when none."""
+    from greenkube.core.optimization.analyzers.rightsizing import planned_limit_changes
+    from greenkube.models.workload_usage import POD_LEVEL
+
+    if summary is None or not rec.container_name or context.usage is None:
+        return []
+    if rec.type == RecommendationType.RIGHTSIZING_CPU:
+        resource, proposed = "cpu", rec.recommended_cpu_request_millicores
+    elif rec.type == RecommendationType.RIGHTSIZING_MEMORY:
+        resource, proposed = "memory", rec.recommended_memory_request_bytes
+    else:
+        return []
+    if not isinstance(proposed, int) or proposed <= 0:
+        return []
+    target = (summary.namespace, summary.target_kind, summary.target_name)
+    pod_summary = context.usage.summaries.get(target, {}).get(POD_LEVEL)
+    try:
+        return planned_limit_changes(context.config, summary, pod_summary, resource, proposed)
+    except Exception as exc:  # advice never breaks a scan; the change then leaves limits alone
+        logger.warning("Could not plan limit changes for %s: %s", rec.container_name, exc)
+        return []
