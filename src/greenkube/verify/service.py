@@ -43,7 +43,14 @@ from greenkube.models.verification import HealthGateResult, HealthGateStatus, Me
 from greenkube.storage.change_repository import ChangeConflictError, ChangeRepository, change_identity
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.attribution import allocate
-from greenkube.verify.confounders import ConfounderDetector, PoolContext, PoolNode, PoolSample, confidence_score
+from greenkube.verify.confounders import (
+    ConfounderDetector,
+    PoolContext,
+    PoolNode,
+    PoolSample,
+    confidence_score,
+    pool_unit_prices,
+)
 from greenkube.verify.load_driver import CollectedLoad, LoadDriverResolver, PrometheusRangeReader
 from greenkube.verify.model import (
     Allocation,
@@ -84,6 +91,8 @@ LOAD_DRIVER_RETRY = timedelta(hours=24)
 UNAVAILABLE_DRIVERS_KEY = "load_drivers_unavailable"
 #: Node pools are sampled from the node snapshots this often over each window (pool confounders, C4).
 POOL_SAMPLE_INTERVAL = timedelta(hours=6)
+#: Each pool sample also reads this much of every pod's metrics for the pool's price card (C4).
+POOL_PRICE_SLICE = timedelta(hours=1)
 #: Pod rows read after another change's rollout to see which nodes its workload ran on.
 POOL_NEIGHBOUR_LOOKUP = timedelta(hours=2)
 #: At most this many other changes in the measurement are checked for pool membership.
@@ -305,6 +314,9 @@ class ChangeMeasurementService:
 
         pre_samples, post_samples = in_pools(pre), in_pools(post)
         pool_nodes = {node.name for sample in pre_samples + post_samples for node in sample.nodes}
+        step = self._step()
+        prices_pre = pool_unit_prices(await self._pool_rows(plan.pre), pool_nodes, step)
+        prices_post = pool_unit_prices(await self._pool_rows(plan.post), pool_nodes, step)
         neighbours: List[ChangeEvent] = []
         try:
             landed = await self.changes.changes_landed_between(
@@ -328,7 +340,27 @@ class ChangeMeasurementService:
             other_changes=tuple(neighbours),
             # The read is capped: in a busier cluster later changes are not checked, and the measurement says so.
             truncated=len(landed) >= POOL_MAX_OTHER_CHANGES,
+            prices_pre=prices_pre,
+            prices_post=prices_post,
         )
+
+    async def _pool_rows(self, window: TimeWindow) -> List[Any]:
+        """Every pod's rows in a :data:`POOL_PRICE_SLICE` at each pool sample of ``window`` (price-card control)."""
+        rows: List[Any] = []
+        moment = ensure_utc(window.start)
+        end = ensure_utc(window.end)
+        while moment < end:
+            try:
+                rows.extend(
+                    await self.combined_repo.read_combined_metrics_smart(
+                        start_time=moment, end_time=min(end, moment + POOL_PRICE_SLICE)
+                    )
+                    or []
+                )
+            except Exception as exc:
+                raise MeasurementReadError(f"pool metrics at {moment.isoformat()} could not be read: {exc}") from exc
+            moment += POOL_SAMPLE_INTERVAL
+        return rows
 
     async def _collect_load(
         self, change: ChangeEvent, window: TimeWindow, buckets: Sequence[Any], *, retry_until: datetime, now: datetime

@@ -21,7 +21,15 @@ of the observed delta. Each finding has a severity:
 
 Pool-level checks (C4) read the workload's node pools from the node
 snapshots (:class:`PoolContext`, sampled every few hours over both windows):
-they need nodes labeled with a pool. Allocated cost is requests x unit price,
+they need nodes labeled with a pool. The pool's price card is a control too:
+the CPU and memory unit prices of every pod on the pool's nodes (all
+workloads, trusted cost only) before and after the change. A unit price is a
+property of the nodes, not of the requests, so it moves only when prices or
+hardware change, and it is checked even when the change resized both
+resources (the workload's own untouched resource is then no control). A shift
+beyond :data:`PRICE_CHANGE_TOLERANCE` lowers confidence, beyond
+:data:`PRICE_CHANGE_SEVERE` it contaminates the measurement; it replaces the
+workload-level price-card finding of the same resource. Allocated cost is requests x unit price,
 so other workloads' changes and autoscaling only move this workload's idle
 share of CO2e (moderate), whereas new hardware in the pool changes its unit
 prices and power profile (severe).
@@ -30,9 +38,9 @@ prices and power profile (severe).
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.counterfactual import HourOfWeekCounterfactual, align
@@ -137,6 +145,33 @@ class PoolContext:
     other_changes: Tuple[ChangeEvent, ...] = ()
     #: More changes landed during the measurement than were read: the later ones were not checked.
     truncated: bool = False
+    #: Pool-wide unit prices (``cpu`` per core-hour, ``memory`` per GiB-hour) in each window (price-card control).
+    prices_pre: Mapping[str, float] = field(default_factory=dict)
+    prices_post: Mapping[str, float] = field(default_factory=dict)
+
+
+_GIB = 1024.0**3
+
+
+def pool_unit_prices(rows: Iterable[Any], nodes: Set[str], step_seconds: int) -> Dict[str, float]:
+    """CPU and memory unit prices of the pods that ran on ``nodes`` (trusted cost with components only)."""
+    from greenkube.core.optimization.verifier import _coverage_seconds, cost_is_trusted
+
+    totals = {"cpu": [0.0, 0.0], "memory": [0.0, 0.0]}
+    for row in rows:
+        if getattr(row, "node", None) not in nodes or not cost_is_trusted(row):
+            continue
+        hours = _coverage_seconds(row, step_seconds) / 3600.0
+        for resource, cost_attr, amount in (
+            ("cpu", "cost_cpu", float(getattr(row, "cpu_request", 0) or 0) / 1000.0),
+            ("memory", "cost_ram", float(getattr(row, "memory_request", 0) or 0) / _GIB),
+        ):
+            cost = getattr(row, cost_attr, None)
+            if cost is None or amount <= 0 or not math.isfinite(float(cost)):
+                continue
+            totals[resource][0] += float(cost)
+            totals[resource][1] += amount * hours
+    return {resource: cost / quantity for resource, (cost, quantity) in totals.items() if quantity > 0 and cost > 0}
 
 
 def _pool_mix(samples: Sequence[PoolSample]) -> Dict[str, float]:
@@ -195,6 +230,14 @@ class ConfounderDetector:
         findings.extend(self._instance_types(pre, post))
         if pool is not None:
             findings.extend(self._pool(change, pool))
+            pool_priced = {item.evidence.get("resource") for item in findings if item.kind == "pool_price_card_change"}
+            if pool_priced:
+                # The pool-wide control covers the same price card: one finding per resource.
+                findings = [
+                    item
+                    for item in findings
+                    if not (item.kind == "price_card_change" and item.evidence.get("resource") in pool_priced)
+                ]
         return findings
 
     @staticmethod
@@ -391,6 +434,7 @@ class ConfounderDetector:
                         evidence={"pools": list(pool.pools), "before": before, "after": after},
                     )
                 )
+        findings.extend(_pool_prices(pool, pools))
         capacity_before, capacity_after = _pool_capacity(pool.pre), _pool_capacity(pool.post)
         shifted = False
         if capacity_before and capacity_after is not None and capacity_before > 0:
@@ -449,6 +493,27 @@ class ConfounderDetector:
                 )
             )
         return findings
+
+
+def _pool_prices(pool: PoolContext, pools: str) -> List[Confounder]:
+    findings: List[Confounder] = []
+    for resource, unit in (("cpu", "core-hour"), ("memory", "GiB-hour")):
+        before, after = pool.prices_pre.get(resource), pool.prices_post.get(resource)
+        if before is None or after is None or before <= 0:
+            continue
+        deviation = after / before - 1.0
+        if abs(deviation) <= PRICE_CHANGE_TOLERANCE:
+            continue
+        findings.append(
+            Confounder(
+                kind="pool_price_card_change",
+                severity="severe" if abs(deviation) > PRICE_CHANGE_SEVERE else "moderate",
+                detail=f"{resource} unit price per {unit} in node pool {pools} changed {deviation:+.0%} between "
+                "the windows (all workloads of the pool)",
+                evidence={"resource": resource, "pools": list(pool.pools), "before": before, "after": after},
+            )
+        )
+    return findings
 
 
 def is_contaminated(confounders: Sequence[Confounder]) -> bool:
