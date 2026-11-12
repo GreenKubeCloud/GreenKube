@@ -276,3 +276,32 @@ tests:
       - equal:
           path: data.GREENKUBE_EXTERNAL_URL
           value: http://ingress.example.com
+
+  # --------------------------------------------------------------------------
+  # Sub-path (config.rootPath)
+  # --------------------------------------------------------------------------
+  - it: routes and links the configured root path
+    templates:
+      - templates/ingress.yaml
+      - templates/httproute.yaml
+      - templates/configmap.yaml
+    set:
+      config.rootPath: /greenkube/
+      ingress.enabled: true
+      ingress.hosts: [tools.example.com]
+      httpRoute.enabled: true
+      httpRoute.parentRefs:
+        - name: shared-gateway
+    asserts:
+      - equal:
+          path: spec.rules[0].http.paths[0].path
+          value: /greenkube
+        template: templates/ingress.yaml
+      - equal:
+          path: spec.rules[0].matches[0].path.value
+          value: /greenkube
+        template: templates/httproute.yaml
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: http://tools.example.com/greenkube
+        template: templates/configmap.yaml

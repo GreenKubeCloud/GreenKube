@@ -33,7 +33,7 @@ spec:
     - host: {{ $host | quote }}
       http:
         paths:
-          - path: /
+          - path: {{ include "greenkube.exposurePath" $ | quote }}
             pathType: Prefix
             backend:
               service:

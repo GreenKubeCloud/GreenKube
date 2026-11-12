@@ -164,6 +164,32 @@ the Ingress controller, set `config.trustedProxyIps` to its addresses so GreenKu
 set `auth.session.secureCookie: always`. Set `config.externalUrl` for links in pull requests, and
 `config.rootPath` when served under a sub-path.
 
+The chart can create the route for you (roadmap N6); the first host also becomes the base of the links in pull
+requests (`GREENKUBE_EXTERNAL_URL`) unless `config.externalUrl` is set:
+
+```yaml
+# Ingress
+ingress:
+  enabled: true
+  className: nginx
+  hosts: [greenkube.example.com]
+  tls:
+    - secretName: greenkube-tls
+      hosts: [greenkube.example.com]
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+
+# or a Gateway API HTTPRoute attached to an existing Gateway
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: shared-gateway
+      namespace: gateway-system
+  hostnames: [greenkube.example.com]
+```
+
+See [Exposure](configuration.md#exposure-ingress-httproute) for every key.
+
 ## Optional: high availability
 
 High availability is two numbers, not another install:

@@ -33,7 +33,7 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /
+            value: {{ include "greenkube.exposurePath" . | quote }}
       backendRefs:
         - name: {{ include "greenkube.fullname" . }}-api
           port: {{ $v.api.port }}
