@@ -15,8 +15,10 @@ Cloud.
   only the two workload subtypes in state ``ACTIVE`` are used.
 * **Mapping.** ``targetResources`` name the workload
   (``//container.googleapis.com/projects/P/locations/L/clusters/C/k8s/namespaces/NS/apps/deployments/NAME``).
-  Insights about another cluster are skipped (``other_cluster``): advice is never
-  attributed to a same-named workload elsewhere. When the insight content names
+  Insights about another cluster are skipped (``other_cluster``): the target's
+  project (id or number), location and cluster name must all be this cluster's,
+  so advice is never attributed to a same-named workload elsewhere (a zonal and
+  a regional cluster may share a name in one project). When the insight content names
   containers and recommended requests, each becomes a ``ContainerResourcesProposal``
   (``RIGHTSIZING_CPU``/``RIGHTSIZING_MEMORY``, increases included). Otherwise the
   insight is an ``AdvisoryProposal`` (kind ``WORKLOAD_OVERPROVISIONED`` or
@@ -206,6 +208,22 @@ def _duration_seconds(value: Any) -> Optional[float]:
     return None
 
 
+def _same_cluster(target: Mapping[str, str], identity: Mapping[str, str]) -> bool:
+    """Whether a parsed target names this cluster: project (id or number), location and name.
+
+    GKE allows a zonal and a regional cluster with the same name in one project,
+    and the region's insights are read too, so the location must match exactly.
+    """
+    projects = {identity["project"]}
+    if identity.get("project_number"):
+        projects.add(identity["project_number"])
+    return (
+        target["cluster"] == identity["cluster"]
+        and target["project"] in projects
+        and target["location"] == identity["location"]
+    )
+
+
 def _region(location: str) -> Optional[str]:
     """``europe-west1`` for the zone ``europe-west1-b``; None for a region."""
     parts = location.split("-")
@@ -276,6 +294,8 @@ class GkeRecommenderSource(Source):
             project = options.project_id or await self._metadata(client, "project/project-id")
             cluster = options.cluster_name or await self._metadata(client, "instance/attributes/cluster-name")
             location = options.location or await self._metadata(client, "instance/attributes/cluster-location")
+            # targetResources may name the project by number: read it too (best effort).
+            project_number = await self._metadata(client, "project/numeric-project-id")
         try:
             token = json.loads(token_text).get("access_token")
         except (ValueError, AttributeError):
@@ -287,7 +307,10 @@ class GkeRecommenderSource(Source):
         ]
         if missing:
             return None, f"set SOURCES_CONFIG.gke {', '.join(missing)}: the metadata server does not report it"
-        return {"project": str(project), "cluster": str(cluster), "location": str(location), "token": token}, None
+        identity = {"project": str(project), "cluster": str(cluster), "location": str(location), "token": token}
+        if project_number and str(project_number).strip().isdigit():
+            identity["project_number"] = str(project_number).strip()
+        return identity, None
 
     async def discover(self) -> SourceHealth:
         if self.transport is None and not os.environ.get("KUBERNETES_SERVICE_HOST"):
@@ -426,7 +449,7 @@ class GkeRecommenderSource(Source):
         target_fields = next((item for item in targets if item is not None), None)
         if target_fields is None:
             return skip("unknown_target")
-        if target_fields["cluster"] != identity["cluster"] or target_fields["project"] != identity["project"]:
+        if not _same_cluster(target_fields, identity):
             return skip("other_cluster")
         now = self.deps.clock()
         period = _duration_seconds(insight.get("observationPeriod"))

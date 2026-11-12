@@ -154,6 +154,46 @@ class TestGke:
         assert [s.target.name for s in report.signals if isinstance(s.proposal, ContainerResourcesProposal)] == ["api"]
         assert {d.code: d.count for d in report.run.diagnostics}["other_cluster"] == 2
 
+    async def test_same_named_cluster_at_another_location_is_skipped(self):
+        # A regional prod-gke in europe-west1 is another cluster than the zonal
+        # prod-gke in europe-west1-b, although the region's insights are read.
+        server = FakeGoogle()
+        [template] = [
+            i for i in server.data["insights"]["europe-west1-b"]["insights"] if i["name"].endswith("over-api")
+        ]
+        regional = json.loads(json.dumps(template))
+        regional["name"] = regional["name"].replace("europe-west1-b", "europe-west1").replace("over-api", "regional")
+        regional["targetResources"] = [
+            "//container.googleapis.com/projects/acme-prod/locations/europe-west1/clusters/prod-gke"
+            "/k8s/namespaces/shop/apps/deployments/regional-only"
+        ]
+        server.data["insights"]["europe-west1"] = {"insights": [regional]}
+
+        report = await _run(_source(server))
+
+        assert not [s for s in report.signals if s.target.name == "regional-only"]
+        assert {d.code: d.count for d in report.run.diagnostics}["other_cluster"] == 2
+
+    async def test_targets_naming_the_project_number_are_this_project(self):
+        server = FakeGoogle()
+        for insight in server.data["insights"]["europe-west1-b"]["insights"]:
+            insight["targetResources"] = [
+                r.replace("/projects/acme-prod/", "/projects/123456/") for r in insight["targetResources"]
+            ]
+
+        report = await _run(_source(server))
+
+        names = {s.target.name for s in report.signals if isinstance(s.proposal, ContainerResourcesProposal)}
+        assert names == {"api"}
+        # Another project's number is still another cluster.
+        server = FakeGoogle()
+        for insight in server.data["insights"]["europe-west1-b"]["insights"]:
+            insight["targetResources"] = [
+                r.replace("/projects/acme-prod/", "/projects/999999/") for r in insight["targetResources"]
+            ]
+        report = await _run(_source(server))
+        assert not [s for s in report.signals if isinstance(s.proposal, ContainerResourcesProposal)]
+
     def test_fixture_is_labelled_synthetic(self):
         assert json.loads(FIXTURE.read_text())["_provenance"]["kind"] == "synthetic"
 

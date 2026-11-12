@@ -6,6 +6,7 @@
   },
   "metadata": {
     "project/project-id": "acme-prod",
+    "project/numeric-project-id": "123456",
     "instance/attributes/cluster-name": "prod-gke",
     "instance/attributes/cluster-location": "europe-west1-b",
     "instance/service-accounts/default/token": "{\"access_token\": \"ya29.test-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
