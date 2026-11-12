@@ -1,0 +1,278 @@
+suite: Ingress, HTTPRoute and external URL (roadmap N6)
+templates:
+  - templates/ingress.yaml
+  - templates/httproute.yaml
+  - templates/configmap.yaml
+
+tests:
+  # --------------------------------------------------------------------------
+  # Defaults: nothing exposed, no links
+  # --------------------------------------------------------------------------
+  - it: renders no Ingress and no HTTPRoute by default
+    templates:
+      - templates/ingress.yaml
+      - templates/httproute.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: leaves GREENKUBE_EXTERNAL_URL empty by default
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: ""
+
+  # --------------------------------------------------------------------------
+  # Ingress
+  # --------------------------------------------------------------------------
+  - it: routes every ingress host to the api Service
+    templates:
+      - templates/ingress.yaml
+    set:
+      ingress.enabled: true
+      ingress.className: nginx
+      ingress.hosts: [greenkube.example.com, gk.example.org]
+      ingress.annotations:
+        cert-manager.io/cluster-issuer: letsencrypt
+    asserts:
+      - isKind:
+          of: Ingress
+      - isAPIVersion:
+          of: networking.k8s.io/v1
+      - equal:
+          path: spec.ingressClassName
+          value: nginx
+      - equal:
+          path: metadata.annotations["cert-manager.io/cluster-issuer"]
+          value: letsencrypt
+      - lengthEqual:
+          path: spec.rules
+          count: 2
+      - equal:
+          path: spec.rules[1].host
+          value: gk.example.org
+      - equal:
+          path: spec.rules[0].http.paths[0]
+          value:
+            path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: RELEASE-NAME-greenkube-api
+                port:
+                  number: 8000
+      - isNull:
+          path: spec.tls
+
+  - it: follows a custom api port
+    templates:
+      - templates/ingress.yaml
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      config.api.port: 8080
+    asserts:
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.port.number
+          value: 8080
+
+  - it: requires a host
+    templates:
+      - templates/ingress.yaml
+    set:
+      ingress.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "ingress.hosts must list at least one host name"
+
+  - it: rejects an invalid host name
+    templates:
+      - templates/ingress.yaml
+    set:
+      ingress.enabled: true
+      ingress.hosts: ["https://greenkube.example.com"]
+    asserts:
+      - failedTemplate: {}
+
+  - it: derives an http external URL from the first host without TLS
+    templates:
+      - templates/configmap.yaml
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com, gk.example.org]
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: http://greenkube.example.com
+
+  - it: derives an https external URL when TLS covers the first host
+    templates:
+      - templates/configmap.yaml
+      - templates/ingress.yaml
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      ingress.tls:
+        - secretName: greenkube-tls
+          hosts: [greenkube.example.com]
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: https://greenkube.example.com
+        template: templates/configmap.yaml
+      - equal:
+          path: spec.tls[0].secretName
+          value: greenkube-tls
+        template: templates/ingress.yaml
+
+  - it: keeps http when TLS covers another host only
+    templates:
+      - templates/configmap.yaml
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      ingress.tls:
+        - secretName: other-tls
+          hosts: [other.example.com]
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: http://greenkube.example.com
+
+  - it: treats a TLS entry without hosts as covering the first host
+    templates:
+      - templates/configmap.yaml
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      ingress.tls:
+        - secretName: default-tls
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: https://greenkube.example.com
+
+  - it: builds no URL from a wildcard host
+    templates:
+      - templates/configmap.yaml
+    set:
+      ingress.enabled: true
+      ingress.hosts: ["*.example.com"]
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: ""
+
+  - it: lets config.externalUrl win over the ingress host
+    templates:
+      - templates/configmap.yaml
+    set:
+      config.externalUrl: https://greenkube.internal.example.com/
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: https://greenkube.internal.example.com
+
+  - it: ignores the ingress hosts while the Ingress is disabled
+    templates:
+      - templates/configmap.yaml
+    set:
+      ingress.hosts: [greenkube.example.com]
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: ""
+
+  # --------------------------------------------------------------------------
+  # Gateway API HTTPRoute
+  # --------------------------------------------------------------------------
+  - it: attaches an HTTPRoute to the given Gateway
+    templates:
+      - templates/httproute.yaml
+    set:
+      httpRoute.enabled: true
+      httpRoute.parentRefs:
+        - name: shared-gateway
+          namespace: gateway-system
+          sectionName: https
+      httpRoute.hostnames: [greenkube.example.com]
+    asserts:
+      - isKind:
+          of: HTTPRoute
+      - isAPIVersion:
+          of: gateway.networking.k8s.io/v1
+      - equal:
+          path: spec.parentRefs[0]
+          value:
+            name: shared-gateway
+            namespace: gateway-system
+            sectionName: https
+      - equal:
+          path: spec.hostnames
+          value: [greenkube.example.com]
+      - equal:
+          path: spec.rules[0]
+          value:
+            matches:
+              - path:
+                  type: PathPrefix
+                  value: /
+            backendRefs:
+              - name: RELEASE-NAME-greenkube-api
+                port: 8000
+
+  - it: requires a parent Gateway
+    templates:
+      - templates/httproute.yaml
+    set:
+      httpRoute.enabled: true
+      httpRoute.hostnames: [greenkube.example.com]
+    asserts:
+      - failedTemplate:
+          errorPattern: "httpRoute.parentRefs must name at least one Gateway"
+
+  - it: derives the external URL from the first HTTPRoute hostname
+    templates:
+      - templates/configmap.yaml
+    set:
+      httpRoute.enabled: true
+      httpRoute.parentRefs:
+        - name: shared-gateway
+      httpRoute.hostnames: [greenkube.example.com]
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: https://greenkube.example.com
+
+  - it: uses the configured HTTPRoute scheme
+    templates:
+      - templates/configmap.yaml
+    set:
+      httpRoute.enabled: true
+      httpRoute.parentRefs:
+        - name: shared-gateway
+      httpRoute.hostnames: [greenkube.example.com]
+      httpRoute.scheme: http
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: http://greenkube.example.com
+
+  - it: prefers the Ingress host when both are enabled
+    templates:
+      - templates/configmap.yaml
+    set:
+      ingress.enabled: true
+      ingress.hosts: [ingress.example.com]
+      httpRoute.enabled: true
+      httpRoute.parentRefs:
+        - name: shared-gateway
+      httpRoute.hostnames: [route.example.com]
+    asserts:
+      - equal:
+          path: data.GREENKUBE_EXTERNAL_URL
+          value: http://ingress.example.com

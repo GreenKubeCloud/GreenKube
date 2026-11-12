@@ -1,0 +1,40 @@
+{{- /* Optional Gateway API HTTPRoute for the UI and API (roadmap N6); see _exposure_helpers.tpl.
+Needs the gateway.networking.k8s.io/v1 CRDs and an existing Gateway (httpRoute.parentRefs). */ -}}
+{{- $route := .Values.httpRoute | default dict }}
+{{- if $route.enabled }}
+{{- if not $route.parentRefs }}
+{{- fail "httpRoute.parentRefs must name at least one Gateway when httpRoute.enabled=true, e.g. [{name: my-gateway, namespace: gateway-system}]" }}
+{{- end }}
+{{- $v := include "greenkube.values" . | fromYaml }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "greenkube.fullname" . }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+    {{- with $route.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml $route.parentRefs | nindent 4 }}
+  {{- with $route.hostnames }}
+  hostnames:
+    {{- range . }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ include "greenkube.fullname" . }}-api
+          port: {{ $v.api.port }}
+{{- end }}
