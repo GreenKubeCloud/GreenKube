@@ -797,7 +797,7 @@ def test_helm_values_planner_rejects_unknown_mapping_fields():
         snapshot.close()
 
 
-def test_helm_values_planner_fails_closed_for_remote_charts_before_rendering():
+def test_helm_values_planner_fails_closed_for_remote_charts_without_an_exact_version_before_rendering():
     snapshot = _snapshot({**_CHART, "apps/prod/values.yaml": "app: {}\n"})
     runner = _ChartRunner()
     remote_source = _values_source(
@@ -811,7 +811,7 @@ def test_helm_values_planner_fails_closed_for_remote_charts_before_rendering():
     )
 
     try:
-        with pytest.raises(HelmValuesUnsupportedError, match="remote"):
+        with pytest.raises(HelmValuesUnsupportedError, match="chart-version-unresolved"):
             HelmValuesPlanner(renderer=_helm_renderer(runner)).plan(
                 _action(),
                 remote_source,

@@ -1,4 +1,4 @@
-"""Bounded rendering of in-snapshot Helm charts."""
+"""Bounded rendering of in-snapshot (and pre-fetched remote) Helm charts."""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ _HELM_VERSION = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z
 _KUBERNETES_VERSION = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 _API_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*(?:/[A-Za-z0-9][A-Za-z0-9._+-]*){0,2}$")
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
+_DEPENDENCY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 _REMOTE_HOST = re.compile(r"^(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?::[0-9]+)?/")
 _TEMPLATE_ACTION = re.compile(r"{{-?(.*?)-?}}", re.DOTALL)
 _TEMPLATE_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
@@ -301,11 +302,19 @@ class HelmRenderer:
         values_files: Sequence[str | Path] = (),
         kube_version: str | None = None,
         api_versions: Sequence[str] | None = None,
+        remote_chart: bool = False,
     ) -> RawRenderResult:
-        """Render an in-repository chart and ordered values files from a snapshot."""
+        """Render an in-repository chart and ordered values files from a snapshot.
+
+        ``remote_chart`` marks a chart the controller pre-fetched, digest-verified and
+        staged into the workspace (H2). Its dependencies must be vendored under
+        ``charts/`` (a remote ``repository`` is then only provenance), and instead of
+        the static template scan the chart is rendered twice: differing output (random
+        secrets, timestamps) fails closed as ``nondeterministic-chart-render``.
+        """
         self._ensure_execution_backend()
         workspace = _snapshot_workspace(snapshot)
-        chart = _inspect_chart(workspace, chart_path, self.limits)
+        chart = _inspect_chart(workspace, chart_path, self.limits, vendored_dependencies=remote_chart)
         prepared_values = _inspect_values_files(workspace, values_files, self.limits)
         if namespace is not None and release_namespace is not None and namespace != release_namespace:
             raise HelmConfigurationError("namespace and release_namespace must agree when both are supplied")
@@ -317,7 +326,8 @@ class HelmRenderer:
             self.kube_version if kube_version is None else _validate_kubernetes_version(kube_version)
         )
         selected_api_versions = self.api_versions if api_versions is None else _validate_api_versions(api_versions)
-        _validate_deterministic_templates(chart, prepared_values, self.limits)
+        if not remote_chart:
+            _validate_deterministic_templates(chart, prepared_values, self.limits)
         self.preflight(snapshot)
 
         arguments = [
@@ -339,6 +349,13 @@ class HelmRenderer:
         process_result = self._run(arguments, workspace)
         if process_result.returncode != 0:
             raise HelmTemplateError(process_result.returncode)
+        if remote_chart:
+            repeated = self._run(arguments, workspace)
+            if repeated.returncode != 0 or repeated.stdout != process_result.stdout:
+                raise HelmClusterDependentError(
+                    "nondeterministic-chart-render: two renders of the same remote chart and values differ "
+                    "(random or time-based template output)"
+                )
         if len(process_result.stdout) > self.limits.max_output_bytes:
             raise HelmOutputLimitError("stdout", self.limits.max_output_bytes)
         if len(process_result.stderr) > self.limits.max_stderr_bytes:
@@ -412,7 +429,13 @@ def _snapshot_workspace(snapshot: RepositorySnapshot) -> Path:
     return root
 
 
-def _inspect_chart(root: Path, chart_path: str | Path, limits: HelmLimits) -> _Chart:
+def _inspect_chart(
+    root: Path,
+    chart_path: str | Path,
+    limits: HelmLimits,
+    *,
+    vendored_dependencies: bool = False,
+) -> _Chart:
     chart_directory = _resolve_snapshot_path(
         root,
         chart_path,
@@ -440,11 +463,11 @@ def _inspect_chart(root: Path, chart_path: str | Path, limits: HelmLimits) -> _C
             category="Helm chart",
         )
         if path.name in {"Chart.yaml", "requirements.yaml"}:
-            _validate_chart_dependencies(root, path.parent, mapping)
+            _validate_chart_dependencies(root, path.parent, mapping, vendored=vendored_dependencies)
             if path == metadata_file:
                 root_metadata = mapping
         elif path.name == "Chart.lock":
-            _validate_locked_dependencies(root, path.parent, mapping, path)
+            _validate_locked_dependencies(root, path.parent, mapping, path, vendored=vendored_dependencies)
     _validate_values_schemas(root, chart_directory, files, limits)
     chart_name_value = None if root_metadata is None else root_metadata.get("name")
     if not isinstance(chart_name_value, str) or not chart_name_value or chart_name_value != chart_name_value.strip():
@@ -632,7 +655,13 @@ def _load_yaml_mapping(content: bytes, path: Path, *, category: str) -> Mapping[
     return value
 
 
-def _validate_chart_dependencies(root: Path, chart_directory: Path, config: Mapping[str, Any]) -> None:
+def _validate_chart_dependencies(
+    root: Path,
+    chart_directory: Path,
+    config: Mapping[str, Any],
+    *,
+    vendored: bool = False,
+) -> None:
     dependencies = config.get("dependencies", [])
     if dependencies is None:
         return
@@ -650,6 +679,9 @@ def _validate_chart_dependencies(root: Path, chart_directory: Path, config: Mapp
         if not repository:
             continue
         if not repository.startswith("file://"):
+            if vendored:
+                _require_vendored_dependency(chart_directory, dependency.get("name"))
+                continue
             raise HelmRemoteReferenceError("remote Helm chart dependencies are disabled")
 
         local_reference = repository.removeprefix("file://")
@@ -661,6 +693,8 @@ def _validate_locked_dependencies(
     chart_directory: Path,
     config: Mapping[str, Any],
     source: Path,
+    *,
+    vendored: bool = False,
 ) -> None:
     dependencies = config.get("dependencies", [])
     if dependencies is None:
@@ -676,8 +710,22 @@ def _validate_locked_dependencies(
         if not isinstance(repository, str):
             raise HelmConfigurationError(f"{source.name}: dependency repository must be a string")
         if not repository.startswith("file://"):
+            if vendored:
+                _require_vendored_dependency(chart_directory, dependency.get("name"))
+                continue
             raise HelmRemoteReferenceError("remote Helm chart dependencies are disabled")
         _validate_local_chart_dependency(root, chart_directory, repository.removeprefix("file://"))
+
+
+def _require_vendored_dependency(chart_directory: Path, name: object) -> None:
+    """A pre-fetched chart renders offline: each remote dependency must ship in ``charts/<name>/``."""
+    if not isinstance(name, str) or _DEPENDENCY_NAME.fullmatch(name) is None or ".." in name:
+        raise HelmConfigurationError("Helm chart dependency names must be chart names")
+    metadata = chart_directory / "charts" / name / "Chart.yaml"
+    if metadata.is_symlink() or not metadata.is_file():
+        raise HelmRemoteReferenceError(
+            f"remote chart dependency {name!r} is not vendored in the chart archive and cannot be fetched offline"
+        )
 
 
 def _validate_values_schemas(
