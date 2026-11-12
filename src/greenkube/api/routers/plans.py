@@ -13,6 +13,7 @@ from greenkube.api.dependencies import (
     get_authenticated_actor,
     get_automation_plan_service,
     get_recommendation_repository,
+    require_scope,
 )
 from greenkube.api.schemas import (
     AutomationPlanApproveRequest,
@@ -102,6 +103,7 @@ _PROVIDER_TOKEN = re.compile(r"\b(?:ghp|gho|ghs|ghu|ghr|github_pat|glpat)_[A-Za-
 
 @router.post(
     "/automation/plans",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
     response_model=AutomationPlanResponse,
     status_code=201,
     responses=_ERROR_RESPONSES,
@@ -182,6 +184,7 @@ async def get_automation_plan(
 
 @router.post(
     "/automation/plans/{plan_id}/rollback-preview",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
     response_model=AutomationPlanResponse,
     status_code=201,
     responses=_ERROR_RESPONSES,
@@ -204,6 +207,7 @@ async def preview_automation_plan_rollback(
 
 @router.post(
     "/automation/plans/{plan_id}/approve",
+    dependencies=[Depends(require_scope(Scope.APPROVE))],
     response_model=AutomationPlanResponse,
     status_code=202,
     responses=_ERROR_RESPONSES,
@@ -233,6 +237,7 @@ async def approve_automation_plan(
 
 @router.post(
     "/automation/plans/{plan_id}/cancel",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
     response_model=AutomationPlanResponse,
     responses=_ERROR_RESPONSES,
 )
@@ -268,6 +273,7 @@ async def cancel_automation_plan(
 
 @router.delete(
     "/automation/plans/{plan_id}",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
     status_code=204,
     response_class=Response,
     responses=_ERROR_RESPONSES,

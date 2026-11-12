@@ -176,3 +176,83 @@ async def test_api_keys_round_trip(backend):
     assert await first.revoke_api_key(created.key.id)
     assert not await first.revoke_api_key(created.key.id)
     assert await second.resolve_api_key(created.plaintext) is None
+
+
+# --------------------------------------------------------------------------- #
+# Single sign-on identities, roles and pending OIDC sign-ins (F16)             #
+# --------------------------------------------------------------------------- #
+
+
+async def test_sso_identities_are_created_once_and_follow_their_groups(backend):
+    from greenkube.auth.settings import AuthSettings
+
+    settings = AuthSettings(mode="oidc", role_groups={"admin": frozenset({"root"}), "operator": frozenset({"sre"})})
+    first, second = backend.service(0), backend.service(1)
+    first._settings = second._settings = lambda: settings
+    await first.create_user("admin", PASSWORD, role="admin")
+
+    created = await first.sso_user("oidc", "sub-1", "Alice", {"sre"})
+    again = await second.sso_user("oidc", "sub-1", "alice-renamed", {"root"})
+
+    assert created.id == again.id and created.auth_source == "oidc" and created.external_id == "oidc:sub-1"
+    assert again.role == "admin" and again.username == "alice"
+    stored = await second.repository.get_user_by_external_id("oidc:sub-1")
+    assert stored is not None and stored.role == "admin" and not stored.is_local
+    assert [user.username for user in await second.list_users()] == ["admin", "alice"]
+
+    with pytest.raises(AuthError) as conflict:
+        await first.sso_user("proxy", "admin", "admin", {"root"})
+    assert conflict.value.code == "ACCOUNT_CONFLICT"
+
+    # SSO accounts never sign in with a password, whatever is stored.
+    with pytest.raises(AuthError):
+        await first.login("alice", "!sso")
+
+
+async def test_disabling_and_roles_with_the_last_admin_guard(backend):
+    service = backend.service()
+    admin = await service.create_user("admin", PASSWORD, role="admin")
+    ops = await service.create_user("ops", PASSWORD, role="viewer")
+    await service.login("ops", PASSWORD)
+
+    assert (await service.set_user_role(ops.id, "admin")).role == "admin"
+    assert (await service.set_user_role(admin.id, "operator")).role == "operator"
+    with pytest.raises(AuthError) as last:
+        await service.set_user_disabled(ops.id, True)
+    assert last.value.code == "LAST_ADMIN"
+
+    await service.set_user_role(admin.id, "admin")
+    disabled = await service.set_user_disabled(ops.id, True)
+    assert disabled.disabled_at is not None
+    assert await service.list_sessions(ops.id) == []
+    assert (await service.set_user_disabled(ops.id, False)).disabled_at is None
+
+
+async def test_pending_oidc_sign_ins_are_single_use_across_replicas(backend):
+    from dataclasses import replace
+
+    from greenkube.auth.models import OidcLogin
+
+    first, second = backend.service(0), backend.service(1)
+    now = backend.clock.now
+    login = OidcLogin(
+        state_sha256="a" * 64,
+        nonce="nonce",
+        code_verifier="verifier",
+        redirect_uri="https://gk.example.test/api/v1/auth/oidc/callback",
+        return_to="/recommendations",
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    await first.repository.create_oidc_login(login)
+    await first.repository.create_oidc_login(
+        replace(login, state_sha256="b" * 64, expires_at=now - timedelta(seconds=1))
+    )
+
+    consumed = await second.repository.consume_oidc_login("a" * 64)
+    assert consumed is not None and consumed.code_verifier == "verifier" and consumed.return_to == "/recommendations"
+    assert consumed.expires_at == login.expires_at
+    assert await first.repository.consume_oidc_login("a" * 64) is None
+
+    await second.purge_expired_sessions()
+    assert await first.repository.consume_oidc_login("b" * 64) is None
