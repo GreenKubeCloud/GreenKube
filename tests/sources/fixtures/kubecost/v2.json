@@ -1,5 +1,11 @@
 {
   "_comment": "Kubecost 2.x answers, shaped after the documented responses of /model/clusterInfo, /model/savings/requestSizingV2 (a bare array), /model/savings/abandonedWorkloads and /model/savings/clusterSizingETL. Unknown fields are kept to check that the parser ignores them.",
+  "_provenance": {
+    "kind": "synthetic",
+    "basis": "Shaped after the documented responses of the Kubecost 2.x API directory (IBM Kubecost self-hosted 2.x: Container Request Right Sizing Recommendation API (V2), Abandoned Workloads API, Cluster Right-Sizing Recommendation API). Not recorded from a live Kubecost: values are invented.",
+    "checked": "2026-11",
+    "clusterSizingETL": "legacy flat shape (totalMonthlySavings at the top of data), still accepted"
+  },
   "clusterInfo": {
     "code": 200,
     "data": {
@@ -17,10 +23,23 @@
       "controllerKind": "deployment",
       "controllerName": "api",
       "containerName": "web",
-      "recommendedRequest": {"cpu": "250m", "memory": "512Mi"},
-      "monthlySavings": {"cpu": 18.25, "memory": 2.1},
-      "latestKnownRequest": {"cpu": "1", "memory": "1Gi"},
-      "currentEfficiency": {"cpu": 0.18, "memory": 0.41, "total": 0.22}
+      "recommendedRequest": {
+        "cpu": "250m",
+        "memory": "512Mi"
+      },
+      "monthlySavings": {
+        "cpu": 18.25,
+        "memory": 2.1
+      },
+      "latestKnownRequest": {
+        "cpu": "1",
+        "memory": "1Gi"
+      },
+      "currentEfficiency": {
+        "cpu": 0.18,
+        "memory": 0.41,
+        "total": 0.22
+      }
     },
     {
       "clusterID": "cluster-one",
@@ -28,10 +47,23 @@
       "controllerKind": "statefulset",
       "controllerName": "postgres",
       "containerName": "postgres",
-      "recommendedRequest": {"cpu": "500m", "memory": "768Mi"},
-      "monthlySavings": {"cpu": 0.0, "memory": -1.4},
-      "latestKnownRequest": {"cpu": "500m", "memory": "256Mi"},
-      "currentEfficiency": {"cpu": 0.62, "memory": 1.35, "total": 0.8}
+      "recommendedRequest": {
+        "cpu": "500m",
+        "memory": "768Mi"
+      },
+      "monthlySavings": {
+        "cpu": 0.0,
+        "memory": -1.4
+      },
+      "latestKnownRequest": {
+        "cpu": "500m",
+        "memory": "256Mi"
+      },
+      "currentEfficiency": {
+        "cpu": 0.62,
+        "memory": 1.35,
+        "total": 0.8
+      }
     },
     {
       "clusterID": "cluster-one",
@@ -39,10 +71,23 @@
       "controllerKind": "",
       "controllerName": "static-pod",
       "containerName": "etcd",
-      "recommendedRequest": {"cpu": "100m", "memory": "100Mi"},
-      "monthlySavings": {"cpu": 1.0, "memory": 0.1},
-      "latestKnownRequest": {"cpu": "200m", "memory": "100Mi"},
-      "currentEfficiency": {"cpu": 0.3, "memory": 0.9, "total": 0.5}
+      "recommendedRequest": {
+        "cpu": "100m",
+        "memory": "100Mi"
+      },
+      "monthlySavings": {
+        "cpu": 1.0,
+        "memory": 0.1
+      },
+      "latestKnownRequest": {
+        "cpu": "200m",
+        "memory": "100Mi"
+      },
+      "currentEfficiency": {
+        "cpu": 0.3,
+        "memory": 0.9,
+        "total": 0.5
+      }
     }
   ],
   "abandonedWorkloads": [
@@ -50,8 +95,16 @@
       "pod": "legacy-report-5c7d9-abcde",
       "namespace": "batch",
       "clusterId": "cluster-one",
-      "owners": [{"name": "legacy-report", "kind": "deployment"}],
-      "requests": {"cpu": 0.5, "memory": 536870912},
+      "owners": [
+        {
+          "name": "legacy-report",
+          "kind": "deployment"
+        }
+      ],
+      "requests": {
+        "cpu": 0.5,
+        "memory": 536870912
+      },
       "ingressBytesPerSecond": 0.4,
       "egressBytesPerSecond": 0.1,
       "monthlySavings": 12.5
@@ -60,8 +113,16 @@
       "pod": "legacy-report-5c7d9-fghij",
       "namespace": "batch",
       "clusterId": "cluster-one",
-      "owners": [{"name": "legacy-report", "kind": "deployment"}],
-      "requests": {"cpu": 0.5, "memory": 536870912},
+      "owners": [
+        {
+          "name": "legacy-report",
+          "kind": "deployment"
+        }
+      ],
+      "requests": {
+        "cpu": 0.5,
+        "memory": 536870912
+      },
       "ingressBytesPerSecond": 0.9,
       "egressBytesPerSecond": 0.0,
       "monthlySavings": 12.5
@@ -71,7 +132,12 @@
     "code": 200,
     "data": {
       "totalMonthlySavings": 310.5,
-      "recommendations": {"single": {"nodeType": "m6i.xlarge", "nodeCount": 3}}
+      "recommendations": {
+        "single": {
+          "nodeType": "m6i.xlarge",
+          "nodeCount": 3
+        }
+      }
     }
   }
 }

@@ -14,9 +14,14 @@ Reads Kubecost's savings APIs and emits signals only:
   dependency evidence, ``deletion_requires_review``) still decide;
 * node-group (cluster) sizing → an ``AdvisoryProposal`` about the cluster.
 
-The API paths changed across Kubecost majors (3.x moved to the ``finops-agent``
-with ClickHouse and renamed cluster sizing "Node Group Sizing"), so they are
-kept in a versioned map (:data:`PATHS`). ``health()`` probes the version; the
+The paths are kept in a versioned map (:data:`PATHS`) because Kubecost 3.x
+moved to the ``finops-agent`` and an aggregator. The 3.x map was checked
+against the IBM Kubecost self-hosted 3.x API directory (2026-11): it still
+documents request sizing V2, abandoned workloads and the Cluster Right-Sizing
+Recommendation API (``/model/savings/clusterSizingETL``) on the cost-analyzer's
+``/model`` API; "Node Group Sizing" is the renamed UI page, with no API of its
+own, so the 3.x map keeps ``clusterSizingETL``. The documented cluster sizing
+answer is keyed by cluster id (``data.<cluster>.recommendations.{single,multi}``). ``health()`` probes the version; the
 map can be overridden per path with the ``paths`` setting. An endpoint that
 answers 404 on the deployed version is reported as a diagnostic and skipped.
 
@@ -71,7 +76,8 @@ KUBECOST_SOURCE_ID = "kubecost"
 #: Service of the Kubecost Helm chart in its default namespace (probed when ``url`` is not set).
 DEFAULT_URL = "http://kubecost-cost-analyzer.kubecost.svc:9090"
 
-#: API paths per Kubecost major version. ``version`` is the probe.
+#: API paths per Kubecost major version. ``version`` is the probe. Checked against
+#: the IBM Kubecost self-hosted 2.x and 3.x API directories (2026-11).
 PATHS: Dict[str, Dict[str, str]] = {
     "2": {
         "version": "/model/clusterInfo",
@@ -83,7 +89,8 @@ PATHS: Dict[str, Dict[str, str]] = {
         "version": "/model/clusterInfo",
         "request_sizing": "/model/savings/requestSizingV2",
         "abandoned_workloads": "/model/savings/abandonedWorkloads",
-        "node_group_sizing": "/model/savings/nodeGroupSizing",
+        # The 3.x directory lists the Cluster Right-Sizing Recommendation API; no node-group sizing API.
+        "node_group_sizing": "/model/savings/clusterSizingETL",
     },
 }
 DEFAULT_MAJOR = "2"
@@ -228,6 +235,34 @@ def _fmt(resource: str, value: Optional[int]) -> str:
     if value is None:
         return "unset"
     return f"{value}m" if resource == "cpu" else f"{value / _MIB:.0f}Mi"
+
+
+def _sizing_by_cluster(data: Any) -> Optional[Dict[str, Mapping[str, Any]]]:
+    """``{cluster id: entry}`` of a documented cluster sizing answer, or None for another shape.
+
+    The Cluster Right-Sizing Recommendation API answers ``data`` keyed by
+    cluster, each entry holding ``recommendations`` and ``parameters.clusterId``.
+    """
+    if not isinstance(data, Mapping) or not data or "recommendations" in data:
+        return None
+    entries: Dict[str, Mapping[str, Any]] = {}
+    for key, entry in data.items():
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("recommendations"), Mapping):
+            return None
+        params = _mapping(entry.get("parameters"))
+        cluster = params.get("clusterId") or params.get("clusterID") or key
+        entries[str(cluster)] = entry
+    return entries
+
+
+def _strategy_savings(entry: Mapping[str, Any]) -> Tuple[Optional[float], Dict[str, float]]:
+    """Best monthly saving over the sizing strategies (``single``, ``multi``...) and each strategy's."""
+    strategies: Dict[str, float] = {}
+    for name, strategy in _mapping(entry.get("recommendations")).items():
+        value = _number(_mapping(strategy).get("monthlySavings"))
+        if value is not None:
+            strategies[str(name)] = value
+    return (max(strategies.values()) if strategies else None), strategies
 
 
 def _window_days(window: str) -> int:
@@ -616,19 +651,37 @@ class KubecostSource(Source):
         data = _unwrap(payload)
         if not data:
             return []
-        named = None
-        savings = None
-        if isinstance(data, Mapping):
+        wanted = self.options.cluster_id
+        by_cluster = _sizing_by_cluster(data)
+        chosen: Optional[Mapping[str, Any]]
+        savings: Optional[float]
+        strategies: Dict[str, float]
+        if by_cluster is not None:
+            # Documented shape: one entry per cluster id. Only this cluster's entry is used:
+            # the one named by cluster_id, or the only one when Kubecost reports a single cluster.
+            if wanted:
+                chosen = by_cluster.get(wanted)
+            else:
+                chosen = next(iter(by_cluster.values())) if len(by_cluster) == 1 else None
+            named = wanted if wanted else None
+            clusters = self._clusters_seen | ({wanted} if wanted else set(by_cluster))
+            entry: Mapping[str, Any] = chosen or {}
+            savings, strategies = _strategy_savings(entry) if chosen is not None else (None, {})
+        else:
+            entry = data if isinstance(data, Mapping) else {}
             named = next(
-                (str(data[key]) for key in _CLUSTER_KEYS if isinstance(data.get(key), str) and data[key]), None
+                (str(entry[key]) for key in _CLUSTER_KEYS if isinstance(entry.get(key), str) and entry[key]), None
             )
+            savings, strategies = None, {}
             for key in ("totalMonthlySavings", "monthlySavings", "savings"):
-                savings = _number(data.get(key))
+                savings = _number(entry.get(key))
                 if savings is not None:
                     break
-        wanted = self.options.cluster_id
-        clusters = self._clusters_seen | ({named} if named else set())
-        if (wanted and named and named != wanted) or (not wanted and len(clusters) > 1):
+            if savings is None and isinstance(entry.get("recommendations"), Mapping):
+                savings, strategies = _strategy_savings(entry)
+            clusters = self._clusters_seen | ({named} if named else set())
+            chosen = entry
+        if chosen is None or (wanted and named and named != wanted) or (not wanted and len(clusters) > 1):
             diagnostics.append(
                 Diagnostic(
                     level="warning",
@@ -651,7 +704,10 @@ class KubecostSource(Source):
             "Kubecost suggests resizing the cluster's node groups; "
             "review its node-group sizing before changing node pools."
         )
-        summary = f"{text} Kubecost estimates {savings:.2f} USD per month."
+        summary = f"{text} Kubecost estimates up to {savings:.2f} USD per month."
+        evidence_data: Dict[str, Any] = {"risk_class": "high"}
+        if strategies:
+            evidence_data["monthly_savings_by_strategy"] = strategies
         return [
             SourceSignal(
                 source_id=KUBECOST_SOURCE_ID,
@@ -661,11 +717,11 @@ class KubecostSource(Source):
                 kind="NODE_GROUP_SIZING",
                 proposal=AdvisoryProposal(text=text),
                 algorithm=self._algorithm("kubecost.node_group_sizing", window, {"window": self.options.window}),
-                evidence=SignalEvidence(summary=summary, data={"risk_class": "high"}),
+                evidence=SignalEvidence(summary=summary, data=evidence_data),
                 observed_window=window,
                 source_estimate={"monthly_savings": savings, "currency": "USD"},
                 provenance=SignalProvenance(origin=SignalOrigin.ADAPTER),
-                raw=trim_raw(data if isinstance(data, dict) else {"data": data}),
+                raw=trim_raw(dict(entry) if isinstance(entry, Mapping) else {"data": data}),
                 fetched_at=now,
             )
         ]

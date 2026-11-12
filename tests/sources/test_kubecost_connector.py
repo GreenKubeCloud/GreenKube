@@ -143,10 +143,39 @@ class TestKubecost3:
 
         assert report.run.status == SourceRunStatus.SUCCEEDED
         paths = {r.url.path for r in server.requests}
-        assert "/model/savings/nodeGroupSizing" in paths and "/model/savings/clusterSizingETL" not in paths
+        # The 3.x API directory documents the Cluster Right-Sizing API; there is no node-group sizing API.
+        assert "/model/savings/clusterSizingETL" in paths and "/model/savings/nodeGroupSizing" not in paths
         cpu = [s for s in report.signals if s.kind == "RIGHTSIZING_CPU"]
         assert [s.source_version for s in cpu] == ["3.x"]
         assert isinstance(cpu[0].proposal, ContainerResourcesProposal) and cpu[0].proposal.proposed.cpu_request_m == 300
+
+    async def test_documented_cluster_sizing_answer_is_read_for_this_cluster_only(self):
+        report = await _run(_source(FakeKubecost("v3"), cluster_id="prod-eu"))
+
+        [node] = [s for s in report.signals if s.capability == Capability.NODE_POOL]
+        assert isinstance(node.proposal, AdvisoryProposal) and node.source_version == "3.x"
+        assert node.evidence.data["monthly_savings_by_strategy"] == {"single": 120.0, "multi": 240.6}
+        assert node.source_estimate == {"monthly_savings": 240.6, "currency": "USD"}
+        assert node.raw["parameters"]["clusterId"] == "prod-eu"
+
+    async def test_cluster_sizing_of_a_cluster_without_savings_advises_nothing(self):
+        report = await _run(_source(FakeKubecost("v3"), cluster_id="prod-us"))
+
+        assert not [s for s in report.signals if s.capability == Capability.NODE_POOL]
+        assert "node_group_sizing_no_savings" in {d.code for d in report.run.diagnostics}
+
+    async def test_cluster_sizing_of_an_unknown_cluster_id_is_not_guessed(self):
+        server = FakeKubecost("v3")
+        server.answers["requestSizingV2"] = {"Recommendations": []}
+        report = await _run(_source(server, cluster_id="staging"))
+
+        assert not [s for s in report.signals if s.capability == Capability.NODE_POOL]
+        assert "node_group_sizing_other_cluster" in {d.code for d in report.run.diagnostics}
+
+    def test_fixtures_are_labelled_synthetic(self):
+        for version in ("v2", "v3"):
+            provenance = json.loads((FIXTURES / f"{version}.json").read_text())["_provenance"]
+            assert provenance["kind"] == "synthetic" and "Not recorded from a live" in provenance["basis"]
 
     async def test_several_clusters_without_cluster_id_are_not_guessed(self):
         report = await _run(_source(FakeKubecost("v3")))
@@ -156,7 +185,7 @@ class TestKubecost3:
 
     async def test_a_missing_endpoint_is_a_diagnostic_not_a_failure(self):
         server = FakeKubecost("v3")
-        del server.answers["nodeGroupSizing"]
+        del server.answers["clusterSizingETL"]
         report = await _run(_source(server, cluster_id="prod-eu"))
 
         assert report.run.status == SourceRunStatus.SUCCEEDED
@@ -164,9 +193,9 @@ class TestKubecost3:
 
     async def test_path_overrides_win(self):
         server = FakeKubecost("v3")
-        server.answers["clusterSizingETL"] = server.answers.pop("nodeGroupSizing")
+        server.answers["nodeGroupSizing"] = server.answers.pop("clusterSizingETL")
         report = await _run(
-            _source(server, cluster_id="prod-eu", paths={"node_group_sizing": "/model/savings/clusterSizingETL"})
+            _source(server, cluster_id="prod-eu", paths={"node_group_sizing": "/model/savings/nodeGroupSizing"})
         )
         assert any(s.capability == Capability.NODE_POOL for s in report.signals)
 
@@ -215,7 +244,8 @@ class TestAttribution:
 
     async def test_node_group_sizing_naming_another_cluster_is_skipped(self):
         server = FakeKubecost("v3")
-        server.answers["nodeGroupSizing"]["data"]["clusterId"] = "staging"
+        # Legacy flat answer naming its cluster.
+        server.answers["clusterSizingETL"] = {"code": 200, "data": {"clusterId": "staging", "monthlySavings": 50.0}}
         report = await _run(_source(server, cluster_id="prod-eu"))
 
         assert not [s for s in report.signals if s.capability == Capability.NODE_POOL]
