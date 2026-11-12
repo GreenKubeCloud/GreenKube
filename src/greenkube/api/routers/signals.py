@@ -3,6 +3,7 @@
 Endpoints (API key scope ``signals:write``):
   POST /signals                - A batch of ``signal.v1alpha1`` signals (``source_id: push:<client>``)
   POST /sources/krr/reports    - A Robusta KRR JSON report (``krr simple -f json``)
+  POST /sources/polaris/reports - A Fairwinds Polaris audit report (``polaris audit --format=json``)
 
 Pushed signals are stored in the inbox and used by the next scans through the
 ``push`` and ``krr`` sources: they reach recommendations only through
@@ -30,6 +31,7 @@ from greenkube.signals.connectors.inbox import (
     create_signal_inbox_repository,
 )
 from greenkube.signals.connectors.krr import KRR_SOURCE_ID, KrrReportError, parse_krr_report
+from greenkube.signals.connectors.polaris import POLARIS_SOURCE_ID, PolarisReportError, parse_polaris_report
 from greenkube.signals.connectors.push import PointerError, parse_batch
 from greenkube.signals.sdk import Diagnostic
 
@@ -40,6 +42,7 @@ router = APIRouter()
 #: Largest accepted bodies (bytes).
 MAX_SIGNAL_BATCH_BYTES = 8 * 1024 * 1024
 MAX_KRR_REPORT_BYTES = 64 * 1024 * 1024
+MAX_POLARIS_REPORT_BYTES = 64 * 1024 * 1024
 #: Inbox rows not pushed again for this long are pruned on the next push.
 INBOX_RETENTION = timedelta(days=30)
 
@@ -271,6 +274,46 @@ async def push_krr_report(
     return await _store(
         inbox,
         source_id=KRR_SOURCE_ID,
+        complete=complete,
+        signals=parsed.signals,
+        received_at=received_at,
+        actor=_actor(request),
+        diagnostics=parsed.diagnostics,
+    )
+
+
+@router.post(
+    "/sources/polaris/reports",
+    response_model=PushResponse,
+    responses={
+        400: {"description": "The body is not JSON."},
+        413: {"description": "Body too large."},
+        422: {"model": SignalValidationResponse, "description": "The body is not a Polaris JSON report."},
+    },
+)
+async def push_polaris_report(
+    request: Request,
+    complete: bool = Query(
+        True,
+        description="True when the report audits the whole cluster (replaces earlier reports); false for a "
+        "partial audit (for example one namespace), which only adds or refreshes findings.",
+    ),
+    inbox: SignalInboxRepository = Depends(get_signal_inbox),
+):
+    """Push a Fairwinds Polaris audit (``polaris audit --format=json``); its findings are used by the next scans.
+
+    Findings are hygiene advice (never pull requests); missing CPU or memory
+    requests also get a request computed by GreenKube from observed usage.
+    """
+    document = await _json_body(request, MAX_POLARIS_REPORT_BYTES)
+    received_at = datetime.now(timezone.utc)
+    try:
+        parsed = parse_polaris_report(document, cluster_uid=_cluster_uid(), received_at=received_at)
+    except PolarisReportError as exc:
+        return _invalid([PointerError(pointer=exc.pointer, message=str(exc), type=exc.type)], "Not a Polaris report.")
+    return await _store(
+        inbox,
+        source_id=POLARIS_SOURCE_ID,
         complete=complete,
         signals=parsed.signals,
         received_at=received_at,
