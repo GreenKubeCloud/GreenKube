@@ -1,0 +1,139 @@
+suite: polaris job (roadmap G4)
+templates:
+  - templates/polaris-cronjob.yaml
+  - templates/networkpolicy.yaml
+
+tests:
+  - it: renders nothing by default
+    templates:
+      - templates/polaris-cronjob.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: requires an API key Secret
+    templates:
+      - templates/polaris-cronjob.yaml
+    set:
+      sources.polaris.job.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "sources.polaris.job.apiKeySecret.name is required"
+
+  - it: requires a digest-pinned Polaris image
+    templates:
+      - templates/polaris-cronjob.yaml
+    set:
+      sources.polaris.job.enabled: true
+      sources.polaris.job.apiKeySecret.name: gk-polaris
+      sources.polaris.job.image.digest: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "sources.polaris.job.image.digest must pin the Polaris image"
+
+  - it: runs Polaris pinned by digest and uploads with a signals:write key
+    templates:
+      - templates/polaris-cronjob.yaml
+    set:
+      sources.polaris.job.enabled: true
+      sources.polaris.job.apiKeySecret.name: gk-polaris
+      sources.polaris.job.extraArgs: ["--namespace", "shop"]
+    asserts:
+      - hasDocuments:
+          count: 4
+      - isKind:
+          of: CronJob
+        documentIndex: 3
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.initContainers[0].image
+          pattern: "^quay.io/fairwinds/polaris@sha256:[0-9a-f]{64}$"
+        documentIndex: 3
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.initContainers[0].command
+          value:
+            - polaris
+            - audit
+            - --format=json
+            - --output-file=/report/polaris.json
+            - --namespace
+            - shop
+        documentIndex: 3
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env[0].value
+          value: http://RELEASE-NAME-greenkube-api.NAMESPACE.svc:8000/api/v1/sources/polaris/reports
+        documentIndex: 3
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env[1].valueFrom.secretKeyRef
+          value:
+            name: gk-polaris
+            key: api-key
+        documentIndex: 3
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.serviceAccountName
+          value: RELEASE-NAME-greenkube-polaris
+        documentIndex: 3
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.securityContext.runAsNonRoot
+          value: true
+        documentIndex: 3
+
+  - it: gives Polaris a read-only ClusterRole without Secrets or ConfigMaps
+    templates:
+      - templates/polaris-cronjob.yaml
+    set:
+      sources.polaris.job.enabled: true
+      sources.polaris.job.apiKeySecret.name: gk-polaris
+    asserts:
+      - isKind:
+          of: ClusterRole
+        documentIndex: 1
+      - notContains:
+          path: rules[0].resources
+          content: secrets
+        documentIndex: 1
+      - notContains:
+          path: rules[0].resources
+          content: configmaps
+        documentIndex: 1
+      - notContains:
+          path: rules[0].verbs
+          content: create
+        documentIndex: 1
+
+  - it: can use an existing ServiceAccount
+    templates:
+      - templates/polaris-cronjob.yaml
+    set:
+      sources.polaris.job.enabled: true
+      sources.polaris.job.apiKeySecret.name: gk-polaris
+      sources.polaris.job.rbac.create: false
+      sources.polaris.job.serviceAccountName: polaris-reader
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.serviceAccountName
+          value: polaris-reader
+
+  - it: lets the Polaris job reach the API when network policies are on
+    templates:
+      - templates/networkpolicy.yaml
+    set:
+      monitoring.networkPolicy.enabled: true
+      sources.polaris.job.enabled: true
+      sources.polaris.job.apiKeySecret.name: gk-polaris
+    asserts:
+      - contains:
+          path: spec.ingress
+          any: true
+          content:
+            from:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: greenkube
+                    app.kubernetes.io/instance: RELEASE-NAME
+                    app.kubernetes.io/component: polaris
+            ports:
+              - protocol: TCP
+                port: 8000
+        documentIndex: 0

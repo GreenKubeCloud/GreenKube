@@ -6,7 +6,7 @@ practices. Users push its JSON report to ``POST /api/v1/sources/polaris/reports`
 into signals at once and stored in the inbox, and the ``polaris`` source
 replays them into each scan.
 
-Mapping, pinned against the report shape of Polaris 9.x (``AuditData`` →
+Mapping, pinned against the report shape of Polaris 9.x and 10.x (``AuditData`` →
 ``Results[]`` of ``Result``, each with controller ``Results``, ``PodResult.Results``
 and ``PodResult.ContainerResults[].Results``, every check a ``ResultMessage``
 with ``ID``, ``Message``, ``Success``, ``Severity`` and ``Category``;
