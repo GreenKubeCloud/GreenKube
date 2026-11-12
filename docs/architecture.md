@@ -572,21 +572,21 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - **Deployment:** Static build served by FastAPI at `/`
 
 **Pages** (see [Web UI](ui.md)):
-- `/` — Overview: realized savings, pending verification and projected opportunity side by side (never summed), changes in flight, top recommendations, then footprint KPIs and charts
-- `/nodes` — Node inventory
+- `/` — Overview: realized savings, pending verification and projected opportunity side by side (never summed), changes in flight, top recommendations
 - `/recommendations` — Optimization recommendations, evidence, plan preview, pull requests
 - `/recommendations/{id}` — Recommendation detail (target of pull-request links): eligibility, projected impact, consensus, evidence, pull requests, measurement, timeline
+- `/changes` — Changes board: Plan → PR open → Merged → Synced → Applied → Measuring → Outcome, with filters
 - `/changes/{plan_id}` and `/ledger` — Plan, pull request, applied change and measurement; savings ledger (`?change=` opens one change)
 - `/sources` and `/setup` — Recommendation sources with their runs; setup checklist, capability states and repository suggestions
 - `/automation` — GitOps discovery, workload binding coverage, manual resolution, automation readiness
-- `/report` — Report builder: choose time range, namespace, aggregation, format and download CSV/JSON
+- `/footprint` — Footprint KPIs and charts, `/footprint/nodes` (node inventory) and `/footprint/report` (report builder: time range, namespace, aggregation, CSV/JSON download); `/report` and `/nodes` redirect there
 - `/settings` — Configuration, service health overview with color-coded status indicators, and runtime service configuration
 
 **Features:**
 - Client-side routing for smooth navigation
 - Desktop-first layout; narrow screens are not fully supported yet
 - Data fetched on page load/navigation — no polling or live push updates
-- Export functionality (CSV, JSON) — from the Report page
+- Export functionality (CSV, JSON) — from Footprint › Report
 - **Service health monitoring:** Sidebar shows per-service health dots; Settings page provides detailed health cards with latency, URLs, and auto-discovery status
 - **Startup connectivity popup:** On first load, if data sources are unreachable or unconfigured, a modal alerts the user and shows the Helm values that fix each issue
 - **Configuration as code:** Data-source URLs and tokens come from Helm values and Secrets only; the Settings page shows them read-only with copy-paste Helm snippets

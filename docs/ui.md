@@ -8,16 +8,39 @@ Status is always written as a word (`Measured`, `Projected`, `Action needed`, `F
 
 | Route | Purpose | Reads |
 |---|---|---|
-| `/` **Overview** | Savings first: realized savings, savings pending verification, projected opportunity, changes in flight, the top 5 recommendations in server order, then the footprint charts | `GET /recommendations/savings`, `GET /recommendations/active`, `GET /automation/pull-requests`, `GET /api/v2/changes`, footprint endpoints |
+| `/` **Overview** | Savings first: realized savings, savings pending verification, projected opportunity, changes in flight (linked to the changes board), the top 5 recommendations in server order, and a link to the footprint | `GET /recommendations/savings`, `GET /recommendations/active`, `GET /automation/pull-requests`, `GET /api/v2/changes` |
 | `/recommendations` | The ranked list, filters, plan preview and pull requests; each card links to its detail page | `GET /recommendations/active` and related |
 | `/recommendations/{id}` | One recommendation: proposal, expected value, delivery eligibility with blockers and fixes, projected impact by component, consensus across sources (every vote, agreement, contested reasons), source badges, revision and queued newer advice, evidence, pull requests, measurement and lifecycle timeline | `GET /recommendations/{id}`, `/events`, `/pull-requests`, `GET /api/v2/recommendations/{id}` |
+| `/changes` | The changes board: one pipeline from approved plan to measured outcome (Plan → PR open → Merged → Synced → Applied → Measuring → Outcome), with filters | `GET /api/v2/changes`, `GET /automation/pull-requests`, `GET /api/v2/recommendations?status=pr_open`, `GET /recommendations/{id}/pull-requests`, `GET /automation/plans/{id}` |
 | `/changes/{plan_id}` | One plan: its files, pull request and sync state, the applied change and its latest measurement | `GET /automation/plans/{id}`, `GET /api/v2/changes?plan_id=`, `/measurements` |
 | `/ledger` | Savings totals per method and the applied changes, filterable by measurement state; `?change=` opens one change (a change id, or a plan id filtered on the server) | `GET /recommendations/savings`, `GET /api/v2/changes` (`?plan_id=` for a plan) |
 | `/sources` | Every recommendation source: status, reason, last run, counts, measured track record, registry problems and recent runs on demand | `GET /sources`, `GET /sources/{id}/runs`, `GET /sources/track-record` |
 | `/setup` | The setup checklist, capability states and repository suggestions | `GET /setup/status`, `GET /automation/repositories/suggestions`, `POST /automation/repositories/allowlist` |
-| `/automation`, `/report`, `/nodes`, `/settings` | GitOps console, report builder, node inventory, configuration, account and API keys | unchanged |
+| `/footprint` | Footprint KPIs and charts of the selected period (CO₂e, cost, energy, pods), with **Nodes** (`/footprint/nodes`) and **Report** (`/footprint/report`) sections | dashboard and metrics endpoints, `GET /nodes`, report endpoints |
+| `/automation` | GitOps discovery (one card per controller family), workload binding coverage and manual resolution, plan automation readiness; pull requests are on the changes board | `GET /gitops/status`, `/gitops/coverage`, `/gitops/bindings`, `GET /automation/status` |
+| `/settings` | Configuration, account and API keys | unchanged |
 
 API paths are under `/api/v1` unless they say `/api/v2`.
+
+The old `/report` and `/nodes` routes redirect to `/footprint/report` and `/footprint/nodes` (query string kept), so bookmarks keep working. The footprint is supporting context; the bundled Grafana dashboard stays the deep-analysis surface (see [Prometheus and Grafana](prometheus-grafana.md)).
+
+## Changes board
+
+`/changes` follows every change GreenKube delivered in one pipeline, newest first in each column:
+
+| Column | A row is here when |
+|---|---|
+| **Plan** | The plan is approved (or being applied) and its pull request is not open yet. |
+| **PR open** | The pull request is open, waiting for review and merge. |
+| **Merged** | The pull request is merged and the GitOps controller has not synced it yet. A failed sync stays here with **Sync failed** and its reason. |
+| **Synced** | The controller synced the merge; the workload has not rolled out yet. |
+| **Applied** | The change rolled out; measurement starts after the warm-up. |
+| **Measuring** | The measurement window is open. |
+| **Outcome** | Realized, not realized, inconclusive, contaminated, regressed (rollback review) or closed; plans that ended without a change (closed without merge, superseded, rejected) too. |
+
+Once an applied change exists, its measurement state decides the column; before that, the plan status (`GET /automation/plans/{id}`) decides, and the pull-request record when the plan is no longer stored. Merged pull requests leave the open list, so the board finds them through the recommendations still in delivery (`status=pr_open`). Per-row lookups are capped at 25 per load; the page says how many it skipped.
+
+Each row names its workload and namespace, shows its status in words, flags what needs a human (**Sync failed**, **The controller synced another revision**, **Pull request failed**, **Regressed: review the rollback**) and links to the change page (`/changes/{plan_id}`), the pull request, its recommendations (`/recommendations/{id}`) and, once applied, its ledger entry (`/ledger?change=`). Filters (stage, namespace, needs attention, free text over workload, repository, plan, change and `#recommendation`) are kept in the URL, for example `/changes?stage=measuring&namespace=shop`. **Load older changes** pages through `GET /api/v2/changes`. The board replaces the pull-request list of the Automation page; it only reads.
 
 ## Projected, measured and realized are never summed
 
@@ -57,7 +80,7 @@ Until the server reports the setup as complete, a banner on every page counts th
 
 **Repositories found by discovery** lists the repositories that discovery inferred, with their provider and where they were found. An administrator selects them and clicks **Allow these N repositories** (`POST /api/v1/automation/repositories/allowlist`). The server allows them in its database and answers with the equivalent `automation.repositoryAllowlist` values snippet (`values_snippet`), which the page shows to copy and commit on GitOps-managed installs.
 
-The UI tests run on JSON the FastAPI app generates (`frontend/tests/fixtures/api`, written by `tests/api/test_ui_contract_fixtures.py` with `GREENKUBE_UPDATE_SNAPSHOTS=1`): a response change fails the backend test until the fixtures, and so the UI tests, follow it.
+The UI tests run on JSON the FastAPI app generates (`frontend/tests/fixtures/api`, written by `tests/api/test_ui_contract_fixtures.py` with `GREENKUBE_UPDATE_SNAPSHOTS=1`; it covers the setup status, repository suggestions, recommendation v2 detail, `GET /sources` and `GET /sources/{id}/runs`): a response change fails the backend test until the fixtures, and so the UI tests, follow it.
 
 ## Sources
 
