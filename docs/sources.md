@@ -5,7 +5,7 @@ GreenKube is a neutral aggregator: its own analyzers are one source of advice am
 - Code: `src/greenkube/signals/` (model, SDK, adapters, runner, registry, contract checks).
 - Example package: [`examples/greenkube-source-example`](../examples/greenkube-source-example).
 - API: `GET /api/v1/sources`, `GET /api/v1/sources/{id}/runs`, `GET /api/v1/sources/{id}/signals`, and the push endpoints `POST /api/v1/signals` and `POST /api/v1/sources/krr/reports` ([API reference](api.md)).
-- Connectors: [VPA and Goldilocks](sources/goldilocks.md), [Robusta KRR](sources/krr.md), [Kubecost](sources/kubecost.md), [Push API](sources/push.md), [NodePools and autoscalers](sources/nodepool.md).
+- Connectors: [VPA and Goldilocks](sources/goldilocks.md), [Robusta KRR](sources/krr.md), [Kubecost](sources/kubecost.md), [Push API](sources/push.md), [NodePools and autoscalers](sources/nodepool.md), [Fairwinds Polaris](sources/polaris.md), [GKE recommender](sources/gke.md), [Azure Advisor (AKS)](sources/azure-advisor.md).
 - Public signal schema: [`schemas/signal.v1alpha1.json`](../schemas/signal.v1alpha1.json) and [`schemas/signal-batch.v1alpha1.json`](../schemas/signal-batch.v1alpha1.json).
 - UI: the **Sources** page lists every source with its status, last run, counts, track record and recent runs ([Web UI](ui.md#sources)).
 - Configuration: `sources.pluginsEnabled`, `sources.settings` ([configuration](configuration.md#recommendation-sources-sources)).
@@ -139,8 +139,11 @@ Run statuses: `succeeded` (authoritative), `incomplete`, `failed`, `unavailable`
 | `krr` | oss | container_requests | — | Robusta KRR reports pushed to `POST /api/v1/sources/krr/reports` ([details](sources/krr.md)). |
 | `kubecost` | commercial | container_requests, cleanup, node_pool | — | Kubecost savings APIs ([details](sources/kubecost.md)). |
 | `push` | custom | all | — | Batches pushed to `POST /api/v1/signals` by `push:<client>` ([details](sources/push.md)). |
+| `polaris` | oss | hygiene, container_requests | — | Fairwinds Polaris audits pushed to `POST /api/v1/sources/polaris/reports`: hygiene advisories, plus requests computed from usage for missing requests ([details](sources/polaris.md)). |
+| `gke` | cloud | container_requests | — | GKE recommender insights (Workload Identity, insight type discovered at runtime) ([details](sources/gke.md)). |
+| `azure_advisor` | cloud | node_pool, hygiene | — | Azure Advisor configuration advice about the AKS cluster, advisory only ([details](sources/azure-advisor.md)). |
 
-`krr`, `kubecost` and `push` emit signals only: they create no v1 recommendation and reach recommendations only through consensus. `krr` and `push` replay what was pushed over HTTP (the inbox, migration `0070`) into each scan, so pushed advice goes through the same runner, validation and storage as everything else. Built-in sources may emit signals under another source id declared in `also_emits` (`vpa` emits `goldilocks`; `push` emits `push:<client>`); plugins may not.
+`krr`, `kubecost`, `push`, `polaris`, `gke` and `azure_advisor` emit signals only: they create no v1 recommendation and reach recommendations only through consensus. `krr` and `push` replay what was pushed over HTTP (the inbox, migration `0070`) into each scan, so pushed advice goes through the same runner, validation and storage as everything else. Built-in sources may emit signals under another source id declared in `also_emits` (`vpa` emits `goldilocks`; `push` emits `push:<client>`); plugins may not.
 
 Native analyzers run through the analyzer adapter (`AnalyzerSource`), VPA and the NodePool heuristic through the v1 connector adapter (`RecommendationSourceAdapter`); their internals are unchanged and they keep emitting the same v1 recommendations. All native analyzers form the v1 source `greenkube` in `optimization_runs`: when one of them fails, `greenkube` is incomplete for that run and none of its recommendations go stale.
 

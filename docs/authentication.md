@@ -148,7 +148,7 @@ curl -X POST https://greenkube.example.com/api/v1/auth/api-keys \
 | `write` | Mutations: scans, ignore/restore, mark applied, plan previews, binding resolution |
 | `approve` | Plan approval, which opens pull requests: `POST /api/v1/automation/plans/{id}/approve` |
 | `plans:deliver` | Report that an approved plan was delivered outside GreenKube (`POST /api/v1/automation/plans/{id}/delivery`, `patch` and `ci` delivery modes). A CI job needs `read` + `plans:deliver` only |
-| `signals:write` | Pushing signals: `POST /api/v1/signals` ([Push API](sources/push.md)) and `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)) |
+| `signals:write` | Pushing signals: `POST /api/v1/signals` ([Push API](sources/push.md)), `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)) and `POST /api/v1/sources/polaris/reports` ([Polaris](sources/polaris.md)). A key pushes `POST /api/v1/signals` batches only as `push:<key name>` (`403 push_client_mismatch` otherwise) |
 | `metrics:read` | Only the Prometheus endpoint `/prometheus/metrics` |
 | `admin` | Everything, including API keys |
 
