@@ -73,7 +73,12 @@ jobs:
         run: uv run pyrefly check
 
       - name: Run tests with pytest (coverage gate from pyproject.toml)
-        run: uv run pytest --cov=greenkube --cov-report=term-missing --tb=short --no-header --color=no -rs | tee pytest.log
+        # shell: bash runs with -o pipefail, so a failing pytest (or coverage
+        # gate) fails this step even though its output is piped through tee.
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest --cov=greenkube --cov-report=term-missing --tb=short --no-header --color=no -rs | tee pytest.log
 
       # The PostgreSQL service above must reach every live-PostgreSQL test (O8).
       - name: Check that the PostgreSQL tests ran

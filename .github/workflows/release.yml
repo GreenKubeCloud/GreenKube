@@ -72,7 +72,12 @@ jobs:
         run: uv run pyrefly check
 
       - name: Test with coverage
-        run: uv run pytest --cov=greenkube --cov-report=term-missing --cov-report=xml -rs | tee pytest.log
+        # shell: bash runs with -o pipefail, so a failing pytest (or coverage
+        # gate) fails this step even though its output is piped through tee.
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest --cov=greenkube --cov-report=term-missing --cov-report=xml -rs | tee pytest.log
 
       - name: Check that the PostgreSQL tests ran
         run: .github/scripts/check-postgres-ran.sh pytest.log
