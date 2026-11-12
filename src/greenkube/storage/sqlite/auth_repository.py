@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from greenkube.auth.models import ApiKey, AuthSession, User
+from greenkube.auth.models import ApiKey, AuthSession, OidcLogin, User
 from greenkube.storage.base_auth_repository import AuthRepository
 from greenkube.utils.time import ensure_utc
 
@@ -13,8 +13,10 @@ from greenkube.utils.time import ensure_utc
 _FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 _USER_COLUMNS = (
-    "id, username, password_hash, role, must_change_password, created_at, updated_at, password_changed_at, disabled_at"
+    "id, username, password_hash, role, must_change_password, created_at, updated_at, password_changed_at, "
+    "disabled_at, auth_source, external_id"
 )
+_OIDC_COLUMNS = "state_sha256, nonce, code_verifier, redirect_uri, return_to, created_at, expires_at"
 _SESSION_COLUMNS = (
     "token_sha256, id, user_id, created_at, last_seen_at, idle_expires_at, absolute_expires_at, "
     "remember, user_agent, ip, revoked_at"
@@ -45,6 +47,8 @@ def _user(row) -> User:
         updated_at=_required(row[6]),
         password_changed_at=_decode(row[7]),
         disabled_at=_decode(row[8]),
+        auth_source=row[9] or "local",
+        external_id=row[10],
     )
 
 
@@ -94,6 +98,20 @@ def _user_values(user: User) -> tuple:
         _encode(user.updated_at),
         _encode(user.password_changed_at),
         _encode(user.disabled_at),
+        user.auth_source,
+        user.external_id,
+    )
+
+
+def _oidc_login(row) -> OidcLogin:
+    return OidcLogin(
+        state_sha256=row[0],
+        nonce=row[1],
+        code_verifier=row[2],
+        redirect_uri=row[3],
+        return_to=row[4],
+        created_at=_required(row[5]),
+        expires_at=_required(row[6]),
     )
 
 
@@ -124,8 +142,8 @@ class SQLiteAuthRepository(AuthRepository):
     async def create_user(self, user: User) -> bool:
         return (
             await self._write(
-                f"INSERT INTO auth_users ({_USER_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(username) DO NOTHING",
+                f"INSERT INTO auth_users ({_USER_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT DO NOTHING",
                 _user_values(user),
             )
             == 1
@@ -134,8 +152,8 @@ class SQLiteAuthRepository(AuthRepository):
     async def create_first_user(self, user: User) -> bool:
         return (
             await self._write(
-                f"INSERT INTO auth_users ({_USER_COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? "
-                "WHERE NOT EXISTS (SELECT 1 FROM auth_users) ON CONFLICT(username) DO NOTHING",
+                f"INSERT INTO auth_users ({_USER_COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+                "WHERE NOT EXISTS (SELECT 1 FROM auth_users) ON CONFLICT DO NOTHING",
                 _user_values(user),
             )
             == 1
@@ -165,6 +183,57 @@ class SQLiteAuthRepository(AuthRepository):
     async def any_user_must_change_password(self) -> bool:
         row = await self._fetchone("SELECT 1 FROM auth_users WHERE must_change_password = 1 LIMIT 1")
         return row is not None
+
+    # --- SSO identities and roles (F16) -----------------------------------------
+    async def get_user_by_external_id(self, external_id: str) -> User | None:
+        row = await self._fetchone(f"SELECT {_USER_COLUMNS} FROM auth_users WHERE external_id = ?", (external_id,))
+        return _user(row) if row else None
+
+    async def list_users(self) -> list[User]:
+        rows = await self._fetchall(f"SELECT {_USER_COLUMNS} FROM auth_users ORDER BY username")
+        return [_user(row) for row in rows]
+
+    async def set_role(self, user_id: str, role: str, *, now: datetime) -> bool:
+        return (
+            await self._write(
+                "UPDATE auth_users SET role = ?, updated_at = ? WHERE id = ?", (role, _encode(now), user_id)
+            )
+            == 1
+        )
+
+    async def set_disabled(self, user_id: str, disabled_at: datetime | None, *, now: datetime) -> bool:
+        return (
+            await self._write(
+                "UPDATE auth_users SET disabled_at = ?, updated_at = ? WHERE id = ?",
+                (_encode(disabled_at), _encode(now), user_id),
+            )
+            == 1
+        )
+
+    async def create_oidc_login(self, login: OidcLogin) -> None:
+        await self._write(
+            f"INSERT INTO auth_oidc_logins ({_OIDC_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                login.state_sha256,
+                login.nonce,
+                login.code_verifier,
+                login.redirect_uri,
+                login.return_to,
+                _encode(login.created_at),
+                _encode(login.expires_at),
+            ),
+        )
+
+    async def consume_oidc_login(self, state_sha256: str) -> OidcLogin | None:
+        async with self.db_manager.transaction() as conn:
+            async with conn.execute(
+                f"DELETE FROM auth_oidc_logins WHERE state_sha256 = ? RETURNING {_OIDC_COLUMNS}", (state_sha256,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        return _oidc_login(row) if row else None
+
+    async def purge_oidc_logins(self, *, now: datetime) -> int:
+        return await self._write("DELETE FROM auth_oidc_logins WHERE expires_at <= ?", (_encode(now),))
 
     # --- sessions ----------------------------------------------------------
     async def create_session(self, session: AuthSession) -> None:

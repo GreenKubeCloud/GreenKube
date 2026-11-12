@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from greenkube.auth.models import ApiKey, AuthSession, User
+from greenkube.auth.models import ApiKey, AuthSession, OidcLogin, User
 
 
 class AuthRepository(ABC):
@@ -39,6 +39,31 @@ class AuthRepository(ABC):
 
     @abstractmethod
     async def any_user_must_change_password(self) -> bool: ...
+
+    # --- SSO identities and roles (F16) -----------------------------------------
+    @abstractmethod
+    async def get_user_by_external_id(self, external_id: str) -> User | None: ...
+
+    @abstractmethod
+    async def list_users(self) -> list[User]:
+        """Every account, ordered by username."""
+
+    @abstractmethod
+    async def set_role(self, user_id: str, role: str, *, now: datetime) -> bool: ...
+
+    @abstractmethod
+    async def set_disabled(self, user_id: str, disabled_at: datetime | None, *, now: datetime) -> bool: ...
+
+    @abstractmethod
+    async def create_oidc_login(self, login: OidcLogin) -> None: ...
+
+    @abstractmethod
+    async def consume_oidc_login(self, state_sha256: str) -> OidcLogin | None:
+        """Delete and return a pending sign-in (single use); ``None`` when unknown or already used."""
+
+    @abstractmethod
+    async def purge_oidc_logins(self, *, now: datetime) -> int:
+        """Delete expired pending sign-ins."""
 
     # --- sessions ----------------------------------------------------------
     @abstractmethod

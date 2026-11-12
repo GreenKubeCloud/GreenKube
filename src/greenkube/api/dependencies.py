@@ -7,6 +7,7 @@ via FastAPI's Depends() mechanism, keeping the API layer decoupled from
 concrete implementations.
 """
 
+import dataclasses
 import hashlib
 import logging
 import re
@@ -19,9 +20,10 @@ from fastapi import Depends, HTTPException, Query, Request
 
 from greenkube.auth.http import CSRF_HEADER, is_same_origin
 from greenkube.auth.metrics import record_auth_failure
-from greenkube.auth.principal import ALL_SCOPES, ANONYMOUS, SAFE_METHODS, Principal, Role, required_scope
-from greenkube.auth.service import AuthService, api_key_principal, user_principal
-from greenkube.auth.settings import AuthSettings
+from greenkube.auth.principal import ALL_SCOPES, ANONYMOUS, SAFE_METHODS, Principal, Role, Scope, required_scope
+from greenkube.auth.proxy import UntrustedProxyHeader, read_proxy_identity
+from greenkube.auth.service import AuthError, AuthService, api_key_principal, user_principal
+from greenkube.auth.settings import AUTH_MODES, AuthSettings
 from greenkube.auth.tokens import constant_time_equals, sha256_hex
 from greenkube.gitops.contracts import Operation, Plan
 from greenkube.gitops.discovery.kubernetes import KubernetesDiscoverySource
@@ -106,11 +108,8 @@ def verify_api_key(request: Request) -> None:
     if path in _PUBLIC_API_PATHS or (request.method == "POST" and _is_webhook_ingress_path(path)):
         return
 
-    if getattr(cfg, "API_AUTH_MODE", "api_key") not in ("api_key", "session"):
-        raise HTTPException(
-            status_code=503,
-            detail="The configured OIDC authentication contract is not available in this deployment.",
-        )
+    if getattr(cfg, "API_AUTH_MODE", "api_key") not in AUTH_MODES:
+        raise HTTPException(status_code=503, detail="The configured authentication mode is not supported.")
     if not api_key:
         if getattr(cfg, "ENVIRONMENT", "development") == "production":
             raise HTTPException(status_code=503, detail="API authentication is not configured.")
@@ -137,7 +136,13 @@ def verify_api_key(request: Request) -> None:
 
 # Auth endpoints reachable without credentials: they resolve a principal when
 # one is presented but never require it.
-_AUTH_PUBLIC_PATHS = ("/api/v1/auth/login", "/api/v1/auth/logout")
+_AUTH_PUBLIC_PATHS = (
+    "/api/v1/auth/login",
+    "/api/v1/auth/logout",
+    "/api/v1/auth/providers",
+    "/api/v1/auth/oidc/login",
+    "/api/v1/auth/oidc/callback",
+)
 # What a user who must still change the initial password may call.
 _PASSWORD_CHANGE_ALLOWED = ("/api/v1/auth/me", "/api/v1/auth/password", "/api/v1/auth/logout", "/api/v1/version")
 _UNAUTHORIZED = "Authentication required."
@@ -201,7 +206,69 @@ async def _session_principal(request: Request, settings: AuthSettings, service: 
         return None
     session, user = resolved
     request.state.auth_session = session
+    request.state.auth_user = user
     return user_principal(user, session, token)
+
+
+async def _proxy_principal(
+    request: Request, settings: AuthSettings, service: AuthService | None, current: Principal | None
+) -> Principal | None:
+    """Resolve trusted authentication-proxy identity headers (``API_AUTH_MODE=proxy``, F16).
+
+    Identity headers from a peer outside ``TRUSTED_PROXY_IPS`` are rejected
+    outright: they are a spoofing attempt or a misconfigured proxy. A session
+    of the same identity is kept (its role follows the forwarded groups); any
+    other identity gets a principal without a session, which may read and
+    which ``GET /auth/me`` turns into a session. Mutations need that session
+    and its CSRF token. A local account that signed in with its password keeps
+    its own session (break-glass access through the proxy).
+    """
+    try:
+        identity = read_proxy_identity(request, settings)
+    except UntrustedProxyHeader:
+        record_auth_failure("untrusted_proxy_header")
+        logger.warning(
+            "Rejected identity headers from %s, which is not in TRUSTED_PROXY_IPS.",
+            request.client.host if request.client else "unknown",
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "UNTRUSTED_PROXY_HEADER",
+                "message": "Identity headers are only accepted from the trusted authentication proxy.",
+            },
+        ) from None
+    except ValueError:
+        record_auth_failure("sso")
+        raise HTTPException(
+            status_code=401, detail={"code": "INVALID_IDENTITY", "message": "The proxy sent no usable identity."}
+        ) from None
+    if identity is None:
+        return current
+    if service is None:
+        raise HTTPException(status_code=503, detail="The account store is not available.")
+    user = getattr(request.state, "auth_user", None)
+    if current is not None and current.is_session and getattr(user, "auth_source", None) == "local":
+        # A local account signed in with its password (break-glass through the proxy) keeps its session.
+        return current
+    same_identity = (
+        current is not None and current.is_session and getattr(user, "external_id", None) == (identity.external_id)
+    )
+    if same_identity and current is not None and current.role == service.sso_role(identity.groups):
+        return current
+    try:
+        user = await service.sso_user("proxy", identity.username, identity.username, identity.groups)
+    except AuthError as error:
+        record_auth_failure("sso")
+        raise HTTPException(
+            status_code=error.status_code, detail={"code": error.code, "message": error.message}
+        ) from None
+    if same_identity and current is not None:
+        # Same session, role re-synchronised from the forwarded groups.
+        return dataclasses.replace(current, role=user.role, scopes=user_principal(user).scopes)
+    request.state.auth_session = None
+    request.state.pending_sso_user = user
+    return user_principal(user)
 
 
 async def _open_access(settings: AuthSettings, service: AuthService | None) -> bool:
@@ -245,11 +312,8 @@ async def authenticate(request: Request) -> None:
         return
 
     settings = AuthSettings.from_config(get_config())
-    if settings.mode not in ("api_key", "session"):
-        raise HTTPException(
-            status_code=503,
-            detail="The configured OIDC authentication contract is not available in this deployment.",
-        )
+    if settings.mode not in AUTH_MODES:
+        raise HTTPException(status_code=503, detail="The configured authentication mode is not supported.")
     service = get_auth_service(request)
     auth_public = path in _AUTH_PUBLIC_PATHS
 
@@ -257,6 +321,8 @@ async def authenticate(request: Request) -> None:
         principal: Principal | None = await _bearer_principal(request, settings, service)
     else:
         principal = await _session_principal(request, settings, service)
+        if settings.proxy_enabled and not auth_public:
+            principal = await _proxy_principal(request, settings, service, principal)
 
     if principal is None:
         if auth_public:
@@ -280,12 +346,51 @@ async def authenticate(request: Request) -> None:
         record_auth_failure("forbidden_scope")
         raise _forbidden("INSUFFICIENT_SCOPE", f"This credential lacks the '{scope}' scope.")
 
-    if principal.is_session and request.method.upper() not in SAFE_METHODS:
-        if not is_same_origin(request, settings, require=True) or not constant_time_equals(
-            request.headers.get(CSRF_HEADER), principal.csrf_token
+    if principal.kind == "user" and request.method.upper() not in SAFE_METHODS:
+        # A user principal without a session (proxy identity before GET /auth/me) has no
+        # CSRF token: the same code makes the UI refresh /auth/me, which starts the session.
+        if (
+            not principal.is_session
+            or not is_same_origin(request, settings, require=True)
+            or not constant_time_equals(request.headers.get(CSRF_HEADER), principal.csrf_token)
         ):
             record_auth_failure("csrf")
             raise _forbidden("CSRF_REJECTED", "Cross-site request rejected: reload the page and try again.")
+
+
+def require_scope(scope: str | Scope):
+    """Route dependency enforcing one scope, on top of the global :func:`authenticate` table (F16).
+
+    Roles map to scopes (``viewer``: read; ``operator``: write, approve, deliver;
+    ``admin``: everything), so ``require_scope(Scope.APPROVE)`` is "operator or
+    above" for users and "an ``approve`` key" for machines. Declared on the
+    mutating routes themselves so that a change to the path table can never
+    silently open them.
+    """
+    needed = str(scope.value if isinstance(scope, Scope) else scope)
+
+    def dependency(request: Request) -> Principal:
+        principal = getattr(request.state, "principal", None)
+        if not isinstance(principal, Principal):
+            # Fail closed: a route guard never runs without the global authentication.
+            raise HTTPException(status_code=401, detail=_UNAUTHORIZED)
+        if not principal.has_scope(needed):
+            record_auth_failure("forbidden_scope")
+            role = _ROLE_HINT.get(needed, "admin")
+            raise _forbidden("INSUFFICIENT_SCOPE", f"This needs the '{needed}' scope (role {role} or above).")
+        return principal
+
+    dependency.__name__ = f"require_scope_{needed.replace(':', '_')}"
+    return dependency
+
+
+_ROLE_HINT = {
+    Scope.READ.value: "viewer",
+    Scope.METRICS_READ.value: "viewer",
+    Scope.WRITE.value: "operator",
+    Scope.APPROVE.value: "operator",
+    Scope.PLANS_DELIVER.value: "operator",
+}
 
 
 def get_principal(request: Request) -> Principal:

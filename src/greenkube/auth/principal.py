@@ -66,6 +66,8 @@ class Principal:
     api_key_id: str | None = None
     legacy: bool = False
     actor_override: str | None = None
+    # How a user signed in: "local", "proxy" or "oidc" (F16); None for keys and anonymous.
+    auth_source: str | None = None
 
     @property
     def actor(self) -> str:

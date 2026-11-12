@@ -296,6 +296,24 @@ class Config(BaseSettings):
     AUTH_ADMIN_PASSWORD: Optional[str] = None
     # Secret holding the generated initial admin password (Helm: <release>-initial-admin).
     AUTH_INITIAL_ADMIN_SECRET: str = ""
+    # --- Single sign-on and roles (F16) ---
+    # proxy: identity headers from TRUSTED_PROXY_IPS only; oidc: native OpenID Connect
+    # (authorization code + PKCE, OIDC_ISSUER, OIDC_AUDIENCE = client id).
+    # Local accounts keep signing in with a password in SSO modes unless this is false.
+    AUTH_LOCAL_LOGIN: bool = True
+    AUTH_PROXY_USER_HEADERS: str = "X-Auth-Request-User,X-Forwarded-User"
+    AUTH_PROXY_GROUPS_HEADERS: str = "X-Auth-Request-Groups,X-Forwarded-Groups"
+    # JSON object role -> IdP groups, e.g. {"admin": ["platform-admins"], "operator": ["sre"]}.
+    AUTH_ROLE_GROUPS: str = ""
+    # Role of an SSO user without a mapped group: viewer, operator, admin or none (no access).
+    AUTH_DEFAULT_ROLE: str = "viewer"
+    OIDC_CLIENT_SECRET: Optional[str] = None
+    OIDC_SCOPES: str = "openid profile email"
+    OIDC_USERNAME_CLAIM: str = "preferred_username"
+    OIDC_GROUPS_CLAIM: str = "groups"
+    # Defaults to <GREENKUBE_EXTERNAL_URL>/api/v1/auth/oidc/callback.
+    OIDC_REDIRECT_URL: str = ""
+    OIDC_PROVIDER_NAME: str = "SSO"
     API_RATE_LIMIT: str = "60/minute"
     ROOT_PATH: str = ""
     METRICS_LIST_MAX_RANGE_DAYS: int = 30
@@ -837,12 +855,22 @@ class Config(BaseSettings):
         self.API_AUTH_MODE = self.API_AUTH_MODE.lower()
         if self.ENVIRONMENT not in ("development", "test", "production"):
             raise ValueError("ENVIRONMENT must be 'development', 'test', or 'production'.")
-        if self.API_AUTH_MODE not in ("api_key", "oidc", "session"):
-            raise ValueError("API_AUTH_MODE must be 'api_key', 'oidc', or 'session'.")
+        if self.API_AUTH_MODE not in ("api_key", "oidc", "proxy", "session"):
+            raise ValueError("API_AUTH_MODE must be 'api_key', 'oidc', 'proxy', or 'session'.")
         if self.API_AUTH_MODE == "oidc" and (not self.OIDC_ISSUER or not self.OIDC_AUDIENCE):
             raise ValueError("OIDC_ISSUER and OIDC_AUDIENCE are required when API_AUTH_MODE is 'oidc'.")
-        if self.API_AUTH_MODE == "session" and not self.SESSION_COOKIE_NAME:
-            raise ValueError("SESSION_COOKIE_NAME must not be empty when API_AUTH_MODE is 'session'.")
+        if self.API_AUTH_MODE == "oidc" and not str(self.OIDC_ISSUER).startswith("https://"):
+            if self.ENVIRONMENT == "production" or not str(self.OIDC_ISSUER).startswith("http://"):
+                raise ValueError("OIDC_ISSUER must be an https:// URL.")
+        if self.API_AUTH_MODE == "proxy" and not self.TRUSTED_PROXY_IPS.strip():
+            # Fail closed: identity headers from anyone would let any client choose its identity.
+            raise ValueError("TRUSTED_PROXY_IPS must list the authentication proxy when API_AUTH_MODE is 'proxy'.")
+        if self.API_AUTH_MODE != "api_key" and not self.SESSION_COOKIE_NAME:
+            raise ValueError("SESSION_COOKIE_NAME must not be empty when browser sessions are enabled.")
+        from greenkube.auth.roles import normalize_default_role, parse_role_groups
+
+        parse_role_groups(self.AUTH_ROLE_GROUPS)
+        self.AUTH_DEFAULT_ROLE = normalize_default_role(self.AUTH_DEFAULT_ROLE)
         # Auto-detect cluster name when not explicitly configured
         if not self.CLUSTER_NAME:
             self.CLUSTER_NAME = self._auto_detect_cluster_name()
