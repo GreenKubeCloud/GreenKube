@@ -53,9 +53,10 @@ opened*. To keep the Git tokens out of every pod, also remove `automation.provid
 ### From a standalone or production install with PostgreSQL
 
 Use `--reset-then-reuse-values` (Helm 3.14 or later) or pass your values file again: the new chart defaults
-then apply, plus only the values you set. `--reuse-values` also carries over every 0.3.x *default*, so the
-install notes list all of them as deprecated, and the 0.3.x default `automation.enabled: false` pauses delivery
-until you drop it.
+then apply, plus only the values you set. Plain `--reuse-values` does not work for this upgrade: Helm then
+keeps the 0.3.x chart's defaults instead of the new ones, so the keys added in 0.4 (`api`, `controller`,
+`renderer`, `sources`...) are missing, and the chart stops before changing anything with
+`the chart defaults are missing` and these two commands.
 
 ```bash
 helm repo update

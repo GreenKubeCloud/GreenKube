@@ -164,6 +164,17 @@ def test_install_refuses_a_namespace_it_did_not_create(harness) -> None:
     assert mutations(calls) == []
 
 
+def test_install_waits_for_the_one_install_deployments(harness) -> None:
+    objs = {"namespace_greenkube": namespace("greenkube", {"greenkube.io/e2e": "true"})}
+    _, calls = harness("install.sh", objs=objs)
+
+    rollouts = [call for call in calls if "rollout status" in call]
+    assert any("deployment/greenkube-controller" in call for call in rollouts), calls
+    assert any("deployment/greenkube-api" in call for call in rollouts), calls
+    # The 0.3.x standalone Deployment no longer exists.
+    assert not any("deployment/greenkube " in call for call in rollouts)
+
+
 def test_setup_gitops_refuses_an_existing_application_it_did_not_create(harness) -> None:
     objs = {
         "namespace_greenkube-e2e-apps": namespace("greenkube-e2e-apps", {"greenkube.io/e2e": "true"}),

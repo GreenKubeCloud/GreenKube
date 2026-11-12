@@ -52,7 +52,9 @@ helm upgrade --install "${GK_RELEASE}" "${REPO_ROOT}/helm-chart" \
   --set-string image.tag="${GK_IMAGE_TAG}" \
   --wait --timeout 10m
 
-kubectl -n "${GK_NAMESPACE}" rollout status "deployment/${GK_RELEASE}" --timeout=300s >/dev/null
+for component in controller api renderer; do
+  kubectl -n "${GK_NAMESPACE}" rollout status "deployment/${GK_RELEASE}-${component}" --timeout=300s >/dev/null
+done
 revision="$(helm -n "${GK_NAMESPACE}" status "${GK_RELEASE}" -o json | jq -r .version)"
 pods="$(kubectl -n "${GK_NAMESPACE}" get pods -o jsonpath='{range .items[*]}{.metadata.name}:{.status.phase} {end}')"
 evidence install ok "helm revision ${revision}; ${pods}"

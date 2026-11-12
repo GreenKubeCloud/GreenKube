@@ -25,6 +25,7 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from greenkube.api.dependencies import validate_namespace
+from greenkube.api.routers.automation import external_pull_request_url
 from greenkube.storage.change_repository import ChangeRepository, get_change_repository
 from greenkube.storage.measurement_repository import (
     SavingsMeasurementRepository,
@@ -57,6 +58,7 @@ async def get_measurements_repository() -> SavingsMeasurementRepository:
 
 def _change_payload(change: ChangeEvent, status: Optional[ChangeStatus]) -> dict[str, Any]:
     payload = change.model_dump(mode="json")
+    payload["pr_url"] = external_pull_request_url(change.pr_url)
     payload["state"] = status.state.value if status is not None else None
     payload["measurement_sequence"] = status.sequence if status is not None else None
     payload["latest_measurement_id"] = status.latest_measurement_id if status is not None else None

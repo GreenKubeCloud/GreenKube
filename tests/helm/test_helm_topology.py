@@ -261,3 +261,37 @@ def test_sqlite_claim_survives_the_switch_to_postgres(legacy_chart: Path):
     assert claim["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
     assert _get(new, "Deployment", "greenkube-controller")["spec"]["replicas"] == 0
     assert "greenkube-postgres" in _names(new, "StatefulSet")
+
+
+def _merge(base: dict, override: dict) -> dict:
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def _reuse_values_chart(legacy_chart: Path, tmp_path: Path, user_values: dict) -> Path:
+    """The current chart as `helm upgrade --reuse-values` renders it over a 0.3.1 release.
+
+    Helm then replaces the new chart's defaults with the old release's coalesced
+    values (the 0.3.1 defaults plus what the user set), so every key the new
+    chart added is missing.
+    """
+    chart = tmp_path / "reuse"
+    shutil.copytree(CHART_PATH, chart)
+    defaults = yaml.safe_load((legacy_chart / "values.yaml").read_text(encoding="utf-8"))
+    (chart / "values.yaml").write_text(yaml.safe_dump(_merge(defaults, user_values)), encoding="utf-8")
+    return chart
+
+
+def test_reuse_values_upgrade_from_0_3_fails_with_the_supported_commands(legacy_chart: Path, tmp_path: Path):
+    chart = _reuse_values_chart(legacy_chart, tmp_path, {"profile": "standalone", "automation": {"enabled": True}})
+
+    result = _run(chart, check=False)
+
+    assert result.returncode != 0
+    assert "nil pointer" not in result.stderr
+    assert "--reuse-values" in result.stderr
+    assert "--reset-then-reuse-values" in result.stderr

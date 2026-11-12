@@ -1520,7 +1520,7 @@ class TestOrphanedLoadBalancer:
         cfg.LOAD_BALANCER_COST_PER_MONTH = 25.0
         custom_recommender = NativeRecommender(config=cfg)
 
-        services = [_lb(name="lb-pricey", namespace="default", endpoint_count=0)]
+        services = [_lb(name="lb-pricey", namespace="default", endpoint_count=0, external_ip="203.0.113.7")]
         metrics = [_make_metric(pod_name="unrelated-pod")]
         recs = [
             r

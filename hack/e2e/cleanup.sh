@@ -15,6 +15,19 @@ need_cmd kubectl helm curl jq
 require_e2e_context
 trap stop_port_forwards EXIT
 
+# PersistentVolumes whose claim lived in the GreenKube namespace, as a JSON array
+# (empty when the volumes cannot be listed).
+release_volumes() {
+  kubectl get pv -o json 2>/dev/null |
+    jq -c --arg ns "${GK_NAMESPACE}" '[.items[] | select(.spec.claimRef.namespace == $ns)]'
+}
+
+no_release_volumes() {
+  local volumes
+  volumes="$(release_volumes)"
+  [[ -z "${volumes}" || "${volumes}" == "[]" ]]
+}
+
 skip_foreign() {
   warn "Leaving $1 alone: it exists but has no ${E2E_OWNER_LABEL} label (set E2E_ADOPT=1 if it is disposable)."
 }
@@ -51,6 +64,21 @@ if harness_owns namespace "${GK_NAMESPACE}"; then
   fi
   log "Removing namespace ${GK_NAMESPACE} (data and credentials included)..."
   kubectl delete namespace "${GK_NAMESPACE}" --ignore-not-found --wait=true >/dev/null
+  # The PostgreSQL volume must be gone before a fresh install: Minikube's hostpath
+  # provisioner reuses the directory of a claim name, so a volume it failed to
+  # delete would hand the old database (and its old password) to the new release.
+  if ! wait_until "the volumes of namespace ${GK_NAMESPACE} to be deleted" 120 3 no_release_volumes; then
+    while read -r volume path; do
+      [[ -n "${volume}" ]] || continue
+      if [[ "${path}" == /tmp/hostpath-provisioner/${GK_NAMESPACE}/* ]]; then
+        warn "Removing the leftover hostpath volume ${volume} (${path})."
+        minikube ssh -- sudo rm -rf "${path}" >/dev/null
+        kubectl delete pv "${volume}" --ignore-not-found >/dev/null
+      else
+        warn "Volume ${volume} of namespace ${GK_NAMESPACE} was not deleted; delete it before a fresh install."
+      fi
+    done < <(release_volumes | jq -r '.[] | "\(.metadata.name) \(.spec.hostPath.path // "")"')
+  fi
   # Cluster-scoped objects of the release (helm uninstall removes them; this
   # covers a release whose namespace was deleted first).
   kubectl delete clusterrole,clusterrolebinding -l "app.kubernetes.io/instance=${GK_RELEASE}" \

@@ -49,6 +49,13 @@ def test_quickstart_accelerates_evidence() -> None:
     values = _values()
     assert values["config"]["prometheus"]["queryRangeStep"] == "30s"
     assert values["config"]["recommendations"]["minSamples"] <= 6
+    # The sample workloads are oversized: their rightsizings are decreases, which
+    # otherwise wait for 7 days of observed coverage (weekly cycles).
+    assert values["config"]["recommendations"]["minDecreaseCoverageDays"] * 86400 <= 600
+    # A merged change is decided by the interim verifier over windowHours: change
+    # measurement (C3) needs a 7-day baseline and a 7-day post-window.
+    assert values["config"]["recommendations"]["changeMeasurement"]["enabled"] is False
+    assert values["config"]["recommendations"]["verification"]["windowHours"] <= 0.1
     # F12: automation is always on; no feature flag in the values.
     assert "enabled" not in values["automation"]
     assert "profile" not in values

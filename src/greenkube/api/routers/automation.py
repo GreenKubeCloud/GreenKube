@@ -313,6 +313,38 @@ def _configured_gitea_web_base_urls() -> dict[str, str]:
     return web_base_urls
 
 
+def external_pull_request_url(url: str | None) -> str | None:
+    """A stored pull-request URL on a Gitea API origin, rewritten to that provider's ``webBaseUrl``.
+
+    For records that carry no provider id (change records): the provider is
+    matched by the origin of its ``apiBaseUrl``. Other URLs are returned as they are.
+    """
+    if not url:
+        return url
+    serialized = os.getenv("GITOPS_PROVIDERS_JSON", "").strip()
+    if not serialized:
+        return url
+    try:
+        web_base_urls = _configured_gitea_web_base_urls()
+        payload = json.loads(serialized)
+    except ValueError:
+        return url
+    providers = payload.get("providers") if isinstance(payload, dict) else payload
+    parsed_url = urlsplit(url)
+    for provider in providers if isinstance(providers, list) else []:
+        if not isinstance(provider, dict):
+            continue
+        web_base_url = web_base_urls.get(str(provider.get("id") or ""))
+        api_base_url = provider.get("apiBaseUrl")
+        if not web_base_url or not isinstance(api_base_url, str):
+            continue
+        api = urlsplit(api_base_url)
+        if (api.scheme, api.netloc.lower()) == (parsed_url.scheme, parsed_url.netloc.lower()):
+            web = urlsplit(web_base_url)
+            return urlunsplit((web.scheme, web.netloc, parsed_url.path, "", ""))
+    return url
+
+
 def _externalize_pull_request_urls(records: list[PullRequestRecord]) -> list[PullRequestRecord]:
     web_base_urls = _configured_gitea_web_base_urls()
     externalized: list[PullRequestRecord] = []
