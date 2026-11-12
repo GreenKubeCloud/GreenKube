@@ -122,6 +122,7 @@ class TestGke:
         [advice] = [s for s in report.signals if isinstance(s.proposal, AdvisoryProposal)]
         assert advice.kind == "WORKLOAD_UNDERPROVISIONED"
         assert advice.target.kind == "StatefulSet" and advice.target.name == "db"
+        assert isinstance(advice.proposal, AdvisoryProposal)
         assert "increase its requests" in advice.proposal.text
         assert advice.capability == Capability.CONTAINER_REQUESTS
 
