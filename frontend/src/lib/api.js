@@ -887,3 +887,20 @@ export function createApiKey({ name, scopes, expiresInDays = null }) {
 export function revokeApiKey(keyId) {
 	return request(`${BASE}/auth/api-keys/${encodeURIComponent(keyId)}`, {}, { method: 'DELETE' });
 }
+
+// --- Changes board (K4) ----------------------------------------------------
+
+/**
+ * v2 recommendations whose pull request is open or merged and not applied yet
+ * (`status=pr_open`): the changes board finds merged plans awaiting sync here.
+ * @param {{namespace?: string, limit?: number, signal?: AbortSignal}} [opts]
+ * @returns {Promise<{items: Object[], total: number}>}
+ */
+export function listDeliveringRecommendations({ namespace, limit, signal } = {}) {
+	return request(`${BASE_V2}/recommendations`, { namespace, status: 'pr_open', limit }, { signal });
+}
+
+/** One automation plan (`GET /automation/plans/{id}`), abortable. */
+export function getAutomationPlanStatus(planId, { signal } = {}) {
+	return request(`${BASE}/automation/plans/${encodeURIComponent(planId)}`, {}, { signal });
+}
