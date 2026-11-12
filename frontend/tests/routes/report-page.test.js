@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/svelte';
-import ReportPage from '../../src/routes/report/+page.svelte';
+import ReportPage from '../../src/routes/footprint/report/+page.svelte';
 
 
 vi.mock('$lib/api.js', () => ({

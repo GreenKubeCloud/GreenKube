@@ -35,12 +35,12 @@
 	const navItems = [
 		{ href: '/', label: 'Overview' },
 		{ href: '/recommendations', label: 'Recommendations' },
+		{ href: '/changes', label: 'Changes' },
 		{ href: '/ledger', label: 'Ledger' },
+		{ href: '/footprint', label: 'Footprint' },
 		{ href: '/automation', label: 'Automation' },
 		{ href: '/sources', label: 'Sources' },
 		{ href: '/setup', label: 'Setup' },
-		{ href: '/report', label: 'Report' },
-		{ href: '/nodes', label: 'Nodes' },
 		{ href: '/settings', label: 'Settings' }
 	];
 
@@ -251,7 +251,7 @@
 		</div>
 
 		<!-- Navigation -->
-		<nav class="flex-1 py-4 px-2 space-y-1 overflow-y-auto">
+		<nav class="flex-1 py-4 px-2 space-y-1 overflow-y-auto" aria-label="Main">
 			{#each navItems as item}
 				<a
 					href={item.href}
