@@ -516,3 +516,20 @@ async def test_cluster_identity_is_stored_once_and_transient_errors_write_nothin
 
     local = await ClusterIdentityResolver(ledger.repo, "laptop", reader=no_cluster).resolve()
     assert local.cluster_uid == "name:laptop" and local.source == "cluster_name"
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_change_rows_carry_the_cluster_uid_once_resolved(ledger: LedgerDb, monkeypatch):
+    from greenkube.storage.change_repository import ChangeRepository
+    from tests.verify.fixtures import change_event  # pyrefly: ignore[missing-import]
+
+    monkeypatch.setattr("greenkube.core.savings_attributor.savings_cluster_name", lambda: CLUSTER)
+    changes = ChangeRepository(ledger.manager)
+    await changes.insert_change(change_event(_hour(-30), change_id="change-before-identity"))
+    await ClusterIdentityResolver(ledger.repo, CLUSTER, reader=_uid).resolve()
+    after = change_event(_hour(-20), change_id="change-after-identity").model_copy(update={"workload_uid": "uid-2"})
+    await changes.insert_change(after)
+    before_uid = await ledger.scalar("SELECT cluster_uid FROM change_events WHERE change_id = 'change-before-identity'")
+    after_uid = await ledger.scalar("SELECT cluster_uid FROM change_events WHERE change_id = 'change-after-identity'")
+    assert before_uid is None and after_uid == CLUSTER_UID
