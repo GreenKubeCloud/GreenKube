@@ -14,8 +14,8 @@ _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 #: Modes with browser sessions; ``api_key`` serves Bearer API keys only.
 SESSION_MODES = frozenset({"session", "oidc", "proxy"})
 AUTH_MODES = frozenset({"api_key", *SESSION_MODES})
-DEFAULT_PROXY_USER_HEADERS = ("X-Auth-Request-User", "X-Forwarded-User")
-DEFAULT_PROXY_GROUPS_HEADERS = ("X-Auth-Request-Groups", "X-Forwarded-Groups")
+DEFAULT_PROXY_USER_HEADERS = ("X-Forwarded-User",)
+DEFAULT_PROXY_GROUPS_HEADERS = ("X-Forwarded-Groups",)
 
 
 def split_header_names(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:

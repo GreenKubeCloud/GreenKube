@@ -152,8 +152,8 @@ data:
   AUTH_LOCAL_LOGIN: {{ ternary "true" "false" (ne $auth.localLogin false) | quote }}
   AUTH_ROLE_GROUPS: {{ ternary "" ($groups | toJson) (empty $groups) | quote }}
   AUTH_DEFAULT_ROLE: {{ $roles.defaultRole | default "viewer" | quote }}
-  AUTH_PROXY_USER_HEADERS: {{ $proxy.userHeaders | default "X-Auth-Request-User,X-Forwarded-User" | quote }}
-  AUTH_PROXY_GROUPS_HEADERS: {{ $proxy.groupsHeaders | default "X-Auth-Request-Groups,X-Forwarded-Groups" | quote }}
+  AUTH_PROXY_USER_HEADERS: {{ $proxy.userHeaders | default "X-Forwarded-User" | quote }}
+  AUTH_PROXY_GROUPS_HEADERS: {{ $proxy.groupsHeaders | default "X-Forwarded-Groups" | quote }}
   {{- if eq $mode "oidc" }}
   OIDC_ISSUER: {{ $oidc.issuer | quote }}
   OIDC_AUDIENCE: {{ $oidc.clientId | quote }}

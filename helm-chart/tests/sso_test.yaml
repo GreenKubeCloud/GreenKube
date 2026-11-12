@@ -23,7 +23,7 @@ tests:
           value: viewer
       - equal:
           path: data.AUTH_PROXY_USER_HEADERS
-          value: X-Auth-Request-User,X-Forwarded-User
+          value: X-Forwarded-User
       - notExists:
           path: data.OIDC_ISSUER
 

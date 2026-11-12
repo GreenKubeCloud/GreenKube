@@ -1,7 +1,7 @@
 """Single sign-on through a trusted authentication proxy, and enforced roles (roadmap F16).
 
-Identity headers (``X-Auth-Request-User`` / ``X-Forwarded-User`` and the
-groups headers) are honoured only from ``TRUSTED_PROXY_IPS``; the first
+Identity headers (``X-Forwarded-User`` / ``X-Forwarded-Groups`` by default)
+are honoured only when the TCP peer is in ``TRUSTED_PROXY_IPS``; the first
 ``GET /auth/me`` of an identity starts the same server-side session as a
 password sign-in.
 """
@@ -34,10 +34,10 @@ APPROVE = "/api/v1/automation/plans/plan-1/approve"
 APPROVE_BODY = {"digest": "sha256:" + "a" * 64}
 
 
-def _headers(user: str, groups: str = "", *, header: str = "X-Auth-Request-User") -> dict[str, str]:
+def _headers(user: str, groups: str = "", *, header: str = "X-Forwarded-User") -> dict[str, str]:
     headers = {header: user}
     if groups:
-        headers["X-Auth-Request-Groups"] = groups
+        headers["X-Forwarded-Groups"] = groups
     return headers
 
 
@@ -57,8 +57,8 @@ def _unavailable_plan_service():
 def test_identity_headers_from_an_untrusted_address_are_rejected(tmp_path, monkeypatch):
     with auth_harness(tmp_path, monkeypatch, client_address=OUTSIDER, **PROXY_ENV) as h:
         before = _failures("untrusted_proxy_header")
-        for header in ("X-Auth-Request-User", "X-Forwarded-User"):
-            response = h.client.get("/api/v1/auth/me", headers=_headers("admin", "platform-admins", header=header))
+        for headers in (_headers("admin", "platform-admins"), {"X-Forwarded-Groups": "platform-admins"}):
+            response = h.client.get("/api/v1/auth/me", headers=headers)
             assert response.status_code == 401, response.text
             assert response.json()["detail"]["code"] == "UNTRUSTED_PROXY_HEADER"
             assert "set-cookie" not in response.headers
@@ -353,3 +353,144 @@ def test_a_viewer_cannot_call_any_mutating_route(tmp_path, monkeypatch):
                 assert response.status_code == 403, (method, route_path, response.status_code, response.text)
                 checked += 1
         assert checked >= 20
+
+
+# --------------------------------------------------------------------------- #
+# Real deployment: uvicorn applies X-Forwarded-For before the app             #
+# --------------------------------------------------------------------------- #
+
+
+def _served_like_greenkube_api(app):
+    """Wrap the app exactly as ``greenkube-api`` serves it (forwarded headers of trusted peers applied)."""
+    from greenkube.api.app import server_app
+
+    return server_app(app, PROXY_ENV["TRUSTED_PROXY_IPS"])
+
+
+def test_proxied_requests_with_x_forwarded_for_are_accepted(tmp_path, monkeypatch):
+    """oauth2-proxy and ingress-nginx always add X-Forwarded-For: the peer check must see the proxy, not the user."""
+    with auth_harness(
+        tmp_path, monkeypatch, client_address=PROXY, asgi_wrapper=_served_like_greenkube_api, **PROXY_ENV
+    ) as h:
+        headers = {**_headers("alice", "sre"), "X-Forwarded-For": "203.0.113.9", "X-Forwarded-Proto": "https"}
+        me = h.client.get("/api/v1/auth/me", headers=headers)
+        assert me.status_code == 200, me.text
+        assert me.json()["name"] == "alice" and me.json()["role"] == "operator"
+
+
+def test_a_client_inside_a_trusted_range_does_not_pass_for_the_proxy(tmp_path, monkeypatch):
+    """An untrusted peer claiming a trusted X-Forwarded-For address is still an untrusted peer."""
+    with auth_harness(
+        tmp_path, monkeypatch, client_address=OUTSIDER, asgi_wrapper=_served_like_greenkube_api, **PROXY_ENV
+    ) as h:
+        headers = {**_headers("admin", "platform-admins"), "X-Forwarded-For": "10.0.0.5"}
+        response = h.client.get("/api/v1/auth/me", headers=headers)
+        assert response.status_code == 401
+        assert response.json()["detail"]["code"] == "UNTRUSTED_PROXY_HEADER"
+
+
+def test_transport_peer_is_recorded_before_the_forwarded_rewrite():
+    import asyncio
+
+    from greenkube.auth.peer import TRANSPORT_PEER_SCOPE_KEY, TransportPeerMiddleware
+
+    seen = {}
+
+    async def app(scope, receive, send):
+        seen.update(scope)
+
+    scope = {
+        "type": "http",
+        "client": ("10.0.0.5", 41000),
+        "headers": [(b"x-forwarded-for", b"203.0.113.9")],
+    }
+    asyncio.run(TransportPeerMiddleware(app, "10.0.0.0/24")(scope, None, None))
+    assert seen["client"][0] == "203.0.113.9"
+    assert seen[TRANSPORT_PEER_SCOPE_KEY] == "10.0.0.5"
+
+
+# --------------------------------------------------------------------------- #
+# Header families are never mixed                                              #
+# --------------------------------------------------------------------------- #
+
+TWO_FAMILIES = {
+    **PROXY_ENV,
+    "AUTH_PROXY_USER_HEADERS": "X-Forwarded-User,X-Auth-Request-User",
+    "AUTH_PROXY_GROUPS_HEADERS": "X-Forwarded-Groups,X-Auth-Request-Groups",
+}
+
+
+def test_default_headers_ignore_another_family(tmp_path, monkeypatch):
+    """A client-supplied X-Auth-Request-* next to the proxy's X-Forwarded-* adds no identity or group."""
+    with auth_harness(tmp_path, monkeypatch, client_address=PROXY, **PROXY_ENV) as h:
+        headers = {
+            **_headers("bob", "devs"),
+            "X-Auth-Request-User": "alice",
+            "X-Auth-Request-Groups": "platform-admins",
+        }
+        me = h.client.get("/api/v1/auth/me", headers=headers).json()
+        assert me["name"] == "bob" and me["role"] == "viewer"
+
+
+def test_mixed_header_families_are_refused(tmp_path, monkeypatch):
+    with auth_harness(tmp_path, monkeypatch, client_address=PROXY, **TWO_FAMILIES) as h:
+        spoofed = {
+            **_headers("bob", "devs"),
+            "X-Auth-Request-User": "alice",
+            "X-Auth-Request-Groups": "platform-admins",
+        }
+        response = h.client.get("/api/v1/auth/me", headers=spoofed)
+        assert response.status_code == 401
+        assert response.json()["detail"]["code"] == "INVALID_IDENTITY"
+        # A groups header of the other family alone is refused too (no group union).
+        groups_only = {**_headers("bob", "devs"), "X-Auth-Request-Groups": "platform-admins"}
+        assert h.client.get("/api/v1/auth/me", headers=groups_only).status_code == 401
+        # The same user in both families is still ambiguous.
+        same_user = {**_headers("bob", "devs"), "X-Auth-Request-User": "bob"}
+        assert h.client.get("/api/v1/auth/me", headers=same_user).status_code == 401
+        # One family alone works, with its own groups only.
+        alone = {"X-Auth-Request-User": "carol", "X-Auth-Request-Groups": "sre"}
+        me = h.client.get("/api/v1/auth/me", headers=alone).json()
+        assert me["name"] == "carol" and me["role"] == "operator"
+
+
+def test_repeated_user_headers_are_refused(tmp_path, monkeypatch):
+    with auth_harness(tmp_path, monkeypatch, client_address=PROXY, **PROXY_ENV) as h:
+        response = h.client.get("/api/v1/auth/me", headers=[("X-Forwarded-User", "bob"), ("X-Forwarded-User", "alice")])
+        assert response.status_code == 401
+        assert response.json()["detail"]["code"] == "INVALID_IDENTITY"
+
+
+def test_more_groups_headers_than_user_headers_is_rejected():
+    from greenkube.core.config import Config
+
+    with pytest.raises(ValueError, match="AUTH_PROXY_GROUPS_HEADERS"):
+        Config(
+            API_AUTH_MODE="proxy",
+            TRUSTED_PROXY_IPS="10.0.0.0/24",
+            AUTH_PROXY_USER_HEADERS="X-Forwarded-User",
+            AUTH_PROXY_GROUPS_HEADERS="X-Forwarded-Groups,X-Auth-Request-Groups",
+        )
+
+
+def test_a_proxy_session_is_not_valid_around_the_proxy(tmp_path, monkeypatch):
+    """The session cookie of a proxied user, replayed directly against the API, is refused."""
+    peer = {"address": PROXY}
+
+    def switchable_peer(app):
+        async def wrapped(scope, receive, send):
+            if scope["type"] == "http":
+                scope["client"] = peer["address"]
+            await app(scope, receive, send)
+
+        return wrapped
+
+    with auth_harness(tmp_path, monkeypatch, asgi_wrapper=switchable_peer, **PROXY_ENV) as h:
+        assert h.client.get("/api/v1/auth/me", headers=_headers("alice", "sre")).status_code == 200
+        peer["address"] = OUTSIDER
+        direct = h.client.get("/api/v1/auth/me")
+        assert direct.status_code == 401
+        assert direct.json()["detail"]["code"] == "UNTRUSTED_PROXY_HEADER"
+        # Back through the proxy the session still works.
+        peer["address"] = PROXY
+        assert h.client.get("/api/v1/auth/me", headers=_headers("alice", "sre")).status_code == 200

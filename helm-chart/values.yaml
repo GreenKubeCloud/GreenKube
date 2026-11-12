@@ -685,10 +685,12 @@ auth:
     # (refuse access).
     defaultRole: viewer
   proxy:
-    # Identity headers set by the authentication proxy (config.apiAuthMode=proxy),
-    # comma-separated, first non-empty wins. Accepted only from config.trustedProxyIps.
-    userHeaders: X-Auth-Request-User,X-Forwarded-User
-    groupsHeaders: X-Auth-Request-Groups,X-Forwarded-Groups
+    # Identity headers the authentication proxy sets AND overwrites (config.apiAuthMode=proxy),
+    # accepted only from config.trustedProxyIps. The n-th groups header pairs with the n-th
+    # user header; a request carrying more than one family is refused. Defaults match
+    # oauth2-proxy --pass-user-headers.
+    userHeaders: X-Forwarded-User
+    groupsHeaders: X-Forwarded-Groups
   oidc:
     # Issuer URL (https), e.g. https://keycloak.example.com/realms/acme
     # (config.apiAuthMode=oidc). Discovery reads <issuer>/.well-known/openid-configuration.

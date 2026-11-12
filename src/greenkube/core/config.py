@@ -301,8 +301,10 @@ class Config(BaseSettings):
     # (authorization code + PKCE, OIDC_ISSUER, OIDC_AUDIENCE = client id).
     # Local accounts keep signing in with a password in SSO modes unless this is false.
     AUTH_LOCAL_LOGIN: bool = True
-    AUTH_PROXY_USER_HEADERS: str = "X-Auth-Request-User,X-Forwarded-User"
-    AUTH_PROXY_GROUPS_HEADERS: str = "X-Auth-Request-Groups,X-Forwarded-Groups"
+    # Identity headers set (overwritten) by the proxy; the n-th groups header pairs with the n-th
+    # user header and only one family may appear on a request. Defaults: oauth2-proxy --pass-user-headers.
+    AUTH_PROXY_USER_HEADERS: str = "X-Forwarded-User"
+    AUTH_PROXY_GROUPS_HEADERS: str = "X-Forwarded-Groups"
     # JSON object role -> IdP groups, e.g. {"admin": ["platform-admins"], "operator": ["sre"]}.
     AUTH_ROLE_GROUPS: str = ""
     # Role of an SSO user without a mapped group: viewer, operator, admin or none (no access).
@@ -865,6 +867,10 @@ class Config(BaseSettings):
         if self.API_AUTH_MODE == "proxy" and not self.TRUSTED_PROXY_IPS.strip():
             # Fail closed: identity headers from anyone would let any client choose its identity.
             raise ValueError("TRUSTED_PROXY_IPS must list the authentication proxy when API_AUTH_MODE is 'proxy'.")
+        _user_headers = [h for h in str(self.AUTH_PROXY_USER_HEADERS or "").split(",") if h.strip()]
+        _group_headers = [h for h in str(self.AUTH_PROXY_GROUPS_HEADERS or "").split(",") if h.strip()]
+        if len(_group_headers) > max(1, len(_user_headers)):
+            raise ValueError("AUTH_PROXY_GROUPS_HEADERS must not list more headers than AUTH_PROXY_USER_HEADERS.")
         if self.API_AUTH_MODE != "api_key" and not self.SESSION_COOKIE_NAME:
             raise ValueError("SESSION_COOKIE_NAME must not be empty when browser sessions are enabled.")
         from greenkube.auth.roles import normalize_default_role, parse_role_groups

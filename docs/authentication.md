@@ -148,6 +148,10 @@ sign-in. Passwords need at least 12 characters (at most 256) and must differ fro
   `{"disabled": true}`). A new local account chooses its own password at its first sign-in. Disabling an account
   signs out all of its sessions. The last active admin can be neither demoted nor disabled (`409 LAST_ADMIN`).
 - Single sign-on accounts get their role from their groups (below) at every sign-in; it cannot be edited in the UI.
+- Operator (`write`, `approve`, `plans:deliver`) covers the day-to-day loop: plans and their delivery,
+  recommendation decisions, repository bindings (`/api/v1/repository-bindings`) and GitOps discovery and provider
+  routes (`/api/v1/gitops/*`). Admin is required for users and roles (`/api/v1/auth/users`), API keys
+  (`/api/v1/auth/api-keys`) and the repository allowlist.
 
 ## Single sign-on
 
@@ -183,24 +187,39 @@ config:
   trustedProxyIps: 10.42.0.0/16      # the proxy Pods or the Ingress controller, required
 auth:
   proxy:
-    userHeaders: X-Auth-Request-User,X-Forwarded-User      # defaults
-    groupsHeaders: X-Auth-Request-Groups,X-Forwarded-Groups
+    userHeaders: X-Forwarded-User      # defaults (oauth2-proxy --pass-user-headers)
+    groupsHeaders: X-Forwarded-Groups
 ```
 
-- GreenKube accepts identity headers **only** from a peer listed in `config.trustedProxyIps`. A request carrying an
-  identity header from any other address is rejected with `401 UNTRUSTED_PROXY_HEADER` (and counted as
-  `greenkube_auth_failures_total{reason="untrusted_proxy_header"}`), whatever cookie or account it also carries. The
-  chart refuses to render `proxy` mode without `trustedProxyIps`, and the API refuses to start without it.
-- List only the proxy's own addresses: every peer in that list can claim any identity. Make sure the proxy strips
-  these headers from incoming client requests (oauth2-proxy, Authentik and Pomerium do) and that the GreenKube
-  Service is not reachable around the proxy, for example with `monitoring.networkPolicy`.
+- GreenKube accepts identity headers **only** when the TCP connection comes from an address listed in
+  `config.trustedProxyIps`. The check uses the connection itself, never the `X-Forwarded-For` client the proxy
+  reports, so proxied requests are recognised and an end user whose own address falls in a trusted range does not
+  pass for the proxy. A request carrying an identity or groups header from any other peer is rejected with
+  `401 UNTRUSTED_PROXY_HEADER` (and counted as `greenkube_auth_failures_total{reason="untrusted_proxy_header"}`),
+  whatever cookie or account it also carries. The chart refuses to render `proxy` mode without `trustedProxyIps`,
+  and the API refuses to start without it.
+- **Configure only the headers your proxy sets and overwrites.** A proxy strips or overwrites the header family it
+  manages and passes any other header through unchanged, so a client could add a second family (for example
+  `X-Auth-Request-User: alice` and `X-Auth-Request-Groups: platform-admins` next to oauth2-proxy's
+  `X-Forwarded-*`). GreenKube never merges families: the n-th `groupsHeaders` entry belongs to the n-th
+  `userHeaders` entry, only the groups header paired with the user header is read, and a request carrying headers
+  of more than one configured family, or a repeated user header, is refused with `401 INVALID_IDENTITY`. List
+  several families only when the proxy overwrites all of them.
+- List only the proxy's own addresses: every peer in that list can claim any identity. Keep the GreenKube Service
+  unreachable around the proxy, for example with `monitoring.networkPolicy`. A session started through the proxy is
+  only accepted through it: replayed from any other peer it is refused with `401 UNTRUSTED_PROXY_HEADER`.
 - The first `GET /api/v1/auth/me` of an identity starts its session (the dashboard does this on load). Reads work at
   once; mutations need the session's CSRF token, so a header-only request is refused with `CSRF_REJECTED` and the
   dashboard refreshes `/auth/me` and retries.
-- oauth2-proxy: `--set-xauthrequest` (or `--pass-user-headers`) sends `X-Auth-Request-User` and
-  `X-Auth-Request-Groups`. Authentik's proxy outpost sends `X-authentik-username` and `X-authentik-groups`: set
-  `auth.proxy.userHeaders: X-authentik-username` and `auth.proxy.groupsHeaders: X-authentik-groups`. Pomerium:
-  forward the claims as headers (`pass_identity_headers` / `jwt_claims_headers`) and point the two settings at them.
+- oauth2-proxy as a reverse proxy: `--pass-user-headers` (on by default) sets `X-Forwarded-User` and
+  `X-Forwarded-Groups`, the defaults. oauth2-proxy behind ingress-nginx `auth-url`: `--set-xauthrequest` returns
+  `X-Auth-Request-User` and `X-Auth-Request-Groups` to the Ingress, which copies them with
+  `nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Groups`; set
+  `auth.proxy.userHeaders: X-Auth-Request-User` and `auth.proxy.groupsHeaders: X-Auth-Request-Groups`, and list the
+  ingress controller Pods in `trustedProxyIps`. Authentik's proxy outpost sends `X-authentik-username` and
+  `X-authentik-groups`: set `auth.proxy.userHeaders: X-authentik-username` and
+  `auth.proxy.groupsHeaders: X-authentik-groups`. Pomerium: forward the claims as headers (`jwt_claims_headers`)
+  and point the two settings at them.
 - A local account that signs in with its password keeps its own session even through the proxy.
 
 ### OpenID Connect (`config.apiAuthMode: oidc`)
@@ -363,7 +382,9 @@ kubectl -n greenkube exec -it greenkube-postgres-0 -- \
 | Constant-time comparisons | API-key secrets, the bootstrap key and CSRF tokens use `hmac.compare_digest`; sessions are looked up by SHA-256 |
 | Secrets in logs | Passwords, tokens and keys are never logged; key creation logs only the `gk_<id>` prefix and the actor |
 | Storage | Session tokens and API-key secrets stored as SHA-256 only; passwords as scrypt hashes |
-| Proxy identity headers | Accepted only from `TRUSTED_PROXY_IPS` (required in `proxy` mode, enforced at startup and in the chart); any identity header from another peer is a `401` before any account or session is used |
+| Proxy identity headers | Accepted only when the TCP peer (recorded before `X-Forwarded-For` is applied, never the forwarded client) is in `TRUSTED_PROXY_IPS` (required in `proxy` mode, enforced at startup and in the chart); any identity or groups header from another peer is a `401` before any account or session is used |
+| Proxy header families | One configured user header and its paired groups header per request; headers of a second family or a repeated user header are refused (`INVALID_IDENTITY`), groups are never merged across families; defaults are the single `X-Forwarded-User` / `X-Forwarded-Groups` family |
+| Proxy sessions | A session started by the proxy is refused from any peer outside `TRUSTED_PROXY_IPS` |
 | Header-only principals | May read; may not mutate without a session and its CSRF token (`CSRF_REJECTED`), so an ambient proxy cookie cannot be used cross-site |
 | OIDC flow | Authorization code + PKCE `S256`; 256-bit `state`, `nonce` and verifier stored server-side, single use, ten-minute expiry; `state` bound to the browser by an `HttpOnly` `SameSite=Lax` cookie scoped to `/api/v1/auth/oidc/` |
 | ID token | Signature verified against the JWKS (asymmetric algorithms only, never `none` or `HS*`); `iss`, `aud`, `azp`, `exp`, `iat`, `nbf`, `nonce`, `sub` checked; discovery must name the configured issuer over `https` |

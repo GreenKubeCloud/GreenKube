@@ -1,9 +1,10 @@
 ### Added
 
 - **Single sign-on through an authentication proxy** (F16): `config.apiAuthMode: proxy` trusts the identity headers
-  of oauth2-proxy, Authentik or Pomerium (`X-Auth-Request-User` / `X-Forwarded-User` and the groups headers by
-  default, `auth.proxy.*`) only from `config.trustedProxyIps`, which the mode requires. Identity headers from any
-  other address are rejected with `401 UNTRUSTED_PROXY_HEADER`. The first `GET /api/v1/auth/me` of an identity
+  of oauth2-proxy, Authentik or Pomerium (`X-Forwarded-User` / `X-Forwarded-Groups` by default, `auth.proxy.*`)
+  only when the TCP peer is in `config.trustedProxyIps`, which the mode requires. Identity headers from any other
+  peer are rejected with `401 UNTRUSTED_PROXY_HEADER`; a request mixing configured header families or repeating the
+  user header is refused (`INVALID_IDENTITY`), and a proxy-started session is refused around the proxy. The first `GET /api/v1/auth/me` of an identity
   starts the same server-side session as a password sign-in; header-only requests may read but not mutate.
 - **Native OpenID Connect sign-in** (F16): `config.apiAuthMode: oidc` with `auth.oidc.*` (issuer, client id,
   optional client secret Secret, scopes, username and groups claims, redirect URL, button label). Authorization code
@@ -35,3 +36,6 @@
   erased; they print the `greenkube auth reset-password` command instead (N11).
 - The initial-admin Secret and the bootstrap API key are also provided in `proxy` and `oidc` modes.
 - `API_AUTH_MODE=oidc` no longer answers `503`; `proxy` is a new accepted value.
+- `greenkube-api` records the TCP peer before applying `X-Forwarded-For` / `X-Forwarded-Proto` of
+  `TRUSTED_PROXY_IPS`, so trusted-proxy checks (identity headers, `X-Forwarded-Host`) judge the connection, not the
+  forwarded client (F16).

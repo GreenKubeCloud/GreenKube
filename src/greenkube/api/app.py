@@ -494,10 +494,18 @@ def main():
     configure_logging(level=cfg.LOG_LEVEL, log_format=cfg.LOG_FORMAT)
     app = create_app(use_lifespan=True)
     uvicorn.run(
-        app,
+        server_app(app, cfg.TRUSTED_PROXY_IPS),
         host=cfg.API_HOST,
         port=cfg.API_PORT,
-        proxy_headers=bool(cfg.TRUSTED_PROXY_IPS),
-        forwarded_allow_ips=cfg.TRUSTED_PROXY_IPS,
+        # Forwarded headers of TRUSTED_PROXY_IPS are applied by server_app, which
+        # first records the TCP peer for the trusted-proxy checks (F16).
+        proxy_headers=False,
         timeout_keep_alive=65,
     )
+
+
+def server_app(app, trusted_proxy_ips: str):
+    """The ASGI app served by greenkube-api: the TCP peer is recorded before X-Forwarded-For is applied."""
+    from greenkube.auth.peer import TransportPeerMiddleware
+
+    return TransportPeerMiddleware(app, trusted_proxy_ips or "")

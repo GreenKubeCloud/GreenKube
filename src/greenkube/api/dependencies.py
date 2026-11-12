@@ -18,7 +18,7 @@ from typing import Any, Optional, Protocol, cast
 
 from fastapi import Depends, HTTPException, Query, Request
 
-from greenkube.auth.http import CSRF_HEADER, is_same_origin
+from greenkube.auth.http import CSRF_HEADER, from_trusted_proxy, is_same_origin, peer_address
 from greenkube.auth.metrics import record_auth_failure
 from greenkube.auth.principal import ALL_SCOPES, ANONYMOUS, SAFE_METHODS, Principal, Role, Scope, required_scope
 from greenkube.auth.proxy import UntrustedProxyHeader, read_proxy_identity
@@ -229,7 +229,7 @@ async def _proxy_principal(
         record_auth_failure("untrusted_proxy_header")
         logger.warning(
             "Rejected identity headers from %s, which is not in TRUSTED_PROXY_IPS.",
-            request.client.host if request.client else "unknown",
+            peer_address(request) or "unknown",
         )
         raise HTTPException(
             status_code=401,
@@ -244,6 +244,21 @@ async def _proxy_principal(
             status_code=401, detail={"code": "INVALID_IDENTITY", "message": "The proxy sent no usable identity."}
         ) from None
     if identity is None:
+        if (
+            current is not None
+            and current.is_session
+            and getattr(getattr(request.state, "auth_user", None), "auth_source", None) == "proxy"
+            and not from_trusted_proxy(request, settings)
+        ):
+            # A session the proxy started is only valid through the proxy, never around it.
+            record_auth_failure("untrusted_proxy_header")
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "UNTRUSTED_PROXY_HEADER",
+                    "message": "This session was started by the authentication proxy and is only valid through it.",
+                },
+            )
         return current
     if service is None:
         raise HTTPException(status_code=503, detail="The account store is not available.")

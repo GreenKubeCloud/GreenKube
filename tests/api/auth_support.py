@@ -92,6 +92,7 @@ def auth_harness(
     users: list[tuple[str, str, str, bool]] | None = None,
     client_address: tuple[str, int] = ("testclient", 50000),
     base_url: str = "http://testserver",
+    asgi_wrapper=None,
     **env: str,
 ):
     """Yield an :class:`AuthHarness` for an app with sessions and a seeded account store."""
@@ -114,7 +115,8 @@ def auth_harness(
     manager = DatabaseManager(cfg)
     service = AuthService(SQLiteAuthRepository(manager), clock=clock)
     app.state.auth_service = service
-    with TestClient(app, client=client_address, base_url=base_url) as client:
+    served = asgi_wrapper(app) if asgi_wrapper is not None else app
+    with TestClient(served, client=client_address, base_url=base_url) as client:
         try:
             yield AuthHarness(client=client, service=service, clock=clock, config=cfg)
         finally:

@@ -582,8 +582,8 @@ config:
 | `auth.localLogin` | `true` | `AUTH_LOCAL_LOGIN` | In `proxy` and `oidc` modes, local accounts (the break-glass admin) still sign in with a password. `false`: SSO only (`POST /auth/login` answers `409`). |
 | `auth.roles.groups.{admin,operator,viewer}` | `[]` | `AUTH_ROLE_GROUPS` | IdP groups granting each role (rendered as a JSON object role to groups). An SSO user gets the highest role any of its groups grants, recomputed at every sign-in. |
 | `auth.roles.defaultRole` | `viewer` | `AUTH_DEFAULT_ROLE` | Role of an SSO user in no listed group: `viewer`, `operator`, `admin`, or `none` (access refused). |
-| `auth.proxy.userHeaders` | `X-Auth-Request-User,X-Forwarded-User` | `AUTH_PROXY_USER_HEADERS` | Identity headers of the authentication proxy (`apiAuthMode: proxy`); the first non-empty one wins. |
-| `auth.proxy.groupsHeaders` | `X-Auth-Request-Groups,X-Forwarded-Groups` | `AUTH_PROXY_GROUPS_HEADERS` | Comma-separated group headers of the authentication proxy. |
+| `auth.proxy.userHeaders` | `X-Forwarded-User` | `AUTH_PROXY_USER_HEADERS` | Identity header the authentication proxy sets and overwrites (`apiAuthMode: proxy`). Several comma-separated headers form separate families; a request carrying more than one family is refused. |
+| `auth.proxy.groupsHeaders` | `X-Forwarded-Groups` | `AUTH_PROXY_GROUPS_HEADERS` | Groups header paired with each user header (same position); never more entries than `userHeaders`. |
 | `auth.oidc.issuer` | `""` | `OIDC_ISSUER` | OpenID Connect issuer (`apiAuthMode: oidc`, required, `https`). Discovery reads `<issuer>/.well-known/openid-configuration`. |
 | `auth.oidc.clientId` | `""` | `OIDC_AUDIENCE` | OAuth client id registered at the provider (required with `oidc`). |
 | `auth.oidc.existingSecret` | `""` | `OIDC_CLIENT_SECRET` | Secret holding the client secret (key `auth.oidc.existingSecretKey`, default `clientSecret`), mounted into the API. Empty: public client protected by PKCE. |
