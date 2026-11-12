@@ -279,3 +279,15 @@ def test_invalid_remote_chart_settings_are_rejected(field: str, value: str):
 
     with pytest.raises(ValidationError, match=field):
         Config(**{field: value})
+
+
+def test_a_cached_archive_reached_through_another_repository_reports_that_repository():
+    registry = FakeChartRegistry()
+    fetcher = _fetcher(registry)
+
+    fetcher.fetch(_oci())
+    via_http = fetcher.fetch(ChartReference.parse(HTTP_REPOSITORY, "nginx", "18.3.1"))
+
+    assert via_http.reference.repository == HTTP_REPOSITORY
+    assert via_http.digest == sha256(registry.archive)
+    assert registry.count("charts.bitnami.com", "/bitnami/nginx-") == 0

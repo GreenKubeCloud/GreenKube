@@ -23,7 +23,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any
@@ -278,6 +278,9 @@ class RemoteChartFetcher:
         cached = self._cached_archive(archive_digest)
         if cached is None:  # pragma: no cover - guarded by _fetch_* returning bytes when uncached
             raise ChartArchiveError("the verified chart archive is no longer cached")
+        if cached.reference != reference or cached.digest != digest:
+            # Same verified archive reached through another reference (repository or pin).
+            return replace(cached, reference=reference, digest=digest)
         return cached
 
     # -- HTTP repositories -------------------------------------------------------------------

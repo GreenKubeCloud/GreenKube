@@ -1040,23 +1040,24 @@ def _staged_remote_chart(
     created_files: list[Path] = []
     created_directories: list[Path] = []
     try:
-        for relative, content in chart.files.items():
-            target = root.joinpath(*PurePosixPath(chart_path).parts, *PurePosixPath(relative).parts)
-            missing: list[Path] = []
-            current = target.parent
-            while current != root and not current.exists():
-                missing.append(current)
-                current = current.parent
-            for directory in reversed(missing):
-                directory.mkdir()
-                created_directories.append(directory)
-            if target.exists() or target.is_symlink():
-                raise error_type("the remote chart staging path is not empty")
-            target.write_bytes(content)
-            created_files.append(target)
+        try:
+            for relative, content in chart.files.items():
+                target = root.joinpath(*PurePosixPath(chart_path).parts, *PurePosixPath(relative).parts)
+                missing: list[Path] = []
+                current = target.parent
+                while current != root and not current.exists():
+                    missing.append(current)
+                    current = current.parent
+                for directory in reversed(missing):
+                    directory.mkdir()
+                    created_directories.append(directory)
+                if target.exists() or target.is_symlink():
+                    raise error_type("the remote chart staging path is not empty")
+                target.write_bytes(content)
+                created_files.append(target)
+        except OSError as exc:
+            raise error_type("the remote chart could not be staged for render validation") from exc
         yield chart_path
-    except OSError as exc:
-        raise error_type("the remote chart could not be staged for render validation") from exc
     finally:
         for path in reversed(created_files):
             try:
