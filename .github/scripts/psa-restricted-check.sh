@@ -26,8 +26,10 @@ kc=(kubectl --context "${context}")
 
 work="$(mktemp -d)"
 cleanup() {
+  local status=$?
   "${kc[@]}" delete namespace "${PSA_NAMESPACE}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   rm -rf "${work}"
+  exit "${status}"
 }
 trap cleanup EXIT
 
@@ -57,7 +59,7 @@ for scenario in "${scenarios[@]}"; do
   name="${scenario%%|*}"
   read -r -a extra <<<"${scenario#*|}"
   rendered="${work}/${name}.yaml"
-  helm template greenkube "${CHART_DIR}" --namespace "${PSA_NAMESPACE}" "${extra[@]}" >"${rendered}"
+  helm template greenkube "${CHART_DIR}" --namespace "${PSA_NAMESPACE}" ${extra[@]+"${extra[@]}"} >"${rendered}"
   output="${work}/${name}.log"
   if ! "${kc[@]}" -n "${PSA_NAMESPACE}" apply --dry-run=server -f "${rendered}" >"${output}" 2>&1; then
     echo "::error::[${name}] server-side dry run failed" >&2
