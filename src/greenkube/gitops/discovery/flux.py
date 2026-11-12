@@ -37,6 +37,8 @@ _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _DNS_SUBDOMAIN_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 _SOURCE_KINDS = frozenset({"Bucket", "GitRepository", "HelmRepository", "OCIRepository"})
 _VALUES_KINDS = frozenset({"ConfigMap", "Secret"})
+_REMOTE_CHART_SOURCE_KINDS = frozenset({"HelmRepository", "OCIRepository"})
+_SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -756,6 +758,8 @@ def discover_flux_helm_release(
         "values_from": values_from,
         "post_renderers": post_renderers,
     }
+    if len(source_resolution.sources) == 1 and source_resolution.sources[0].kind in _REMOTE_CHART_SOURCE_KINDS:
+        config["chart"].update(_remote_chart_deployment(status, source_resolution.sources[0]))
     if chart_source.chart_ref is not None:
         chart_ref_config = deepcopy(chart_source.chart_ref)
         if chart_source.chart_ref_uid is not None:
@@ -1013,7 +1017,29 @@ def _source_stub(
     )
 
 
+def _remote_chart_deployment(status: Mapping[str, Any], flux_source: _FluxSource) -> dict[str, str]:
+    """The exact chart version (and OCI digest) Flux last deployed, so plans render exactly that chart."""
+    result: dict[str, str] = {}
+    history = status.get("history")
+    latest = as_mapping(history[0]) if isinstance(history, list) and history else None
+    version = text(latest.get("chartVersion")) if latest is not None else None
+    version = version or text(status.get("lastAttemptedRevision"))
+    if version is None and flux_source.kind == "OCIRepository" and flux_source.ref not in ("HEAD", "UNRESOLVED"):
+        version = flux_source.ref  # the OCIRepository tag; the planner renders it only when exact
+    if version is not None:
+        result["resolved_version"] = version.partition("@")[0]
+    digest = text(status.get("lastAttemptedRevisionDigest"))
+    if digest is None and flux_source.kind == "OCIRepository" and flux_source.artifact_revision is not None:
+        digest = flux_source.artifact_revision.rpartition("@")[2]
+    if digest is not None and _SHA256_DIGEST.fullmatch(digest.lower()) and flux_source.kind == "OCIRepository":
+        result["digest"] = digest.lower()
+    return result
+
+
 def _chart_source_snapshot_reason(flux_source: _FluxSource, owner: Mapping[str, str]) -> str | None:
+    if flux_source.kind in _REMOTE_CHART_SOURCE_KINDS:
+        # Remote charts are pre-fetched by the controller and digest-verified at plan time (H2).
+        return None if flux_source.repo_url is not None else "chart-source-url-unresolved"
     if flux_source.kind != "GitRepository":
         return "remote-chart-not-in-snapshot"
     if flux_source.repo_url is None:

@@ -1077,7 +1077,8 @@ def test_flux_helmrelease_planner_fails_closed_for_remote_chart_and_runtime_valu
     )
 
     try:
-        with pytest.raises(FluxHelmReleasePlanError, match="remote"):
+        # The manifest names a HelmRepository the discovered source does not: drift fails closed.
+        with pytest.raises(FluxHelmReleasePlanError, match="changed after source discovery"):
             FluxHelmReleasePlanner(renderer=_helm_renderer(remote_runner)).plan(
                 _action(),
                 remote_source,
@@ -1329,7 +1330,7 @@ def test_flux_helmrelease_planner_rejects_valuesfrom_target_path_as_unsupported(
         snapshot.close()
 
 
-def test_flux_helmrelease_planner_rejects_remote_chartref_with_a_typed_reason():
+def test_flux_helmrelease_planner_rejects_an_undiscovered_chartref_with_a_typed_reason():
     release = _safe_load(_release_manifest())
     release["spec"].pop("chart")
     release["spec"]["chartRef"] = {
@@ -1349,7 +1350,8 @@ def test_flux_helmrelease_planner_rejects_remote_chartref_with_a_typed_reason():
     runner = _ChartRunner()
 
     try:
-        with pytest.raises(FluxHelmReleaseUnsupportedError, match="remote-chart-not-in-snapshot") as error:
+        # The chartRef OCIRepository is not the GitRepository discovery captured: drift fails closed.
+        with pytest.raises(FluxHelmReleaseUnsupportedError, match="changed after source discovery") as error:
             FluxHelmReleasePlanner(renderer=_helm_renderer(runner)).plan(
                 _action(),
                 _flux_source(renderer_config=source_config),

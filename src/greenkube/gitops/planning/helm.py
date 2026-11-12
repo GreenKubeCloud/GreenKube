@@ -438,8 +438,10 @@ class FluxHelmReleasePlanner:
         renderer: _HelmRenderEngine | None = None,
         expected_version: str = DEFAULT_HELM_VERSION,
         binary: str = "helm",
+        chart_fetcher: _ChartFetcher | None = None,
     ) -> None:
         self.renderer = renderer or HelmRenderer(expected_version=expected_version, binary=binary)
+        self._remote = _RemoteChartSupport(chart_fetcher, ())
 
     def render_source(
         self,
@@ -450,15 +452,26 @@ class FluxHelmReleasePlanner:
         *,
         expected_manifest_path: str | None = None,
     ) -> RawRenderResult:
-        """Render one exact Flux source using only the supported local HelmRelease subset."""
+        """Render one exact Flux source (Git, HelmRepository or OCIRepository chart) with its post-renderers."""
         revision = base_revision.lower() if isinstance(base_revision, str) else base_revision
-        prepared = _prepare_flux_helm_release_context(
-            action,
-            source,
-            snapshot,
-            revision,
-            expected_manifest_path=expected_manifest_path,
-        )
+        with ExitStack() as stack:
+            prepared = _prepare_flux_helm_release_context(
+                action,
+                source,
+                snapshot,
+                revision,
+                expected_manifest_path=expected_manifest_path,
+                remote=self._remote,
+                stack=stack,
+            )
+            return self._render_prepared(action, snapshot, prepared)
+
+    def _render_prepared(
+        self,
+        action: ActionPlanV3,
+        snapshot: ArchiveSnapshot,
+        prepared: _FluxHelmReleaseContext,
+    ) -> RawRenderResult:
         with _stage(
             prepared.root,
             prepared.files,
@@ -492,13 +505,26 @@ class FluxHelmReleasePlanner:
     ) -> FilePlan:
         if isinstance(base_revision, str):
             base_revision = base_revision.lower()
-        prepared = _prepare_flux_helm_release_context(
-            action,
-            source,
-            snapshot,
-            base_revision,
-            expected_manifest_path=None,
-        )
+        with ExitStack() as stack:
+            prepared = _prepare_flux_helm_release_context(
+                action,
+                source,
+                snapshot,
+                base_revision,
+                expected_manifest_path=None,
+                remote=self._remote,
+                stack=stack,
+            )
+            return self._plan_prepared(action, source, snapshot, base_revision, prepared)
+
+    def _plan_prepared(
+        self,
+        action: ActionPlanV3,
+        source: WorkloadSource,
+        snapshot: ArchiveSnapshot,
+        base_revision: str,
+        prepared: _FluxHelmReleaseContext,
+    ) -> FilePlan:
         operations = prepared.operations
         root = prepared.root
         snapshot_files = prepared.files
@@ -617,6 +643,8 @@ def _prepare_flux_helm_release_context(
     base_revision: str,
     *,
     expected_manifest_path: str | None,
+    remote: _RemoteChartSupport | None = None,
+    stack: ExitStack | None = None,
 ) -> _FluxHelmReleaseContext:
     operations, root, snapshot_files = _validate_common_request(
         action,
@@ -643,19 +671,31 @@ def _prepare_flux_helm_release_context(
     spec = _mapping(parsed_release.document.get("spec"))
     if spec is None:
         raise FluxHelmReleasePlanError("Git-owned HelmRelease spec must be a mapping")
-    (
-        chart_path,
-        release_name,
-        release_namespace,
-        chart_values_files,
-        ignore_missing_values_files,
-    ) = _flux_chart_context(
+    flux_chart = _flux_chart_context(
         root,
         snapshot_files,
         source,
         spec,
         base_revision,
     )
+    chart_values_files = flux_chart.values_files
+    ignore_missing_values_files = flux_chart.ignore_missing_values_files
+    remote_chart: FetchedChart | None = None
+    if flux_chart.reference is not None:
+        if remote is None or stack is None:
+            raise FluxHelmReleaseUnsupportedError("remote-chart-not-in-snapshot: no chart fetcher is configured")
+        remote_chart = _fetch_remote_chart(
+            remote.chart_fetcher,
+            flux_chart.reference,
+            FluxHelmReleaseUnsupportedError,
+        )
+        chart_path = stack.enter_context(
+            _staged_remote_chart(root, snapshot_files, remote_chart, FluxHelmReleasePlanError)
+        )
+    elif flux_chart.chart_path is not None:
+        chart_path = flux_chart.chart_path
+    else:  # pragma: no cover - _flux_chart_context returns a path or a reference
+        raise FluxHelmReleaseUnsupportedError("the Flux chart location could not be resolved")
     values_from = _load_flux_values_from(root, snapshot_files, source, spec, base_revision)
     inline_values = spec.get("values")
     if inline_values is None:
@@ -687,9 +727,10 @@ def _prepare_flux_helm_release_context(
         root=root,
         files=snapshot_files,
         chart_path=chart_path,
-        release_name=release_name,
-        release_namespace=release_namespace,
+        release_name=flux_chart.release_name,
+        release_namespace=flux_chart.release_namespace,
         values_files=(overlay_path,) if overlay_path is not None else (),
+        remote_chart=remote_chart,
     )
     return _FluxHelmReleaseContext(
         operations=tuple(operations),
@@ -1949,13 +1990,28 @@ def _find_release_manifest(
     return candidates[0]
 
 
+@dataclass(frozen=True, slots=True)
+class _FluxChart:
+    """Where a HelmRelease's chart comes from: a Git path in the snapshot, or an exact remote chart."""
+
+    chart_path: str | None
+    reference: ChartReference | None
+    release_name: str
+    release_namespace: str
+    values_files: tuple[str, ...]
+    ignore_missing_values_files: bool
+
+
+_REMOTE_FLUX_SOURCE_KINDS = frozenset({"HelmRepository", "OCIRepository"})
+
+
 def _flux_chart_context(
     root: Path,
     snapshot_files: Mapping[str, Any],
     source: WorkloadSource,
     spec: Mapping[str, Any],
     base_revision: str,
-) -> tuple[str, str, str, tuple[str, ...], bool]:
+) -> _FluxChart:
     renderer_config = _mapping(source.renderer_config)
     if renderer_config is None:
         raise FluxHelmReleaseUnsupportedError("Flux renderer configuration must be a mapping")
@@ -1963,6 +2019,7 @@ def _flux_chart_context(
     if configured_chart is None:
         raise FluxHelmReleaseUnsupportedError("Flux renderer configuration is missing chart ownership metadata")
 
+    remote_chart_name: str | None = None
     if "chartRef" in spec:
         chart_ref = _mapping(spec.get("chartRef"))
         if chart_ref is None:
@@ -1978,13 +2035,24 @@ def _flux_chart_context(
             or discovered_chart_ref.get("namespace") != chart_ref_namespace
         ):
             raise FluxHelmReleaseUnsupportedError("Flux chartRef changed after source discovery")
-        if chart_ref_kind != "HelmChart":
+        if chart_ref_kind not in {"HelmChart", "OCIRepository"}:
             raise FluxHelmReleaseUnsupportedError(
-                f"remote-chart-not-in-snapshot: chartRef kind {chart_ref_kind!r} is not a local HelmChart"
+                f"remote-chart-not-in-snapshot: chartRef kind {chart_ref_kind!r} is not a HelmChart or OCIRepository"
             )
-        source_ref = _mapping(renderer_config.get("chart_source_ref"))
-        if source_ref is None:
-            raise FluxHelmReleaseUnsupportedError("Flux HelmChart source identity was not captured during discovery")
+        if chart_ref_kind == "OCIRepository":
+            source_ref: Mapping[str, Any] = {
+                "kind": "OCIRepository",
+                "name": chart_ref_name,
+                "namespace": chart_ref_namespace,
+            }
+        else:
+            discovered_source_ref = _mapping(renderer_config.get("chart_source_ref"))
+            if discovered_source_ref is None:
+                raise FluxHelmReleaseUnsupportedError(
+                    "Flux HelmChart source identity was not captured during discovery"
+                )
+            source_ref = discovered_source_ref
+            remote_chart_name = text(configured_chart.get("name"))
         configured_version = configured_chart.get("version")
         raw_values_files: Any = renderer_config.get("chart_values_files", [])
         ignore_missing_values_files: Any = renderer_config.get("chart_ignore_missing_values_files", False)
@@ -1993,14 +2061,16 @@ def _flux_chart_context(
         chart_spec = _mapping(raw_chart.get("spec")) if raw_chart is not None else None
         if chart_spec is None:
             raise FluxHelmReleaseUnsupportedError("HelmRelease spec.chart.spec must be a mapping")
-        source_ref = _mapping(chart_spec.get("sourceRef"))
-        if source_ref is None or (text(source_ref.get("kind")) or "HelmRepository") != "GitRepository":
+        spec_source_ref = _mapping(chart_spec.get("sourceRef"))
+        source_kind = text(spec_source_ref.get("kind")) or "HelmRepository" if spec_source_ref is not None else None
+        if spec_source_ref is None or source_kind not in {"GitRepository", "HelmRepository"}:
             raise FluxHelmReleaseUnsupportedError(
-                "remote-chart-not-in-snapshot: HelmRepository/OCIRepository chart artifacts are not in the Git snapshot"
+                "remote-chart-not-in-snapshot: only GitRepository and HelmRepository chart sources can be rendered"
             )
+        source_ref = spec_source_ref
         configured_source_ref = _mapping(renderer_config.get("chart_source_ref"))
         if configured_source_ref is not None and (
-            configured_source_ref.get("kind") != "GitRepository"
+            configured_source_ref.get("kind") != source_kind
             or configured_source_ref.get("name") != text(source_ref.get("name"))
             or configured_source_ref.get("namespace")
             != (text(source_ref.get("namespace")) or source.controller_namespace)
@@ -2009,8 +2079,52 @@ def _flux_chart_context(
         configured_version = chart_spec.get("version")
         raw_values_files = chart_spec.get("valuesFiles", [])
         ignore_missing_values_files = chart_spec.get("ignoreMissingValuesFiles", False)
+        remote_chart_name = text(chart_spec.get("chart"))
 
-    if (text(source_ref.get("kind")) or "HelmRepository") != "GitRepository":
+    source_kind = text(source_ref.get("kind")) or "HelmRepository"
+    source_evidence = _mapping(source.evidence.get("source_ref"))
+    if source_evidence is None:
+        raise FluxHelmReleaseUnsupportedError("Flux chart source identity was not captured during discovery")
+    expected_source_namespace = text(source_ref.get("namespace")) or source.controller_namespace
+    if (
+        source_evidence.get("kind") != source_kind
+        or source_evidence.get("name") != source_ref.get("name")
+        or (source_evidence.get("namespace") or source.controller_namespace) != expected_source_namespace
+    ):
+        raise FluxHelmReleaseUnsupportedError("Flux chart source reference changed after source discovery")
+
+    chart_values_files = _normalize_flux_chart_values_files(raw_values_files)
+    discovered_values_files = _normalize_flux_chart_values_files(renderer_config.get("chart_values_files", []))
+    if chart_values_files != discovered_values_files:
+        raise FluxHelmReleaseUnsupportedError("Flux chart.spec.valuesFiles changed after source discovery")
+    if type(ignore_missing_values_files) is not bool:
+        raise FluxHelmReleaseUnsupportedError("Flux ignoreMissingValuesFiles must be a boolean")
+    discovered_ignore_missing = renderer_config.get("chart_ignore_missing_values_files", False)
+    if type(discovered_ignore_missing) is not bool or discovered_ignore_missing != ignore_missing_values_files:
+        raise FluxHelmReleaseUnsupportedError("Flux ignoreMissingValuesFiles changed after source discovery")
+
+    release_name, release_namespace = _flux_release_identity(source, spec, renderer_config)
+    if source_kind in _REMOTE_FLUX_SOURCE_KINDS:
+        reference = _flux_remote_chart_reference(
+            configured_chart,
+            source_kind=source_kind,
+            chart_name=remote_chart_name,
+            configured_version=configured_version,
+        )
+        if chart_values_files:
+            raise FluxHelmReleaseUnsupportedError(
+                "remote-chart-values-files: chart.spec.valuesFiles of a remote chart are not rendered"
+            )
+        return _FluxChart(
+            chart_path=None,
+            reference=reference,
+            release_name=release_name,
+            release_namespace=release_namespace,
+            values_files=(),
+            ignore_missing_values_files=False,
+        )
+
+    if source_kind != "GitRepository":
         raise FluxHelmReleaseUnsupportedError("remote-chart-not-in-snapshot: chart source is not a GitRepository")
     raw_chart_path = configured_chart.get("name")
     if not isinstance(raw_chart_path, str):
@@ -2029,17 +2143,6 @@ def _flux_chart_context(
         raise FluxHelmReleaseUnsupportedError(
             "chart-source-not-in-snapshot: Flux Git chart belongs to another repository"
         )
-
-    source_evidence = _mapping(source.evidence.get("source_ref"))
-    if source_evidence is None:
-        raise FluxHelmReleaseUnsupportedError("Flux chart source identity was not captured during discovery")
-    expected_source_namespace = text(source_ref.get("namespace")) or source.controller_namespace
-    if (
-        source_evidence.get("kind") != source_ref.get("kind")
-        or source_evidence.get("name") != source_ref.get("name")
-        or (source_evidence.get("namespace") or source.controller_namespace) != expected_source_namespace
-    ):
-        raise FluxHelmReleaseUnsupportedError("Flux chart source reference changed after source discovery")
     source_revision = revision_commit(source.source_revision) if source.source_revision else None
     if source_revision is None or source_revision != base_revision.lower():
         raise FluxHelmReleaseUnsupportedError(
@@ -2071,17 +2174,51 @@ def _flux_chart_context(
         raise FluxHelmReleaseUnsupportedError("Flux local chart version selector cannot be resolved exactly")
     if not _local_chart_version_selector_matches(configured_chart.get("version"), actual_chart_version):
         raise FluxHelmReleaseUnsupportedError("Flux chart version changed after source discovery")
+    return _FluxChart(
+        chart_path=chart_path,
+        reference=None,
+        release_name=release_name,
+        release_namespace=release_namespace,
+        values_files=chart_values_files,
+        ignore_missing_values_files=ignore_missing_values_files,
+    )
 
-    chart_values_files = _normalize_flux_chart_values_files(raw_values_files)
-    discovered_values_files = _normalize_flux_chart_values_files(renderer_config.get("chart_values_files", []))
-    if chart_values_files != discovered_values_files:
-        raise FluxHelmReleaseUnsupportedError("Flux chart.spec.valuesFiles changed after source discovery")
-    if type(ignore_missing_values_files) is not bool:
-        raise FluxHelmReleaseUnsupportedError("Flux ignoreMissingValuesFiles must be a boolean")
-    discovered_ignore_missing = renderer_config.get("chart_ignore_missing_values_files", False)
-    if type(discovered_ignore_missing) is not bool or discovered_ignore_missing != ignore_missing_values_files:
-        raise FluxHelmReleaseUnsupportedError("Flux ignoreMissingValuesFiles changed after source discovery")
 
+def _flux_remote_chart_reference(
+    configured_chart: Mapping[str, Any],
+    *,
+    source_kind: str,
+    chart_name: str | None,
+    configured_version: Any,
+) -> ChartReference:
+    """The exact chart Flux deployed from a HelmRepository or OCIRepository (digest-pinned when known)."""
+    if configured_chart.get("source_kind") != source_kind:
+        raise FluxHelmReleaseUnsupportedError("Flux chart source kind changed after source discovery")
+    if configured_version not in (None, "") and configured_version != configured_chart.get("version"):
+        raise FluxHelmReleaseUnsupportedError("Flux chart version changed after source discovery")
+    repository_url = configured_chart.get("repo_url")
+    if not isinstance(repository_url, str) or not repository_url:
+        raise FluxHelmReleaseUnsupportedError("chart-source-url-unresolved: the Flux chart source has no URL")
+    if source_kind == "OCIRepository":
+        repository, _, name = repository_url.rstrip("/").rpartition("/")
+        if not repository.lower().startswith("oci://") or not name:
+            raise FluxHelmReleaseUnsupportedError("the Flux OCIRepository URL must be oci://<registry>/<path>/<chart>")
+    else:
+        if chart_name is None or chart_name != configured_chart.get("name"):
+            raise FluxHelmReleaseUnsupportedError("Flux chart name changed after source discovery")
+        repository, name = repository_url, chart_name
+    version = configured_chart.get("resolved_version") or configured_version
+    try:
+        return ChartReference.parse(repository, name, version, expected_digest=configured_chart.get("digest"))
+    except ChartFetchError as exc:
+        raise FluxHelmReleaseUnsupportedError(str(exc)) from exc
+
+
+def _flux_release_identity(
+    source: WorkloadSource,
+    spec: Mapping[str, Any],
+    renderer_config: Mapping[str, Any],
+) -> tuple[str, str]:
     release_name = flux_release_name(source.controller_name, spec)
     release_namespace = spec.get("targetNamespace") or source.controller_namespace
     if len(release_name) > 53:
@@ -2100,7 +2237,7 @@ def _flux_chart_context(
         raise FluxHelmReleaseUnsupportedError("Flux HelmRelease releaseName must be explicit")
     if not isinstance(release_namespace, str) or not release_namespace.strip():
         raise FluxHelmReleaseUnsupportedError("Flux HelmRelease targetNamespace must be explicit")
-    return chart_path, release_name, release_namespace, chart_values_files, ignore_missing_values_files
+    return release_name, release_namespace
 
 
 def _normalize_flux_chart_values_files(value: Any) -> tuple[str, ...]:

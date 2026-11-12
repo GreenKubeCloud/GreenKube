@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import shutil
 from collections.abc import Mapping, Sequence
@@ -23,7 +24,9 @@ from greenkube.gitops.contracts import (
     WorkloadSource,
 )
 from greenkube.gitops.discovery.argo import discover_argo_application
+from greenkube.gitops.discovery.flux import discover_flux_helm_release
 from greenkube.gitops.planning.helm import (
+    FluxHelmReleasePlanner,
     HelmPlanError,
     HelmValuesNeedsMappingError,
     HelmValuesPlanner,
@@ -577,5 +580,168 @@ def test_real_helm_renders_the_recorded_bitnami_chart_from_oci_through_the_plann
         assert plan.files[0].content == EXPECTED_VALUES
         assert plan.validation.passed
         assert not (snapshot.workspace / ".greenkube-render").exists()
+    finally:
+        snapshot.close()
+
+
+PLATFORM_REPO = "https://github.com/acme/platform.git"
+RELEASE_PATH = "clusters/prod/web/helmrelease.yaml"
+OCI_RELEASE = """\
+# Public web tier, chart from the Bitnami OCI registry.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: web
+  namespace: web
+spec:
+  interval: 10m
+  chartRef:
+    kind: OCIRepository
+    name: nginx-chart
+    namespace: flux-system
+  values:
+    replicaCount: 2
+    metrics:
+      enabled: true
+"""
+HTTP_RELEASE = """\
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: web
+  namespace: web
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: nginx
+      version: 18.3.*
+      sourceRef:
+        kind: HelmRepository
+        name: bitnami
+        namespace: flux-system
+  values:
+    replicaCount: 2
+"""
+
+
+def _flux_live_workload() -> dict[str, Any]:
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": "web-nginx",
+            "namespace": "web",
+            "labels": {"app.kubernetes.io/managed-by": "Helm"},
+            "annotations": {"meta.helm.sh/release-name": "web", "meta.helm.sh/release-namespace": "web"},
+        },
+    }
+
+
+def _flux_source(release_content: str, chart_source: Mapping[str, Any]) -> WorkloadSource:
+    release = _load(release_content)
+    release["status"] = {"history": [{"chartVersion": "18.3.1", "status": "deployed"}]}
+    sources = discover_flux_helm_release(
+        release,
+        [_flux_live_workload()],
+        [chart_source],
+        cluster="prod",
+        provider_id="github-main",
+        manifest_source={
+            "provider_id": "github-main",
+            "repo_url": PLATFORM_REPO,
+            "ref": "main",
+            "revision": VALUES_REVISION,
+            "path": "clusters/prod/web",
+        },
+    )
+    (source,) = sources
+    return source
+
+
+def _oci_repository(registry: FakeChartRegistry, digest: str | None = None) -> dict[str, Any]:
+    return {
+        "apiVersion": "source.toolkit.fluxcd.io/v1beta2",
+        "kind": "OCIRepository",
+        "metadata": {"name": "nginx-chart", "namespace": "flux-system"},
+        "spec": {"url": "oci://registry-1.docker.io/bitnamicharts/nginx", "ref": {"semver": "18.3.x"}},
+        "status": {"artifact": {"revision": f"18.3.1@{digest or registry.manifest_digest}"}},
+    }
+
+
+def test_flux_oci_chart_ref_is_rendered_and_patched_through_the_managed_post_renderer():
+    registry = FakeChartRegistry()
+    source = _flux_source(OCI_RELEASE, _oci_repository(registry))
+    snapshot = _snapshot({RELEASE_PATH: OCI_RELEASE}, repo_url=PLATFORM_REPO)
+    runner = _BitnamiRunner()
+
+    try:
+        assert source.status is BindingStatus.RESOLVED
+        assert source.renderer_config["chart"]["digest"] == registry.manifest_digest
+        plan = FluxHelmReleasePlanner(
+            renderer=HelmRenderer(expected_version=HELM_VERSION, runner=runner),
+            chart_fetcher=_fetcher(registry),
+        ).plan(
+            _action([_op("nginx", cpu="50m"), _op("metrics", cpu="20m")]),
+            source,
+            snapshot,
+            VALUES_REVISION,
+        )
+
+        assert [edit.path for edit in plan.files] == [RELEASE_PATH]
+        content = plan.files[0].content or ""
+        assert content.startswith("# Public web tier")
+        assert "postRenderers:" in content
+        assert "- name: nginx" in content and "- name: metrics" in content
+        assert plan.validation.passed
+        assert plan.warnings == [
+            "remote Helm chart oci://registry-1.docker.io/bitnamicharts/nginx:18.3.1 rendered from "
+            f"{registry.manifest_digest}"
+        ]
+        assert all(call[3].startswith(".greenkube-render/charts/") for call in runner.calls if call[1] == "template")
+        assert not (snapshot.workspace / ".greenkube-render").exists()
+    finally:
+        snapshot.close()
+
+
+def test_flux_oci_chart_whose_tag_moved_since_the_deployment_fails_closed():
+    registry = FakeChartRegistry()
+    source = _flux_source(OCI_RELEASE, _oci_repository(registry, digest="sha256:" + "f" * 64))
+    snapshot = _snapshot({RELEASE_PATH: OCI_RELEASE}, repo_url=PLATFORM_REPO)
+
+    try:
+        with pytest.raises(HelmPlanError, match="chart-digest-mismatch"):
+            FluxHelmReleasePlanner(
+                renderer=HelmRenderer(expected_version=HELM_VERSION, runner=_BitnamiRunner()),
+                chart_fetcher=_fetcher(registry),
+            ).plan(_action([_op("nginx", cpu="50m")]), source, snapshot, VALUES_REVISION)
+    finally:
+        snapshot.close()
+
+
+def test_flux_helm_repository_chart_renders_the_deployed_version_of_a_range():
+    registry = FakeChartRegistry()
+    helm_repository = {
+        "apiVersion": "source.toolkit.fluxcd.io/v1",
+        "kind": "HelmRepository",
+        "metadata": {"name": "bitnami", "namespace": "flux-system"},
+        "spec": {"url": "https://charts.bitnami.com/bitnami"},
+        "status": {"artifact": {"revision": "sha256:" + "e" * 64}},
+    }
+    source = _flux_source(HTTP_RELEASE, helm_repository)
+    snapshot = _snapshot({RELEASE_PATH: HTTP_RELEASE}, repo_url=PLATFORM_REPO)
+
+    try:
+        assert source.renderer_config["chart"]["resolved_version"] == "18.3.1"
+        plan = FluxHelmReleasePlanner(
+            renderer=HelmRenderer(expected_version=HELM_VERSION, runner=_BitnamiRunner()),
+            chart_fetcher=_fetcher(registry),
+        ).plan(_action([_op("nginx", cpu="50m")]), source, snapshot, VALUES_REVISION)
+
+        assert plan.validation.passed
+        assert plan.warnings == [
+            "remote Helm chart https://charts.bitnami.com/bitnami nginx@18.3.1 rendered from "
+            f"sha256:{hashlib.sha256(registry.archive).hexdigest()}"
+        ]
     finally:
         snapshot.close()
