@@ -28,7 +28,8 @@ SUBSCRIPTION = "00000000-0000-0000-0000-000000000001"
 
 
 class FakeAzure:
-    def __init__(self, refuse_token: bool = False):
+    def __init__(self, refuse_token: bool = False, next_link: str = f"{ARM}/PAGE2"):
+        self.next_link = next_link
         self.pages = json.loads(FIXTURE.read_text())["pages"]
         self.refuse_token = refuse_token
         self.requests: List[httpx.Request] = []
@@ -47,7 +48,7 @@ class FakeAzure:
             return httpx.Response(200, json=self.pages[1])
         if request.url.path == f"/subscriptions/{SUBSCRIPTION}/providers/Microsoft.Advisor/recommendations":
             page = dict(self.pages[0])
-            page["nextLink"] = f"{ARM}/PAGE2"
+            page["nextLink"] = self.next_link
             return httpx.Response(200, json=page)
         return httpx.Response(404)
 
@@ -130,6 +131,16 @@ async def test_refused_token_fails_the_run_without_leaking(tmp_path):
 
     assert report.run.status == SourceRunStatus.FAILED
     assert "federated.jwt.token" not in (report.run.error or "")
+
+
+async def test_next_link_to_another_host_is_not_followed(tmp_path):
+    server = FakeAzure(next_link="https://elsewhere.test/PAGE2")
+    report = await _run(_source(tmp_path, server))
+
+    # The ARM token is never sent to another host, and the batch is incomplete.
+    assert not [r for r in server.requests if r.url.host == "elsewhere.test"]
+    assert report.run.status == SourceRunStatus.INCOMPLETE
+    assert "foreign_next_link" in {d.code for d in report.run.diagnostics}
 
 
 def test_capability_keywords():

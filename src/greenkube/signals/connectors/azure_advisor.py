@@ -32,6 +32,7 @@ import logging
 import math
 import os
 from typing import Any, ClassVar, Dict, FrozenSet, List, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import Field
@@ -100,6 +101,12 @@ def _number(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _origin(url: str) -> Tuple[str, str]:
+    """Scheme and host (with port) of a URL, lowercased."""
+    parts = urlsplit(url)
+    return parts.scheme.lower(), parts.netloc.lower()
 
 
 def capability_for(text: str) -> Capability:
@@ -216,6 +223,8 @@ class AzureAdvisorSource(Source):
             first["$filter"] = categories
         params: Optional[Dict[str, str]] = first
         items: List[Mapping[str, Any]] = []
+        foreign_link = False
+        arm_origin = _origin(self.arm_url)
         async with self._client(headers={"Authorization": f"Bearer {token}"}) as client:
             for _ in range(MAX_PAGES):
                 if url is None:
@@ -226,8 +235,23 @@ class AzureAdvisorSource(Source):
                 items.extend(item for item in payload.get("value") or [] if isinstance(item, Mapping))
                 next_link = payload.get("nextLink")
                 url, params = (str(next_link), None) if next_link else (None, None)
+                if url is not None and _origin(url) != arm_origin:
+                    # The ARM token is only ever sent to Azure Resource Manager:
+                    # stop paging (the batch stays incomplete) instead of following it.
+                    foreign_link = True
+                    break
         signals, counts = self.advice_signals(items, ctx)
-        diagnostics = [
+        diagnostics: List[Diagnostic] = []
+        if foreign_link:
+            diagnostics.append(
+                Diagnostic(
+                    level="warning",
+                    code="foreign_next_link",
+                    message="Advisor paged to another host than Azure Resource Manager; paging stopped",
+                    count=1,
+                )
+            )
+        diagnostics += [
             Diagnostic(
                 level="info",
                 code=code,
