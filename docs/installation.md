@@ -183,8 +183,9 @@ executors next to the controller.
 
 Browser users sign in with accounts and server-side sessions; machines use scoped API keys created in
 **Settings > API keys** (`read`, `write`, `approve`, `plans:deliver`, `signals:write`, `metrics:read`, `admin`). To provide the first
-admin password yourself (GitOps), set `auth.admin.existingSecret`. SSO through an authentication proxy or OIDC is
-on the roadmap. See [Authentication](authentication.md).
+admin password yourself (GitOps), set `auth.admin.existingSecret`. Single sign-on works through an authentication
+proxy (`config.apiAuthMode: proxy`) or native OpenID Connect (`config.apiAuthMode: oidc`), with IdP groups mapped to
+the `viewer`, `operator` and `admin` roles. See [Authentication](authentication.md).
 
 The bootstrap API key `GREENKUBE_API_KEY` (Secret `greenkube`) still works as an admin key for one more minor
 release (deprecated).
