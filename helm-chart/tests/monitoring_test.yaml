@@ -73,6 +73,12 @@ tests:
       - matchRegex:
           path: spec.groups[1].rules[0].annotations.description
           pattern: '\{\{ \$labels.loop \}\}'
+      - equal:
+          path: spec.groups[1].rules[3].alert
+          value: GreenKubeLedgerChainVerificationFailed
+      - equal:
+          path: spec.groups[1].rules[3].expr
+          value: increase(greenkube_ledger_chain_verification_failures_total[2h]) > 0
 
   - it: should leave the controller loop alerts out when disabled
     set:

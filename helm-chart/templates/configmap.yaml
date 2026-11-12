@@ -204,8 +204,12 @@ data:
   CHANGE_MEASUREMENT_EPSILON_RATIO: {{ if hasKey . "epsilonRatio" }}{{ .epsilonRatio | quote }}{{ else }}"0.02"{{ end }}
   CHANGE_DRIFT_THRESHOLD: {{ if hasKey . "driftThreshold" }}{{ .driftThreshold | quote }}{{ else }}"0.5"{{ end }}
   CHANGE_DRIFT_SUSTAINED_DAYS: {{ if hasKey . "driftSustainedDays" }}{{ .driftSustainedDays | int | quote }}{{ else }}"3"{{ end }}
+  CHANGE_MEASUREMENT_ACCELERATED: {{ ternary "true" "false" (eq .accelerated true) | quote }}
   {{- end }}
   {{- end }}
+
+  # --- Savings ledger v2 (C6) ---
+  LEDGER_CHAIN_VERIFY_INTERVAL: {{ dig "ledger" "chainVerifyInterval" "1h" .Values.config | quote }}
 
   # --- Recommendation sources (Source SDK) ---
   {{- with .Values.sources }}

@@ -148,6 +148,37 @@ class TestChangeMeasurementWindowConfig:
         with patch.dict(os.environ, {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value}, clear=True):
             assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == float(value)
 
+    @pytest.mark.parametrize("value", ["0.25", "0.0417", "1"])
+    def test_accelerated_demo_windows_accept_a_baseline_of_at_least_an_hour(self, value):
+        env = {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value, "CHANGE_MEASUREMENT_ACCELERATED": "true"}
+        with patch.dict(os.environ, env, clear=True):
+            assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == float(value)
+
+    @pytest.mark.parametrize("value", ["0", "0.01", "0.04"])
+    def test_accelerated_demo_windows_still_reject_less_than_an_hour(self, value):
+        env = {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value, "CHANGE_MEASUREMENT_ACCELERATED": "true"}
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ValueError, match="CHANGE_MEASUREMENT_PRE_WINDOW_DAYS"):
+                Config(_env_file=None)
+
+    def test_acceleration_is_off_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = Config(_env_file=None)
+        assert cfg.CHANGE_MEASUREMENT_ACCELERATED is False
+        assert cfg.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == 7.0
+
+
+class TestLedgerConfig:
+    def test_chain_verification_runs_hourly_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            assert Config(_env_file=None).LEDGER_CHAIN_VERIFY_INTERVAL == "1h"
+
+    @pytest.mark.parametrize("value", ["30s", "25h", "1d", "soon"])
+    def test_invalid_chain_verification_intervals_are_rejected(self, value):
+        with patch.dict(os.environ, {"LEDGER_CHAIN_VERIFY_INTERVAL": value}, clear=True):
+            with pytest.raises(ValueError, match="LEDGER_CHAIN_VERIFY_INTERVAL"):
+                Config(_env_file=None)
+
 
 class TestRecommendationApplyToleranceConfig:
     @pytest.mark.parametrize("value", ["-0.1", "1.01", "nan", "inf"])

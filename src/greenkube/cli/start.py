@@ -217,9 +217,13 @@ async def attribute_recommendation_savings() -> None:
         from ..core.factory import get_recommendation_repository as _reco_repo
         from ..core.factory import get_savings_ledger_repository as _savings_repo
         from ..core.savings_attributor import SavingsAttributor, savings_cluster_name
+        from ..verify.ledger.projector import build_projector
 
         applied = await _reco_repo().get_applied_recommendations()
-        attributor = SavingsAttributor(savings_repo=_savings_repo(), cluster_name=savings_cluster_name())
+        # Dual write (C6): the run is followed by a savings ledger v2 pass.
+        attributor = SavingsAttributor(
+            savings_repo=_savings_repo(), cluster_name=savings_cluster_name(), ledger=build_projector()
+        )
         result = await attributor.accrue(applied)
         logger.info(
             "Savings attribution complete: %d slot(s), %d row(s) written, %d error(s).",
@@ -409,6 +413,17 @@ async def _run_drift_monitor() -> None:
         await run_drift_monitor()
     except Exception as e:
         logger.error("Drift monitor task failed: %s", e)
+        report_loop_failure(e)
+
+
+async def _run_ledger_chain() -> None:
+    """Savings ledger v2 catch-up and hash-chain verification (C6); errors mark the tick failed."""
+    from ..verify.ledger.verification import run_ledger_chain
+
+    try:
+        await run_ledger_chain()
+    except Exception as e:
+        logger.error("Savings ledger chain task failed: %s", e)
         report_loop_failure(e)
 
 
@@ -735,6 +750,14 @@ def _register_controller_loops(
             DRIFT_MONITOR_INTERVAL_SECONDS,
             timeout_seconds=_TIMEOUT_LONG,
             description="Drift monitor: regresses realized changes whose saving no longer holds (C8).",
+        ),
+        LoopSpec(
+            "ledger-chain",
+            _run_ledger_chain,
+            parse_interval_seconds(getattr(cfg, "LEDGER_CHAIN_VERIFY_INTERVAL", "1h")),
+            run_immediately=True,
+            timeout_seconds=_TIMEOUT_LONG,
+            description="Savings ledger v2 catch-up, supersession and restatement, then hash-chain verification (C6).",
         ),
         LoopSpec(
             "recommendation-scan",

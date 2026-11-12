@@ -264,10 +264,14 @@ async def test_attribute_recommendation_savings_success():
     with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(CLUSTER_NAME="cluster-a")):
         with patch("greenkube.core.factory.get_recommendation_repository", return_value=reco_repo):
             with patch("greenkube.core.factory.get_savings_ledger_repository", return_value=savings_repo):
-                with patch("greenkube.core.savings_attributor.SavingsAttributor", return_value=attributor) as cls:
+                with (
+                    patch("greenkube.core.savings_attributor.SavingsAttributor", return_value=attributor) as cls,
+                    patch("greenkube.verify.ledger.projector.build_projector", return_value="projector"),
+                ):
                     await start_module.attribute_recommendation_savings()
 
-    cls.assert_called_once_with(savings_repo=savings_repo, cluster_name="cluster-a")
+    # Dual write (C6): the attributor gets the savings ledger v2 projector.
+    cls.assert_called_once_with(savings_repo=savings_repo, cluster_name="cluster-a", ledger="projector")
     attributor.accrue.assert_awaited_once_with(["rec"])
 
 
@@ -414,6 +418,7 @@ async def test_async_start_registers_every_controller_loop_and_runs_initial_task
         "savings-attribution",
         "recommendation-lifecycle",
         "savings-drift",
+        "ledger-chain",
         "recommendation-scan",
         "metrics-compression",
         "dashboard-summary",

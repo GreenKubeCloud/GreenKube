@@ -52,9 +52,12 @@ def test_quickstart_accelerates_evidence() -> None:
     # The sample workloads are oversized: their rightsizings are decreases, which
     # otherwise wait for 7 days of observed coverage (weekly cycles).
     assert values["config"]["recommendations"]["minDecreaseCoverageDays"] * 86400 <= 600
-    # A merged change is decided by the interim verifier over windowHours: change
-    # measurement (C3) needs a 7-day baseline and a 7-day post-window.
-    assert values["config"]["recommendations"]["changeMeasurement"]["enabled"] is False
+    # Change measurement records merged changes (/changes, /ledger) and decides them on
+    # accelerated demo windows: explicit opt-in, never the production defaults.
+    measurement = values["config"]["recommendations"]["changeMeasurement"]
+    assert measurement["enabled"] is True and measurement["accelerated"] is True
+    assert 1 / 24 <= measurement["preWindowDays"] < 7
+    assert (measurement["postWindowDays"] * 24 + measurement["warmupHours"]) <= 1.5
     assert values["config"]["recommendations"]["verification"]["windowHours"] <= 0.1
     # F12: automation is always on; no feature flag in the values.
     assert "enabled" not in values["automation"]
@@ -135,4 +138,7 @@ def test_quickstart_values_render_a_valid_configuration(monkeypatch: pytest.Monk
     config = Config()
     assert config.RECOMMENDATION_MIN_SAMPLES == 6
     assert config.VERIFICATION_WINDOW_HOURS == pytest.approx(0.1)
+    assert config.CHANGE_MEASUREMENT_ENABLED and config.CHANGE_MEASUREMENT_ACCELERATED
+    assert config.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == pytest.approx(0.25)
+    assert config.LEDGER_CHAIN_VERIFY_INTERVAL == "5m"
     assert config.recommendation_scan_interval.total_seconds() == 60

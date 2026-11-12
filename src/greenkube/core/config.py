@@ -64,6 +64,10 @@ def parse_repository_allowlist(value: str) -> tuple[str, ...]:
     return tuple(patterns)
 
 
+#: Shortest baseline window (days) an accelerated (demo/quickstart) change measurement accepts: 1 hour.
+ACCELERATED_MIN_PRE_WINDOW_DAYS = 1 / 24
+
+
 def _scan_interval_seconds(value: str) -> int:
     """Parse a scheduler interval such as ``30m`` or ``1h`` (units s, m, h)."""
     match = re.fullmatch(r"(\d+)([smh])", str(value).strip().lower())
@@ -429,8 +433,9 @@ class Config(BaseSettings):
     # Record every detected change with a baseline snapshot and measure it with a
     # counterfactual and a bootstrap CI. Off: changes are measured by the interim verifier.
     CHANGE_MEASUREMENT_ENABLED: bool = True
-    # Baseline window (days) ending at the PR merge or plan approval; at least 7 so every hour of the week matches.
-    CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: float = Field(7.0, ge=7)
+    # Baseline window (days) ending at the PR merge or plan approval; at least 7 so every hour of the week matches
+    # (at least 1 hour with CHANGE_MEASUREMENT_ACCELERATED, see below).
+    CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: float = Field(7.0, gt=0)
     # Post-change window (days) starting after the rollout and its warm-up.
     CHANGE_MEASUREMENT_POST_WINDOW_DAYS: float = Field(7.0, gt=0)
     # Hours after rollout completion excluded from the post-window.
@@ -445,6 +450,12 @@ class Config(BaseSettings):
     # saving is lost on each of CHANGE_DRIFT_SUSTAINED_DAYS consecutive days.
     CHANGE_DRIFT_THRESHOLD: float = Field(0.5, gt=0, le=1)
     CHANGE_DRIFT_SUSTAINED_DAYS: int = Field(3, ge=1, le=7)
+    # Demo and quickstart only: lifts the 7-day minimum of the baseline window down to 1 hour so a
+    # change is decided minutes after it lands. Off in every production default.
+    CHANGE_MEASUREMENT_ACCELERATED: bool = False
+    # --- Savings ledger v2 (roadmap C6) ---
+    # How often the controller catches the hash-chained ledger up and verifies its chain (s, m or h).
+    LEDGER_CHAIN_VERIFY_INTERVAL: str = "1h"
     # Interval between lifecycle jobs (apply detection, verification, expiry).
     RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
     # Interval between scheduled, leader-gated recommendation scans in the
@@ -714,6 +725,16 @@ class Config(BaseSettings):
             raise ValueError("RECOMMENDATION_SCAN_INTERVAL must be between 1m and 24h.")
         return normalized
 
+    @field_validator("LEDGER_CHAIN_VERIFY_INTERVAL", mode="after")
+    @classmethod
+    def _validate_ledger_chain_verify_interval(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        match = re.fullmatch(r"(\d+)([smh])", normalized)
+        seconds = int(match.group(1)) * {"s": 1, "m": 60, "h": 3600}[match.group(2)] if match else 0
+        if not 60 <= seconds <= 86_400:
+            raise ValueError("LEDGER_CHAIN_VERIFY_INTERVAL must be a duration between 1m and 24h (e.g. 1h).")
+        return normalized
+
     @field_validator("RECOMMENDATION_APPLY_TOLERANCE", mode="after")
     @classmethod
     def _validate_recommendation_apply_tolerance(cls, value: float) -> float:
@@ -865,6 +886,25 @@ class Config(BaseSettings):
                 "Unknown CLOUD_PROVIDER '%s' - falling back to DEFAULT_PUE=%s",
                 self.CLOUD_PROVIDER,
                 self.DEFAULT_PUE,
+            )
+
+        # Change measurement windows (C3): the 7-day baseline is the safe minimum; only an explicit
+        # accelerated (demo/quickstart) setting may shorten it, never below one hour.
+        minimum_pre_window = ACCELERATED_MIN_PRE_WINDOW_DAYS if self.CHANGE_MEASUREMENT_ACCELERATED else 7.0
+        if self.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS < minimum_pre_window:
+            raise ValueError(
+                f"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS must be at least {minimum_pre_window:g} "
+                + (
+                    "with CHANGE_MEASUREMENT_ACCELERATED."
+                    if self.CHANGE_MEASUREMENT_ACCELERATED
+                    else "(7 days so every hour of the week is matched; CHANGE_MEASUREMENT_ACCELERATED "
+                    "allows shorter demo windows)."
+                )
+            )
+        if self.CHANGE_MEASUREMENT_ACCELERATED:
+            logging.getLogger(__name__).warning(
+                "CHANGE_MEASUREMENT_ACCELERATED is on: change measurements use demo windows and are not "
+                "representative. Do not use it in production."
             )
 
         # Cross-field validation

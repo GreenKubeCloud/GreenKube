@@ -6,8 +6,8 @@
 #
 # DO NOT use these values in production. They collect a sample every 30 seconds,
 # accept 6 samples as enough evidence, ignore observation coverage and measure a
-# merged change over 6 minutes. Every number GreenKube shows is then based on a
-# few minutes of data.
+# merged change over minutes instead of weeks (accelerated change measurement).
+# Every number GreenKube shows is then based on a few minutes of data.
 
 image:
   repository: greenkube/greenkube
@@ -41,13 +41,26 @@ config:
     # still queues one on demand.
     scanInterval: 1m
     verification:
-      # Measure a merged change over 6 minutes (default 72 hours).
+      # Health gates of a merged change after 6 minutes (default 72 hours).
       windowHours: 0.1
       lifecycleInterval: 30s
-    # Change measurement (counterfactual, roadmap C3) needs a 7-day baseline and
-    # a 7-day post-window; the quickstart decides with the verifier above.
+    # Change measurement (roadmap C1-C5) records every merged change on /changes
+    # and /ledger and measures it against a counterfactual baseline. Production
+    # needs a 7-day baseline and a 7-day post-window; accelerated demo windows
+    # decide a change about 80 minutes after it lands. A fresh cluster has no
+    # baseline for the same hours of the week, so expect an honest
+    # "inconclusive" outcome rather than measured savings.
     changeMeasurement:
-      enabled: false
+      enabled: true
+      accelerated: true
+      # 6 hours of baseline (default 7 days, the minimum without acceleration).
+      preWindowDays: 0.25
+      # 72 minutes after a 3-minute warm-up (default 7 days after 1 hour).
+      postWindowDays: 0.05
+      warmupHours: 0.05
+  # Savings ledger v2: catch up and verify the hash chain every 5 minutes (default 1h).
+  ledger:
+    chainVerifyInterval: 5m
 
 # Automation is always on; delivery activates once the Gitea token Secret exists.
 automation:

@@ -95,5 +95,12 @@ spec:
           annotations:
             summary: No GreenKube controller holds the leader Lease
             description: Collection, scans, apply detection, measurement and automation run only on the leader controller; none is running or scraped.
+        - alert: GreenKubeLedgerChainVerificationFailed
+          expr: increase(greenkube_ledger_chain_verification_failures_total[2h]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: The GreenKube savings ledger hash chain failed verification
+            description: {{ `An entry of the append-only savings ledger was modified, removed or reordered ({{ $labels.reason }}); see GET /api/v2/ledger/summary (chain) and the controller logs.` | quote }}
     {{- end }}
 {{- end }}
