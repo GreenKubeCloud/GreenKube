@@ -190,6 +190,19 @@ httpRoute:
 
 See [Exposure](configuration.md#exposure-ingress-httproute) for every key.
 
+## Pod Security Admission
+
+Every pod the chart renders by default (api, controller, renderer, bundled PostgreSQL, credentials bootstrap Job, Helm
+test pod, and the optional worker and KRR CronJob) meets the Kubernetes Pod Security Standard `restricted`: non-root,
+no privilege escalation, all capabilities dropped and `RuntimeDefault` seccomp. The bundled PostgreSQL needs no root
+init container. You can install into a namespace labelled `pod-security.kubernetes.io/enforce=restricted`; CI checks
+it with a server-side dry run on kind (roadmap N5).
+
+One option is outside `restricted`: `renderer.egressFirewall.enabled=true` adds an init container that runs as root with
+`NET_ADMIN` to install a deny-all egress firewall. It is off by default and only meant for CNIs that do not enforce
+NetworkPolicy; keep it off in a `restricted` namespace and rely on the renderer's egress NetworkPolicy, or label the
+namespace `baseline`/`privileged` if you need it.
+
 ## Optional: high availability
 
 High availability is two numbers, not another install:
