@@ -832,6 +832,18 @@ monitoring:
     # render only when the controller ServiceMonitor does (serviceMonitor.enabled and
     # controller.metricsPort > 0).
     controllerAlerts: true
+    # Loop health alerts (N7, group greenkube.loop, rendered with the controller
+    # loop alerts): GreenKubeCollectionLagging, GreenKubeRecommendationScanFailing,
+    # GreenKubeRecommendationSourceFailing, GreenKubeRecommendationScanStale,
+    # GreenKubeMeasurementStalled and GreenKubeLedgerChainVerificationFailed.
+    thresholds:
+      # Collection watermark behind now (leader only).
+      collectionLagSeconds: 1800
+      # Age of the last successful recommendation scan (scans run hourly).
+      recommendationScanStaleSeconds: 10800
+      # Age of the last successful recommendation-lifecycle tick (apply
+      # detection, verification and change measurement; runs every 5 minutes).
+      measurementStaleSeconds: 1800
 
   serviceMonitor:
     # Create a ServiceMonitor for Prometheus Operator to discover GreenKube metrics.
