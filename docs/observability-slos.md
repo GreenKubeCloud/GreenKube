@@ -118,7 +118,15 @@ Every periodic job of the controller is a registered loop (`src/greenkube/core/l
 | `greenkube_loop_consecutive_failures{loop}` | Failed or timed-out ticks since the last success. |
 | `greenkube_controller_leader` | `1` on the replica that runs leader-only loops (the Lease holder, or any controller without leader election). |
 
-`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `savings-drift`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`, `session-purge` and `controller-heartbeat`.
+`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `savings-drift`, `ledger-chain`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`, `session-purge` and `controller-heartbeat`.
+
+The `ledger-chain` loop also exports the integrity of the savings ledger v2 ([methodology](methodology/savings-measurement.md#12-savings-ledger-v2-c6)):
+
+| Metric | Meaning |
+| --- | --- |
+| `greenkube_ledger_chain_verification_failures_total{reason}` | Verifications that found a modified, missing or reordered entry (`hash_mismatch`, `broken_link`, `missing_entry`, `identity_mismatch`, `truncated`, `head_rewritten`). Alerted by `GreenKubeLedgerChainVerificationFailed` (critical) with the controller alerts. |
+| `greenkube_ledger_chain_verified_entries` | Entries verified by the last pass, all clusters. |
+| `greenkube_ledger_write_errors_total{reason}` | Ledger passes that could not write (`projection_failed`, `supersession_failed`, `restatement_failed`, `dual_write_failed`, `invalid_v1_row`); the next pass catches up. |
 
 The same listener serves three more endpoints:
 

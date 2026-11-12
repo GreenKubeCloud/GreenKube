@@ -1,6 +1,6 @@
 # Savings measurement — methodology
 
-**Strategy:** `request_rightsizing` version `2.0` (`greenkube.verify.strategy.RequestRightsizingStrategy`) · **Code:** `src/greenkube/verify/` · **Roadmap:** C1–C5, C8, C9
+**Strategy:** `request_rightsizing` version `2.0` (`greenkube.verify.strategy.RequestRightsizingStrategy`) · **Code:** `src/greenkube/verify/` · **Roadmap:** C1–C9, N9
 
 GreenKube measures every applied change once, against a counterfactual: what the workload would have cost **without** the change. The method follows the spirit of IPMVP Option B (retrofit isolation with measurement of the affected system): a baseline period before the change, a reporting period after it, a model that adjusts the baseline to the reporting period's conditions, and an uncertainty statement.
 
@@ -16,7 +16,8 @@ This page is the reference for reviewing and auditing a measurement. When a rule
 | Load-regression counterfactual (C3 v2) | **In use** when a load driver exists and the fit's diagnostics pass (strategy `2.0`). |
 | Confounders, bootstrap interval, outcome rule (C4) | **In use**, including node-pool confounders (hardware, autoscaling, changes to neighbours). |
 | One measurement per change, split across its recommendations (C5) | **In use.** |
-| Append-only ledger entries, hash chain and restatement (C6) | Not yet. Measured savings reach the existing ledger through the recommendation (method `measured`). |
+| Append-only ledger entries, hash chain and restatement (C6) | **In use** ([section 12](#12-savings-ledger-v2-c6)); the v1 ledger is still written and read by the legacy views. |
+| Ledger API and exports (C7) | **In use**: `/api/v2/ledger/entries`, `/summary`, `/export` (CSV and FOCUS-aligned). |
 | Drift monitor (`realized → regressed`, reversal entries, C8) | **In use** ([section 10](#10-drift-monitor-c8)). |
 
 Changes applied before this release, recommendations marked applied by hand (`PATCH /api/v1/recommendations/{id}/apply`, which apply detection never sees), and every change when `CHANGE_MEASUREMENT_ENABLED=false` are still measured by the interim verifier described in [recommendation.md](../recommendation.md#lifecycle-states).
@@ -175,6 +176,7 @@ Values are **signed and never floored**: a cost increase is reported as a negati
 | The workload was deleted and recreated during the post-window | severe |
 | The workload's HPA changed after the rollout (replicas, so the allocated cost, moved without the change) | severe |
 | The unit price of a resource whose per-replica requests the change did not touch moved more than 20% | severe |
+| The node pool's CPU or memory unit price (all workloads of the pool) moved more than 20% (`pool_price_card_change`) | severe |
 | The node instance types running the workload changed on more than 50% of its pod-hours | severe |
 | The node pool's hardware changed: its CPU-capacity-weighted instance-type mix moved by more than 25% (`pool_instance_type_change`) | severe |
 | The node pool's mean CPU capacity changed by more than 50% (`pool_capacity_change`) | severe |
@@ -182,6 +184,7 @@ Values are **signed and never floored**: a cost increase is reported as a negati
 | The workload's HPA changed inside the baseline window | moderate |
 | Mean replicas deviate more than 25% from the replicas predicted by the same counterfactual | moderate |
 | The unit price of a resource whose per-replica requests the change did not touch moved more than 5% | moderate |
+| The node pool's CPU or memory unit price moved more than 5% (`pool_price_card_change`) | moderate |
 | The node instance types running the workload changed (total-variation distance above 25% of pod-hours) | moderate |
 | The node pool's mean CPU capacity changed by more than 25% (the cluster autoscaler, `pool_capacity_change`) | moderate |
 | A change to another workload whose pods ran in the same node pool landed during the measurement (`pool_change`) | moderate |
@@ -191,6 +194,8 @@ Values are **signed and never floored**: a cost increase is reported as a negati
 A severe confounder's detail is the reason of the `contaminated` outcome.
 
 **Node-pool checks.** The workload's pools are the `node_pool` of the nodes its pods ran on during the post-window. The node snapshots (SCD2) are sampled every 6 hours over both windows; samples without any node of the pools (before the snapshots began) are ignored. A change to another workload counts when it completed between the merge and the end of the post-window and its pods ran on one of the pools' nodes in the two hours after its rollout. Allocated cost is requests × unit price, so other workloads' changes and autoscaling only move the idle share of CO₂e allocated to this workload (moderate), while new hardware in the pool changes its unit prices and power profile (severe). Nodes without a pool label are not grouped, and the checks are skipped. A failed read of the node snapshots or of the changes delays the decision to the next pass.
+
+**Pool price card.** At each pool sample the metrics of every pod are read for one hour, and the CPU (per core-hour) and memory (per GiB-hour) unit prices of the pods that ran on the pools' nodes are computed from trusted cost with CPU/RAM components, for each window. A unit price belongs to the nodes, not to the requests, so this control works even when the change resized both resources of the workload (the workload-level check then has no untouched resource). A pool-wide finding replaces the workload-level finding of the same resource, so a price change is never penalized twice.
 
 **Confidence** starts at the coverage and loses 0.15 per moderate confounder, 0.05 per mild one and 0.10 when the counterfactual has no load driver or only the CPU-usage driver; it is 0 when the measurement is contaminated.
 
@@ -249,23 +254,61 @@ Per-replica rates do not move with load-driven replica counts; they move when th
 
 **Spec drift.** The usage drift is assessed first, so a revert in git whose usage has already drifted for the sustained period is a regression. Otherwise, when the latest spec observation after the rollout has a pod-template digest other than the change's `spec_digest_after`, or another workload UID, the change is closed (`realized → closed`, event `spec_drift` or `workload_recreated`): its measured saving no longer describes what runs. Its `verified` recommendations become `regressed` as well, so their measured accrual stops from the first observation of the differing run (`accrual_end` in the event payload). The monitor acts two hours after the observation, and a newer recorded GreenKube change on the workload closes the change as `superseded` instead; each change then keeps accruing its own measured step.
 
-**Reversal entries.** Both paths store where the measured saving ended (`details.accrual_end` on the change: the drift onset, which is the first day of the sustained run, or the first differing spec observation). The measured accruals written after it, or after the verification time if that is later, are reversed: one signed ledger row per recommendation, method `measured`, covering `[accrual end, end of the last accrued slot)` at the recommendation's measured annual rate. It is written two hours after the state change, once an accrual run in flight has finished, and the change records a `savings_reversed` event listing the rows. A later pass reverses only what no earlier `savings_reversed` entry covers, so an accrual written late gets an adjacent entry, never an overlapping one. A reversal within one accrual slot widens its period label by one second so it cannot take that slot's idempotency key; its amount uses the exact period. Ended changes are checked for 14 days after their state change. The ledger counters report reversals as reversed (`greenkube_cost_savings_reversed_dollars_total`, `greenkube_co2e_savings_reversed_grams_total`); savings accrued before the accrual end are kept.
+**Deletion.** The monitor asks the Kubernetes API whether a realized change's Deployment, StatefulSet or DaemonSet still exists. HTTP 404 records a `workload_absent` event; when the workload is still absent two hours later the change is closed (`realized → closed`, event `workload_deleted`, `accrual_end` = the first absent observation) and its `verified` recommendations become `regressed`, so their measured accrual stops there. A workload found again in between records `workload_present` and nothing closes; any other API answer (no client, forbidden, timeout) decides nothing.
+
+**Reversal entries.** The three paths store where the measured saving ended (`details.accrual_end` on the change: the drift onset, which is the first day of the sustained run, or the first differing spec observation). The measured accruals written after it, or after the verification time if that is later, are reversed: one signed ledger row per recommendation, method `measured`, covering `[accrual end, end of the last accrued slot)` at the recommendation's measured annual rate. It is written two hours after the state change, once an accrual run in flight has finished, and the change records a `savings_reversed` event listing the rows. A later pass reverses only what no earlier `savings_reversed` entry covers, so an accrual written late gets an adjacent entry, never an overlapping one. A reversal within one accrual slot widens its period label by one second so it cannot take that slot's idempotency key; its amount uses the exact period. Ended changes are checked for 14 days after their state change. In the savings ledger v2 each reversal row becomes a `reversal` entry with reason `drift`, linked to the first measured accrual it cancels ([section 12](#12-savings-ledger-v2-c6)). The ledger counters report reversals as reversed (`greenkube_cost_savings_reversed_dollars_total`, `greenkube_co2e_savings_reversed_grams_total`); savings accrued before the accrual end are kept.
 
 ## 11. Auditing a measurement
 
 1. `GET /api/v2/changes/{id}` returns the change, its state history and its baseline snapshot metadata. `baseline.content_verified` must be `true`.
 2. `GET /api/v2/changes/{id}/measurements` returns each decided measurement with its windows, load driver, `counterfactual_params`, per-quantity estimates and intervals, confounders, confidence, health gates, `allocations` and the per-recommendation rows.
 3. `evidence_sha256` covers every decided field of the measurement and `baseline_sha256` the snapshot it used. Recomputing the counterfactual from the snapshot's `hours` and `load_series`, the post-window rows and the parameters above must give the same estimates; the bootstrap seed is derived from `change_id`, `sequence` and the quantity.
-4. Database triggers reject `UPDATE` and `DELETE` on `change_events`, `change_members`, `baseline_snapshots`, `change_measurements`, `change_state_events` and `savings_measurements`.
+4. Database triggers reject `UPDATE` and `DELETE` on `change_events`, `change_members`, `baseline_snapshots`, `change_measurements`, `change_state_events`, `savings_measurements` and `savings_ledger_entries`.
+5. `GET /api/v2/ledger/entries?change_id={id}` lists the ledger entries of the change; `GET /api/v2/ledger/summary` reports the last hash-chain verification.
+
+## 12. Savings ledger v2 (C6)
+
+Every saving GreenKube reports ends up as an **entry** of an append-only, hash-chained ledger (`savings_ledger_entries`, `greenkube.verify.ledger`). An entry is one signed amount of one quantity earned during one period under one method:
+
+| Column | Meaning |
+|---|---|
+| `entry_kind` | `accrual` (an amount earned), `reversal` (cancels `reverses_entry_id`), `restatement` (replaces the projected accrual `restates_entry_id` with the measured amount of the same period). |
+| `book` | `accrued` mirrors the v1 accrual ledger and reconciles with `GET /api/v1/recommendations/savings`; `restatement` holds the restatements and the reversals of the projections they replace. |
+| `reason` | `accrual`, `drift` (a drift-monitor reversal, [section 10](#10-drift-monitor-c8)), `supersession` (rollback review, revert or phantom repair), `restatement`. |
+| `method` | `projected`, `measured_allocated` (this methodology, allocated cost), `realized_billed` (pool-level realization, C10, not written yet), `user_declared`. Never summed together. |
+| `quantity`, `value`, `unit` | `cost` in the pricing currency (`IMPACT_PRICING_CURRENCY`) or `co2e_g` in gCO₂e. Values are signed and never floored. |
+| `period_start`, `period_end`, `slot_start` | The accrued period, on the fixed UTC hour grid of the accrual job. |
+| `recommendation_ids`, `change_id`, `measurement_id`, `pr_url`, `method_version` | Provenance: the change's recommendations, the change and its pull request, the measurement and the strategy version (`request_rightsizing/2.0`) of measured amounts. |
+| `cluster_uid`, `cluster_name` | The UID of the `kube-system` namespace (roadmap N9), stored next to `CLUSTER_NAME` in `cluster_identities` the first time it is read and never replaced; `name:<CLUSTER_NAME>` without Kubernetes access. Signal ids and recommendation fingerprints keep their own cluster key. |
+| `seq`, `prev_hash`, `hash` | The entry's position in its cluster's chain and the chain link. |
+
+**Append-only.** Database triggers reject `UPDATE` and `DELETE` (and `TRUNCATE` on PostgreSQL). A correction is always a new entry.
+
+**Hash chain.** Each cluster's entries are numbered without gaps (`seq`) and chained: `hash = sha256(prev_hash || canonical_json(entry))`, where the canonical JSON covers every column except `hash` and `prev_hash` (sorted keys, timestamps as `YYYY-MM-DDTHH:MM:SS.ffffffZ`, floats as their shortest exact representation). Appends are serialized per cluster (an immediate transaction on SQLite, a transaction-scoped advisory lock on PostgreSQL), and every entry has a deterministic `entry_key`, so retries and concurrent writers never fork the chain or duplicate an entry.
+
+**Verification.** The controller's `ledger-chain` loop (leader only, every `LEDGER_CHAIN_VERIFY_INTERVAL`, default 1 hour, and at start) walks each chain: positions must follow each other, every `prev_hash` must be the previous `hash`, every `hash` must match its recomputed value and every `entry_id` its key. It verifies incrementally from the last verified head and the whole chain once a day; a chain shorter than the head it verified before, or with another hash there, lost its tail. Failures increment `greenkube_ledger_chain_verification_failures_total{reason}` (`missing_entry`, `broken_link`, `hash_mismatch`, `identity_mismatch`, `truncated`, `head_rewritten`), raise the `GreenKubeLedgerChainVerificationFailed` alert of the chart's PrometheusRule, and are reported by `GET /api/v2/ledger/summary` (`chain`).
+
+**Dual write.** The savings attribution job keeps writing the v1 ledger (`recommendation_savings_ledger`), which the legacy views, the gauges and `GET /recommendations/savings` read. Each attribution run that reached the database is followed by a ledger pass, and the `ledger-chain` loop catches up whatever a failed pass left (`greenkube_ledger_write_errors_total`). A pass:
+
+1. projects every v1 row after its watermark (`ledger_projection_watermarks`, advanced in the same transaction) into one entry per non-zero quantity. v1 `measured` becomes `measured_allocated`. A v1 drift reversal (an off-grid negative `measured` row) becomes a `reversal` with reason `drift`. Legacy compressed hourly rows are projected too. Each pass re-reads the last 1,000 ids so a row committed out of id order is not missed;
+2. reverses (reason `supersession`) every entry whose v1 row is flagged `superseded`, and the restatement entries attached to it;
+3. restates (BUG-39): for each `verified` (or later `regressed`) recommendation, every projected accrual that ended at or before `verified_at` and is not reversed yet gets a `reversal` and a `restatement` at the measured annual rate over the same period (`measured_cost_saved`, `measured_co2e_saved_grams`), linked to the projection, the measurement and the change.
+
+**Reading the books.** The `accrued` total of a method equals the v1 ledger of that method (all time, or prorated over a window exactly as the savings report does). The `restated` total (both books) is the best current statement: after a measurement, the projection of the measured period has moved to `measured_allocated`. A recommendation superseded after a restatement ends at zero in both books.
+
+**Rollups** are read-side: the `savings_ledger_daily_rollup` view sums entries per UTC day, namespace, method, quantity, book and kind. Nothing is ever compressed or deleted.
+
+**Export.** `GET /api/v2/ledger/export` streams the entries as CSV (one row per entry, with `window_share` and `window_value` for a window) or, with `format=focus`, as FOCUS-aligned rows (one per accrual group, cost and CO₂e together): `ChargeCategory` `Credit` for accruals and `Adjustment` (`ChargeClass` `Correction`) for reversals and restatements, `EffectiveCost` = −saving (avoided spend), `BilledCost` 0 except for `realized_billed`, and the `x-greenkube-*` extension columns (`method`, `measurement-id`, `pr-url`, `co2e-g`, `saving`, `book`, `hash`, …). The sum of `x-greenkube-saving` over `accrued` rows of a method reconciles with the savings report.
 
 ## Limitations
 
 - **Request changes only.** `request_rightsizing` is the only strategy. Replica, schedule, deletion and node-pool changes need their own strategies.
 - **Allocated, not billed.** The measured saving is allocated cost. The bill only drops when nodes are removed; pool-level realization (C10) is not implemented.
-- **Pool confounders need pool labels.** Node-pool checks use the `node_pool` of the node snapshots; clusters whose nodes carry no pool label get no pool-level check. Price changes are seen per workload only (the unit price of an untouched resource).
+- **Pool confounders need pool labels.** Node-pool checks, the pool price card included, use the `node_pool` of the node snapshots; clusters whose nodes carry no pool label get no pool-level check, and price changes are then seen per workload only (the unit price of an untouched resource).
 - **Drift is per replica.** The drift monitor watches allocated cost per replica-hour, the quantity a request change moves; a regression that only shows in replica counts (an HPA retuned) is not a drift of this change, and CO₂e is not monitored on its own.
 - **Reversals are whole.** A regression reverses the full measured rate from the onset, even when only part of the saving was lost (for example 60%). This is conservative: the remaining part is not credited until a new change is measured.
-- **Deletion and supersession.** A deleted workload is not observed, so it does not end a realized change; only a recreation (new UID) does. A change superseded by a newer recorded change is closed, but its recommendations keep accruing their measured step next to the new change's, and no reversal entry is written.
+- **Deletion and supersession.** A deletion ends the measured accrual at the first absent observation, up to one monitor interval (1 hour) after the actual deletion; the accruals of that hour are kept. A change superseded by a newer recorded change is closed, but its recommendations keep accruing their measured step next to the new change's, and no reversal entry is written.
+- **Accelerated demo windows.** `CHANGE_MEASUREMENT_ACCELERATED` (quickstart only) accepts a baseline of 1 hour or more. Such a baseline holds no other hour of the week than its own, so the post-window rarely matches it and the outcome is usually `inconclusive`. It shows the pipeline end to end (`/changes`, `/ledger`), not a saving.
 - **One baseline week.** With the default windows each hour of the week has a single baseline value; the load regression then uses weekday/weekend hours of the day instead. The interval reflects the noise, but an unusual baseline week (a holiday, an incident) biases the counterfactual. Use a longer `CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` (14 days enables hour-of-week slots) for such workloads.
 - **Load-driver heuristics.** The ingress-nginx and Envoy drivers assume a Service named after the workload, and the Envoy driver assumes Contour's cluster naming. Set `greenkube.io/load-metric` when that does not hold.
 - **Spec observations depend on the lifecycle interval.** A spec change reverted between two detection passes is not seen.

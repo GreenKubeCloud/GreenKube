@@ -52,19 +52,28 @@ def test_quickstart_accelerates_evidence() -> None:
     # The sample workloads are oversized: their rightsizings are decreases, which
     # otherwise wait for 7 days of observed coverage (weekly cycles).
     assert values["config"]["recommendations"]["minDecreaseCoverageDays"] * 86400 <= 600
-    # Change measurement records merged changes (/changes, /ledger) and decides them on
-    # accelerated demo windows: explicit opt-in, never the production defaults.
-    measurement = values["config"]["recommendations"]["changeMeasurement"]
-    assert measurement["enabled"] is True and measurement["accelerated"] is True
-    assert 1 / 24 <= measurement["preWindowDays"] < 7
-    assert (measurement["postWindowDays"] * 24 + measurement["warmupHours"]) <= 1.5
+    # A merged change is decided by the interim verifier over windowHours, inside the
+    # e2e verdict timeout: change measurement is the opt-in overlay below.
+    assert values["config"]["recommendations"]["changeMeasurement"]["enabled"] is False
     assert values["config"]["recommendations"]["verification"]["windowHours"] <= 0.1
+    # The savings ledger v2 fills and is verified every few minutes.
+    assert values["config"]["ledger"]["chainVerifyInterval"] == "5m"
     # F12: automation is always on; no feature flag in the values.
     assert "enabled" not in values["automation"]
     assert "profile" not in values
     provider = values["automation"]["providers"][0]
     assert provider["type"] == "gitea"
     assert provider["repositoryAllowlist"] == ["greenkube/greenkube-e2e-quickstart"]
+
+
+def test_change_measurement_overlay_uses_explicit_accelerated_windows() -> None:
+    overlay = yaml.safe_load((QUICKSTART / "values-change-measurement.yaml").read_text())
+    measurement = overlay["config"]["recommendations"]["changeMeasurement"]
+    # Records merged changes (/changes, /ledger) and decides them on demo windows:
+    # explicit opt-in, never the production defaults.
+    assert measurement["enabled"] is True and measurement["accelerated"] is True
+    assert 1 / 24 <= measurement["preWindowDays"] < 7
+    assert measurement["postWindowDays"] * 24 + measurement["warmupHours"] <= 1.5
 
 
 @pytest.mark.parametrize(
@@ -138,7 +147,36 @@ def test_quickstart_values_render_a_valid_configuration(monkeypatch: pytest.Monk
     config = Config()
     assert config.RECOMMENDATION_MIN_SAMPLES == 6
     assert config.VERIFICATION_WINDOW_HOURS == pytest.approx(0.1)
-    assert config.CHANGE_MEASUREMENT_ENABLED and config.CHANGE_MEASUREMENT_ACCELERATED
-    assert config.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == pytest.approx(0.25)
+    assert not config.CHANGE_MEASUREMENT_ENABLED and not config.CHANGE_MEASUREMENT_ACCELERATED
     assert config.LEDGER_CHAIN_VERIFY_INTERVAL == "5m"
     assert config.recommendation_scan_interval.total_seconds() == 60
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_change_measurement_overlay_renders_a_valid_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            "greenkube",
+            str(REPO_ROOT / "helm-chart"),
+            "--namespace",
+            "greenkube",
+            "-f",
+            str(QUICKSTART / "values.yaml"),
+            "-f",
+            str(QUICKSTART / "values-change-measurement.yaml"),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    docs = [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
+    (configmap,) = [doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "greenkube-config"]
+    for key, value in configmap["data"].items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("GREENKUBE_API_KEY", "e2e-test-key")
+    config = Config()
+    assert config.CHANGE_MEASUREMENT_ENABLED and config.CHANGE_MEASUREMENT_ACCELERATED
+    assert config.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == pytest.approx(0.25)
+    assert config.CHANGE_MEASUREMENT_WARMUP_HOURS == pytest.approx(0.05)
