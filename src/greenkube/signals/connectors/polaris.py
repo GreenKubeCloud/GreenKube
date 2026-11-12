@@ -258,6 +258,9 @@ class PolarisSource(InboxSource):
                 continue
             value = max(int(round(stats.p95 * headroom)), minimum[resource])
             spec = ResourceSpec(cpu_request_m=value) if resource == "cpu" else ResourceSpec(memory_request_bytes=value)
+            # No request is a request of zero: the proposal is an increase (a
+            # reliability change delivered by review), never an unknown current.
+            unset = ResourceSpec(cpu_request_m=0) if resource == "cpu" else ResourceSpec(memory_request_bytes=0)
             shown = f"{value}m" if resource == "cpu" else f"{value / _MIB:.0f}Mi"
             label = f"{target.kind} {target.namespace}/{target.name} container '{target.container}'"
             proposals.append(
@@ -268,7 +271,7 @@ class PolarisSource(InboxSource):
                     target=target,
                     capability=Capability.CONTAINER_REQUESTS,
                     kind="RIGHTSIZING_CPU" if resource == "cpu" else "RIGHTSIZING_MEMORY",
-                    proposal=ContainerResourcesProposal(container=target.container, proposed=spec),
+                    proposal=ContainerResourcesProposal(container=target.container, current=unset, proposed=spec),
                     algorithm=AlgorithmInfo(
                         name=FOLLOW_UP_ALGORITHM,
                         params={"percentile": 95, "headroom": headroom},

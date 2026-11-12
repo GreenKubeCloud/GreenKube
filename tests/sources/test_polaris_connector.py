@@ -12,6 +12,7 @@ import pytest
 from greenkube.core.config import Config
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.engine import OptimizationEngine
+from greenkube.core.optimization.scoring import default_delivery_mode
 from greenkube.models.metrics import CombinedMetric, RecommendationType
 from greenkube.signals.connectors.inbox import InboxBatch
 from greenkube.signals.connectors.polaris import (
@@ -126,7 +127,9 @@ class TestFollowUp:
         assert cpu.engine_family == FOLLOW_UP_ENGINE and cpu.source_id == "polaris"
         p95 = cpu.evidence.data["p95"]
         assert cpu.proposal.proposed.cpu_request_m == max(round(p95 * config.RIGHTSIZING_HEADROOM), 10)
-        assert cpu.proposal.current.cpu_request_m is None
+        # No request observed: the current request is zero, so this is an increase.
+        assert cpu.proposal.current.cpu_request_m == 0
+        assert cpu.proposal.direction == "increase"
         assert cpu.algorithm.name == "greenkube.requests_from_usage"
         # The Polaris findings themselves are still there (hygiene advice).
         assert sum(s.capability == Capability.HYGIENE for s in report.signals) == 5
@@ -160,6 +163,9 @@ class TestFollowUp:
         ]
         assert recs, [r.type for r in result.recommendations]
         assert str(getattr(recs[0].source, "value", recs[0].source)) == "polaris"
+        # Setting a request from unset is an increase: reviewed, never delivered directly.
+        assert recs[0].current_cpu_request_millicores == 0
+        assert default_delivery_mode(recs[0]) == "manual"
         # Hygiene advisories have no v1 type: they stay signals (never pull requests).
         assert not [r for r in result.recommendations if str(r.type).endswith("ROOT_ALLOWED")]
 
