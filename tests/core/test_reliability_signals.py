@@ -17,6 +17,7 @@ from greenkube.core.reliability_signals import (
     ReliabilitySignals,
     apply_signals,
     attach_reliability_signals,
+    container_kinds_from_pods,
     jvm_hint,
     jvm_hints_from_pods,
 )
@@ -270,3 +271,24 @@ def test_risk_profile_reads_the_scan_signals_and_jvm_lowers_memory_decrease_conf
     assert plain_confidence is not None
     assert results["jvm"].confidence == pytest.approx(plain_confidence * JVM_MEMORY_DECREASE_CONFIDENCE)
     assert "JVM runtime suspected" in results["jvm"].reason
+
+
+def test_container_kinds_from_pod_specs_mark_native_sidecars_and_init_containers():
+    """H1: a native sidecar lives in initContainers, so its action must address that list."""
+    snapshot = _snapshot(_summary(API, "web"), _summary(API, "proxy"), _summary(API, ""))
+    pod = _pod(
+        "shop",
+        "api-7d9f8b6c5d-abcde",
+        [_container("web", "ghcr.io/acme/api:1")],
+        owner=("ReplicaSet", "api-7d9f8b6c5d"),
+    )
+    pod.spec.init_containers = [
+        SimpleNamespace(name="proxy", image="envoy:1", restart_policy="Always"),
+        SimpleNamespace(name="migrate", image="migrate:1", restart_policy=None),
+    ]
+    kinds = container_kinds_from_pods([pod], snapshot)
+    assert kinds == {(API, "web"): "container", (API, "proxy"): "sidecar", (API, "migrate"): "init"}
+    apply_signals(snapshot, ReliabilitySignals(container_kinds=kinds))
+    assert snapshot.summaries[API]["web"].container_kind == "container"
+    assert snapshot.summaries[API]["proxy"].container_kind == "sidecar"
+    assert snapshot.summaries[API][""].container_kind is None
