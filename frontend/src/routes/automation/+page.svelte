@@ -8,43 +8,9 @@
 		getGitOpsBindings,
 		getGitOpsCoverage,
 		getGitOpsStatus,
-		getOpenPullRequests,
 		refreshGitOpsDiscovery,
 		resolveGitOpsBinding
 	} from '$lib/api.js';
-
-	const PROVIDER_LABELS = {
-		github: 'GitHub',
-		gitlab: 'GitLab',
-		gitea: 'Gitea'
-	};
-
-	const SYNC_STATUS_LABELS = {
-		synced: 'Synced',
-		pending: 'Pending',
-		failed: 'Failed',
-		unavailable: 'Unavailable',
-		mismatched: 'Revision mismatch'
-	};
-
-	const SYNC_ERROR_LABELS = {
-		sync_confirmed: 'Sync confirmed',
-		reconciliation_pending: 'Reconciliation pending',
-		controller_failed: 'Controller failed',
-		controller_not_found: 'Controller not found',
-		controller_ambiguous: 'Controller ambiguous',
-		controller_identity_mismatch: 'Controller identity mismatch',
-		controller_not_ready: 'Controller not ready',
-		source_unresolved: 'Source unresolved',
-		source_mismatch: 'Source mismatch',
-		source_ambiguous: 'Source ambiguous',
-		unsupported_controller: 'Unsupported controller',
-		revision_unavailable: 'Revision unavailable',
-		revision_mismatch: 'Revision mismatch',
-		invalid_response: 'Invalid response',
-		response_too_large: 'Response too large',
-		response_truncated: 'Response truncated'
-	};
 
 	const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 	const SAFE_REVISION =
@@ -84,12 +50,10 @@
 	let coverage = null;
 	let bindings = [];
 	let providerReadiness = null;
-	let pullRequests = [];
 	let discoveryError = false;
 	let coverageError = false;
 	let bindingsError = false;
 	let providerReadinessError = false;
-	let pullRequestsError = false;
 	let selectedCandidates = {};
 	let confirmations = {};
 	let resolvingBindings = {};
@@ -119,11 +83,6 @@
 			/^[A-Za-z0-9._/-]+$/.test(value)
 			? value
 			: 'Controller omitted';
-	}
-
-	function providerLabel(value) {
-		if (typeof value !== 'string') return 'Unrecognized provider';
-		return PROVIDER_LABELS[value.trim().toLowerCase()] ?? 'Unrecognized provider';
 	}
 
 	function repositoryLabel(value) {
@@ -234,16 +193,6 @@
 
 	function automationMetric(value) {
 		return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? String(value) : '—';
-	}
-
-	function syncStatusLabel(value) {
-		if (typeof value !== 'string') return '—';
-		return SYNC_STATUS_LABELS[value.trim().toLowerCase()] ?? '—';
-	}
-
-	function syncErrorLabel(value) {
-		if (typeof value !== 'string') return '—';
-		return SYNC_ERROR_LABELS[value.trim().toLowerCase()] ?? '—';
 	}
 
 	function bindingReasonLabel(value) {
@@ -457,25 +406,6 @@
 		}
 	}
 
-	function projectPullRequest(record, index) {
-		if (!isRecord(record)) return null;
-		const normalizedStatus = typeof record.status === 'string' ? record.status.trim().toLowerCase() : '';
-		if (normalizedStatus !== 'pending' && normalizedStatus !== 'open') return null;
-
-		return {
-			key: `pull-request-${index}`,
-			planId: safeIdentifier(record.plan_id),
-			provider: providerLabel(record.provider),
-			providerId: safeIdentifier(record.provider_id),
-			repo: repositoryLabel(record.repo),
-			status: normalizedStatus === 'pending' ? 'Pending' : 'Open',
-			syncStatus: syncStatusLabel(record.sync_status),
-			syncRevision: revisionLabel(record.sync_revision),
-			syncObservedAt: timestampLabel(record.sync_observed_at),
-			syncNote: syncErrorLabel(record.sync_error_code)
-		};
-	}
-
 	async function refreshDiscovery() {
 		if (loading || refreshingDiscovery) return;
 		refreshingDiscovery = true;
@@ -499,21 +429,18 @@
 		discoveryStatus = null;
 		coverage = null;
 		providerReadiness = null;
-		pullRequests = [];
 		discoveryError = true;
 		coverageError = true;
 		bindingsError = true;
 		providerReadinessError = true;
-		pullRequestsError = true;
 		resolutionErrors = {};
 		resolutionSuccess = '';
 
-		const [statusResult, coverageResult, bindingsResult, providerResult, pullRequestsResult] = await Promise.allSettled([
+		const [statusResult, coverageResult, bindingsResult, providerResult] = await Promise.allSettled([
 			getGitOpsStatus(),
 			getGitOpsCoverage(),
 			getGitOpsBindings(),
-			getAutomationStatus(),
-			getOpenPullRequests()
+			getAutomationStatus()
 		]);
 
 		if (sequence !== loadSequence) return;
@@ -551,15 +478,8 @@
 			providerReadinessError = false;
 		}
 
-		if (pullRequestsResult.status === 'fulfilled' && Array.isArray(pullRequestsResult.value)) {
-			pullRequests = pullRequestsResult.value
-				.map((record, index) => projectPullRequest(record, index))
-				.filter((record) => record !== null);
-			pullRequestsError = false;
-		}
-
 		const hasData =
-			!discoveryError || !coverageError || !bindingsError || !providerReadinessError || !pullRequestsError;
+			!discoveryError || !coverageError || !bindingsError || !providerReadinessError;
 		if (!hasData) pageError = 'Automation operations could not be loaded.';
 		if (sequence === loadSequence) loading = false;
 	}
@@ -570,7 +490,7 @@
 		<div class="min-w-0">
 			<h1 class="text-2xl font-bold text-dark-100">Automation &amp; GitOps</h1>
 			<p class="mt-1 text-sm text-dark-500">
-				Review workload source candidates, approve expiring manual bindings, and inspect pull-request operations.
+				Review workload source candidates, approve expiring manual bindings, and check plan automation readiness.
 			</p>
 		</div>
 		<button
@@ -861,66 +781,13 @@
 			<section
 				class="rounded-2xl border border-dark-700/50 bg-dark-900/70 p-4 sm:p-5"
 				aria-labelledby="pull-requests-heading"
+				data-testid="changes-board-link"
 			>
-				<div class="mb-4">
-					<h2 id="pull-requests-heading" class="text-lg font-semibold text-dark-100">Pending and open pull requests</h2>
-					<p class="mt-1 text-sm text-dark-500">
-						Read-only records with safe plan, provider, repository, and sync metadata.
-					</p>
-				</div>
-
-				{#if pullRequestsError}
-					<p class="text-sm text-red-400" role="alert">Pull-request records are unavailable.</p>
-				{:else if pullRequests.length === 0}
-					<p class="text-sm text-dark-400">No pending or open pull requests.</p>
-				{:else}
-					<div class="space-y-3">
-						{#each pullRequests as pullRequest (pullRequest.key)}
-							<article class="rounded-xl border border-dark-700/50 bg-dark-950/40 p-4">
-								<div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-									<h3 class="font-medium text-dark-100">Pull request</h3>
-									<span class="rounded-full bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-300">
-										{pullRequest.status}
-									</span>
-								</div>
-								<dl class="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2 xl:grid-cols-3">
-									<div>
-										<dt class="text-xs text-dark-500">Plan</dt>
-										<dd class="mt-1 break-all font-mono text-dark-200">{pullRequest.planId}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Provider</dt>
-										<dd class="mt-1 text-dark-200">{pullRequest.provider}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Provider ID</dt>
-										<dd class="mt-1 break-all font-mono text-dark-200">{pullRequest.providerId}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Repository</dt>
-										<dd class="mt-1 break-all font-mono text-dark-200">{pullRequest.repo}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Sync status</dt>
-										<dd class="mt-1 text-dark-200">{pullRequest.syncStatus}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Sync revision</dt>
-										<dd class="mt-1 break-all font-mono text-dark-200">{pullRequest.syncRevision}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Sync observed</dt>
-										<dd class="mt-1 text-dark-200">{pullRequest.syncObservedAt}</dd>
-									</div>
-									<div>
-										<dt class="text-xs text-dark-500">Sync note</dt>
-										<dd class="mt-1 text-dark-200">{pullRequest.syncNote}</dd>
-									</div>
-								</dl>
-							</article>
-						{/each}
-					</div>
-				{/if}
+				<h2 id="pull-requests-heading" class="text-lg font-semibold text-dark-100">Pull requests and changes</h2>
+				<p class="mt-1 text-sm text-dark-500">
+					Pull requests, their merge and sync state, rollouts and measurements are followed on the changes board.
+				</p>
+				<a href="/changes" class="mt-3 inline-block text-sm text-green-400 hover:text-green-300">Open the changes board →</a>
 			</section>
 		</div>
 	</DataState>

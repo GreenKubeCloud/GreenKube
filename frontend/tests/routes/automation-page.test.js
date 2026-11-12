@@ -149,7 +149,7 @@ describe('AutomationPage', () => {
 		]);
 	});
 
-	it('shows safe discovery, coverage, provider readiness, and pending/open PR metadata', async () => {
+	it('shows safe discovery, coverage and provider readiness without a pull-request list', async () => {
 		const { container } = render(AutomationPage);
 
 		expect(await screen.findByRole('heading', { name: 'GitOps discovery' })).toBeInTheDocument();
@@ -169,14 +169,9 @@ describe('AutomationPage', () => {
 		expect(screen.getByText('GitOps plan automation is ready')).toBeInTheDocument();
 		expect(screen.getByText('Provider registry: Configured')).toBeInTheDocument();
 
-		expect(screen.getByText('plan-101')).toBeInTheDocument();
-		expect(screen.getByText('production-github')).toBeInTheDocument();
-		expect(screen.getAllByText('acme/platform-config')).toHaveLength(2);
-		expect(screen.getByText('a'.repeat(40))).toBeInTheDocument();
-		expect(screen.getByText('Reconciliation pending')).toBeInTheDocument();
-		expect(screen.getByText('Controller failed')).toBeInTheDocument();
-		expect(screen.getAllByText('Pending').length).toBeGreaterThan(0);
-		expect(screen.getAllByText('Open')).toHaveLength(2);
+		// Pull requests moved to the changes board (K4): no second list here.
+		expect(api.getOpenPullRequests).not.toHaveBeenCalled();
+		expect(screen.queryByText('plan-101')).not.toBeInTheDocument();
 
 		expect(container).not.toHaveTextContent('cluster-with-private-data');
 		expect(container).not.toHaveTextContent('legacy-secret');
@@ -250,12 +245,13 @@ describe('AutomationPage', () => {
 		expect(container).not.toHaveTextContent('server-secret');
 	});
 
-	it('shows an empty state when no pending or open pull requests are returned', async () => {
-		api.getOpenPullRequests.mockResolvedValue([]);
-
+	it('links to the changes board instead of listing pull requests (K4)', async () => {
 		render(AutomationPage);
 
-		expect(await screen.findByText('No pending or open pull requests.')).toBeInTheDocument();
+		const section = await screen.findByTestId('changes-board-link');
+		expect(within(section).getByRole('heading', { level: 2, name: 'Pull requests and changes' })).toBeInTheDocument();
+		expect(within(section).getByRole('link', { name: /Open the changes board/ })).toHaveAttribute('href', '/changes');
+		expect(screen.queryByText('No pending or open pull requests.')).not.toBeInTheDocument();
 	});
 
 	it('requires explicit confirmation, resolves only a listed candidate, and refreshes coverage', async () => {
@@ -440,7 +436,7 @@ describe('AutomationPage', () => {
 			expect(api.getGitOpsCoverage).toHaveBeenCalledTimes(2);
 			expect(api.getGitOpsBindings).toHaveBeenCalledTimes(2);
 			expect(api.getAutomationStatus).toHaveBeenCalledTimes(2);
-			expect(api.getOpenPullRequests).toHaveBeenCalledTimes(2);
 		});
+		expect(api.getOpenPullRequests).not.toHaveBeenCalled();
 	});
 });
