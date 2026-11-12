@@ -8,7 +8,11 @@
 * running pods (``do-not-disrupt`` / ``safe-to-evict`` annotations, labels for PDB selectors);
 * PodDisruptionBudgets (``status.disruptionsAllowed``);
 * when Karpenter runs: NodeClaims (claim → pool) and the ``DisruptionBlocked`` /
-  ``Unconsolidatable`` events of NodePools, NodeClaims and Nodes (roadmap G5).
+  ``Unconsolidatable`` events of NodePools, NodeClaims and Nodes (roadmap G5);
+* when Karpenter runs and ``PROMETHEUS_URL`` is set: Karpenter's metrics
+  ``karpenter_voluntary_disruption_decisions_total``,
+  ``karpenter_voluntary_disruption_eligible_nodes`` and
+  ``karpenter_nodepools_cost_total`` (roadmap G5; see :func:`karpenter_metric_queries`).
 
 Every read is read-only and already allowed by the chart's ClusterRole. A read
 that fails (missing CRD, RBAC, timeout) is reported in
@@ -20,17 +24,22 @@ the previous realization context stays in use.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import math
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api, get_custom_objects_api, get_policy_v1_api
 from greenkube.impact.realization import (
     BLOCKING_KARPENTER_EVENTS,
+    KARPENTER_METRICS_WINDOW,
     NOTED_KARPENTER_EVENTS,
     UNAVAILABLE_CLUSTER_AUTOSCALER,
+    UNAVAILABLE_KARPENTER_METRICS,
     UNAVAILABLE_KARPENTER_POOLS,
     ClusterAutoscalerObservation,
     KarpenterEventObservation,
+    KarpenterMetricsObservation,
     KarpenterPoolObservation,
     NodeObservation,
     PdbObservation,
@@ -45,6 +54,77 @@ CA_STATUS_CONFIGMAP = "cluster-autoscaler-status"
 KARPENTER_GROUP = "karpenter.sh"
 KARPENTER_VERSIONS = ("v1", "v1beta1")
 UNAVAILABLE_KARPENTER_EVENTS = "Karpenter events"
+
+#: Instant PromQL query → its ``data.result`` list; None when the query failed.
+MetricsQuery = Callable[[str], Awaitable[Optional[List[Dict[str, Any]]]]]
+_QUERY_PATHS = ("/api/v1/query", "/prometheus/api/v1/query")
+
+
+def karpenter_metric_queries(window: str = KARPENTER_METRICS_WINDOW) -> Dict[str, str]:
+    """PromQL of the Karpenter metrics read into the RealizationContext, by observation field."""
+    return {
+        "decisions": f"sum by (reason) (increase(karpenter_voluntary_disruption_decisions_total[{window}]))",
+        "eligible_nodes": "sum by (reason) (karpenter_voluntary_disruption_eligible_nodes)",
+        "pool_costs": f"sum by (nodepool) (increase(karpenter_nodepools_cost_total[{window}]))",
+    }
+
+
+def _sample_value(sample: Any) -> Optional[float]:
+    value = sample.get("value") if isinstance(sample, dict) else None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        number = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def metric_by_label(result: Optional[List[Dict[str, Any]]], label: str) -> Optional[Dict[str, float]]:
+    """``{label value: value}`` of an instant-query result; None when no series is exported."""
+    if not result:
+        return None
+    values: Dict[str, float] = {}
+    for sample in result:
+        metric = sample.get("metric") if isinstance(sample, dict) else None
+        key = (
+            str((metric or {}).get(label) or "").lower() if label == "reason" else str((metric or {}).get(label) or "")
+        )
+        number = _sample_value(sample)
+        if key and number is not None:
+            values[key] = values.get(key, 0.0) + number
+    return values
+
+
+async def _prometheus_query(promql: str) -> Optional[List[Dict[str, Any]]]:
+    """Instant query against ``PROMETHEUS_URL`` (same paths and credentials as the Prometheus collector)."""
+    import httpx
+
+    from greenkube.utils.http_client import get_async_http_client
+
+    base = (global_config.PROMETHEUS_URL or "").rstrip("/")
+    headers: Dict[str, str] = {}
+    if global_config.PROMETHEUS_BEARER_TOKEN:
+        headers["Authorization"] = f"Bearer {global_config.PROMETHEUS_BEARER_TOKEN}"
+    username, password = global_config.PROMETHEUS_USERNAME, global_config.PROMETHEUS_PASSWORD
+    auth = (username, password) if username and password else None
+    async with get_async_http_client(verify=bool(global_config.PROMETHEUS_VERIFY_CERTS)) as client:
+        for path in _QUERY_PATHS:
+            try:
+                response = await client.get(
+                    f"{base}{path}",
+                    params={"query": promql, "time": f"{datetime.now(timezone.utc).timestamp():.3f}"},
+                    headers=headers,
+                    auth=auth,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except (httpx.HTTPError, ValueError):
+                continue
+            if isinstance(payload, dict) and payload.get("status") == "success":
+                result = (payload.get("data") or {}).get("result")
+                return result if isinstance(result, list) else []
+    return None
 
 
 def _timeout() -> Optional[float]:
@@ -106,6 +186,10 @@ def pdb_from_object(pdb: Any) -> Optional[PdbObservation]:
 class AutoscalerCollector:
     """Collects :class:`RealizationInputs` from the cluster."""
 
+    def __init__(self, metrics_query: Optional[MetricsQuery] = None) -> None:
+        #: Prometheus instant query for the Karpenter metrics; the configured Prometheus by default.
+        self._metrics_query = metrics_query
+
     async def collect(self) -> Optional[RealizationInputs]:
         core = await get_core_v1_api()
         if core is None:
@@ -133,6 +217,7 @@ class AutoscalerCollector:
         pdbs = await self._pdbs(unavailable)
         karpenter_pools = await self._karpenter_pools(unavailable)
         karpenter_events = await self._karpenter_events(core, unavailable) if karpenter_pools else []
+        karpenter_metrics = await self._karpenter_metrics(unavailable) if karpenter_pools else None
         return RealizationInputs(
             nodes=nodes,
             pods=pods,
@@ -140,7 +225,34 @@ class AutoscalerCollector:
             karpenter_pools=karpenter_pools,
             cluster_autoscaler=cluster_autoscaler,
             karpenter_events=karpenter_events,
+            karpenter_metrics=karpenter_metrics,
             unavailable=tuple(unavailable),
+        )
+
+    async def _karpenter_metrics(self, unavailable: List[str]) -> Optional[KarpenterMetricsObservation]:
+        """Karpenter's Prometheus metrics; None without Prometheus, noted when Prometheus fails."""
+        query = self._metrics_query
+        if query is None:
+            if not global_config.PROMETHEUS_URL:
+                return None
+            query = _prometheus_query
+        results: Dict[str, Optional[Dict[str, float]]] = {}
+        labels: Mapping[str, str] = {"decisions": "reason", "eligible_nodes": "reason", "pool_costs": "nodepool"}
+        for name, promql in karpenter_metric_queries().items():
+            try:
+                result = await query(promql)
+            except Exception as error:
+                logger.debug("Karpenter metric query failed: %s", error)
+                result = None
+            if result is None:
+                logger.warning("Could not read the Karpenter metrics from Prometheus; the factor ignores them.")
+                unavailable.append(UNAVAILABLE_KARPENTER_METRICS)
+                return None
+            results[name] = metric_by_label(result, labels[name])
+        return KarpenterMetricsObservation(
+            decisions=results["decisions"],
+            eligible_nodes=results["eligible_nodes"],
+            pool_costs=results["pool_costs"],
         )
 
     async def _cluster_autoscaler(self, core: Any, unavailable: List[str]) -> Optional[ClusterAutoscalerObservation]:
