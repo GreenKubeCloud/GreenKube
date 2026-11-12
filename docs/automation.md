@@ -381,8 +381,9 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
   them once the owner and GitOps binding of the workload are resolved.
 - **Rollback.** Request-only changes (containers and native sidecars) roll back automatically; a change that edits
   limits is reverted by reverting its pull request, and the PR says so.
-- **Measurement.** An increase is measured on reliability: the OOM-kill rate after the rollout is compared with the
-  rate the recommendation observed before it (see [Savings measurement: reliability
+- **Measurement.** A memory increase is measured on reliability: the OOM-kill rate of that container after the
+  rollout is compared with the rate the recommendation observed before it; other containers and CPU-only increases
+  keep the strict "any OOM kill fails" gate (see [Savings measurement: reliability
   increases](methodology/savings-measurement.md#reliability-increases-h1)).
 
 Every other recommendation type remains visible but shows "Manual change required" and cannot open a PR. Every plan, whatever its kind, is render-validated the same way: the rendered resources after the edit must differ from the rendered resources before it by exactly the kind's expected change (the fields it sets, plus the resources it creates or deletes), and the kind's invariants must hold (for container resources, every request stays within its limit). Anything else fails closed.

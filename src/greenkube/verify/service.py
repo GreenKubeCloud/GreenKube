@@ -64,6 +64,7 @@ from greenkube.verify.series import floor_hour, hourly_buckets, utc_hour
 from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
     MeasurementSettings,
+    ReliabilityOutcome,
     SavingsMeasurementStrategy,
     increase_reliability,
     strategy_for,
@@ -794,24 +795,34 @@ class ChangeMeasurementService:
         Raises :class:`MeasurementReadError` when the gates cannot be read, so
         no health check or decision is recorded from missing metrics.
         """
+        gates, _ = await self._health_and_reliability(members, start, end)
+        return gates
+
+    async def _health_and_reliability(
+        self, members: Sequence[RecommendationRecord], start: datetime, end: datetime
+    ) -> Tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
+        """Health gates per container and the reliability outcome of memory increases (H1)."""
         by_container: Dict[Optional[str], List[RecommendationRecord]] = {}
         for member in members:
             by_container.setdefault(member.container_name, []).append(member)
-        gates: List[HealthGateResult] = []
+        raw: Dict[Optional[str], List[HealthGateResult]] = {}
         for container, group in sorted(by_container.items(), key=lambda item: item[0] or ""):
             try:
-                results = await self.verifier.health_gates_for(group, start, end, strict=True)
+                raw[container] = list(await self.verifier.health_gates_for(group, start, end, strict=True))
             except Exception as exc:
                 raise MeasurementReadError(
                     f"health gates of {container or 'workload'} could not be evaluated: {exc}"
                 ) from exc
-            for gate in results:
+        # A memory-request increase made because of OOM kills is judged on that container's kill
+        # rate, not on "any kill"; every other container keeps the strict gate (H1).
+        judged, reliability = increase_reliability(members, raw, start, end)
+        gates: List[HealthGateResult] = []
+        for container in raw:
+            for gate in judged[container]:
                 if container and len(by_container) > 1:
                     gate = gate.model_copy(update={"detail": f"[{container}] {gate.detail}".strip()})
                 gates.append(gate)
-        # A request increase made because of OOM kills is judged on the kill rate, not on "any kill" (H1).
-        gates, _ = increase_reliability(members, gates, start, end)
-        return gates
+        return gates, reliability
 
     async def _interim_health(
         self, change: ChangeEvent, status: ChangeStatus, plan: WindowPlan, health_end: datetime, now: datetime
@@ -950,8 +961,11 @@ class ChangeMeasurementService:
             seed_parts=(change.change_id, status.sequence),
         )
         awaiting = [member for member in in_effect if _awaiting(member)]
-        gates = await self._health(awaiting, ensure_utc(plan.post.start), ensure_utc(plan.post.end)) if awaiting else []
-        _, reliability = increase_reliability(in_effect, gates, ensure_utc(plan.post.start), ensure_utc(plan.post.end))
+        gates, reliability = (
+            await self._health_and_reliability(awaiting, ensure_utc(plan.post.start), ensure_utc(plan.post.end))
+            if awaiting
+            else ([], None)
+        )
         counterfactual_params = dict(result.counterfactual_params)
         reasons = list(result.reasons)
         if reliability is not None:

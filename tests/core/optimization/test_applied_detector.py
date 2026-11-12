@@ -424,8 +424,8 @@ class TestAppliedDetector:
         assert snapshot.container_request_values_valid
 
     @pytest.mark.asyncio
-    async def test_kubernetes_reader_records_native_sidecar_requests(self, monkeypatch):
-        """H1: a native sidecar's requests are part of the pre-apply baseline; classic init containers are not."""
+    async def test_kubernetes_reader_records_sidecar_and_init_container_requests(self, monkeypatch):
+        """H1: native sidecar and init container requests are recorded per container (not in the sums)."""
         import greenkube.core.k8s_client as k8s_client
 
         def container(name, cpu, restart_policy=None):
@@ -461,7 +461,7 @@ class TestAppliedDetector:
 
         monkeypatch.setattr(k8s_client, "get_apps_v1_api", get_api)
         snapshot = (await K8sWorkloadReader().read())[("prod", "Deployment", "api")]
-        assert snapshot.container_request_values == {"api": (500, None), "proxy": (50, None)}
+        assert snapshot.container_request_values == {"api": (500, None), "proxy": (50, None), "migrate": (1000, None)}
         assert snapshot.cpu_request_millicores == 500
 
     def test_kubernetes_request_summary_preserves_each_container(self):

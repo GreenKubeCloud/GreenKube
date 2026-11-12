@@ -503,62 +503,115 @@ def oom_rate_outcome(
     )
 
 
+def _type_name(record: Any) -> Optional[str]:
+    value = getattr(record, "type", None)
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
+
+
+def _raises(current: Any, proposed: Any) -> bool:
+    numbers = (int, float)
+    return (
+        isinstance(current, numbers)
+        and isinstance(proposed, numbers)
+        and not isinstance(current, bool)
+        and not isinstance(proposed, bool)
+        and proposed > current
+    )
+
+
 def is_reliability_increase(record: Any) -> bool:
-    """A recommendation that raises a CPU or memory request (H1): measured on reliability."""
-    pairs = (
-        (
-            getattr(record, "current_cpu_request_millicores", None),
-            getattr(record, "recommended_cpu_request_millicores", None),
-        ),
-        (
-            getattr(record, "current_memory_request_bytes", None),
-            getattr(record, "recommended_memory_request_bytes", None),
-        ),
-    )
-    return any(
-        isinstance(current, int) and isinstance(proposed, int) and proposed > current for current, proposed in pairs
-    )
+    """A recommendation that raises a CPU or memory request (H1): a reliability fix.
 
-
-def increase_reliability(
-    members: Sequence[Any], gates: Sequence[HealthGateResult], post_start: datetime, post_end: datetime
-) -> tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
-    """Health gates and the reliability outcome of a change whose members raise requests (H1).
-
-    For an increase made because of OOM kills, a kill after the rollout does not mean the
-    change hurt: the question is whether the kill **rate** dropped. The ``oom_kills`` gates
-    are then replaced by one rate comparison, which fails only when the rate did not drop
-    (the increase did not help; a person reviews it). Changes without increases, or
-    increases without OOM history, keep their gates unchanged.
+    Same semantics as ``eligibility.proposes_increase``: when the record carries a
+    type, only the resource of that type is compared.
     """
-    increases = [member for member in members if is_reliability_increase(member)]
-    if not increases:
-        return list(gates), None
-    baseline_by_container: Dict[Optional[str], int] = {}
-    baseline_seconds: Optional[float] = None
-    for member in increases:
-        evidence = getattr(member, "evidence", None)
-        events = getattr(evidence, "oom_events", None)
-        seconds = getattr(evidence, "observation_window_seconds", None)
-        if not isinstance(events, int) or isinstance(events, bool):
-            continue
-        container = getattr(member, "container_name", None)
-        baseline_by_container[container] = max(events, baseline_by_container.get(container, 0))
-        if isinstance(seconds, (int, float)) and seconds > 0:
-            baseline_seconds = max(float(seconds), baseline_seconds or 0.0)
-    oom_gates = [gate for gate in gates if gate.gate == OOM_GATE]
-    post_values = [gate.value for gate in oom_gates]
-    post_events = (
-        int(math.fsum(value for value in post_values if value is not None))
-        if oom_gates and all(value is not None for value in post_values)
-        else None
+    rec_type = _type_name(record)
+    cpu = _raises(
+        getattr(record, "current_cpu_request_millicores", None),
+        getattr(record, "recommended_cpu_request_millicores", None),
     )
+    if rec_type == "RIGHTSIZING_CPU":
+        return cpu
+    if rec_type == "RIGHTSIZING_MEMORY":
+        return raises_memory_request(record)
+    return rec_type is None and (cpu or raises_memory_request(record))
+
+
+def raises_memory_request(record: Any) -> bool:
+    """A recommendation that raises the memory request: the only increase that can cure OOM kills."""
+    rec_type = _type_name(record)
+    if rec_type is not None and rec_type != "RIGHTSIZING_MEMORY":
+        return False
+    return _raises(
+        getattr(record, "current_memory_request_bytes", None),
+        getattr(record, "recommended_memory_request_bytes", None),
+    )
+
+
+def _lowers_memory_request(record: Any) -> bool:
+    rec_type = _type_name(record)
+    if rec_type is not None and rec_type != "RIGHTSIZING_MEMORY":
+        return False
+    return _raises(
+        getattr(record, "recommended_memory_request_bytes", None),
+        getattr(record, "current_memory_request_bytes", None),
+    )
+
+
+def _oom_baseline(group: Sequence[Any]) -> tuple[Optional[int], Optional[float]]:
+    """OOM kills observed before the change by the memory increases of one container (and their window)."""
+    events: Optional[int] = None
+    seconds: Optional[float] = None
+    for member in group:
+        if not raises_memory_request(member):
+            continue
+        evidence = getattr(member, "evidence", None)
+        count = getattr(evidence, "oom_events", None)
+        window = getattr(evidence, "observation_window_seconds", None)
+        if not isinstance(count, int) or isinstance(count, bool):
+            continue
+        events = max(count, events or 0)
+        if isinstance(window, (int, float)) and not isinstance(window, bool) and window > 0:
+            seconds = max(float(window), seconds or 0.0)
+    return events, seconds
+
+
+def _post_oom_events(gates: Sequence[HealthGateResult]) -> Optional[int]:
+    values = [gate.value for gate in gates if gate.gate == OOM_GATE]
+    if not values or any(value is None for value in values):
+        return None
+    return int(math.fsum(value for value in values if value is not None))
+
+
+def container_reliability(
+    group: Sequence[Any], gates: Sequence[HealthGateResult], post_start: datetime, post_end: datetime
+) -> tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
+    """Health gates and reliability outcome of **one container** of a change (H1).
+
+    ``group`` holds the change members of that container and ``gates`` the health
+    gates read for that container only. For a memory-request increase made because
+    of OOM kills, a kill after the rollout does not mean the change hurt: the
+    question is whether the kill **rate** dropped. That container's ``oom_kills``
+    gate is then replaced by one rate comparison, which fails only when the rate did
+    not drop (a person reviews it). Everything else keeps the strict "any kill
+    fails" gate: containers without a memory increase (CPU-only increases cannot
+    cure OOM kills, and decreases must never hide one), containers with a memory
+    decrease, and memory increases without OOM history.
+    """
+    if not any(raises_memory_request(member) for member in group):
+        return list(gates), None
+    baseline_events, baseline_seconds = _oom_baseline(group)
+    post_events = _post_oom_events(gates)
     outcome = oom_rate_outcome(
-        sum(baseline_by_container.values()) if baseline_by_container else None,
+        baseline_events,
         baseline_seconds,
         post_events,
         (ensure_utc(post_end) - ensure_utc(post_start)).total_seconds(),
     )
+    if any(_lowers_memory_request(member) for member in group):
+        return list(gates), outcome
     if not outcome.baseline_events or post_events is None:
         return list(gates), outcome
     failed = outcome.outcome is ChangeOutcome.NOT_REALIZED and post_events > 0
@@ -570,3 +623,45 @@ def increase_reliability(
         detail=f"reliability increase: {outcome.reason}",
     )
     return [*(gate for gate in gates if gate.gate != OOM_GATE), rate_gate], outcome
+
+
+def increase_reliability(
+    members: Sequence[Any],
+    gates_by_container: Mapping[Optional[str], Sequence[HealthGateResult]],
+    post_start: datetime,
+    post_end: datetime,
+) -> tuple[Dict[Optional[str], List[HealthGateResult]], Optional[ReliabilityOutcome]]:
+    """Apply :func:`container_reliability` to every container of a change.
+
+    ``gates_by_container`` maps each container to the gates read for it. Returns the
+    gates per container (OOM gates replaced only where :func:`container_reliability`
+    allows it) and the change-level reliability outcome: the OOM-kill rate summed
+    over the containers whose memory request was raised (``None`` without any).
+    """
+    by_container: Dict[Optional[str], List[Any]] = {}
+    for member in members:
+        by_container.setdefault(getattr(member, "container_name", None), []).append(member)
+    result: Dict[Optional[str], List[HealthGateResult]] = {}
+    outcomes: Dict[Optional[str], ReliabilityOutcome] = {}
+    for container, gates in gates_by_container.items():
+        result[container], outcome = container_reliability(by_container.get(container, []), gates, post_start, post_end)
+        if outcome is not None:
+            outcomes[container] = outcome
+    for container, group in by_container.items():
+        if container not in gates_by_container:
+            _, outcome = container_reliability(group, [], post_start, post_end)
+            if outcome is not None:
+                outcomes[container] = outcome
+    if not outcomes:
+        return result, None
+    if len(outcomes) == 1:
+        return result, next(iter(outcomes.values()))
+    baselines = [outcome.baseline_events for outcome in outcomes.values()]
+    posts = [outcome.post_events for outcome in outcomes.values()]
+    hours = [outcome.baseline_hours for outcome in outcomes.values() if outcome.baseline_hours]
+    return result, oom_rate_outcome(
+        sum(value for value in baselines if value is not None) if any(v is not None for v in baselines) else None,
+        max(hours) * 3600.0 if hours else None,
+        None if any(value is None for value in posts) else sum(value for value in posts if value is not None),
+        (ensure_utc(post_end) - ensure_utc(post_start)).total_seconds(),
+    )
