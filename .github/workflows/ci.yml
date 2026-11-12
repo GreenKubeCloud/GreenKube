@@ -40,17 +40,17 @@ jobs:
 
     steps:
       - name: Check out code (full history for Gitleaks)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
 
@@ -58,7 +58,7 @@ jobs:
         run: uv sync --locked --group test
 
       - name: Lint for hardcoded secrets
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -84,10 +84,10 @@ jobs:
         working-directory: frontend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"
@@ -102,12 +102,12 @@ jobs:
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: '3.17.3'
 
@@ -119,6 +119,9 @@ jobs:
 
       - name: Run Helm unit tests
         run: helm unittest helm-chart
+
+      - name: Unit-test the PrometheusRule alerts with promtool
+        run: .github/scripts/promtool-check.sh
 
       - name: Check that helm template renders are stable (Argo CD)
         run: |
@@ -133,3 +136,37 @@ jobs:
           check --set worker.replicas=1
           check --set automation.enabled=true --set profile=production
           check --set secrets.apiKey=ci-api-key --set postgres.auth.password=ci-password
+
+  # Pod Security Admission "restricted" (roadmap N5): server-side dry run of
+  # several renders in a namespace that enforces the profile on kind.
+  psa-restricted:
+    name: Pod Security (restricted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: '3.17.3'
+
+      - name: Create a kind cluster
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: psa
+
+      - name: Dry-run the chart under Pod Security "restricted"
+        run: .github/scripts/psa-restricted-check.sh
+
+  # Workflow syntax and shell checks of .github/workflows.
+  actionlint:
+    name: Workflow Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run actionlint
+        # rhysd/actionlint:1.7.7
+        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
