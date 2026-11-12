@@ -30,6 +30,7 @@ from greenkube.gitops.discovery.common import (
     text,
     workload_source,
 )
+from greenkube.gitops.sha import SHA256_DIGEST
 
 _API_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
 _KIND_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
@@ -38,7 +39,6 @@ _DNS_SUBDOMAIN_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 _SOURCE_KINDS = frozenset({"Bucket", "GitRepository", "HelmRepository", "OCIRepository"})
 _VALUES_KINDS = frozenset({"ConfigMap", "Secret"})
 _REMOTE_CHART_SOURCE_KINDS = frozenset({"HelmRepository", "OCIRepository"})
-_SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -1031,7 +1031,7 @@ def _remote_chart_deployment(status: Mapping[str, Any], flux_source: _FluxSource
     digest = text(status.get("lastAttemptedRevisionDigest"))
     if digest is None and flux_source.kind == "OCIRepository" and flux_source.artifact_revision is not None:
         digest = flux_source.artifact_revision.rpartition("@")[2]
-    if digest is not None and _SHA256_DIGEST.fullmatch(digest.lower()) and flux_source.kind == "OCIRepository":
+    if digest is not None and SHA256_DIGEST.fullmatch(digest.lower()) and flux_source.kind == "OCIRepository":
         result["digest"] = digest.lower()
     return result
 

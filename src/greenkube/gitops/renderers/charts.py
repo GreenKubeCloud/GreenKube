@@ -34,6 +34,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from greenkube.gitops.renderers.helm import HelmError
+from greenkube.gitops.sha import SHA256_DIGEST
 
 HELM_CONFIG_MEDIA_TYPE = "application/vnd.cncf.helm.config.v1+json"
 HELM_CHART_MEDIA_TYPES = frozenset(
@@ -52,7 +53,6 @@ _INDEX_MEDIA_TYPES = frozenset(
         "application/vnd.docker.distribution.manifest.list.v2+json",
     }
 )
-_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CHART_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$")
 _OCI_PATH_COMPONENT = re.compile(r"^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$")
@@ -172,7 +172,7 @@ class ChartReference:
             digest = expected_digest.strip().lower()
             if _HEX_SHA256.fullmatch(digest):
                 digest = f"sha256:{digest}"
-            if _SHA256.fullmatch(digest) is None:
+            if SHA256_DIGEST.fullmatch(digest) is None:
                 raise ChartReferenceError("the pinned chart digest must be a sha256 digest")
         return cls(repository=normalized, name=name, version=version, expected_digest=digest)
 
@@ -646,7 +646,7 @@ def _chart_layer_digest(manifest_bytes: bytes, reference: ChartReference) -> str
         raise ChartArchiveError(f"{reference.display} must contain exactly one Helm chart layer")
     digest = chart_layers[0].get("digest")
     size = chart_layers[0].get("size")
-    if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+    if not isinstance(digest, str) or SHA256_DIGEST.fullmatch(digest) is None:
         raise ChartArchiveError(f"{reference.display} chart layer digest is not a sha256 digest")
     if not isinstance(size, int) or isinstance(size, bool) or size < 0:
         raise ChartArchiveError(f"{reference.display} chart layer size is invalid")

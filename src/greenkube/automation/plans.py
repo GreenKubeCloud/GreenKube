@@ -288,14 +288,14 @@ class AutomationPlanService:
             except HelmValuesUnsupportedError as exc:
                 raise AutomationPlanError(
                     AutomationErrorCode.UNSUPPORTED_SOURCE,
-                    "the Helm values mapping is unsupported or did not preserve the exact target",
+                    f"the Helm values mapping is unsupported or did not preserve the exact target: {exc}",
                 ) from exc
             except (HelmPlanError, HelmError, ValidationError) as exc:
                 if _is_no_effective_change(exc):
                     raise _no_effective_change_error(exc) from exc
                 raise AutomationPlanError(
                     AutomationErrorCode.RENDER_VALIDATION_FAILED,
-                    "Helm values render validation failed",
+                    f"Helm values render validation failed: {exc}",
                 ) from exc
         elif source.renderer is RendererKind.HELM_RELEASE:
             planner = self.planners.get(RendererKind.HELM_RELEASE)
@@ -309,14 +309,14 @@ class AutomationPlanService:
             except FluxHelmReleaseUnsupportedError as exc:
                 raise AutomationPlanError(
                     AutomationErrorCode.UNSUPPORTED_SOURCE,
-                    "this Flux HelmRelease source is outside the validated local post-renderer subset",
+                    f"this Flux HelmRelease source is outside the validated post-renderer subset: {exc}",
                 ) from exc
             except (FluxHelmReleasePlanError, HelmPlanError, HelmError, ValidationError) as exc:
                 if _is_no_effective_change(exc):
                     raise _no_effective_change_error(exc) from exc
                 raise AutomationPlanError(
                     AutomationErrorCode.RENDER_VALIDATION_FAILED,
-                    "Flux HelmRelease render validation failed",
+                    f"Flux HelmRelease render validation failed: {exc}",
                 ) from exc
         else:
             target_path = _find_target_path(contents, action)
