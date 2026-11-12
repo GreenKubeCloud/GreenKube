@@ -33,25 +33,9 @@ spec:
         fsGroup: 70
         seccompProfile:
           type: RuntimeDefault
-      initContainers:
-        # The official postgres entrypoint runs "chmod 2777 /var/run/postgresql"
-        # which fails when the container runs as non-root (UID 70).
-        # This init container pre-sets the correct permissions on the emptyDir.
-        - name: init-pgrun-perms
-          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
-          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
-          securityContext:
-            runAsUser: 0
-            runAsNonRoot: false
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-              add: ["CHOWN", "FOWNER"]
-          command: ["sh", "-c", "chmod 2777 /var/run/postgresql && chown 70:70 /var/run/postgresql"]
-          volumeMounts:
-            - name: pg-run
-              mountPath: /var/run/postgresql
+      # No root init container (N5, Pod Security "restricted"): fsGroup makes
+      # the /var/run/postgresql emptyDir group-writable for UID 70, and the
+      # official entrypoint ignores its own failed "chmod" on that directory.
       containers:
         - name: postgres
           image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
