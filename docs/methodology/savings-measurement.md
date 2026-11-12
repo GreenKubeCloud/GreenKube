@@ -205,6 +205,16 @@ They are evaluated twice:
 
 A health failure does not change the measurement outcome: the saving is still evidence about the change. It changes what happens to the recommendations.
 
+### Reliability increases (H1)
+
+A request increase is a reliability fix: its cost is measured like any request change (the estimates are negative savings, reported as a cost), and its success is whether the **OOM-kill rate dropped**.
+
+- **Baseline:** the OOM kills the recommendation observed over its evidence window (`evidence.oom_events` over `evidence.observation_window_seconds`), summed over the change's containers.
+- **After:** the OOM kills the health gates read over the post-change window (interim window, then the whole post-window).
+- **Test:** if the rate had not changed, the post-window share of all kills would follow a binomial law with the post-window share of the observed time. The drop is `realized` when the post-window count is improbably low (one-sided p ≤ 0.10), `not_realized` when the post-window rate is not lower, and `inconclusive` with too few kills or unknown counts. An increase made without OOM history (p99 close to the request) is `inconclusive` on this test and judged by its usage gates.
+- **Gate:** for an increase with OOM history, the `oom_kills` gate compares the rates instead of failing on any kill: a kill after an OOM-driven increase does not send it to `rollback_review` (rolling it back would bring the kills back) unless the rate did not drop.
+- The outcome is stored in `counterfactual_params.reliability` (metric, outcome, reason, counts, hours, rates per day, p-value) and added to the measurement's reasons. The savings outcome of the change is unchanged.
+
 ## 8. One measurement per change (C5)
 
 A change is measured once, on its workload. The saving is split between its recommendations:

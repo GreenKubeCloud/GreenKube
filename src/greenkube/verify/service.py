@@ -65,6 +65,7 @@ from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
     MeasurementSettings,
     SavingsMeasurementStrategy,
+    increase_reliability,
     strategy_for,
 )
 
@@ -808,6 +809,8 @@ class ChangeMeasurementService:
                 if container and len(by_container) > 1:
                     gate = gate.model_copy(update={"detail": f"[{container}] {gate.detail}".strip()})
                 gates.append(gate)
+        # A request increase made because of OOM kills is judged on the kill rate, not on "any kill" (H1).
+        gates, _ = increase_reliability(members, gates, start, end)
         return gates
 
     async def _interim_health(
@@ -948,6 +951,13 @@ class ChangeMeasurementService:
         )
         awaiting = [member for member in in_effect if _awaiting(member)]
         gates = await self._health(awaiting, ensure_utc(plan.post.start), ensure_utc(plan.post.end)) if awaiting else []
+        _, reliability = increase_reliability(in_effect, gates, ensure_utc(plan.post.start), ensure_utc(plan.post.end))
+        counterfactual_params = dict(result.counterfactual_params)
+        reasons = list(result.reasons)
+        if reliability is not None:
+            # The outcome of a reliability increase (H1); its cost stays in the estimates, as a cost.
+            counterfactual_params["reliability"] = reliability.as_dict()
+            reasons.append(f"reliability ({reliability.outcome.value}): {reliability.reason}")
         estimates = {item.quantity: item for item in result.estimates}
         allocations = []
         for share in allocate(in_effect, result.estimates):
@@ -977,7 +987,7 @@ class ChangeMeasurementService:
             windows=plan,
             load_driver=load.info if load is not None else None,
             counterfactual_params=_with_unavailable_drivers(
-                result.counterfactual_params, snapshot.collector_versions.get(UNAVAILABLE_DRIVERS_KEY), collected
+                counterfactual_params, snapshot.collector_versions.get(UNAVAILABLE_DRIVERS_KEY), collected
             ),
             estimates=result.estimates,
             confounders=confounders,
@@ -985,7 +995,7 @@ class ChangeMeasurementService:
             health=gates,
             allocations=allocations,
             outcome=result.outcome,
-            reasons=result.reasons,
+            reasons=reasons,
             supersedes_measurement_id=previous[-1].measurement_id if previous else None,
             decided_at=now,
         ).with_evidence_digest()

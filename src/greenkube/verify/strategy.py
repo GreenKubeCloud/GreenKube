@@ -6,16 +6,21 @@ observations into per-quantity :class:`~greenkube.verify.model.SavingsEstimate`
 values. Only :class:`RequestRightsizingStrategy` exists today (container
 resource changes, ``action_kind="container_resources"``); other action kinds
 register their own strategy by key.
+
+A request **increase** (H1) is a reliability fix: its cost is measured like any
+request change (a negative saving), and its success is the drop of the OOM-kill
+rate (:func:`oom_rate_outcome`, :func:`increase_reliability`).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 
 from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
+from greenkube.models.verification import HealthGateResult, HealthGateStatus
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.confounders import is_contaminated
 from greenkube.verify.counterfactual import HourOfWeekCounterfactual, align
@@ -368,3 +373,200 @@ STRATEGIES: Dict[str, SavingsMeasurementStrategy] = {"container_resources": Requ
 
 def strategy_for(action_kind: str) -> Optional[SavingsMeasurementStrategy]:
     return STRATEGIES.get(action_kind)
+
+
+# --------------------------------------------------------------------------- #
+# Reliability outcome of request increases (H1)                                #
+# --------------------------------------------------------------------------- #
+
+#: One-sided significance of an OOM-rate drop (matches the 90% intervals of the savings estimates).
+RELIABILITY_ALPHA = 0.10
+#: Health gate replaced by the rate comparison for increases.
+OOM_GATE = "oom_kills"
+
+
+@dataclass(frozen=True)
+class ReliabilityOutcome:
+    """OOM-kill rate before and after a request increase (H1): the outcome of a reliability fix.
+
+    ``baseline_events`` are the OOM kills the recommendation observed over its
+    evidence window (``evidence.oom_events``); ``post_events`` the kills the health
+    gates read over the post-change window. If the rate had not changed, the
+    post-window share of all kills would be binomial with the post-window share of
+    the observed time: a drop is ``realized`` when the post count is improbably low
+    (one-sided p <= ``RELIABILITY_ALPHA``), ``not_realized`` when the rate did not
+    drop, and ``inconclusive`` with too few kills or unknown counts.
+    """
+
+    metric: str
+    outcome: ChangeOutcome
+    reason: str
+    baseline_events: Optional[int] = None
+    baseline_hours: Optional[float] = None
+    post_events: Optional[int] = None
+    post_hours: Optional[float] = None
+    p_value: Optional[float] = None
+
+    @property
+    def baseline_rate_per_day(self) -> Optional[float]:
+        return _per_day(self.baseline_events, self.baseline_hours)
+
+    @property
+    def post_rate_per_day(self) -> Optional[float]:
+        return _per_day(self.post_events, self.post_hours)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "metric": self.metric,
+            "outcome": self.outcome.value,
+            "reason": self.reason,
+            "baseline_events": self.baseline_events,
+            "baseline_hours": self.baseline_hours,
+            "post_events": self.post_events,
+            "post_hours": self.post_hours,
+            "baseline_rate_per_day": self.baseline_rate_per_day,
+            "post_rate_per_day": self.post_rate_per_day,
+            "p_value": self.p_value,
+        }
+
+
+def _per_day(events: Optional[int], hours: Optional[float]) -> Optional[float]:
+    if events is None or hours is None or hours <= 0:
+        return None
+    return round(events / hours * 24.0, 6)
+
+
+def _binomial_cdf(k: int, n: int, p: float) -> float:
+    """P(X <= k) for X ~ Binomial(n, p), exact (n counts OOM kills, so it is small)."""
+    if k >= n:
+        return 1.0
+    return math.fsum(math.comb(n, i) * p**i * (1.0 - p) ** (n - i) for i in range(k + 1))
+
+
+def oom_rate_outcome(
+    baseline_events: Optional[int],
+    baseline_seconds: Optional[float],
+    post_events: Optional[int],
+    post_seconds: Optional[float],
+    *,
+    alpha: float = RELIABILITY_ALPHA,
+) -> ReliabilityOutcome:
+    """Did the OOM-kill rate drop after the increase? (exact conditional test, see :class:`ReliabilityOutcome`)."""
+    baseline_hours = baseline_seconds / 3600.0 if baseline_seconds and baseline_seconds > 0 else None
+    post_hours = post_seconds / 3600.0 if post_seconds and post_seconds > 0 else None
+    base: Dict[str, Any] = {
+        "metric": OOM_GATE,
+        "baseline_events": baseline_events,
+        "baseline_hours": round(baseline_hours, 4) if baseline_hours is not None else None,
+        "post_events": post_events,
+        "post_hours": round(post_hours, 4) if post_hours is not None else None,
+    }
+    if baseline_events is None or baseline_hours is None:
+        return ReliabilityOutcome(
+            **base, outcome=ChangeOutcome.INCONCLUSIVE, reason="no OOM-kill count before the change"
+        )
+    if post_events is None or post_hours is None:
+        return ReliabilityOutcome(
+            **base, outcome=ChangeOutcome.INCONCLUSIVE, reason="no OOM-kill count after the change"
+        )
+    if baseline_events <= 0:
+        return ReliabilityOutcome(
+            **base,
+            outcome=ChangeOutcome.INCONCLUSIVE,
+            reason="no OOM kills before the change: the increase is judged by its usage headroom only",
+        )
+    baseline_rate = baseline_events / baseline_hours
+    post_rate = post_events / post_hours
+    if post_rate >= baseline_rate:
+        return ReliabilityOutcome(
+            **base,
+            outcome=ChangeOutcome.NOT_REALIZED,
+            reason=(
+                f"OOM-kill rate did not drop: {post_rate * 24:.3g}/day after the change against "
+                f"{baseline_rate * 24:.3g}/day before"
+            ),
+        )
+    share = post_hours / (post_hours + baseline_hours)
+    p_value = _binomial_cdf(post_events, post_events + baseline_events, share)
+    if p_value <= alpha:
+        outcome, verdict = ChangeOutcome.REALIZED, "dropped"
+    else:
+        outcome, verdict = ChangeOutcome.INCONCLUSIVE, "is lower, but too few kills were observed to tell"
+    return ReliabilityOutcome(
+        **base,
+        outcome=outcome,
+        p_value=round(p_value, 6),
+        reason=(
+            f"OOM-kill rate {verdict}: {post_rate * 24:.3g}/day after the change against "
+            f"{baseline_rate * 24:.3g}/day before (one-sided p={p_value:.3g})"
+        ),
+    )
+
+
+def is_reliability_increase(record: Any) -> bool:
+    """A recommendation that raises a CPU or memory request (H1): measured on reliability."""
+    pairs = (
+        (
+            getattr(record, "current_cpu_request_millicores", None),
+            getattr(record, "recommended_cpu_request_millicores", None),
+        ),
+        (
+            getattr(record, "current_memory_request_bytes", None),
+            getattr(record, "recommended_memory_request_bytes", None),
+        ),
+    )
+    return any(
+        isinstance(current, int) and isinstance(proposed, int) and proposed > current for current, proposed in pairs
+    )
+
+
+def increase_reliability(
+    members: Sequence[Any], gates: Sequence[HealthGateResult], post_start: datetime, post_end: datetime
+) -> tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
+    """Health gates and the reliability outcome of a change whose members raise requests (H1).
+
+    For an increase made because of OOM kills, a kill after the rollout does not mean the
+    change hurt: the question is whether the kill **rate** dropped. The ``oom_kills`` gates
+    are then replaced by one rate comparison, which fails only when the rate did not drop
+    (the increase did not help; a person reviews it). Changes without increases, or
+    increases without OOM history, keep their gates unchanged.
+    """
+    increases = [member for member in members if is_reliability_increase(member)]
+    if not increases:
+        return list(gates), None
+    baseline_by_container: Dict[Optional[str], int] = {}
+    baseline_seconds: Optional[float] = None
+    for member in increases:
+        evidence = getattr(member, "evidence", None)
+        events = getattr(evidence, "oom_events", None)
+        seconds = getattr(evidence, "observation_window_seconds", None)
+        if not isinstance(events, int) or isinstance(events, bool):
+            continue
+        container = getattr(member, "container_name", None)
+        baseline_by_container[container] = max(events, baseline_by_container.get(container, 0))
+        if isinstance(seconds, (int, float)) and seconds > 0:
+            baseline_seconds = max(float(seconds), baseline_seconds or 0.0)
+    oom_gates = [gate for gate in gates if gate.gate == OOM_GATE]
+    post_values = [gate.value for gate in oom_gates]
+    post_events = (
+        int(math.fsum(value for value in post_values if value is not None))
+        if oom_gates and all(value is not None for value in post_values)
+        else None
+    )
+    outcome = oom_rate_outcome(
+        sum(baseline_by_container.values()) if baseline_by_container else None,
+        baseline_seconds,
+        post_events,
+        (ensure_utc(post_end) - ensure_utc(post_start)).total_seconds(),
+    )
+    if not outcome.baseline_events or post_events is None:
+        return list(gates), outcome
+    failed = outcome.outcome is ChangeOutcome.NOT_REALIZED and post_events > 0
+    rate_gate = HealthGateResult(
+        gate=OOM_GATE,
+        status=HealthGateStatus.FAILED if failed else HealthGateStatus.PASSED,
+        value=post_events,
+        threshold=outcome.baseline_events,
+        detail=f"reliability increase: {outcome.reason}",
+    )
+    return [*(gate for gate in gates if gate.gate != OOM_GATE), rate_gate], outcome
