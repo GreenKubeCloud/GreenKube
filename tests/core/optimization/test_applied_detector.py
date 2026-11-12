@@ -423,6 +423,47 @@ class TestAppliedDetector:
         assert snapshot.container_request_values == {"api": (500, 128 * 1024 * 1024)}
         assert snapshot.container_request_values_valid
 
+    @pytest.mark.asyncio
+    async def test_kubernetes_reader_records_native_sidecar_requests(self, monkeypatch):
+        """H1: a native sidecar's requests are part of the pre-apply baseline; classic init containers are not."""
+        import greenkube.core.k8s_client as k8s_client
+
+        def container(name, cpu, restart_policy=None):
+            return SimpleNamespace(
+                name=name, restart_policy=restart_policy, resources=SimpleNamespace(requests={"cpu": cpu})
+            )
+
+        item = SimpleNamespace(
+            metadata=SimpleNamespace(namespace="prod", name="api", uid="uid-api-1", generation=8),
+            status=SimpleNamespace(observed_generation=8),
+            spec=SimpleNamespace(
+                template=SimpleNamespace(
+                    spec=SimpleNamespace(
+                        containers=[container("api", "500m")],
+                        init_containers=[container("proxy", "50m", "Always"), container("migrate", "1")],
+                    )
+                )
+            ),
+        )
+
+        async def deployments():
+            return SimpleNamespace(items=[item])
+
+        async def empty_list():
+            return SimpleNamespace(items=[])
+
+        async def get_api():
+            return SimpleNamespace(
+                list_deployment_for_all_namespaces=deployments,
+                list_stateful_set_for_all_namespaces=empty_list,
+                list_daemon_set_for_all_namespaces=empty_list,
+            )
+
+        monkeypatch.setattr(k8s_client, "get_apps_v1_api", get_api)
+        snapshot = (await K8sWorkloadReader().read())[("prod", "Deployment", "api")]
+        assert snapshot.container_request_values == {"api": (500, None), "proxy": (50, None)}
+        assert snapshot.cpu_request_millicores == 500
+
     def test_kubernetes_request_summary_preserves_each_container(self):
         containers = [
             SimpleNamespace(
