@@ -124,7 +124,7 @@ requests queues instead of exhausting the Pod's memory.
 
 Counters live in each API process: with several replicas, an attacker gets at most the budget times the number of
 replicas. `greenkube_auth_failures_total{reason}` counts `bad_credentials`, `rate_limited`, `invalid_session`,
-`invalid_api_key`, `csrf` and `forbidden_scope` rejections.
+`invalid_api_key`, `csrf`, `forbidden_scope`, `untrusted_proxy_header` and `sso` rejections.
 
 ### Passwords
 
