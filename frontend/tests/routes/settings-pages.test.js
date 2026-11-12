@@ -22,7 +22,10 @@ vi.mock('$lib/api.js', () => ({
 	changePassword: vi.fn(),
 	listApiKeys: vi.fn(),
 	createApiKey: vi.fn(),
-	revokeApiKey: vi.fn()
+	revokeApiKey: vi.fn(),
+	listUsers: vi.fn(() => Promise.resolve([])),
+	createUser: vi.fn(),
+	updateUser: vi.fn()
 }));
 
 const ADMIN = { kind: 'user', name: 'admin', role: 'admin', scopes: ['admin'] };
