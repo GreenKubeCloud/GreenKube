@@ -648,6 +648,12 @@ def _renderer_configuration(
             "release_name": text(helm.get("releaseName")) or application_name,
             "release_namespace": text(helm.get("namespace")) or destination_namespace or "default",
         }
+        if owner.chart is not None:
+            # Argo CD reports the chart version it resolved (targetRevision may be a
+            # range such as 18.3.*): the renderer fetches exactly that version (H2).
+            deployed = revisions[owner.index] if 0 <= owner.index < len(revisions) else None
+            if deployed is not None:
+                config["chart"]["resolved_version"] = deployed
         value_files, value_sources, error = _resolve_value_files(owner, helm, sources, revisions)
         config["values_files"] = value_files
         config["values_sources"] = value_sources
