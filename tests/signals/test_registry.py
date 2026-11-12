@@ -30,7 +30,7 @@ NATIVE_IDS = [
     "greenkube.orphaned_lb",
 ]
 #: Signal-only connectors (roadmap G), after the native analyzers.
-CONNECTOR_IDS = ["krr", "kubecost", "push", "polaris", "gke"]
+CONNECTOR_IDS = ["krr", "kubecost", "push", "polaris", "gke", "azure_advisor"]
 
 
 class AcmeSettings(SourceSettings):
