@@ -14,16 +14,23 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
 from greenkube.api.routers import automation_repositories, setup
+from greenkube.api.routers.sources import get_signal_repository, get_source_catalog
+from greenkube.core.config import Config
+from greenkube.core.optimization.registry import build_source_registry
 from greenkube.models.health import ServiceHealth, ServiceStatus
 from greenkube.models.metrics import RecommendationRecord, RecommendationType
 from greenkube.models.recommendation_v2 import RecommendationRevision
+from greenkube.signals.runtime import SourceRunRecord, SourceRunStatus
+from greenkube.signals.sdk import Diagnostic, SourceHealthStatus
 from greenkube.storage.automation_capability_repository import CapabilityRow
+from greenkube.storage.base_signal_repository import SignalRepository, SourceRunSummary
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "frontend" / "tests" / "fixtures" / "api"
@@ -338,3 +345,137 @@ def test_every_ui_action_the_api_emits_is_known_to_the_ui():
     block = source[source.index("const UI_ACTIONS") : source.index("};", source.index("const UI_ACTIONS"))]
     known = set(re.findall(r"^\s*([a-z_]+):", block, re.M))
     assert known == set(setup.UI_ACTIONS)
+
+
+# --- Sources page (K6): GET /sources and GET /sources/{id}/runs ---------------
+
+
+class _FixtureSignalRepository(SignalRepository):
+    """Source runs only, newest first per source: what the Sources page reads."""
+
+    def __init__(self, runs: dict[str, list[SourceRunRecord]]) -> None:
+        self.runs = runs
+
+    async def record_run(self, run, signals=()):
+        raise NotImplementedError
+
+    async def latest_runs(self):
+        return {
+            source_id: SourceRunSummary(
+                latest=runs[0],
+                last_success_at=next((r.finished_at for r in runs if r.status == SourceRunStatus.SUCCEEDED), None),
+            )
+            for source_id, runs in self.runs.items()
+        }
+
+    async def list_runs(self, source_id, *, limit=20):
+        return self.runs.get(source_id, [])[:limit]
+
+    async def list_signals(self, source_id, *, limit=100, target_key=None):
+        return []
+
+    async def prune(self, before):
+        return 0
+
+
+def _source_run(source_id: str, status: SourceRunStatus, run_id: int, minutes: int, **values: Any) -> SourceRunRecord:
+    started = CREATED + timedelta(minutes=minutes)
+    return SourceRunRecord(
+        id=run_id,
+        source_id=source_id,
+        status=status,
+        started_at=started,
+        finished_at=started + timedelta(seconds=1.25),
+        duration_seconds=1.25,
+        **values,
+    )
+
+
+def _broken_plugin() -> SimpleNamespace:
+    def load():
+        raise ImportError("No module named 'acme_sdk'")
+
+    return SimpleNamespace(name="acme", value="acme_source:AcmeSource", load=load, dist=None)
+
+
+def _source_runs() -> dict[str, list[SourceRunRecord]]:
+    return {
+        "greenkube.rightsizing_cpu": [
+            _source_run(
+                "greenkube.rightsizing_cpu",
+                SourceRunStatus.INCOMPLETE,
+                7,
+                60,
+                signal_count=3,
+                recommendation_count=3,
+                error_code="incomplete",
+                diagnostics=[
+                    Diagnostic(level="warning", code="skipped", message="12 VPAs skipped: updateMode=Auto", count=12)
+                ],
+            ),
+            _source_run(
+                "greenkube.rightsizing_cpu",
+                SourceRunStatus.SUCCEEDED,
+                5,
+                30,
+                complete=True,
+                signal_count=12,
+                recommendation_count=4,
+            ),
+        ],
+        "vpa": [
+            _source_run(
+                "vpa",
+                SourceRunStatus.UNAVAILABLE,
+                6,
+                45,
+                health_status=SourceHealthStatus.UNAVAILABLE,
+                health_reason="VPA CRD not installed",
+            )
+        ],
+        "greenkube.orphaned_lb": [
+            _source_run(
+                "greenkube.orphaned_lb",
+                SourceRunStatus.FAILED,
+                4,
+                20,
+                error_code="RuntimeError",
+                error="RuntimeError",
+                consecutive_failures=2,
+            )
+        ],
+        "uninstalled": [_source_run("uninstalled", SourceRunStatus.SUCCEEDED, 1, 0, complete=True)],
+    }
+
+
+@pytest.fixture
+def source_catalog(client):
+    repository = _FixtureSignalRepository(_source_runs())
+    config = Config().model_copy(
+        update={
+            "RECOMMENDATION_KARPENTER_ENABLED": False,
+            "SOURCES_CONFIG": '{"greenkube.carbon_aware": {"enabled": false}, "vpa": {"enabled": "true"}}',
+        }
+    )
+    catalog = build_source_registry(config, entry_points=lambda: [_broken_plugin()])
+    client.app.dependency_overrides[get_signal_repository] = lambda: repository
+    client.app.dependency_overrides[get_source_catalog] = lambda: catalog
+    yield repository
+    client.app.dependency_overrides.pop(get_signal_repository, None)
+    client.app.dependency_overrides.pop(get_source_catalog, None)
+
+
+def test_sources_fixtures(client, source_catalog):
+    sources = client.get("/api/v1/sources")
+    assert sources.status_code == 200
+    body = sources.json()
+    statuses = {source["id"]: source["status"] for source in body["sources"]}
+    assert statuses["vpa"] == "failing" and statuses["greenkube.orphaned_lb"] == "failing"
+    assert statuses["greenkube.rightsizing_cpu"] == "degraded" and statuses["uninstalled"] == "unregistered"
+    assert body["problems"][0]["code"] == "plugin_load_failed"
+    _check_fixture("sources_list", body)
+
+    runs = client.get("/api/v1/sources/greenkube.rightsizing_cpu/runs?limit=20")
+    assert runs.status_code == 200
+    assert [run["run_id"] for run in runs.json()] == [7, 5]
+    _check_fixture("source_runs", runs.json())
