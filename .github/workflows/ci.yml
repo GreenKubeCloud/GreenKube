@@ -73,7 +73,11 @@ jobs:
         run: uv run pyrefly check
 
       - name: Run tests with pytest (coverage gate from pyproject.toml)
-        run: uv run pytest --cov=greenkube --cov-report=term-missing --tb=short --no-header --color=no
+        run: uv run pytest --cov=greenkube --cov-report=term-missing --tb=short --no-header --color=no -rs | tee pytest.log
+
+      # The PostgreSQL service above must reach every live-PostgreSQL test (O8).
+      - name: Check that the PostgreSQL tests ran
+        run: .github/scripts/check-postgres-ran.sh pytest.log
 
   frontend-test:
     name: Frontend Tests
