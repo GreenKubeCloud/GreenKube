@@ -361,16 +361,63 @@ Only CPU and memory rightsizing recommendations (the `container_resources` kind)
 |---|---|---|
 | Argo CD raw YAML | Yes | Uses the Application's resource inventory and a raw manifest planner. |
 | Argo CD Kustomize | Yes | Plans the overlay and render-validates the result. |
-| Argo CD Helm with a local chart and Git-managed values files | Yes | The chart must live in the same repository and revision as the values. Infers a unique values file/container mapping when possible; otherwise offers a server-validated one-time mapping. |
-| Argo CD Helm with a remote chart (Helm repository, OCI, or another Git repository) | No | The chart is not in the snapshot; fails closed. |
+| Argo CD Helm with a local chart and Git-managed values files | Yes | The chart must live in the same repository and revision as the values. Infers a unique values file/container mapping when possible; otherwise offers a server-validated one-time mapping. Several containers of one workload are planned in one edit. |
+| Argo CD multi-source Helm: remote chart (Helm repository or OCI registry) + `$values` Git source | Yes | The edit lands in the last values file of the `$values` source. The exact chart version Argo CD deployed is pre-fetched, digest-verified and rendered offline ([Helm support](#helm-support)). |
+| Argo CD Helm with a remote chart and no Git-managed values file | No | Nothing in Git to edit (`remote-chart-values-not-in-git`); fails closed. |
+| Argo CD Helm with a chart in another Git repository | No | The chart is not in the snapshot; fails closed. |
 | Argo CD Helm with inline `valuesObject` / `parameters` | No | Fails closed; move values to a Git-managed values file. |
-| Argo CD multi-source Helm | Partial | Only when the chart is local to the values repository; source indices are handled server-side. A remote chart source fails closed. |
+| Argo CD multi-source Helm with a local chart | Yes | Source indices are handled server-side. |
 | Flux Kustomization (raw/Kustomize) | Yes | Uses the Flux inventory and exact source revision. The overlay is rendered as Flux builds it: `spec.targetNamespace`, `namePrefix` and `nameSuffix` are applied to the root Kustomization for the render only (see below). |
 | Flux HelmRelease with local same-revision Git chart | Yes | Renders `valuesFiles`, `valuesFrom`, and inline values, then applies the managed post-renderer edit. |
 | Flux HelmRelease `chartRef` to a Git-backed HelmChart | Yes | The HelmChart must exist in the same immutable snapshot. |
-| Flux HelmRelease with remote HelmRepository/OCI chart | No | The chart artifact is not in the snapshot; fails closed. |
+| Flux HelmRelease with a HelmRepository chart (HTTP or `type: oci`), or `chartRef` to an OCIRepository | Yes | The deployed chart version (and, for an OCIRepository, its digest) is pre-fetched, verified and rendered offline; the managed post-renderer patch is written to the Git-owned HelmRelease. Chart `valuesFiles` of a remote chart fail closed (`remote-chart-values-files`). |
 | Flux `valuesFrom` that is runtime-only, cross-repository, cross-revision, or uses `targetPath` | No | Fails closed with a typed reason. |
 | Manual binding resolution | Yes | An operator can select one server-provided candidate for an ambiguous/unresolved binding. |
+
+### Helm support
+
+| Chart | Rendered from | Values edit | Container mapping |
+|---|---|---|---|
+| Local chart (same repository and revision) | The repository snapshot | Last Git-managed values file (Argo CD) or managed post-renderer (Flux) | Explicit mapping, else render probe of the values file |
+| HTTP Helm repository (`https://.../index.yaml`) | Pre-fetched by the controller, verified against the `digest` of `index.yaml` | Same | Configured mapping, built-in registry, then render probe |
+| OCI registry (`oci://` or Argo CD's scheme-less form) | Pre-fetched anonymously, verified against the manifest digest (`Docker-Content-Digest`) and the chart layer digest; a Flux OCIRepository also pins the digest it deployed | Same | Same |
+| Bucket, private registry needing credentials, chart version range without a deployed version | Not rendered | | Fails closed with a reason code |
+
+**Remote charts.** The renderer sandbox has no network, so the controller fetches the remote chart: exactly the version the controller deployed (Argo CD `status.sync.revisions`, Flux `status.history[0].chartVersion`; a range such as `18.3.*` alone is never rendered). The archive must match the digest its repository publishes, is unpacked in memory (bounded; no links, no paths outside the chart), and is staged into the render workspace for the duration of the plan. Remote dependencies must be vendored in the chart archive (`charts/`, packaged `.tgz` dependencies are unpacked); nothing is fetched at render time. Because packaged charts commonly define helpers that use `lookup` or random functions without calling them, a remote chart is rendered twice instead of being scanned statically: differing output fails closed as `nondeterministic-chart-render`. The plan carries the provenance (`remote Helm chart <reference> rendered from sha256:...`) in its validation warnings and in the PR body.
+
+The controller only contacts hosts named by the discovered chart source, and never loopback, link-local or metadata addresses. `automation.helm.remoteCharts.allowedHosts` narrows that to a list (`host`, `host:port`, `*.domain`; Docker Hub also needs `auth.docker.io` and `*.docker.com`; plain-HTTP repositories must always be listed). Registry bearer tokens are anonymous and never follow a redirect to another host. `automation.helm.remoteCharts.enabled=false` makes every remote chart fail closed (`remote-charts-disabled`).
+
+| Reason | Meaning | Plan status |
+|---|---|---|
+| `chart-version-unresolved` | No exact deployed chart version is known | Unsupported source |
+| `chart-host-not-allowed` | Host outside the allowlist, plain HTTP, or an internal address | Unsupported source |
+| `chart-registry-auth-required` | The registry refuses anonymous pulls | Unsupported source |
+| `remote-charts-disabled` | `automation.helm.remoteCharts.enabled=false` | Unsupported source |
+| `chart-digest-mismatch`, `chart-digest-unavailable` | The archive does not match its published or deployed digest, or none is published | Render validation failed |
+| `chart-not-found`, `chart-archive-invalid`, `chart-size-limit` | The chart could not be fetched or unpacked safely | Render validation failed |
+| `nondeterministic-chart-render` | Two renders of the same inputs differ | Render validation failed |
+
+**Values-path mapping.** For each container of the plan, GreenKube finds where the chart reads its `resources`, in this order, and keeps a candidate only when editing it changes exactly that container in the render:
+
+1. the explicit mapping of the Application (`greenkube.cloud/helm-values-mapping` annotation) for its container;
+2. `automation.helm.chartMappings` entries matching the chart (name or `<repository>/<name>`, globs allowed), its version and the container; a matching but wrong entry fails closed rather than falling through;
+3. the built-in registry: Bitnami charts (`resources`, `<container>.resources`, `primary`/`master`/`controller`/`server.resources`, `metrics.resources`), ingress-nginx, cert-manager, podinfo, grafana, bjw-s app-template and stakater application;
+4. a render probe of every `resources` path of the Git values file and of the chart's default values; exactly one must match, otherwise the plan is `needs_chart_mapping`.
+
+For a remote chart the edit may create the values path in the Git file. When `resources` is missing or empty there, it is first seeded with the container's currently rendered resources, so a chart that falls back to a preset when `resources` is empty (Bitnami `resourcesPreset`) keeps its limits:
+
+```yaml
+# environments/prod/nginx.yaml after a plan for containers nginx and metrics
+replicaCount: 2
+metrics:
+  enabled: true
+  resources:
+    requests: {cpu: 20m, ephemeral-storage: 50Mi, memory: 128Mi}
+    limits: {cpu: 150m, ephemeral-storage: 2Gi, memory: 192Mi}
+resources:
+  requests: {cpu: 50m, ephemeral-storage: 50Mi, memory: 64Mi}
+  limits: {cpu: 150m, ephemeral-storage: 2Gi, memory: 192Mi}
+```
 
 When discovery cannot choose a single owner, the binding is `ambiguous`, `unresolved`, or `blocked` and plans fail closed. The **Automation & GitOps** page lists actionable bindings and their safe candidate provenance. Manual resolutions are generation-bound, expire at `automation.bindingTtl` (default 30 minutes), and are written to the audit trail.
 
@@ -635,7 +682,7 @@ SLOs and example alert rules are documented in [Observability and SLOs](observab
 ## Limitations
 
 - Only CPU and memory rightsizing recommendations have GitOps planners.
-- Remote Helm/Kustomize artifacts, Argo CD inline Helm values, Flux `valuesFrom.targetPath`, cross-repository/revision values, chart dependencies, and unmanaged post-renderers fail closed.
+- Remote Kustomize artifacts, Argo CD inline Helm values, Flux `valuesFrom.targetPath`, cross-repository/revision values, dependencies of local charts, remote charts that need registry credentials or whose dependencies are not vendored, chart `valuesFiles` of remote Flux charts, and unmanaged post-renderers fail closed. Remote Helm charts from HTTP repositories and OCI registries are supported ([Helm support](#helm-support)); Flux remote charts are edited through the managed post-renderer, not `spec.values`.
 - Argo CD Applications that are not stored in Git have no PR target.
 - Provider archive downloads must be available at the resolved full commit SHA. GreenKube does not fall back to a mutable branch or per-file reads.
 - Descendant sync confirmation needs a provider ancestry API: GitHub compare, GitLab merge base, or a Gitea release that serves `GET /repos/{owner}/{repo}/compare/{basehead}`. Without it, a controller that already runs a later commit stays pending (`ancestry_unavailable`) until the sync timeout.

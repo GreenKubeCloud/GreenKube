@@ -3,7 +3,9 @@ Isolated Helm/Kustomize renderer (F6): always deployed, small, without
 Secrets or a service-account token, behind an egress-deny NetworkPolicy. The
 renderer itself probes whether that policy is enforced (at startup and daily)
 and reports it on /status; the controller turns an unenforced policy into the
-renderer_egress_unenforced warning of the setup checklist.
+renderer_egress_unenforced warning of the setup checklist. Remote Helm charts
+(H2) open no egress here: the controller pre-fetches and digest-verifies them
+and sends them inside the render snapshot.
 */ -}}
 {{- $root := . }}
 {{- $v := include "greenkube.values" $root | fromYaml }}
