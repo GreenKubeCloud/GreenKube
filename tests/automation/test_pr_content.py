@@ -83,6 +83,12 @@ SCENARIOS = {
     "high_risk_missing_records": lambda: _context(
         fx.rightsize_plan(), [fx.recommendation(41, risk_level="high", impact=None)], missing=(42,)
     ),
+    # Container resources v2 (H1): a reliability increase with a raised memory limit, and a CPU
+    # increase that removes the CPU limit.
+    "increase": lambda: _context(fx.increase_plan(), [fx.increase_recommendation(43)]),
+    "increase_cpu_limit_removed": lambda: _context(
+        fx.cpu_limit_removal_plan(), [fx.increase_recommendation(44, rec_type=RecommendationType.RIGHTSIZING_CPU)]
+    ),
 }
 
 
@@ -511,3 +517,26 @@ def test_enum_fields_render_as_their_values_never_as_python_reprs():
         r"\b(?:RiskLevel|EffortLevel|RecommendationSource|RecommendationStatus|RecommendationType)\.", rendered
     )
     assert leaked == []
+
+
+def test_increase_title_shows_its_cost_never_a_saving():
+    """H1: an increase PR shows the projected cost with a plus sign and no saving."""
+    title = render_title(SCENARIOS["increase"](), PullRequestRenderSettings(max_title_chars=200))
+    assert title == "greenkube: raise resources of payments/api (mem 1Gi→2Gi) · +$150/yr"
+    body = render_body(SCENARIOS["increase"](), SETTINGS)
+    assert "Projected cost (reliability fix)" in body
+    assert "Projected saving" not in body
+    assert "| limits.memory | 1.5Gi | 3Gi |" in body
+    assert "3 OOM kills" in body
+
+
+def test_limit_edits_are_reverted_by_reverting_the_pull_request():
+    body = render_body(SCENARIOS["increase_cpu_limit_removed"](), SETTINGS)
+    assert "| limits.cpu | 1000m | removed | n/a |" in body
+    assert "changes container limits" in body
+    assert "let GreenKube open the rollback pull request" not in body
+
+
+def test_increase_labels_mark_reliability():
+    metadata = derive_metadata(SCENARIOS["increase"]())
+    assert "reliability" in metadata.labels

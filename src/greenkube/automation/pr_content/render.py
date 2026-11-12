@@ -25,8 +25,10 @@ from greenkube.automation.pr_content.model import (
     PullRequestContext,
     PullRequestRenderSettings,
     ResourceChange,
+    edits_limits,
     highest_risk,
     plan_verb,
+    raises_requests,
     resource_changes,
     savings_totals,
 )
@@ -146,6 +148,9 @@ def _title_savings(context: PullRequestContext) -> list[str]:
         parts.append(f"−{fmt.money_compact(totals.cost_annual, totals.currency)}/yr")
     if totals.has_co2e and totals.co2e_annual_g > 0:
         parts.append(f"−{fmt.co2e_compact(totals.co2e_annual_g)}/yr")
+    if raises_requests(context) and totals.has_cost and totals.cost_annual < 0:
+        # A reliability increase (H1) costs money: its cost is shown as such, never as a saving.
+        parts.append(f"+{fmt.money_compact(-totals.cost_annual, totals.currency)}/yr")
     return parts
 
 
@@ -331,7 +336,9 @@ def _summary(context: PullRequestContext, settings: PullRequestRenderSettings) -
             + f", from recommendation{'s' if len(plan.recommendation_ids) > 1 else ''} {ids}."
         )
     lines = ["## Summary", "", sentence]
-    if not context.is_rollback:
+    if raises_requests(context):
+        lines.extend(("", *_increase_totals_table(context), "", *_reliability_lines(context)))
+    elif not context.is_rollback:
         lines.extend(("", *_totals_table(context)))
     if context.missing_recommendation_ids:
         missing = ", ".join(f"#{item}" for item in context.missing_recommendation_ids)
@@ -385,6 +392,67 @@ def _totals_table(context: PullRequestContext) -> list[str]:
             "totalled; see the change page for its breakdown."
         )
     return [*lines, "", *(f"_{note}_" for note in notes)]
+
+
+def _increase_totals_table(context: PullRequestContext) -> list[str]:
+    """Projected cost of a reliability increase (H1): positive amounts, labelled as cost, never as a saving."""
+    totals = savings_totals(context.recommendations)
+    if not totals.has_cost and not totals.has_co2e:
+        return ["_No projected cost is recorded for these recommendations._"]
+    lines = ["| Projected cost (reliability fix) | per month | per year |", "| --- | ---: | ---: |"]
+    if totals.has_cost:
+        cost = -totals.cost_annual
+        lines.append(
+            f"| Cost ({totals.currency}) | +{fmt.money(cost / 12, totals.currency)} "
+            f"| +{fmt.money(cost, totals.currency)} |"
+        )
+    if totals.has_co2e:
+        co2e = -totals.co2e_annual_g
+        lines.append(f"| CO₂e | {_signed_co2e(co2e / 12)} | {_signed_co2e(co2e)} |")
+    return [
+        *lines,
+        "",
+        "_Projected by the Impact Model; a request increase reserves more capacity, so it is reported as a cost, "
+        "never as a saving._",
+    ]
+
+
+def _signed_co2e(grams: float) -> str:
+    return f"+{fmt.co2e(grams)}" if grams >= 0 else f"−{fmt.co2e(-grams)}"
+
+
+def _reliability_lines(context: PullRequestContext) -> list[str]:
+    """What the increase protects against (risk reduced), from each recommendation's evidence."""
+    lines = [
+        "**Reliability fix.** This pull request raises requests to reduce the risk of OOM kills, CPU contention and "
+        "evictions; it is never approved automatically unless `automation.autoApprove.increases` allows it.",
+    ]
+    for record in context.recommendations:
+        evidence = record.evidence
+        if evidence is None:
+            continue
+        container = f"`{fmt.inline(record.container_name or 'workload', max_chars=80)}`"
+        facts: list[str] = []
+        if evidence.oom_events:
+            facts.append(f"{evidence.oom_events} OOM kill{'s' if evidence.oom_events > 1 else ''}")
+        memory = evidence.memory_usage
+        if record.recommended_memory_request_bytes is not None and memory is not None:
+            current = evidence.current.memory_request_bytes
+            facts.append(
+                f"memory p99 {fmt.memory(memory.p99)} · max {fmt.memory(memory.max)}"
+                + (f" for a {fmt.memory(current)} request" if current else "")
+            )
+        cpu_usage = evidence.cpu_usage
+        if record.recommended_cpu_request_millicores is not None and cpu_usage is not None:
+            current = evidence.current.cpu_request_millicores
+            facts.append(
+                f"CPU p99 {fmt.cpu(cpu_usage.p99)}" + (f" for a {fmt.cpu(current)} request" if current else "")
+            )
+        if evidence.cpu_throttling_ratio:
+            facts.append(f"CPU throttled in {fmt.percent(evidence.cpu_throttling_ratio)} of periods")
+        if facts:
+            lines.append(f"- {container}: {', '.join(facts)} in the observation window.")
+    return lines
 
 
 def _changes(context: PullRequestContext) -> str:
@@ -780,6 +848,11 @@ def _rollback(context: PullRequestContext, settings: PullRequestRenderSettings) 
             f"{where}: when a health gate fails after the rollout, the recommendation enters rollback review and "
             "the inverse plan restores the recorded pre-apply values."
         )
+    elif edits_limits(context):
+        lines.append(
+            "- This pull request changes container limits, which the recorded pre-apply baseline does not hold: "
+            "GreenKube cannot build an automated rollback; revert this pull request manually."
+        )
     else:
         lines.append(
             "- GreenKube cannot build an automated rollback for this layout or action kind; revert this pull "
@@ -807,10 +880,18 @@ def _verification(context: PullRequestContext, settings: PullRequestRenderSettin
             f"baseline of {fmt.duration_hours(settings.measurement_pre_window_days * 24)} that ends at the merge, "
             "matched hour of the week and normalized for load, with a 90% confidence interval."
         )
-        lines.append(
-            "3. The outcome is `realized`, `not_realized`, `inconclusive` or `contaminated`; health gates "
-            "(restarts, OOM kills, throttling, readiness) can send the change to rollback review."
-        )
+        if raises_requests(context):
+            lines.append(
+                "3. A reliability increase is judged on reliability: GreenKube compares the OOM-kill rate after the "
+                "rollout with the rate observed before it, and reports the measured cost as a cost. Health gates "
+                "(restarts, throttling, readiness, and OOM kills that do not drop) can send the change to rollback "
+                "review."
+            )
+        else:
+            lines.append(
+                "3. The outcome is `realized`, `not_realized`, `inconclusive` or `contaminated`; health gates "
+                "(restarts, OOM kills, throttling, readiness) can send the change to rollback review."
+            )
     else:
         lines.append(
             f"2. The verifier compares {fmt.duration_hours(settings.verification_window_hours)} after the rollout "
