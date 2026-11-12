@@ -243,6 +243,28 @@ automation:
     # (synced, applied, measuring, outcome) for lifecycleLookbackDays after the merge.
     lifecycleComments: true
     lifecycleLookbackDays: 30
+  # Helm charts (docs/automation.md#helm-support). Remote charts (HTTP repositories,
+  # OCI registries) are pre-fetched by the controller, verified against the digest
+  # their repository publishes and rendered offline: the renderer sandbox keeps no
+  # network egress. Values edits land in the values file of the Argo CD $values
+  # source or, for Flux, in a managed post-renderer patch.
+  helm:
+    remoteCharts:
+      enabled: true
+      # Hosts the controller may fetch charts from: "host", "host:port" or "*.domain".
+      # Empty: any public host named by a discovered Argo CD/Flux chart source
+      # (loopback, link-local and metadata addresses are always refused). When set,
+      # Docker Hub charts also need auth.docker.io and *.docker.com; plain-HTTP
+      # repositories must always be listed.
+      allowedHosts: []
+    # Values-path mappings per chart and version, tried before the built-in registry
+    # of well-known charts (Bitnami, ingress-nginx, cert-manager...). Each mapping is
+    # still render-validated: a wrong one fails closed instead of editing anything.
+    #   - chart: nginx          # chart name or <repository>/<name>; globs allowed
+    #     version: "18.3.1"     # exact version or glob ("18.*"); default "*"
+    #     container: nginx      # container name or glob; default "*"
+    #     path: resources       # dotted values path ending with "resources"
+    chartMappings: []
 
 image:
   repository: greenkube/greenkube

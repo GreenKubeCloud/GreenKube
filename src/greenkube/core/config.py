@@ -34,6 +34,25 @@ def parse_gitops_duration_seconds(value: str) -> float:
 DISCOVERED_REPOSITORIES = "@discovered"
 
 
+def parse_helm_chart_hosts(value: str) -> tuple[str, ...]:
+    """Parse ``GITOPS_HELM_CHART_HOSTS``: a JSON list of host, host:port or *.domain patterns."""
+    import json
+
+    text = (value or "").strip()
+    if not text:
+        return ()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        raise ValueError("GITOPS_HELM_CHART_HOSTS must be a JSON list of hosts") from None
+    if not isinstance(parsed, list) or any(not isinstance(item, str) or not item.strip() for item in parsed):
+        raise ValueError("GITOPS_HELM_CHART_HOSTS must be a JSON list of non-empty hosts")
+    hosts = tuple(item.strip().lower() for item in parsed)
+    if any(re.fullmatch(r"(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?", host) is None for host in hosts):
+        raise ValueError("GITOPS_HELM_CHART_HOSTS entries must be host, host:port or *.domain patterns")
+    return hosts
+
+
 def parse_repository_allowlist(value: str) -> tuple[str, ...]:
     """Parse ``AUTOMATION_REPOSITORY_ALLOWLIST``: a JSON list (or comma list) of patterns."""
     import json
@@ -507,6 +526,19 @@ class Config(BaseSettings):
     # How long after the merge the status comment keeps being refreshed.
     GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS: int = Field(30, ge=1, le=365)
 
+    # --- Helm remote charts (H2, docs/automation.md#helm-support) ---
+    # The controller pre-fetches the exact remote chart (HTTP repository or OCI registry)
+    # a discovered Argo CD/Flux source deployed, verifies its digest and renders it offline
+    # in the renderer sandbox. false keeps remote charts fail-closed (remote-charts-disabled).
+    GITOPS_HELM_REMOTE_CHARTS: bool = True
+    # JSON list of chart hosts the controller may contact ("host", "host:port", "*.domain").
+    # Empty: any public host named by a discovered chart source. Loopback, link-local and
+    # metadata addresses are always refused; plain-HTTP hosts must be listed.
+    GITOPS_HELM_CHART_HOSTS: str = "[]"
+    # JSON list of per-chart values-path mappings, checked before the built-in registry:
+    # [{"chart": "nginx", "version": "18.3.1", "container": "nginx", "path": "resources"}].
+    GITOPS_HELM_CHART_MAPPINGS: str = "[]"
+
     # --- Cloud provider & PUE ---
     # DEFAULT_PUE may be overridden by the datacenter profile for the configured CLOUD_PROVIDER
     # (see _compute_and_validate model validator). The raw env-var value is preserved in
@@ -619,6 +651,23 @@ class Config(BaseSettings):
         from greenkube.automation.pr_content.template import validate_template
 
         return validate_template(value)
+
+    @field_validator("GITOPS_HELM_CHART_HOSTS", mode="after")
+    @classmethod
+    def _validate_helm_chart_hosts(cls, value: str) -> str:
+        parse_helm_chart_hosts(value)
+        return value
+
+    @field_validator("GITOPS_HELM_CHART_MAPPINGS", mode="after")
+    @classmethod
+    def _validate_helm_chart_mappings(cls, value: str) -> str:
+        from greenkube.gitops.planning.helm_mappings import ChartMappingConfigError, parse_chart_mappings
+
+        try:
+            parse_chart_mappings(value)
+        except ChartMappingConfigError as exc:
+            raise ValueError(f"GITOPS_HELM_CHART_MAPPINGS is invalid: {exc}") from None
+        return value
 
     @field_validator("GITOPS_DISCOVERY_INTERVAL", mode="before")
     @classmethod
@@ -1001,6 +1050,11 @@ class Config(BaseSettings):
     def automation_repository_allowlist(self) -> tuple[str, ...]:
         """Configured repository allowlist patterns; ``@discovered`` is expanded at run time."""
         return parse_repository_allowlist(self.AUTOMATION_REPOSITORY_ALLOWLIST)
+
+    @property
+    def helm_chart_hosts(self) -> tuple[str, ...]:
+        """Hosts the controller may fetch remote Helm charts from; empty means discovered hosts."""
+        return parse_helm_chart_hosts(self.GITOPS_HELM_CHART_HOSTS)
 
     @property
     def gitops_discovery_interval_seconds(self) -> float:

@@ -247,3 +247,35 @@ def test_archive_metadata_must_match_the_requested_chart():
 
     with pytest.raises(ChartArchiveError, match="chart version"):
         _fetcher(registry).fetch(_oci())
+
+
+def test_fetcher_settings_come_from_the_configuration(monkeypatch: pytest.MonkeyPatch):
+    from greenkube.core.config import Config
+
+    settings = Config(
+        GITOPS_HELM_REMOTE_CHARTS=False, GITOPS_HELM_CHART_HOSTS='["Registry-1.Docker.io", "*.docker.com"]'
+    )
+    monkeypatch.setattr("greenkube.core.config.get_config", lambda: settings)
+
+    fetcher = RemoteChartFetcher.from_settings()
+
+    assert fetcher.enabled is False
+    assert fetcher.allowed_hosts == ("registry-1.docker.io", "*.docker.com")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("GITOPS_HELM_CHART_HOSTS", '["https://ghcr.io/charts"]'),
+        ("GITOPS_HELM_CHART_HOSTS", '"ghcr.io"'),
+        ("GITOPS_HELM_CHART_MAPPINGS", '[{"chart": "nginx"}]'),
+        ("GITOPS_HELM_CHART_MAPPINGS", '[{"chart": "nginx", "path": "resources.limits"}]'),
+    ],
+)
+def test_invalid_remote_chart_settings_are_rejected(field: str, value: str):
+    from pydantic import ValidationError
+
+    from greenkube.core.config import Config
+
+    with pytest.raises(ValidationError, match=field):
+        Config(**{field: value})
