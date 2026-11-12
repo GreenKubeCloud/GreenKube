@@ -115,7 +115,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "greenkube.secretNameFor" (dict "context" $root "key" "DB_CONNECTION_STRING") }}
                   key: DB_CONNECTION_STRING
-            {{- if and (eq $component "api") (has $root.Values.config.apiAuthMode (list "api_key" "session")) }}
+            {{- if and (eq $component "api") (has $root.Values.config.apiAuthMode (list "api_key" "session" "oidc" "proxy")) }}
             - name: GREENKUBE_API_KEY
               valueFrom:
                 secretKeyRef:

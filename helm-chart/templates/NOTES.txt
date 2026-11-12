@@ -9,6 +9,23 @@ Welcome to
 {{- $admin := (.Values.auth | default dict).admin | default dict }}
 {{- $initialAdmin := include "greenkube.initialAdminSecretName" . }}
 {{- $port := $v.api.port }}
+{{- $mode := .Values.config.apiAuthMode | default "session" }}
+{{- $auth := .Values.auth | default dict }}
+{{- $adminName := $admin.username | default "admin" }}
+{{- /* N11: once the initial password is used, GreenKube erases it and annotates the
+  Secret. NOTES is never applied to the cluster, so this read-only lookup is safe; under
+  `helm template` / Argo CD it returns nothing and the generic text is printed. */}}
+{{- $initialConsumed := false }}
+{{- if $initialAdmin }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $initialAdmin }}
+{{- if $existing }}
+{{- $annotations := ($existing.metadata | default dict).annotations | default dict }}
+{{- if or (eq (index $annotations "greenkube.cloud/initial-admin" | default "") "consumed") (not (index ($existing.data | default dict) "password")) }}
+{{- $initialConsumed = true }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $reset := printf "kubectl -n %s exec deploy/%s-api -- greenkube auth reset-password %s" .Release.Namespace (include "greenkube.fullname" .) $adminName }}
 
 1. Open the dashboard:
      kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "greenkube.fullname" . }}-api {{ $port }}:{{ $port }}
@@ -16,25 +33,49 @@ Welcome to
      Dashboard:        http://localhost:{{ $port }}/
      Setup checklist:  http://localhost:{{ $port }}/setup
 
-{{ if eq (.Values.config.apiAuthMode | default "session") "session" -}}
-2. Sign in as "{{ $admin.username | default "admin" }}" on the dashboard.
+{{ if eq $mode "session" -}}
+2. Sign in as "{{ $adminName }}" on the dashboard.
+{{- else if eq $mode "oidc" -}}
+2. Sign in with "{{ (($auth.oidc | default dict).providerName) | default "SSO" }}" (OpenID Connect, {{ ($auth.oidc | default dict).issuer }}).
+   Register this redirect URI at the provider:
+     {{ ($auth.oidc | default dict).redirectUrl | default (printf "%s/api/v1/auth/oidc/callback" (.Values.config.externalUrl | default "<config.externalUrl>" | trimSuffix "/")) }}
+   Roles come from IdP groups (auth.roles); others get "{{ (($auth.roles | default dict).defaultRole) | default "viewer" }}".
+{{- else if eq $mode "proxy" -}}
+2. Open GreenKube through your authentication proxy: it signs you in from the
+   identity headers it sends, accepted only from config.trustedProxyIps ({{ .Values.config.trustedProxyIps }}).
+   Roles come from IdP groups (auth.roles); others get "{{ (($auth.roles | default dict).defaultRole) | default "viewer" }}".
+{{- else -}}
+2. Authenticate with the API key (config.apiAuthMode=api_key, no browser sign-in):
+{{- end }}
+{{- if ne $mode "api_key" }}
+{{- if and (ne $mode "session") (eq $auth.localLogin false) }}
+   Password sign-in is disabled (auth.localLogin=false): the local "{{ $adminName }}" account cannot sign in.
+{{- else }}
+{{- if ne $mode "session" }}
+   Break-glass: the local admin "{{ $adminName }}" still signs in with a password.
+{{- end }}
 {{- if $admin.existingSecret }}
    The password is the "{{ $admin.existingSecretKey | default "password" }}" key of your Secret {{ $admin.existingSecret }} (auth.admin.existingSecret).
+{{- else if and $initialAdmin $initialConsumed }}
+   The initial admin password was already used and erased from Secret {{ $initialAdmin }}:
+   sign in with the password chosen at the first sign-in. Forgotten? Reset it with:
+     {{ $reset }}
 {{- else if $initialAdmin }}
    Initial admin password (you choose a new one at the first sign-in; GreenKube
    then erases it from the Secret):
      kubectl -n {{ .Release.Namespace }} get secret {{ $initialAdmin }} -o jsonpath='{.data.password}' | base64 -d; echo
+   If this prints nothing, the password was already used. Forgotten? Reset it with:
+     {{ $reset }}
 {{- else }}
    rbac.create=false: no initial admin password can be generated. Set
    auth.admin.existingSecret to a Secret holding the first admin password.
+{{- end }}
 {{- end }}
    Behind an Ingress, serve GreenKube over HTTPS so the session cookie is Secure
    (set config.trustedProxyIps to the Ingress controller addresses).
 
 3. Machines (CI, Prometheus, scripts) use scoped API keys: Settings > API keys.
    The bootstrap API key below is deprecated and kept for one more minor release:
-{{- else -}}
-2. Authenticate with the API key (config.apiAuthMode=api_key, no browser sign-in):
 {{- end }}
      kubectl -n {{ .Release.Namespace }} get secret {{ $apiKeySecret }} -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d; echo
 {{- if .Values.secrets.existingSecret }}
@@ -49,7 +90,7 @@ Welcome to
    Secret and set secrets.existingSecret instead.
 {{- end }}
 
-{{ if eq (.Values.config.apiAuthMode | default "session") "session" }}4{{ else }}3{{ end }}. Connect Git (optional): GitOps discovery is already running. To let
+{{ if ne $mode "api_key" }}4{{ else }}3{{ end }}. Connect Git (optional): GitOps discovery is already running. To let
    GreenKube open pull requests, create one Secret; delivery activates within
    one to two minutes, with no upgrade and no restart:
      kubectl -n {{ .Release.Namespace }} create secret generic {{ include "greenkube.gitCredentialsSecretName" . }} \

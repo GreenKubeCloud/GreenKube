@@ -213,7 +213,7 @@
         "logLevel": {"type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "debug", "info", "warning", "error", "critical"]},
         "logFormat": {"type": "string", "enum": ["json", "console"]},
         "environment": {"type": "string", "enum": ["production", "development", "test"]},
-        "apiAuthMode": {"type": "string", "enum": ["session", "api_key", "oidc"]},
+        "apiAuthMode": {"type": "string", "enum": ["session", "api_key", "oidc", "proxy"]},
         "externalUrl": {"type": "string", "pattern": "^$|^https?://[^\\s?#]+$"},
         "electricityProvider": {"type": "string", "enum": ["electricity_maps", "wattnet"]},
         "normalizationGranularity": {"type": "string", "enum": ["hour", "day", "none"]},
@@ -318,7 +318,44 @@
             "rememberLifetime": {"$ref": "#/definitions/longDuration"}
           }
         },
-        "login": {"type": "object", "properties": {"rateLimit": {"type": "string"}}}
+        "login": {"type": "object", "properties": {"rateLimit": {"type": "string"}}},
+        "localLogin": {"type": "boolean"},
+        "roles": {
+          "type": "object",
+          "properties": {
+            "groups": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "admin": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "operator": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "viewer": {"type": "array", "items": {"type": "string", "minLength": 1}}
+              }
+            },
+            "defaultRole": {"type": "string", "enum": ["viewer", "operator", "admin", "none"]}
+          }
+        },
+        "proxy": {
+          "type": "object",
+          "properties": {
+            "userHeaders": {"type": "string", "minLength": 1},
+            "groupsHeaders": {"type": "string", "minLength": 1}
+          }
+        },
+        "oidc": {
+          "type": "object",
+          "properties": {
+            "issuer": {"type": "string", "pattern": "^$|^https?://[^\\s?#]+$"},
+            "clientId": {"type": "string"},
+            "existingSecret": {"type": "string"},
+            "existingSecretKey": {"type": "string", "minLength": 1},
+            "scopes": {"type": "string"},
+            "usernameClaim": {"type": "string", "minLength": 1},
+            "groupsClaim": {"type": "string", "minLength": 1},
+            "redirectUrl": {"type": "string", "pattern": "^$|^https?://[^\\s?#]+$"},
+            "providerName": {"type": "string", "maxLength": 64}
+          }
+        }
       }
     },
     "secrets": {"type": "object"},
