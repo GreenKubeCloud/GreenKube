@@ -42,6 +42,22 @@ sources:
 
 The source is `unavailable` (never failing) until the subscription, the cluster name and the Workload Identity variables are present. It collects at most once per hour.
 
+## Network policy
+
+With `monitoring.networkPolicy.enabled`, the controller's egress is limited to DNS, PostgreSQL and the renderer. Allow Azure AD and Azure Resource Manager through `monitoring.networkPolicy.additionalEgress`, for example:
+
+```yaml
+monitoring:
+  networkPolicy:
+    additionalEgress:
+      - to:
+          - ipBlock: {cidr: 0.0.0.0/0}   # login.microsoftonline.com and management.azure.com
+        ports:
+          - {protocol: TCP, port: 443}
+```
+
+The ARM token is only ever sent to the Resource Manager host: a `nextLink` that points to another host is not followed (the run is `incomplete`, diagnostic `foreign_next_link`).
+
 ## Limitations
 
 - Advice only: no proposal is PR-able. Configuration changes (autoscaler profile, add-ons) are made in Azure, not in Git manifests.

@@ -19,7 +19,7 @@ Google's Active Assist flags GKE workloads whose requests are too high or too lo
 
 **Insight content.** The content of the GKE workload insights is not publicly documented. The parser reads a container list (`containerRecommendations`, `containers` or `containerResources`, at the top of `content` or under `content.recommendation`) with the container name (`containerName` or `name`) and its recommended requests (`recommendedRequests`, `recommended` or `target`, with `cpu` and `memory` as Kubernetes quantities). Nothing is guessed: an insight without readable values becomes an advisory signal that says which way to go. The test fixture (`tests/sources/fixtures/gke_insights.json`) is **synthetic** and labelled as such: check it against a recording of your project before relying on the values.
 
-**Attribution.** Insights about another cluster or project than this one are skipped and counted (`other_cluster`): advice is never attributed to a same-named workload elsewhere.
+**Attribution.** An insight is this cluster's only when its target names this project (by id, or by number as read from the metadata server's `project/numeric-project-id`), this cluster's exact location and its name. Anything else is skipped and counted (`other_cluster`): advice is never attributed to a same-named workload elsewhere. In particular a zonal and a regional cluster may share a name in one project, and the region's insights are read for a zonal cluster, so an insight under the region about a same-named regional cluster is skipped.
 
 **Coverage gaps (always reported).** GKE gives no recommendation for workloads whose requests VPA manages, nor for the target metric of an HPA, and may wait up to three days for new workloads. Every batch carries the `gke_coverage` diagnostic so that a missing insight is never read as "nothing to change".
 
@@ -60,6 +60,30 @@ sources:
       # insight_types: ["google.container.DiagnosisInsight"]   # skip discovery
       # timeout_seconds: 30
 ```
+
+## Network policy
+
+With `monitoring.networkPolicy.enabled`, the controller's egress is limited to DNS, PostgreSQL and the renderer. Allow the metadata server and Google APIs through `monitoring.networkPolicy.additionalEgress`, for example:
+
+```yaml
+monitoring:
+  networkPolicy:
+    additionalEgress:
+      - to:
+          - ipBlock: {cidr: 169.254.169.254/32}   # GKE metadata server (Workload Identity tokens)
+        ports:
+          - {protocol: TCP, port: 80}
+      - to:
+          - ipBlock: {cidr: 169.254.169.252/32}   # GKE metadata server on Dataplane V2
+        ports:
+          - {protocol: TCP, port: 988}
+      - to:
+          - ipBlock: {cidr: 0.0.0.0/0}            # recommender.googleapis.com (or your Private Google Access range)
+        ports:
+          - {protocol: TCP, port: 443}
+```
+
+Without these rules the source reports `unavailable` (metadata server unreachable) or fails its run; it never writes anything.
 
 ## Limitations
 
