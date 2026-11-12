@@ -33,7 +33,7 @@ Values are signed and never floored. Nothing is ever updated or deleted.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
@@ -367,13 +367,11 @@ def restatement_of(projection: LedgerEntry, *, annual_rate: float, provenance: P
     """The reversal of a projected accrual and the measured amount of its period, linked to it."""
     seconds = (ensure_utc(projection.period_end) - ensure_utc(projection.period_start)).total_seconds()
     reversal = reversal_of(projection, REASON_RESTATEMENT, created_by="ledger-restatement")
-    reversal = LedgerEntryDraft(
-        **{
-            **{name: getattr(reversal, name) for name in LedgerEntryDraft.__dataclass_fields__},
-            "book": BOOK_RESTATEMENT,
-            "change_id": provenance.change_id or projection.change_id,
-            "measurement_id": provenance.measurement_id,
-        }
+    reversal = replace(
+        reversal,
+        book=BOOK_RESTATEMENT,
+        change_id=provenance.change_id or projection.change_id,
+        measurement_id=provenance.measurement_id,
     )
     measured = LedgerEntryDraft(
         entry_key=f"restatement:{projection.entry_id}",
