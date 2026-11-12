@@ -47,7 +47,8 @@ Autoscalers and disruption budgets (HPA, VPA, PDB):
 - The policy result carries no HPA, VPA or PDB evidence for this workload; check the autoscalers and disruption budgets that target it before merging.
 
 Watch these for 24h after the rollout:
-- Review if CPU p95 exceeds 220m.
+- p95 memory usage exceeds 110% of the proposed request
+- any OOM kill after apply
 - container restarts and `OOMKilled` events
 - CPU throttling of the changed containers
 - readiness, error rate and latency of the service

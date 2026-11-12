@@ -29,6 +29,7 @@ from greenkube.gitops.contracts import (
     ValidationResult,
     WorkloadSource,
 )
+from greenkube.models.evidence import RollbackCondition
 from greenkube.models.metrics import RecommendationRecord, RecommendationType
 
 RENDERED_AT = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
@@ -311,6 +312,23 @@ def increase_recommendation(
             ),
             "oom_events": 3 if memory else 0,
             "cpu_throttling_ratio": None if memory else 0.12,
+            # What core.optimization.evidence builds: thresholds follow the proposed (raised) request.
+            "rollback_conditions": [
+                RollbackCondition(
+                    metric="memory_p95_usage" if memory else "cpu_p95_usage",
+                    comparator="gt",
+                    threshold=2 * GIB * 1.1 if memory else 880.0,
+                    description="p95 memory usage exceeds 110% of the proposed request"
+                    if memory
+                    else "p95 CPU usage exceeds 110% of the proposed request",
+                ),
+                RollbackCondition(
+                    metric="oom_events" if memory else "restart_rate",
+                    comparator="gt",
+                    threshold=0.0,
+                    description="any OOM kill after apply" if memory else "any new restart after apply",
+                ),
+            ],
             "cpu_usage": base.evidence.cpu_usage.model_copy(update={"p95": 470, "p99": 520, "max": 610})
             if base.evidence.cpu_usage is not None and not memory
             else base.evidence.cpu_usage,
