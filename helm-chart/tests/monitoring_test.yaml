@@ -84,7 +84,11 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.groups
-          count: 1
+          count: 2
+      # The ledger integrity group renders whenever a process is scraped.
+      - equal:
+          path: spec.groups[1].name
+          value: greenkube.ledger
 
   - it: should leave the controller loop alerts out when the controller metrics port is off
     set:
@@ -96,7 +100,11 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.groups
-          count: 1
+          count: 2
+      # The ledger integrity group renders whenever a process is scraped.
+      - equal:
+          path: spec.groups[1].name
+          value: greenkube.ledger
 
   - it: should render ServiceMonitor when enabled
     set:

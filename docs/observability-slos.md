@@ -143,9 +143,11 @@ With the controller loop alerts, the PrometheusRule installs the loop health gro
 | `GreenKubeRecommendationSourceFailing` (warning, 1 h) | `increase(greenkube_optimization_analyzer_failures_total[2h])` by `source` > 0 | One source keeps failing; its signals miss the consensus. |
 | `GreenKubeRecommendationScanStale` (warning, 15 min) | `time() - greenkube_last_successful_optimization_run_timestamp_seconds` > `recommendationScanStaleSeconds` (10800) | No successful scan for 3 hours; silent before the first success. |
 | `GreenKubeMeasurementStalled` (warning, 10 min) | `time() - greenkube_loop_last_success_timestamp_seconds{loop="recommendation-lifecycle"}` > `measurementStaleSeconds` (1800) | Apply detection, verification and change measurement are not advancing, so the measurement backlog grows. |
-| `GreenKubeLedgerChainVerificationFailed` (critical) | `increase(greenkube_ledger_chain_verification_failures_total[1h])` > 0 | A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted, export it and compare it with your last export before anything else writes to it. |
+| `GreenKubeLedgerChainVerificationFailed` (critical, group `greenkube.ledger`) | `increase(greenkube_ledger_chain_verification_failures_total[1h])` > 0, or a counter series that first appears above zero | A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted, export it and compare it with your last export before anything else writes to it. |
 
 The code exports no gauge of pending measurements yet, so the measurement backlog is alerted through the loop that drains it.
+
+The ledger alert sits in its own group, `greenkube.ledger`, rendered whenever `monitoring.serviceMonitor.enabled` is set, even with `controllerAlerts: false` or `controller.metricsPort: 0`, because the hash-chain verification may run in the API as well as in the controller.
 
 ## Collection telemetry
 

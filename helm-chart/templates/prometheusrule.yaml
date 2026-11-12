@@ -99,9 +99,9 @@ spec:
     {{- $collectionLag := int ($thresholds.collectionLagSeconds | default 1800) }}
     {{- $scanStale := int ($thresholds.recommendationScanStaleSeconds | default 10800) }}
     {{- $measurementStale := int ($thresholds.measurementStaleSeconds | default 1800) }}
-    # Loop health (N7): collection watermark, recommendation scans, measurement
-    # and ledger integrity. Every series comes from the controller metrics
-    # endpoint, hence the same rendering condition as greenkube.controller.
+    # Loop health (N7): collection watermark, recommendation scans and
+    # measurement. Every series comes from the controller metrics endpoint,
+    # hence the same rendering condition as greenkube.controller.
     - name: greenkube.loop
       rules:
         - alert: GreenKubeCollectionLagging
@@ -156,8 +156,23 @@ spec:
           annotations:
             summary: GreenKube measurements are not advancing
             description: {{ printf "The recommendation-lifecycle loop (apply detection, verification, change measurement) has not succeeded for more than %ds: applied changes wait unmeasured and the measurement backlog grows." $measurementStale | quote }}
+    {{- end }}
+    {{- if .Values.monitoring.serviceMonitor.enabled }}
+    # Ledger integrity (N7). Rendered whenever a GreenKube process is scraped,
+    # independently of the controller alerts: the verification may run in the
+    # API as well as in the controller. The second clause catches a counter
+    # series that first appears already above zero (created on its first
+    # failure, or right after a restart), which increase() cannot see.
+    - name: greenkube.ledger
+      rules:
         - alert: GreenKubeLedgerChainVerificationFailed
-          expr: sum(increase(greenkube_ledger_chain_verification_failures_total[1h])) > 0
+          expr: |
+            sum(increase(greenkube_ledger_chain_verification_failures_total[1h])) > 0
+            or
+            sum(
+              greenkube_ledger_chain_verification_failures_total
+                unless greenkube_ledger_chain_verification_failures_total offset 1h
+            ) > 0
           labels:
             severity: critical
           annotations:

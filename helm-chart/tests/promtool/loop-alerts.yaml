@@ -174,3 +174,47 @@ tests:
             exp_annotations:
               summary: The GreenKube savings ledger failed its hash-chain verification
               description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
+
+  # A counter series that first appears already at 1 (created on its first
+  # failure, or right after a restart) is invisible to increase(); the
+  # "unless ... offset 1h" clause still fires, and resolves after an hour.
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_ledger_chain_verification_failures_total{job="api",instance="api:8000"}'
+        values: '_x3 1x80'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: The GreenKube savings ledger failed its hash-chain verification
+              description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
+      - eval_time: 30m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: The GreenKube savings ledger failed its hash-chain verification
+              description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
+      - eval_time: 75m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts: []
+
+  # A healthy counter that appears at 0 never alerts.
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_ledger_chain_verification_failures_total{job="api",instance="api:8000"}'
+        values: '_x3 0x80'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts: []

@@ -12,7 +12,7 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.groups
-          count: 3
+          count: 4
       - equal:
           path: spec.groups[2].name
           value: greenkube.loop
@@ -31,8 +31,14 @@ tests:
       - equal:
           path: spec.groups[2].rules[4].alert
           value: GreenKubeMeasurementStalled
+      - lengthEqual:
+          path: spec.groups[2].rules
+          count: 5
       - equal:
-          path: spec.groups[2].rules[5].alert
+          path: spec.groups[3].name
+          value: greenkube.ledger
+      - equal:
+          path: spec.groups[3].rules[0].alert
           value: GreenKubeLedgerChainVerificationFailed
 
   - it: reads only metric names the code exports
@@ -59,10 +65,10 @@ tests:
           path: spec.groups[2].rules[4].expr
           pattern: greenkube_loop_last_success_timestamp_seconds\{loop="recommendation-lifecycle"\}
       - matchRegex:
-          path: spec.groups[2].rules[5].expr
+          path: spec.groups[3].rules[0].expr
           pattern: greenkube_ledger_chain_verification_failures_total
       - equal:
-          path: spec.groups[2].rules[5].labels.severity
+          path: spec.groups[3].rules[0].labels.severity
           value: critical
 
   - it: applies the default thresholds
@@ -128,7 +134,7 @@ tests:
           path: spec.groups[0].name
           value: greenkube.automation
 
-  - it: leaves the loop group out with the controller alerts
+  - it: leaves the loop group out with the controller alerts but keeps the ledger alert
     set:
       monitoring.prometheusRule.enabled: true
       monitoring.serviceMonitor.enabled: true
@@ -136,4 +142,7 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.groups
-          count: 1
+          count: 2
+      - equal:
+          path: spec.groups[1].name
+          value: greenkube.ledger
