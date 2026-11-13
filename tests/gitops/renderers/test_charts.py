@@ -142,6 +142,15 @@ def test_internal_and_metadata_hosts_are_refused_even_without_an_allowlist():
         _fetcher(registry).check_url("https://127.0.0.1/index.yaml")
 
 
+@pytest.mark.parametrize("address", ["fd00:ec2::254", "100.100.100.200", "::ffff:169.254.169.254"])
+def test_cloud_metadata_addresses_outside_link_local_ranges_are_refused(address: str):
+    registry = FakeChartRegistry()
+    fetcher = RemoteChartFetcher(transport=registry.transport(), resolver=lambda _host: [address])
+
+    with pytest.raises(ChartHostNotAllowedError, match="metadata"):
+        fetcher.check_url("https://charts.example.com/index.yaml")
+
+
 def test_plain_http_repositories_must_be_explicitly_allowed():
     registry = FakeChartRegistry()
 

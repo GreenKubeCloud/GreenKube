@@ -60,6 +60,8 @@ _EXACT_VERSION = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-
 _HOST_PATTERN = re.compile(r"^(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$")
 _BEARER_PARAMETER = re.compile(r'(\w+)="([^"]*)"')
 _METADATA_HOSTNAMES = frozenset({"localhost", "metadata", "metadata.google.internal", "instance-data"})
+# Cloud metadata endpoints outside the link-local ranges (AWS IPv6 IMDS, Alibaba Cloud).
+_METADATA_ADDRESSES = frozenset(ipaddress.ip_address(value) for value in ("fd00:ec2::254", "100.100.100.200"))
 _MAX_REDIRECTS = 5
 _MAX_NESTED_CHART_DEPTH = 4
 
@@ -271,20 +273,18 @@ class RemoteChartFetcher:
                 digest, archive_digest, archive = self._fetch_oci(session, reference)
             else:
                 digest, archive_digest, archive = self._fetch_http(session, reference)
-        if archive is not None:
+        if not isinstance(archive, FetchedChart):
             chart = _unpack_chart(reference, digest, archive_digest, archive, self.limits)
             self._remember(chart)
             return chart
-        cached = self._cached_archive(archive_digest)
-        if cached is None:  # pragma: no cover - guarded by _fetch_* returning bytes when uncached
-            raise ChartArchiveError("the verified chart archive is no longer cached")
+        cached = archive
         if cached.reference != reference or cached.digest != digest:
             # Same verified archive reached through another reference (repository or pin).
             return replace(cached, reference=reference, digest=digest)
         return cached
 
     # -- HTTP repositories -------------------------------------------------------------------
-    def _fetch_http(self, session: _Session, reference: ChartReference) -> tuple[str, str, bytes | None]:
+    def _fetch_http(self, session: _Session, reference: ChartReference) -> tuple[str, str, bytes | FetchedChart]:
         resolved = self._cached_resolution(reference)
         if resolved is None:
             index_url = f"{reference.repository}/index.yaml"
@@ -310,14 +310,15 @@ class RemoteChartFetcher:
             self._store_resolution(reference, archive_digest, archive_url)
         else:
             archive_digest, archive_url = resolved
-        if self._cached_archive(archive_digest) is not None:
-            return archive_digest, archive_digest, None
+        cached = self._cached_archive(archive_digest)
+        if cached is not None:
+            return archive_digest, archive_digest, cached
         archive = session.get(archive_url, max_bytes=self.limits.max_archive_bytes).content
         _verify_digest(archive, archive_digest, f"{reference.display} archive")
         return archive_digest, archive_digest, archive
 
     # -- OCI registries ----------------------------------------------------------------------
-    def _fetch_oci(self, session: _Session, reference: ChartReference) -> tuple[str, str, bytes | None]:
+    def _fetch_oci(self, session: _Session, reference: ChartReference) -> tuple[str, str, bytes | FetchedChart]:
         host, base_path = _split_oci(reference.repository)
         repository = "/".join(part for part in (base_path, reference.name) if part)
         registry = f"https://{host}"
@@ -350,8 +351,9 @@ class RemoteChartFetcher:
         else:
             digest, archive_url = resolved
             layer_digest = archive_url.rsplit("/", 1)[-1]
-        if self._cached_archive(layer_digest) is not None:
-            return digest, layer_digest, None
+        cached = self._cached_archive(layer_digest)
+        if cached is not None:
+            return digest, layer_digest, cached
         archive = session.get(
             archive_url,
             max_bytes=self.limits.max_archive_bytes,
@@ -592,6 +594,8 @@ def _reject_internal_host(host: str, resolver: Resolver) -> None:
             address = ipaddress.ip_address(candidate.split("%", 1)[0])
         except ValueError:
             continue
+        if address in _METADATA_ADDRESSES:
+            raise ChartHostNotAllowedError(f"chart host {host!r} resolves to a cloud metadata address")
         if (
             address.is_loopback
             or address.is_link_local
