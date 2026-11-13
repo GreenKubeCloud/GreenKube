@@ -98,6 +98,44 @@ class AutomationPlanError(RuntimeError):
         super().__init__(message)
 
 
+class _RecommendationReader(Protocol):
+    async def get_recommendation_by_id(self, rec_id: int) -> Any: ...
+
+
+async def ensure_recommendations_active(repository: _RecommendationReader, recommendation_ids: Sequence[Any]) -> None:
+    """Raise ``not_active`` when a requested recommendation (or one grouped with it) is not active.
+
+    Planning a dismissed, applied, expired or superseded recommendation is a
+    lifecycle problem, not a targeting one: the caller gets ``not_active``
+    instead of the planner's generic ``requires_container_target``. Unknown ids
+    and invalid input are left to the planner, which rejects them.
+    """
+    seen: set[int] = set()
+    pending = [rec_id for rec_id in recommendation_ids if type(rec_id) is int and rec_id > 0]
+    while pending:
+        rec_id = pending.pop(0)
+        if rec_id in seen:
+            continue
+        seen.add(rec_id)
+        try:
+            record = await repository.get_recommendation_by_id(rec_id)
+        except Exception:  # the planner reads it again and fails closed
+            continue
+        if record is None:
+            continue
+        status = getattr(record, "status", None)
+        label = str(getattr(status, "value", status) or "").lower()
+        if status is not None and label != "active":
+            raise AutomationPlanError(
+                AutomationErrorCode.NOT_ACTIVE,
+                f"recommendation {rec_id} is {label}; only active recommendations can be planned",
+            )
+        action = getattr(record, "action", None)
+        pending.extend(
+            other for other in (getattr(action, "recommendation_ids", None) or ()) if type(other) is int and other > 0
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class GitBlobFile:
     """File contents paired with the Git object ID of the file blob."""
