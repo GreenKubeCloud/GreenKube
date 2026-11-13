@@ -366,7 +366,8 @@ recreated by its own controller.
 `DELETION_MIN_UNUSED_DAYS` persistence are required; `greenkube.io/ignore`/`greenkube.io/keep` opt out). Planning
 checks the manifest in Git again (an opted-out resource, a Service that is not a `LoadBalancer` or an infrastructure
 namespace is refused), and the plan worker reads the live object before any Git write: a resource already gone fails
-the plan with `no_effective_change`, an opted-out one fails it.
+the plan with `no_effective_change`; an opted-out one, a `PersistentVolume` that is `Bound` again or a Service that is
+no longer of type `LoadBalancer` fails it.
 
 **Where the resource lives in Git.** Discovery persists the Argo CD `status.resources` and Flux `status.inventory`
 entries of the kinds registered action kinds target (table `resource_bindings`, migration 0087) with the managing
@@ -375,6 +376,9 @@ controller (`resource_binding_missing`), by several (`ambiguous_binding`), by a 
 (`binding_unresolved`) or refreshed more than `automation.bindingTtl` ago (`binding_stale`) cannot become a pull
 request. A cluster-scoped binding is stored with the empty namespace; its plan source uses the reserved namespace
 `_cluster`, which no real namespace can match.
+At delivery, the plan worker reads the binding again and marks the plan `stale` when it moved, is no longer resolved,
+is older than `automation.bindingTtl`, or when the controller stopped pruning since approval; without a binding reader
+the delivery is retried, never skipped.
 
 **The edit.**
 
@@ -403,7 +407,8 @@ absent (a read error is never taken for absence); a resource deleted by hand whi
 same way (`detected`). The change is measured by `ResourceDeletionStrategy`: the realized saving is the rate the
 resource was charged before the change (its trusted cost in the baseline window, otherwise the allocated rate frozen
 with the recommendation: the OpenCost per-asset cost or the configured rate), `not_realized` if the resource is still
-observed after the change.
+observed after the change. The strategy only claims a saving for a change whose absence was read from the cluster
+(rollout completion source `resource_absent`); any other deletion change is `inconclusive`.
 
 ## Manual mode
 
@@ -418,7 +423,9 @@ shows **Apply manually**, and every active card on the recommendations page link
 - `POST /api/v1/recommendations/{id}/manual/applied` (`write`, "Mark as applied") records an active recommendation as
   applied by hand with a change id: the change-measurement pipeline records the change and measures it like a merged
   pull request (application method `manual`). A recommendation with an open pull request is applied by its merge
-  (`409`).
+  (`409`), and so is one whose plan is approved or being delivered. For a deletion, GreenKube first reads the
+  resource: it is marked applied only once the cluster answers that it is absent (`409` while it still exists, `503`
+  when it cannot be read), so no saving is claimed for a resource that is still there.
 
 GreenKube never runs these commands: Git, or the operator, stays the only write path.
 
@@ -704,6 +711,9 @@ SLOs and example alert rules are documented in [Observability and SLOs](observab
 ## Limitations
 
 - Only CPU and memory rightsizing recommendations and orphaned LoadBalancer/PersistentVolume deletions have GitOps planners; a deletion has no automated rollback.
+- A resource's Git location comes from its controller's resolved workload bindings. An Argo CD Application or Flux Kustomization that manages only PersistentVolumes or Services, and no workload, leaves them unresolved (`binding_unresolved`), so their deletions stay manual.
+- Resource bindings are replaced on every discovery refresh: when one controller API fails during a refresh, its resources temporarily report `resource_binding_missing` until the next successful refresh.
+- The `greenkube.io/source` annotation binding for unmanaged resources is not implemented; manual mode (snippets and "Mark as applied") covers them.
 - Remote Helm/Kustomize artifacts, Argo CD inline Helm values, Flux `valuesFrom.targetPath`, cross-repository/revision values, chart dependencies, and unmanaged post-renderers fail closed.
 - Argo CD Applications that are not stored in Git have no PR target.
 - Provider archive downloads must be available at the resolved full commit SHA. GreenKube does not fall back to a mutable branch or per-file reads.

@@ -91,6 +91,7 @@ def test_an_orphaned_volume_becomes_a_kubectl_delete_with_the_retained_disk_note
     ]
     assert any("cannot be undone" in note for note in guide.notes)
     assert any("Retain" in note for note in guide.notes)
+    assert any("once the cluster answers that it is gone" in note for note in guide.notes)
 
 
 def test_names_are_shell_quoted() -> None:

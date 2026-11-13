@@ -159,6 +159,10 @@ def manual_guide(record: RecommendationRecord) -> ManualApplyGuide:
             "Deleting cannot be undone. Check the evidence in the recommendation and confirm with the owners first; "
             'annotate the resource with greenkube.io/ignore="true" instead if it is still needed.',
         )
+        notes.append(
+            "Mark as applied only after the delete: GreenKube reads the resource first and records the change only "
+            "once the cluster answers that it is gone."
+        )
         if deletion.kind == "PersistentVolume":
             notes.insert(
                 1,
