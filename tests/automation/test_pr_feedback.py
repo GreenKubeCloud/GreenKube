@@ -430,3 +430,41 @@ async def test_sync_loop_reconciles_comments_at_most_once_per_feedback_interval(
     stop.set()
     await runtime.run(stop)
     assert feedback.reconciles == 2
+
+
+@pytest.mark.asyncio
+async def test_read_only_credentials_never_write_the_comment():
+    """patch/ci delivery (F4) run with read-only credentials: feedback skips every provider write."""
+    publisher, provider, _ = _publisher(read_only=True)
+    resolver = publisher.provider_resolver
+    assert isinstance(resolver, Resolver)
+
+    assert await publisher.publish("pln-1") is FeedbackOutcome.SKIPPED
+    summary = await publisher.reconcile_once()
+
+    assert provider.calls == 0
+    assert resolver.calls == 0
+    assert summary.created == summary.updated == 0
+
+
+@pytest.mark.asyncio
+async def test_externally_delivered_plans_are_never_commented():
+    publisher, provider, _ = _publisher()
+    plans = publisher.plan_repository
+    assert isinstance(plans, Plans)
+    plans.plans["pln-1"] = plans.plans["pln-1"].model_copy(update={"delivery_mode": "ci"})
+
+    assert await publisher.publish("pln-1") is FeedbackOutcome.SKIPPED
+    assert provider.calls == 0
+
+
+@pytest.mark.parametrize(("mode", "read_only"), [("direct", False), ("patch", True), ("ci", True)])
+def test_factory_makes_feedback_read_only_in_patch_and_ci_modes(mode, read_only):
+    publisher = create_pull_request_feedback_publisher(
+        pull_request_repository=object(),
+        plan_repository=object(),
+        provider_resolver=object(),
+        config=Config(AUTOMATION_DELIVERY_MODE=mode),
+    )
+    assert publisher is not None
+    assert publisher.writes_allowed(fx.plan(status=PlanStatus.MERGED)) is (not read_only)

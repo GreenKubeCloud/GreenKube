@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol, cast
 
+from greenkube.automation.delivery import DELIVERY_DIRECT, configured_delivery_mode, is_external
 from greenkube.automation.git.base import CommentUpsertResult, GitProviderCapability
 from greenkube.automation.pr_content.lifecycle import (
     LIFECYCLE_MARKER,
@@ -132,6 +133,7 @@ class PullRequestFeedbackPublisher:
         clock: Callable[[], datetime] | None = None,
         cache_size: int = 2048,
         open_check_interval: timedelta = DEFAULT_OPEN_CHECK_INTERVAL,
+        read_only: bool | Callable[[], bool] = False,
     ) -> None:
         self.pull_request_repository = pull_request_repository
         self.plan_repository = plan_repository
@@ -149,11 +151,25 @@ class PullRequestFeedbackPublisher:
         self._open_after_id: int | None = None
         #: When each open plan was last checked for newer advice (bounded like ``_published``).
         self._open_checked: OrderedDict[str, datetime] = OrderedDict()
+        #: Credentials are read-only (``patch``/``ci`` delivery, F4): never write to the provider.
+        self._read_only = read_only
+
+    def writes_allowed(self, plan: Plan) -> bool:
+        """Whether the comment may be written for ``plan``.
+
+        In ``patch`` and ``ci`` delivery modes GreenKube needs read access only;
+        the token in the cluster is expected to be read-only, so a comment write
+        would only fail (and could mark the provider in error). A plan approved
+        for ``patch`` or ``ci`` is never commented either, whatever the current
+        mode, since its pull request was opened by someone else.
+        """
+        read_only = self._read_only() if callable(self._read_only) else self._read_only
+        return not read_only and not is_external(getattr(plan, "delivery_mode", None))
 
     async def publish(self, plan_id: str) -> FeedbackOutcome:
         """Bring the plan's status comment up to date; never raises for unknown plans."""
         plan = await self.plan_repository.get_plan(plan_id)
-        if plan is None:
+        if plan is None or not self.writes_allowed(plan):
             return FeedbackOutcome.SKIPPED
         records = list(await self.pull_request_repository.list_pull_requests_by_plan_id(plan_id))
         record = _primary_record(records)
@@ -439,4 +455,6 @@ def create_pull_request_feedback_publisher(
         settings=PullRequestRenderSettings.from_config(config),
         newer_advice=newer_advice,
         lookback_days=int(getattr(config, "GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS", DEFAULT_FEEDBACK_LOOKBACK_DAYS)),
+        # patch and ci delivery (F4) run with read-only credentials: no comment writes.
+        read_only=configured_delivery_mode(config) != DELIVERY_DIRECT,
     )
