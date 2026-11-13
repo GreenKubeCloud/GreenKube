@@ -77,6 +77,23 @@ def _type_text(record: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
 
+def live_state_refusal(live: Mapping[str, Any], target: ResourceTarget) -> str | None:
+    """Why the live resource is no longer the orphan the recommendation saw, or ``None``.
+
+    Checked before any Git write: a PersistentVolume that became ``Bound`` again, or a
+    Service that is no longer of type ``LoadBalancer``, is refused (fail closed).
+    """
+    spec = live.get("spec")
+    status = live.get("status")
+    spec = spec if isinstance(spec, Mapping) else {}
+    status = status if isinstance(status, Mapping) else {}
+    if target.kind == "PersistentVolume" and status.get("phase") == "Bound":
+        return "is Bound to a claim again"
+    if target.kind == "Service" and spec.get("type") != "LoadBalancer":
+        return f"is no longer a LoadBalancer (live type {spec.get('type') or 'ClusterIP'})"
+    return None
+
+
 def deletion_target_for(record: Any) -> ResourceTarget | None:
     """The resource a deletion recommendation proposes to delete, or ``None``."""
     deletable = DELETABLE_TARGETS.get(_type_text(record))
@@ -226,6 +243,9 @@ class DeleteResourceSpec(ActionKindSpec):
         reason = opt_out_reason(metadata if isinstance(metadata, Mapping) else None)
         if reason is not None:
             raise ActionKindError(f"{describe_target(target)} is opted out of deletion in the cluster ({reason})")
+        drift = live_state_refusal(live, target)
+        if drift is not None:
+            raise ActionKindError(f"{describe_target(target)} {drift}: it is no longer an orphan, so it is not deleted")
         return None
 
     def is_resource_applied(self, live: Mapping[str, Any] | None, target: ResourceTarget) -> AppliedVerdict:

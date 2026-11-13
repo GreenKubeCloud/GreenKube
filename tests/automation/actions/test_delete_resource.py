@@ -77,11 +77,26 @@ def test_helm_renderers_are_refused_with_an_explanation() -> None:
 
 def test_baseline_capture_requires_the_live_resource_and_respects_opt_outs() -> None:
     target = ResourceTarget(api_version="v1", kind="Service", namespace="shop", name="old-lb")
-    assert DELETE_RESOURCE.capture_baseline({"metadata": {"name": "old-lb"}}, target) is None
+    live_lb = {"metadata": {"name": "old-lb"}, "spec": {"type": "LoadBalancer"}}
+    assert DELETE_RESOURCE.capture_baseline(live_lb, target) is None
     with pytest.raises(ActionKindError, match="no_effective_change"):
         DELETE_RESOURCE.capture_baseline(None, target)
     with pytest.raises(ActionKindError, match="opted out"):
         DELETE_RESOURCE.capture_baseline({"metadata": {"annotations": {"greenkube.io/keep": ""}}}, target)
+
+
+def test_baseline_capture_refuses_a_resource_that_is_no_longer_an_orphan() -> None:
+    service = ResourceTarget(api_version="v1", kind="Service", namespace="shop", name="old-lb")
+    with pytest.raises(ActionKindError, match="no longer a LoadBalancer"):
+        DELETE_RESOURCE.capture_baseline({"metadata": {}, "spec": {"type": "ClusterIP"}}, service)
+    with pytest.raises(ActionKindError, match="no longer a LoadBalancer"):
+        DELETE_RESOURCE.capture_baseline({"metadata": {}}, service)
+
+    volume = ResourceTarget(api_version="v1", kind="PersistentVolume", namespace="", name="pv-orphan")
+    with pytest.raises(ActionKindError, match="Bound"):
+        DELETE_RESOURCE.capture_baseline({"metadata": {}, "status": {"phase": "Bound"}}, volume)
+    released = {"metadata": {}, "spec": {"claimRef": {"name": "gone"}}, "status": {"phase": "Released"}}
+    assert DELETE_RESOURCE.capture_baseline(released, volume) is None
 
 
 def test_apply_detection_is_absence() -> None:

@@ -64,7 +64,9 @@ def _worker(reader: Any = None, bindings: Any = None) -> PlanWorker:
 @pytest.mark.asyncio
 async def test_a_present_resource_lets_the_deletion_proceed_without_a_workload_baseline() -> None:
     plan = _delete_plan()
-    result = await _worker(_Reader({"metadata": {"name": "old-lb"}}))._ensure_pre_apply_baseline(None, plan)
+    result = await _worker(
+        _Reader({"metadata": {"name": "old-lb"}, "spec": {"type": "LoadBalancer"}})
+    )._ensure_pre_apply_baseline(None, plan)
     assert result is plan and result.pre_apply_baseline is None
 
 
@@ -83,6 +85,14 @@ async def test_an_opted_out_live_resource_is_refused() -> None:
     with pytest.raises(PlanWorkerError, match="opted out") as error:
         await _worker(_Reader(live))._ensure_pre_apply_baseline(None, _delete_plan())
     assert error.value.reason_code is None and error.value.plan_status is PlanStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_a_service_that_is_no_longer_a_load_balancer_fails_closed() -> None:
+    live = {"metadata": {"name": "old-lb"}, "spec": {"type": "ClusterIP"}}
+    with pytest.raises(PlanWorkerError, match="no longer a LoadBalancer") as error:
+        await _worker(_Reader(live))._ensure_pre_apply_baseline(None, _delete_plan())
+    assert error.value.plan_status is PlanStatus.FAILED and not error.value.retryable
 
 
 @pytest.mark.asyncio
