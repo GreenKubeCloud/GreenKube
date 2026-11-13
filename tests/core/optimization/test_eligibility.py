@@ -184,12 +184,10 @@ class TestEligibility:
         [
             RecommendationType.ZOMBIE_POD,
             RecommendationType.IDLE_NAMESPACE,
-            RecommendationType.ORPHANED_PERSISTENT_VOLUME,
-            RecommendationType.ORPHANED_LOAD_BALANCER,
         ],
     )
     def test_deletions_always_require_review(self, rec_type):
-        """No deletion is automated: every deletion kind is blocked with an explanation and a fix."""
+        """Zombie and idle-namespace deletions stay manual: blocked with an explanation and a fix (H6)."""
         record = _record(type=rec_type, action=None, scope="cluster")
         result = assess_eligibility(record, _ctx())
         assert result["can_open_pr"] is False

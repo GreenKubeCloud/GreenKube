@@ -225,12 +225,14 @@ async def decide_records(
     automation_enabled = not bool(getattr(config, "automation_delivery_paused", False))
     policy, policy_error = elig.load_policy(os.getenv("GITOPS_POLICY_JSON"))
     bindings = None
+    resource_bindings = None
     open_prs: Optional[frozenset] = frozenset()
     if automation_configured and automation_enabled:
         # Bindings and pull requests only exist when automation runs; skip the reads otherwise.
         if gitops_repo is not None:
             cluster = getattr(config, "CLUSTER_NAME", None) or "default"
             bindings = await elig.load_bindings(gitops_repo, cluster, current)
+            resource_bindings = await elig.load_resource_bindings(gitops_repo, cluster)
         open_prs = await elig.load_open_pr_ids(pr_repo)
     from greenkube.utils.time import parse_query_step_seconds
 
@@ -241,6 +243,7 @@ async def decide_records(
         policy=policy,
         policy_error=policy_error,
         bindings=bindings,
+        resource_bindings=resource_bindings,
         open_pr_recommendation_ids=open_prs,
         step_seconds=parse_query_step_seconds(str(getattr(config, "PROMETHEUS_QUERY_RANGE_STEP", "") or "5m")),
     )
