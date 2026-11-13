@@ -23,7 +23,7 @@ kubectl -n greenkube get secret greenkube-initial-admin -o jsonpath='{.data.pass
 ```
 
 **2. Connect Git (optional).** GitOps discovery already runs. To let GreenKube open pull requests against the
-repositories your Argo CD or Flux sources point at, create one Secret. Delivery activates within one to two minutes,
+repositories your Argo CD or Flux sources point at, create one Secret. Delivery activates within a minute,
 with no upgrade and no restart:
 
 ```bash
@@ -246,7 +246,7 @@ not authenticate against the existing database) and prints the recovery command.
 | Controller crash-loops with `password authentication failed` | A PostgreSQL volume from an earlier install was reused with another password. | Delete `data-greenkube-postgres-0`, or put the original password in the Secret `greenkube` or `secrets.existingSecret`. |
 | `helm install` fails with a values schema error | A value has the wrong type or is out of range. | Fix the value named in the message; see [Configuration](configuration.md). |
 | `helm upgrade` fails with `config.db.type=sqlite is no longer supported` | A 0.3.x SQLite release. | Follow [Upgrading from SQLite](upgrading.md#from-a-sqlite-install). |
-| Setup checklist: delivery `credentials_missing` | No Git credentials are mounted. | Create `greenkube-git-credentials` ([Connect Git](#optional-connect-git)); allow a minute for the kubelet to project it. |
+| Setup checklist: delivery `credentials_missing` | No Git credentials are mounted. | Create `greenkube-git-credentials` ([Connect Git](#optional-connect-git)); it is read through the Kubernetes API on the next readiness tick (within 60 s). |
 | Setup checklist: delivery `credentials_host_ambiguous` or `credentials_host_mismatch` | The token is not bound to a host, and repositories use several hosts or a self-hosted one; or the `host` key names a host no repository uses. | Add (or fix) the `host` key of `greenkube-git-credentials`; declare explicit providers for the other hosts. |
 | Setup checklist: `renderer_egress_unenforced` | The network plugin does not enforce NetworkPolicy. | Use a CNI that does, or `--set renderer.egressFirewall.enabled=true`. Previews still work. |
 | Dashboard shows no data | Prometheus is unreachable or not discovered. | Set `config.prometheus.url`. |

@@ -527,6 +527,15 @@ class GitHubProvider(GitProvider):
         if response.status_code == 404:
             raise GitProviderError("GitHub could not request configured pull-request reviewers.")
 
+    def _open_pull_requests_query(self, repo: GitRepository, base: str, limit: int) -> tuple[str, dict[str, str]]:
+        return (
+            f"/repos/{repo.owner}/{repo.name}/pulls",
+            {"state": "open", "base": base, "sort": "created", "direction": "desc", "per_page": str(limit)},
+        )
+
+    def _pull_request_commits_path(self, repo: GitRepository, number: int) -> str:
+        return f"/repos/{repo.owner}/{repo.name}/pulls/{number}/commits"
+
     async def add_pull_request_metadata(
         self,
         repo: GitRepository,

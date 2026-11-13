@@ -33,15 +33,18 @@ planned file changes. From there on, the same lifecycle tracks every mode:
 from __future__ import annotations
 
 import email.utils
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.header import Header
-from typing import Literal
+from typing import Any, Literal, cast
 
 from greenkube.automation.git.base import git_blob_id
 from greenkube.gitops.contracts import Plan
+
+logger = logging.getLogger(__name__)
 
 DeliveryMode = Literal["direct", "patch", "ci"]
 
@@ -336,3 +339,135 @@ def effective_expiry(plan: Plan) -> datetime | None:
     if plan.status is PlanStatus.APPROVED and is_external(plan.delivery_mode):
         return plan.expires_at + EXTERNAL_DELIVERY_GRACE
     return plan.expires_at
+
+
+# --------------------------------------------------------------------------- trailer linkage (F4)
+
+#: Pull requests whose commits are read per linkage pass (each costs one provider call).
+MAX_COMMIT_SCANS_PER_PASS = 10
+#: Pull requests already tried and refused are skipped until their head changes (bounded memory).
+_REFUSED_CACHE_SIZE = 512
+
+
+def plan_ids_in_pull_request_body(body: str | None) -> set[str]:
+    """Plan ids named by a pull request description: the trailer or the GreenKube footer."""
+    ids: set[str] = set()
+    if not body:
+        return ids
+    trailer = plan_trailer_of(body)
+    if trailer:
+        ids.add(trailer)
+    try:
+        from greenkube.automation.pr_content.render import parse_footer
+
+        footer = parse_footer(body)
+    except Exception:
+        footer = None
+    plan_id = footer.get("plan_id") if isinstance(footer, dict) else None
+    if isinstance(plan_id, str) and plan_id:
+        ids.add(plan_id)
+    return ids
+
+
+def plan_ids_in_commit_messages(messages: Sequence[str]) -> set[str]:
+    """Plan ids named by the ``GreenKube-Plan`` trailer of any commit message."""
+    return {plan_id for plan_id in (plan_trailer_of(message) for message in messages) if plan_id}
+
+
+class PlanTrailerLinker:
+    """Links ``patch``-mode pull requests opened from any branch by the ``GreenKube-Plan`` trailer.
+
+    The automation controller already links a pull request opened from the
+    deterministic plan branch. An operator who applies the patch with
+    ``git am`` on a branch of their own keeps the trailer in the commit
+    message, and often in the description. Each pass lists the open pull
+    requests targeting the base branch of the approved ``patch`` plans (one
+    page per repository and base branch), reads the description, and the
+    commit messages of at most :data:`MAX_COMMIT_SCANS_PER_PASS` requests,
+    then records a match through the worker's verified delivery report (same
+    checks as ``POST /automation/plans/{id}/delivery``). Read access only.
+    """
+
+    def __init__(self, worker: Any, *, max_commit_scans: int = MAX_COMMIT_SCANS_PER_PASS) -> None:
+        self.worker = worker
+        self.max_commit_scans = max_commit_scans
+        #: (plan id, PR number, head sha) already refused, or PRs whose commits were read.
+        self._seen: dict[tuple[str, int, str | None], None] = {}
+
+    def _remember(self, key: tuple[str, int, str | None]) -> None:
+        self._seen[key] = None
+        while len(self._seen) > _REFUSED_CACHE_SIZE:
+            self._seen.pop(next(iter(self._seen)))
+
+    async def link_once(self) -> int:
+        from greenkube.gitops.contracts import PlanStatus
+
+        lister = getattr(getattr(self.worker, "plans", None), "list_plans", None)
+        resolver = getattr(self.worker, "provider_resolver", None)
+        if not callable(lister) or resolver is None:
+            return 0
+        plans = [
+            plan
+            for plan in await cast(Any, lister)(status=PlanStatus.APPROVED)
+            if plan.delivery_mode == DELIVERY_PATCH and plan.digest
+        ]
+        groups: dict[tuple[str, str, str], list[Plan]] = {}
+        for plan in plans:
+            groups.setdefault((plan.source.provider_id, plan.source.repo_url, plan.source.ref), []).append(plan)
+        linked = 0
+        scans = 0
+        for group in groups.values():
+            by_id = {plan.plan_id: plan for plan in group}
+            try:
+                target = await resolver.resolve(group[0].source)
+            except Exception as error:
+                logger.info("Trailer linkage: provider unavailable (%s).", type(error).__name__)
+                continue
+            try:
+                pull_requests = await target.provider.list_open_pull_requests(target.repository, group[0].source.ref)
+                for pull_request in pull_requests:
+                    raw = pull_request.raw if isinstance(pull_request.raw, dict) else {}
+                    head = raw.get("head") if isinstance(raw.get("head"), dict) else {}
+                    head_sha = head.get("sha") if isinstance(head, dict) else raw.get("sha")
+                    head_sha = head_sha if isinstance(head_sha, str) else None
+                    body = raw.get("body") if isinstance(raw.get("body"), str) else raw.get("description")
+                    candidates = plan_ids_in_pull_request_body(body if isinstance(body, str) else None) & set(by_id)
+                    if not candidates and scans < self.max_commit_scans:
+                        scan_key = ("", pull_request.number, head_sha)
+                        if scan_key not in self._seen:
+                            scans += 1
+                            messages = await target.provider.list_pull_request_commit_messages(
+                                target.repository, pull_request.number
+                            )
+                            candidates = plan_ids_in_commit_messages(messages) & set(by_id)
+                            if not candidates:
+                                self._remember(scan_key)
+                    for plan_id in sorted(candidates):
+                        key = (plan_id, pull_request.number, head_sha)
+                        if key in self._seen:
+                            continue
+                        if await self._record(by_id[plan_id], pull_request.url, head_sha):
+                            linked += 1
+                            by_id.pop(plan_id, None)
+                        else:
+                            self._remember(key)
+            except Exception as error:
+                logger.info("Trailer linkage: pull-request scan failed (%s).", type(error).__name__)
+            finally:
+                try:
+                    await target.provider.close()
+                except Exception:
+                    pass
+        return linked
+
+    async def _record(self, plan: Plan, pr_url: str, head_sha: str | None) -> bool:
+        try:
+            await self.worker.record_external_delivery(
+                plan.plan_id, pr_url=pr_url, head_sha=head_sha, actor="automation-controller"
+            )
+        except Exception as error:
+            code = getattr(error, "code", type(error).__name__)
+            logger.info("Plan %s: pull request %s not linked by trailer (%s).", plan.plan_id, pr_url, code)
+            return False
+        logger.info("Plan %s linked to pull request %s by its GreenKube-Plan trailer.", plan.plan_id, pr_url)
+        return True

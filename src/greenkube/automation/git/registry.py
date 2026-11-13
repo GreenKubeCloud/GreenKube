@@ -10,6 +10,8 @@ from typing import TypeVar
 from urllib.parse import quote
 
 from greenkube.automation.git.base import (
+    OPEN_PULL_REQUEST_SCAN_LIMIT,
+    PULL_REQUEST_COMMIT_SCAN_LIMIT,
     CommentUpsertResult,
     CommitStatusState,
     GitCommitRequest,
@@ -454,6 +456,18 @@ class _AuthorizedGitProvider(GitProvider):
         return await self._call(
             repo,
             lambda: self._provider.find_open_pull_request_for_branch(repo, branch),
+        )
+
+    async def list_open_pull_requests(
+        self, repo: GitRepository, base: str, *, limit: int = OPEN_PULL_REQUEST_SCAN_LIMIT
+    ) -> list[PullRequestInfo]:
+        return await self._call(repo, lambda: self._provider.list_open_pull_requests(repo, base, limit=limit))
+
+    async def list_pull_request_commit_messages(
+        self, repo: GitRepository, number: int, *, limit: int = PULL_REQUEST_COMMIT_SCAN_LIMIT
+    ) -> list[str]:
+        return await self._call(
+            repo, lambda: self._provider.list_pull_request_commit_messages(repo, number, limit=limit)
         )
 
     async def delete_plan_branch(self, repo: GitRepository, branch: str) -> None:

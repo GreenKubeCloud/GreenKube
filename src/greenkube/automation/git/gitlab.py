@@ -91,6 +91,21 @@ class GitLabProvider(GitProvider):
     def _headers(self) -> dict:
         return {"Accept": "application/json", "PRIVATE-TOKEN": self.token}
 
+    def _open_pull_requests_query(self, repo: GitRepository, base: str, limit: int) -> tuple[str, dict[str, str]]:
+        return (
+            f"/projects/{self._project(repo)}/merge_requests",
+            {
+                "state": "opened",
+                "target_branch": base,
+                "order_by": "created_at",
+                "sort": "desc",
+                "per_page": str(limit),
+            },
+        )
+
+    def _pull_request_commits_path(self, repo: GitRepository, number: int) -> str:
+        return f"/projects/{self._project(repo)}/merge_requests/{number}/commits"
+
     def _project(self, repo: GitRepository) -> str:
         return quote(repo.full_name, safe="")
 

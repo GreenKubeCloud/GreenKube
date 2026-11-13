@@ -22,7 +22,11 @@ The controller's `automation-readiness` loop reconciles every 60 seconds:
 The result is stored in `automation_capabilities`, exported as `greenkube_capability_active{capability}`, and shown
 by `GET /api/v1/setup/status` (the setup checklist). The plan executor runs only while delivery is active; the
 webhook outbox and PR polling only while tracking is active. Creating or deleting the credentials Secret switches
-them within one to two minutes (the kubelet refreshes the optional projected volume, about a minute on a default kubelet, then one reconciler tick), with no restart.
+them within 60 seconds, with no restart: GreenKube reads that one Secret through the Kubernetes API (`get` and a
+`watch` selected by `metadata.name`, granted by a Role limited to its `resourceName`; Secrets are never listed), so
+the next reconciler tick sees it without waiting for the kubelet to refresh the optional projected volume. When the
+API cannot be read (for example a chart older than this Role), the mounted volume remains the fallback (one to two
+minutes). Values are kept in memory only and never logged.
 
 ### Provider inference
 
@@ -49,7 +53,8 @@ credentials follow the same rules and are only ever bound to a host inferred as 
 `github_app_host_unsupported`). The token
 is therefore never sent to a host it was not issued for, even when someone who can create an Argo CD Application or
 a Flux GitRepository points it at a server they control. The bound provider is enabled only while `token` is
-mounted. `GET /api/v1/automation/repositories/suggestions` lists
+present. With GitHub App credentials, the repositories the App is installed on are the inferred GitHub
+provider's allowlist (see [GitHub App](#github-app)). `GET /api/v1/automation/repositories/suggestions` lists
 the discovered repositories with their inferred provider type, API URL and allowlist state.
 
 ### Repository allowlist
@@ -173,8 +178,14 @@ requests, per-installation rate limits, and tokens that expire after an hour. Gr
    **Contents: read and write**, **Pull requests: read and write**, **Commit statuses: read and write** and
    **Metadata: read**; with the `patch` or `ci` [delivery mode](#delivery-modes), set Contents and Pull requests to
    read-only.
-2. Install it on the GitOps repositories (the installation's repository selection limits what GreenKube can reach,
-   in addition to `automation.repositoryAllowlist`).
+2. Install it on the GitOps repositories. The installation's repository selection ("All repositories" or "Only
+   select repositories") is the allowlist of the inferred GitHub provider: the readiness reconciler lists it every
+   5 minutes (`GET /app/installations`, then `GET /installation/repositories` with a short-lived installation
+   token) and allows exactly those repositories. With the default `["@discovered"]`, every selected repository is
+   allowed; explicit `automation.repositoryAllowlist` patterns narrow the selection. A discovered repository the App
+   is not installed on stays dormant with `github_app_not_installed`. If the selection cannot be read, the last
+   known one is kept (before the first read, the discovered repositories apply; installation tokens still fail
+   closed for repositories the App cannot reach).
 3. Put its id and private key in the default Secret:
 
 ```bash
@@ -188,7 +199,9 @@ For each repository GreenKube signs a 9-minute JSON Web Token with the private k
 covers the repository (`GET /repos/{owner}/{repo}/installation`, so one App installed in several organizations needs
 no installation id), and requests an installation token scoped to that single repository. Tokens are cached in the
 process until five minutes before they expire. Commits and pull requests are authored by the App's bot
-(`<app-slug>[bot]`). The private key, the JSON Web Token and installation tokens are never logged, returned by the API
+(`<app-slug>[bot]`). Commits are created without an explicit author or committer, which is what GitHub requires to
+sign an App's API commits: they show as **Verified** in the pull request (the commit result records GitHub's
+`verification.verified` and `reason`). This satisfies branch protection rules that require signed commits. The private key, the JSON Web Token and installation tokens are never logged, returned by the API
 or put in a ConfigMap. An explicit provider authenticates as a GitHub App when its `secretKey` is `privateKey`; the
 App id is read from the `appId` key of the same Secret (both keys are projected):
 
@@ -201,6 +214,15 @@ automation:
       secretName: greenkube-github-app
       secretKey: privateKey
 ```
+
+### Signed commits on GitLab and Gitea
+
+GitLab and Gitea create GreenKube's commits server-side through their REST APIs (GitLab Commits API, Gitea
+contents API), which accept no client signature: a signing key held by GreenKube could only be used by pushing
+commits over the Git protocol, which GreenKube deliberately does not do (no clone, no Git binary in the image). Use
+the platform's own signing instead: GitLab signs commits created through the web and API with its instance key where
+web commit signing is available, and Gitea signs API commits with the instance key when `[repository.signing]`
+sets `CRUD_ACTIONS`. A branch rule requiring signed commits is then satisfied without a key in the cluster.
 
 ### GitLab project and group access tokens
 
@@ -247,8 +269,12 @@ greenkube plan report-delivery pln-0123abcd --pr-url https://github.com/acme/git
 
 `apply-patch` refuses a dirty working tree or an existing branch, creates the branch on the plan's base revision and
 runs `git am --3way`; the commit keeps the `GreenKube-Plan: <plan id>` trailer. A pull request opened from another
-branch is linked when its description carries the same trailer (or the GreenKube footer), through the link-back (the
-**I opened PR** field of the plan dialog, or `report-delivery`). The patch is served only when the stored diff
+branch is linked automatically too: at the PR poll interval the controller lists the open pull requests targeting
+the base branch of each approved `patch` plan (50 most recent per repository and branch), reads their descriptions
+and, for at most 10 requests per pass, their commit messages, and records a request whose description or commits
+carry the `GreenKube-Plan` trailer (or whose description carries the GreenKube footer) through the same
+verification as a report. A request that does not verify is not retried until its head changes. The link-back (the
+**I opened PR** field of the plan dialog, or `report-delivery`) works for any request. The patch is served only when the stored diff
 reproduces the original file blobs exactly; otherwise the API answers `409 patch_unavailable`.
 
 **CI.** Create an API key with only `read` and `plans:deliver`. The example GitHub Actions workflow
@@ -318,7 +344,11 @@ curl -fsS -H "Authorization: Bearer ${GREENKUBE_API_KEY}" \
   jq '{id, confidence, risk_level, evidence: {sample_count: .evidence.sample_count, coverage_ratio: .evidence.coverage_ratio}, eligibility}'
 ```
 
-While evidence is still being collected, the `warming_up` blocker gives an estimate in `eligible_at` (on `/api/v1` and `/api/v2` recommendations, shown as "Collecting evidence — eligible in ~31h"). **Open PR** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint was removed: read the recommendation's `eligibility` field. If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
+Evidence gates are relative to the history that exists (F7): `minCoverage` is evaluated against the data
+available since install (the first collected sample), capped at the lookback, so a one-day-old install that
+collected every step is not held back by a 7-day window; the observed value is reported as
+`coverage_since_install` in the `sample_count_coverage` check. While evidence is still being collected, the
+`warming_up` blocker gives an estimate in `eligible_at` (`first sample + minSamples query steps`) (on `/api/v1` and `/api/v2` recommendations, shown as "Collecting evidence — eligible in ~31h"). **Open PR** runs every gate and returns the plan or a typed rejection; it does not open a PR. The former `GET /recommendations/{id}/apply-pr/eligibility` endpoint was removed: read the recommendation's `eligibility` field. If a gate rejects a plan at preview time, inspect `policy_result.checks` for the observed value and configured limit. Prefer collecting representative metrics. You may adjust `automation.policy.minCoverage`, `minSamples`, `minConfidence`, and the other policy fields in your values file when your risk policy requires different thresholds; lowering them trades evidence quality for more eligible PRs. Keep any reduced thresholds local to a controlled test unless they have been explicitly approved for your environment.
 
 ## Signed webhooks (optional)
 
@@ -524,6 +554,14 @@ automation:
 
 Labels, reviewers and the validation status are added after the PR is open and recorded. A provider refusal is logged and never fails or retries the plan operation.
 
+**Degraded features.** Labels and reviewers, the validation status, the status comment and CODEOWNERS reads are
+best effort. When the provider refuses one of them with `403` (for example a fine-grained GitHub token without the
+Issues permission that labels and comments need), the provider stays `verified`: the refused feature is recorded as a
+degraded feature note instead (`degraded_features`, for example `{"pull_request_metadata": "permission_denied"}`, per
+provider in `GET /api/v1/automation/status`, table `gitops_provider_feature_notes`) and cleared after the next
+successful call of that feature. A `401`, or a `403` on a required call (reading the repository, committing, opening
+the PR), still marks the provider in error.
+
 ## Lifecycle feedback on the PR
 
 **Validation status** (`commitStatus`). GreenKube sets the commit status `greenkube/validation` on the PR head: `success` when the rendered diff validated and policy allowed the plan, `failure` otherwise. The description says which (for example `render diff valid; policy passed with 1 warning(s)`), and the status links to the change page when `externalUrl` is set.
@@ -541,6 +579,11 @@ Labels, reviewers and the validation status are added after the PR is open and r
 The comment is posted once and then edited, never duplicated: it starts with the marker `<!-- greenkube:lifecycle v1 -->`, and GreenKube edits the marked comment that its own identity wrote. That identity is the token's user (`GET /user`) or, when the token may not read its own profile, the author of the PR, which GreenKube opened. A marked comment written by anyone else is never adopted or edited, so nobody can have GreenKube's status written into a comment they control, and a human comment is never overwritten. If the token changes to another user, the new user posts one new status comment and keeps it up to date. A body identical to the one last published costs no provider call. The sync step is posted as soon as the sync observer records it; applied, measuring and outcome are refreshed by the leader controller every 5 minutes for PRs merged within `lifecycleLookbackDays` (at most 25 comment writes per cycle). Outcomes come from change measurement; with change measurement off, from the interim verifier.
 
 **Newer advice available** (E7). A recommendation never changes under an open plan: a scan that computes different advice queues it as the next revision, and the plan keeps the revision it pinned. The status comment then says "Newer advice available" with the new values, after the merge and also **before** it: the leader controller checks each open plan PR for queued advice at most every 15 minutes (on the same cycle and the same 25-writes cap) and posts the status comment only when there is newer advice, so open PRs without news get no comment. Close the PR and open a new preview to apply the newer advice.
+
+**Read-only credentials.** With the `patch` or `ci` [delivery mode](#delivery-modes) the token in the cluster is
+read-only, so GreenKube writes nothing to the provider: no status comment (on any plan) while that mode is
+configured, and never on a plan that was approved for `patch` or `ci` delivery. Lifecycle tracking (merge, sync,
+apply, measurement) is unchanged and visible in the UI.
 
 Comments and statuses need a token that can write PR comments and commit statuses (GitHub: `Pull requests` and `Commit statuses` write; GitLab: `api`; Gitea: `write:repository` and `write:issue`, plus `read:user` so GreenKube can read its own identity; without it, the PR author is used).
 
