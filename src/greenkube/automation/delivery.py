@@ -440,8 +440,8 @@ class PlanTrailerLinker:
                                 target.repository, pull_request.number
                             )
                             candidates = plan_ids_in_commit_messages(messages) & set(by_id)
-                            if not candidates:
-                                self._remember(scan_key)
+                            # Read once per head: a refused match is remembered per plan below.
+                            self._remember(scan_key)
                     for plan_id in sorted(candidates):
                         key = (plan_id, pull_request.number, head_sha)
                         if key in self._seen:

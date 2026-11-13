@@ -123,6 +123,19 @@ async def test_refused_or_unrelated_pull_requests_are_not_retried_until_their_he
 
 
 @pytest.mark.asyncio
+async def test_commits_of_a_refused_commit_trailer_match_are_read_once_per_head():
+    provider = FakeProvider([_pr(9)], {9: ["greenkube: rightsize\n\nGreenKube-Plan: pln-1"]})
+    worker = FakeWorker([_patch_plan()], provider, refuse={9})
+    linker = PlanTrailerLinker(worker)
+
+    assert await linker.link_once() == 0
+    assert await linker.link_once() == 0
+
+    assert provider.commit_reads == [9]
+    assert len(worker.reports) == 1
+
+
+@pytest.mark.asyncio
 async def test_only_approved_patch_plans_are_considered():
     plan = fx.plan().model_copy(update={"delivery_mode": "ci", "digest": "sha256:" + "d" * 64})
     provider = FakeProvider([_pr(8, body="GreenKube-Plan: pln-1")], {})
