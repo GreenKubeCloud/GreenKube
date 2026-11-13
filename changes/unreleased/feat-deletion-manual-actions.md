@@ -11,3 +11,4 @@
 - Orphaned LoadBalancer and PersistentVolume recommendations are no longer blocked with `deletion_requires_review`: they report `action_kind: delete_resource` and can open a reviewed pull request when their resource binding is resolved and the automation policy allows their risk.
 - A deletion change is recorded against the deleted resource (`Service`/`PersistentVolume`) with `action_kind: delete_resource` instead of a `Pod` target and the container-resources strategy.
 - The PR content names a cluster-scoped deleted resource without a leading `/`.
+- The automation policy evaluator skips the workload-only gates (rollout state, HPA/VPA/PDB interactions, usage sample coverage) for action kinds bound by resource bindings; controller health, risk, confidence, freeze windows and plan history still apply.
