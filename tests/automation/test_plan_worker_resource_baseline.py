@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
 
 from greenkube.automation.plan_worker import PlanWorker, PlanWorkerError
-from greenkube.gitops.contracts import ActionPlanV3, ControllerKind, DeleteResource, PlanStatus, ResourceTarget
+from greenkube.gitops.contracts import (
+    ActionPlanV3,
+    ControllerKind,
+    DeleteResource,
+    PlanStatus,
+    ResourceTarget,
+    configured_binding_ttl,
+)
 from greenkube.gitops.discovery.inventory import ResourceBinding
 from greenkube.storage.resource_binding_repository import StoredResourceBinding
 from tests.automation.pr_fixtures import plan as make_plan  # pyrefly: ignore[missing-import]
@@ -111,11 +118,15 @@ async def test_an_applying_plan_is_not_checked_again() -> None:
     assert await _worker(_Reader(None))._ensure_pre_apply_baseline(None, plan) is plan
 
 
-def _stored(source) -> StoredResourceBinding:
+def _stored(source, *, prune=None, observed_at=None) -> StoredResourceBinding:
     binding = ResourceBinding(
-        ref=LB, status="resolved", controllers=((ControllerKind.ARGOCD, "argocd", "payments-prod"),), location=source
+        ref=LB,
+        status="resolved",
+        controllers=((ControllerKind.ARGOCD, "argocd", "payments-prod"),),
+        location=source,
+        prune=prune,
     )
-    return StoredResourceBinding(binding=binding, observed_at=datetime.now(timezone.utc))
+    return StoredResourceBinding(binding=binding, observed_at=observed_at or datetime.now(timezone.utc))
 
 
 @pytest.mark.asyncio
@@ -133,3 +144,34 @@ async def test_the_resource_binding_must_be_unchanged_at_apply_time() -> None:
     assert error.value.plan_status is PlanStatus.STALE
     with pytest.raises(PlanWorkerError):
         await _worker(bindings=_Bindings(None))._validate_current_binding(plan)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_binding_reader_is_retried_instead_of_skipping_the_check() -> None:
+    with pytest.raises(PlanWorkerError, match="no resource binding reader") as error:
+        await _worker()._validate_current_binding(_delete_plan())
+    assert error.value.retryable
+
+
+def _approved_on(stored: StoredResourceBinding):
+    current = stored.binding.workload_source()
+    assert current is not None
+    return _delete_plan().model_copy(update={"source": current})
+
+
+@pytest.mark.asyncio
+async def test_a_stale_resource_binding_makes_the_plan_stale_at_apply_time() -> None:
+    plan = _approved_on(_stored(_source()))
+    old = _stored(_source(), observed_at=datetime.now(timezone.utc) - configured_binding_ttl() - timedelta(minutes=1))
+    with pytest.raises(PlanWorkerError, match="binding TTL") as error:
+        await _worker(bindings=_Bindings(old))._validate_current_binding(plan)
+    assert error.value.plan_status is PlanStatus.STALE
+
+
+@pytest.mark.asyncio
+async def test_prune_disabled_after_approval_makes_the_plan_stale() -> None:
+    plan = _approved_on(_stored(_source(), prune=True))
+    await _worker(bindings=_Bindings(_stored(_source(), prune=True)))._validate_current_binding(plan)
+    with pytest.raises(PlanWorkerError, match="stopped pruning") as error:
+        await _worker(bindings=_Bindings(_stored(_source(), prune=False)))._validate_current_binding(plan)
+    assert error.value.plan_status is PlanStatus.STALE

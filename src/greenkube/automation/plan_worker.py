@@ -75,7 +75,9 @@ from greenkube.gitops.contracts import (
     PreApplyWorkloadBaseline,
     ResourceTarget,
     WorkloadSource,
+    configured_binding_ttl,
 )
+from greenkube.gitops.discovery.inventory import CONTROLLER_PRUNE_EVIDENCE
 from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.models.metrics import (
     PullRequestRecord,
@@ -686,9 +688,18 @@ class PlanWorker:
             )
 
     async def _validate_current_resource_binding(self, plan: Plan) -> None:
-        """The resource binding a resource-bound plan was approved on must be unchanged (H0d)."""
+        """The resource binding a resource-bound plan was approved on must be unchanged (H0d).
+
+        Fails closed: with no binding reader the check is retried rather than skipped; a
+        binding that is gone, ambiguous, moved, older than the binding TTL, or whose
+        controller stopped pruning since approval makes the plan stale.
+        """
         if self.resource_binding_reader is None:
-            return
+            raise PlanWorkerError(
+                "Could not verify the GitOps resource binding because no resource binding reader is configured; "
+                "verify worker configuration, then retry.",
+                retryable=True,
+            )
         source = plan.source
         try:
             stored = await self.resource_binding_reader.get(source.cluster, plan.action.target)
@@ -714,6 +725,27 @@ class PlanWorker:
             raise PlanWorkerError(
                 "The GitOps resource binding changed or is no longer resolved; refresh discovery and re-plan "
                 "before applying.",
+                plan_status=PlanStatus.STALE,
+                action_status=ActionStatus.NONE,
+            )
+        observed_at = getattr(stored, "observed_at", None)
+        if (
+            not isinstance(observed_at, datetime)
+            or ensure_utc(self.clock()) - ensure_utc(observed_at) >= configured_binding_ttl()
+        ):
+            raise PlanWorkerError(
+                "The GitOps resource binding is older than the binding TTL (discovery stopped refreshing it); "
+                "refresh discovery and re-plan before applying.",
+                plan_status=PlanStatus.STALE,
+                action_status=ActionStatus.NONE,
+            )
+        if (
+            source.evidence.get(CONTROLLER_PRUNE_EVIDENCE) is True
+            and current.evidence.get(CONTROLLER_PRUNE_EVIDENCE) is not True
+        ):
+            raise PlanWorkerError(
+                "The GitOps controller managing the resource stopped pruning after approval, so merging would not "
+                "delete it; re-plan to review the new warning before applying.",
                 plan_status=PlanStatus.STALE,
                 action_status=ActionStatus.NONE,
             )
