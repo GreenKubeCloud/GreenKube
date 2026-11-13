@@ -1729,6 +1729,10 @@ async def create_plan_runtime(
         # Kustomize and Helm previews say when the renderer's egress is not enforced (F6).
         renderer_egress_unenforced=renderer_egress_probe(db_manager),
     )
+    from greenkube.core.optimization.applied_detector import K8sResourceReader
+    from greenkube.storage.resource_binding_repository import ResourceBindingRepository
+
+    resource_bindings = ResourceBindingRepository(db_manager)
     worker = PlanWorker(
         operations=plan_operation_repository,
         plans=gitops_repository,
@@ -1739,6 +1743,8 @@ async def create_plan_runtime(
         workload_reader=K8sWorkloadReader(),
         pull_request_options=selected_pull_request_options,
         binding_reader=gitops_repository,
+        resource_reader=K8sResourceReader(),
+        resource_binding_reader=resource_bindings,
     )
     api_plan_service = RuntimePlanService(
         recommendation_repository=recommendation_repository,
@@ -1753,6 +1759,7 @@ async def create_plan_runtime(
         snapshot_limits=snapshot_limits,
         policy_config=selected_policy_config,
         policy_repository=gitops_repository,
+        resource_binding_repository=resource_bindings,
     )
     return PlanRuntime(
         providers=providers,
