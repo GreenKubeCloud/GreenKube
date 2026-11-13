@@ -179,7 +179,11 @@ class ConfiguredKubernetesDiscoverySource:
             resources=resources,
         )
         candidates = await self._provider_resolver.resolve_candidates(discovery.candidates)
-        return KubernetesDiscoveryResult(candidates=candidates, availability=dict(discovery.availability))
+        return KubernetesDiscoveryResult(
+            candidates=candidates,
+            availability=dict(discovery.availability),
+            resource_index=getattr(discovery, "resource_index", None),
+        )
 
 
 class GitOpsDiscoveryRuntime:
@@ -334,12 +338,18 @@ async def create_gitops_discovery_runtime(
         else (config.gitops_discovery_interval_seconds if config is not None else DEFAULT_DISCOVERY_INTERVAL_SECONDS)
     )
     selected_ttl = config.gitops_binding_ttl if config is not None else DEFAULT_BINDING_TTL
+    resource_repository = None
+    if db_manager is not None:
+        from greenkube.storage.resource_binding_repository import ResourceBindingRepository
+
+        resource_repository = ResourceBindingRepository(db_manager)
     service = GitOpsDiscoveryService(
         configured_source,
         cast(WorkloadBindingRepository, repository),
         cluster=cluster or (config.CLUSTER_NAME if config is not None else "") or "default",
         provider_id=_DISCOVERY_PROVIDER_ID,
         binding_ttl=selected_ttl,
+        resource_repository=resource_repository,
     )
     return GitOpsDiscoveryRuntime(
         service,

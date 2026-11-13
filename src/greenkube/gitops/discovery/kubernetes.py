@@ -20,6 +20,7 @@ from greenkube.gitops.discovery.flux import (
     discover_flux_helm_release_values_sources,
     discover_flux_kustomization,
 )
+from greenkube.gitops.discovery.inventory import ResourceBindingIndex
 
 _ARGO_APPLICATIONS = "argocd"
 _FLUX_KUSTOMIZATIONS = ControllerKind.FLUX_KUSTOMIZATION.value
@@ -91,6 +92,8 @@ class KubernetesDiscoveryResult:
 
     candidates: list[WorkloadSource]
     availability: dict[str, CapabilityAvailability]
+    #: Inventories of the listed Argo CD Applications and Flux Kustomizations (H0d).
+    resource_index: ResourceBindingIndex | None = None
 
 
 class KubernetesWorkloadInventoryReader:
@@ -294,7 +297,14 @@ class KubernetesDiscoverySource:
             )
 
         candidates = [_with_live_workload_evidence(candidate, live_resources) for candidate in candidates]
-        return KubernetesDiscoveryResult(candidates=candidates, availability=availability)
+        resource_index = ResourceBindingIndex()
+        for application in items_by_capability[_APPLICATIONS.capability]:
+            resource_index.add_argo_application(application)
+        for kustomization in items_by_capability[_KUSTOMIZATIONS.capability]:
+            resource_index.add_flux_kustomization(kustomization)
+        return KubernetesDiscoveryResult(
+            candidates=candidates, availability=availability, resource_index=resource_index
+        )
 
     async def _list(
         self,

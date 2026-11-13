@@ -22,6 +22,7 @@ from greenkube.gitops.contracts import (
     WorkloadSource,
     binding_candidate_generation_token,
 )
+from greenkube.gitops.discovery.inventory import ResourceBinding, ResourceBindingIndex
 from greenkube.gitops.discovery.kubernetes import CapabilityAvailability, KubernetesDiscoveryResult
 from greenkube.storage.base_gitops_repository import (
     MAX_WORKLOAD_BINDING_CANDIDATES,
@@ -68,6 +69,19 @@ class _DiscoverySource(Protocol):
         namespace: str | None = None,
         resources: Iterable[Mapping[str, Any]] = (),
     ) -> KubernetesDiscoveryResult: ...
+
+
+class _ResourceBindingStore(Protocol):
+    async def replace_cluster(
+        self, cluster: str, bindings: Iterable[ResourceBinding], *, observed_at: datetime
+    ) -> int: ...
+
+
+def registered_resource_kinds() -> frozenset[tuple[str, str]]:
+    """``(group, kind)`` of the non-workload resources registered action kinds target (H0d)."""
+    from greenkube.automation.actions import ACTION_KINDS
+
+    return frozenset(kind for spec in ACTION_KINDS for kind in spec.resource_kinds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +136,8 @@ class DiscoveryRefreshResult:
     bindings: tuple[WorkloadBinding, ...]
     coverage: DiscoveryCoverage
     availability: Mapping[str, CapabilityAvailability]
+    #: Bindings of the non-workload resources registered action kinds target (H0d).
+    resource_bindings: tuple[ResourceBinding, ...] = ()
 
 
 class GitOpsDiscoveryService:
@@ -138,6 +154,8 @@ class GitOpsDiscoveryService:
         resolver: WorkloadBindingResolver | None = None,
         binding_ttl: timedelta = DEFAULT_BINDING_TTL,
         clock: Callable[[], datetime] | None = None,
+        resource_repository: _ResourceBindingStore | None = None,
+        resource_kinds: Callable[[], frozenset[tuple[str, str]]] = registered_resource_kinds,
     ) -> None:
         if not cluster.strip() or not provider_id.strip():
             raise ValueError("cluster and provider_id must not be blank")
@@ -151,6 +169,8 @@ class GitOpsDiscoveryService:
         self._binding_ttl = binding_ttl
         self._resolver = resolver or WorkloadBindingResolver(freshness_ttl=binding_ttl)
         self._clock = clock or _utc_now
+        self._resource_repository = resource_repository
+        self._resource_kinds = resource_kinds
 
     async def refresh(
         self,
@@ -249,12 +269,34 @@ class GitOpsDiscoveryService:
             )
         )
         bindings = tuple(persisted_bindings[identity] for identity in sorted(persisted_bindings))
+        resource_bindings = await self._refresh_resource_bindings(discovery, bindings, refreshed_at)
         return DiscoveryRefreshResult(
             refreshed_at=refreshed_at,
             bindings=bindings,
             coverage=coverage,
             availability=dict(discovery.availability),
+            resource_bindings=resource_bindings,
         )
+
+    async def _refresh_resource_bindings(
+        self,
+        discovery: KubernetesDiscoveryResult,
+        bindings: Iterable[WorkloadBinding],
+        refreshed_at: datetime,
+    ) -> tuple[ResourceBinding, ...]:
+        """Bind the inventoried resources action kinds target and persist them (H0d).
+
+        A controller's Git location comes from its resolved workload bindings; a resource
+        of a controller without one stays unresolved (``controller-source-unresolved``).
+        """
+        index = getattr(discovery, "resource_index", None)
+        if not isinstance(index, ResourceBindingIndex):
+            return ()
+        index.add_sources(binding.source for binding in bindings if binding.source is not None)
+        resource_bindings = tuple(index.bindings(self._resource_kinds()))
+        if self._resource_repository is not None:
+            await self._resource_repository.replace_cluster(self._cluster, resource_bindings, observed_at=refreshed_at)
+        return resource_bindings
 
     async def coverage(self) -> DiscoveryCoverage:
         """Return freshness-aware binding counts for the configured cluster."""
