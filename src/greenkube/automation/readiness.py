@@ -104,6 +104,25 @@ CAPABILITIES = ("discovery", "preview", "delivery", "sync_tracking", "webhooks",
 
 #: Discovery capability keys of the GitOps controllers themselves (not their sources).
 _CONTROLLER_CAPABILITIES = ("argocd", "flux_kustomization", "flux_helm_release")
+#: Controller family of each discovery capability key: the setup checklist names
+#: the GitOps controllers people install (Argo CD, Flux), not their CRD kinds.
+CONTROLLER_FAMILIES: Mapping[str, str] = {
+    "argocd": "argocd",
+    "flux_kustomization": "flux",
+    "flux_helm_release": "flux",
+}
+
+
+def controller_families(kinds: Iterable[Any]) -> list[str]:
+    """Distinct controller families (``argocd``, ``flux``) of discovery capability keys, in order."""
+    families: list[str] = []
+    for kind in kinds:
+        family = CONTROLLER_FAMILIES.get(str(kind), str(kind))
+        if family and family not in families:
+            families.append(family)
+    return families
+
+
 _WELL_KNOWN_HOSTS: Mapping[str, str] = {"github.com": "github", "gitlab.com": "gitlab"}
 _PROVIDER_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -734,7 +753,10 @@ class AutomationReadiness:
         if status:
             controllers = [name for name in _CONTROLLER_CAPABILITIES if _available(status.get(name))]
         if controllers or bindings:
-            return CapabilityState(STATE_ACTIVE, details={"controllers": controllers})
+            return CapabilityState(
+                STATE_ACTIVE,
+                details={"controllers": controller_families(controllers), "source_kinds": controllers},
+            )
         if status is None:
             return CapabilityState(STATE_PENDING, "discovery_not_run")
         return CapabilityState(STATE_DORMANT, "no_gitops_controller")

@@ -630,3 +630,16 @@ async def test_explicit_provider_snapshot_follows_its_database_allowlist(tmp_pat
     assert states["acme/gitops"].allowlisted is True
     assert states["acme/other"].allowlisted is False
     assert states["acme/other"].preview.reason == "not_allowlisted"
+
+
+async def test_discovery_reports_controller_families(tmp_path):
+    discovery = {
+        "argocd": {"available": True},
+        "flux_kustomization": {"available": True},
+        "flux_helm_release": {"available": True},
+    }
+    snapshot = await _readiness(FakeGitOpsRepository([]), tmp_path, discovery=discovery).run_once()
+
+    details = snapshot.capabilities["discovery"].details
+    assert details["controllers"] == ["argocd", "flux"]
+    assert details["source_kinds"] == ["argocd", "flux_kustomization", "flux_helm_release"]

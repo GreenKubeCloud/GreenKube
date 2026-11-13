@@ -302,7 +302,10 @@ def _gitops_check(row: Optional[CapabilityRow], snapshot_fresh: bool) -> SetupCh
             docs,
         )
     if row.state == "active":
-        controllers = ", ".join(row.payload.get("controllers") or []) or "workload sources"
+        from greenkube.automation.readiness import controller_families
+
+        # Rows written before families were recorded hold CRD kinds: map them too.
+        controllers = ", ".join(controller_families(row.payload.get("controllers") or [])) or "workload sources"
         return _check(
             "gitops_controllers", "gitops", title, "ok", f"Discovered: {controllers}.", "Nothing to do.", docs
         )
