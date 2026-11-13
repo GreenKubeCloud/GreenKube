@@ -772,6 +772,11 @@ def remove_resource_document(
     A ``kind: List`` loses one item, a multi-document YAML file loses one document and a
     file holding only the target is deleted.
     """
+    return remove_document(path, content, target_resource.document_index, target)
+
+
+def remove_document(path: str, content: str, document_index: int, target: ResourceTarget) -> str | None:
+    """``content`` without the target held by document ``document_index`` (see ``remove_resource_document``)."""
     if PurePosixPath(path).suffix.lower() == ".json":
         document = _load_json(path, content)
         if _remove_list_item(document, target):
@@ -790,7 +795,7 @@ def remove_resource_document(
         documents = list(yaml.load_all(content))
     except (YAMLError, RecursionError, ValueError, TypeError) as exc:
         raise RawManifestPlanError(f"{path}: round-trip YAML parsing failed") from exc
-    index = target_resource.document_index
+    index = document_index
     if index >= len(documents):
         raise RawManifestPlanError(f"{path}: rendered document index is absent from the round-trip source")
     if not _remove_list_item(documents[index], target):
