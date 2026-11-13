@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any, Literal, Protocol, cast
@@ -41,6 +41,130 @@ _CONFLICTING_VPA_UPDATE_MODES = frozenset({"Auto", "Recreate", "InPlace", "InPla
 # HPA metric targets that do not depend on the pod requests (absolute usage), D13.
 _REQUEST_INDEPENDENT_HPA_TARGETS = frozenset({"AverageValue", "Value"})
 MissingEvidenceMode = Literal["fail", "warn"]
+
+
+# --------------------------------------------------------------------------- evidence warm-up (F7)
+#
+# Evidence gates are computed relative to the history that exists. Right after
+# install, the observation window (the lookback, e.g. 7 days) mostly predates the
+# first collected sample, so the coverage of the whole window stays low for days
+# even though every step since install was collected. ``minCoverage`` is therefore
+# evaluated against the data available since the first sample, capped at the
+# lookback, and ``eligible_at = first_sample + required history`` where the
+# required history is ``minSamples`` query steps.
+
+#: How long the first collected sample (``earliest_input_time``) is cached per process.
+HISTORY_START_TTL_SECONDS = 600.0
+_history_cache: dict[str, Any] = {"value": None, "read_at": None}
+
+
+def known_history_start() -> datetime | None:
+    """The cached first-sample time of this installation (None until read or when unknown)."""
+    value = _history_cache.get("value")
+    return value if isinstance(value, datetime) else None
+
+
+def set_history_start(value: datetime | None, *, read_at: float | None = None) -> None:
+    import time
+
+    _history_cache["value"] = ensure_utc(value) if isinstance(value, datetime) else None
+    _history_cache["read_at"] = time.monotonic() if read_at is None else read_at
+
+
+async def collection_history_start() -> datetime | None:
+    """First collected sample of this installation (cached); None when unknown.
+
+    Read from the workload usage store (``earliest_input_time``). A failure keeps
+    the last known value: without one, the gates fall back to the full lookback.
+    """
+    import time
+
+    read_at = _history_cache.get("read_at")
+    if isinstance(read_at, float) and time.monotonic() - read_at < HISTORY_START_TTL_SECONDS:
+        return known_history_start()
+    try:
+        from greenkube.core.config import get_config
+        from greenkube.core.db import get_db_manager
+        from greenkube.storage.base_workload_usage_repository import create_workload_usage_repository
+
+        value = await create_workload_usage_repository(get_db_manager(), get_config().DB_TYPE).earliest_input_time()
+    except Exception:
+        return known_history_start()
+    set_history_start(value)
+    return known_history_start()
+
+
+def _evidence_window(evidence: Any) -> tuple[float | None, datetime | None, datetime | None]:
+    window = getattr(evidence, "observation_window_seconds", None)
+    valid = isinstance(window, (int, float)) and not isinstance(window, bool) and math.isfinite(window) and window > 0
+    window_seconds = float(window) if valid else None
+    end = getattr(evidence, "observation_window_end", None)
+    start = getattr(evidence, "observation_window_start", None)
+    end = ensure_utc(end) if isinstance(end, datetime) else None
+    start = ensure_utc(start) if isinstance(start, datetime) else None
+    if start is None and end is not None and window_seconds is not None:
+        start = end - timedelta(seconds=window_seconds)
+    return window_seconds, start, end
+
+
+def available_history_seconds(evidence: Any, history_start: datetime | None, step_seconds: int = 300) -> float | None:
+    """Seconds of the observation window covered by data since install, capped at the lookback."""
+    window, start, end = _evidence_window(evidence)
+    if window is None:
+        return None
+    if history_start is None or end is None:
+        return window
+    first = max(start, ensure_utc(history_start)) if start is not None else ensure_utc(history_start)
+    available = (end - first).total_seconds()
+    return min(window, max(available, float(max(step_seconds, 1))))
+
+
+def coverage_since_history(evidence: Any, history_start: datetime | None, step_seconds: int = 300) -> float:
+    """Coverage of the data available since install (the stored coverage is over the whole lookback)."""
+    coverage = getattr(evidence, "coverage_ratio", 0.0)
+    if isinstance(coverage, bool) or not isinstance(coverage, (int, float)) or not math.isfinite(coverage):
+        return 0.0
+    window, _, _ = _evidence_window(evidence)
+    available = available_history_seconds(evidence, history_start, step_seconds)
+    if window is None or available is None or available <= 0:
+        return float(coverage)
+    return max(0.0, min(1.0, float(coverage) * window / available))
+
+
+def evidence_eligible_at(
+    evidence: Any,
+    *,
+    min_samples: int,
+    min_coverage: float,
+    step_seconds: int,
+    history_start: datetime | None,
+) -> datetime | None:
+    """When the evidence gates pass: ``first_sample + minSamples x step`` (F7).
+
+    The first sample is the later of the window start and the install's first
+    collected sample; without the latter it is estimated from the sample count
+    (one sample per step). When the coverage since install is below
+    ``minCoverage`` (collection gaps), the missing share of the available history
+    is added after the window end.
+    """
+    window, start, end = _evidence_window(evidence)
+    if end is None:
+        return None
+    step = max(int(step_seconds or 300), 1)
+    coverage = getattr(evidence, "coverage_ratio", 0.0)
+    coverage = float(coverage) if isinstance(coverage, (int, float)) and not isinstance(coverage, bool) else 0.0
+    if history_start is not None:
+        first = max(start, ensure_utc(history_start)) if start is not None else ensure_utc(history_start)
+    else:
+        # Unknown install time: estimate the first sample from the samples collected so far.
+        samples = int(getattr(evidence, "sample_count", 0) or 0)
+        first = end - timedelta(seconds=samples * step)
+    eligible_at = first + timedelta(seconds=min_samples * step)
+    since = coverage_since_history(evidence, history_start, step)
+    if since < min_coverage:
+        available = available_history_seconds(evidence, history_start, step) or 0.0
+        eligible_at = max(eligible_at, end + timedelta(seconds=(min_coverage - since) * available))
+    return eligible_at
 
 
 class ChangeFreezeWindow(BaseModel):
@@ -233,10 +357,38 @@ class AutomationPolicyEvaluator:
         config: AutomationPolicyConfig,
         plan_repository: PolicyPlanRepository | None,
         clock=lambda: datetime.now(timezone.utc),
+        history_start=None,
+        step_seconds: int | None = None,
     ) -> None:
         self.config = config
         self.plan_repository = plan_repository
         self.clock = clock
+        #: First collected sample of the installation (F7): an async callable, a datetime, or
+        #: None for the process-wide cached reader.
+        self.history_start = history_start
+        self.step_seconds = step_seconds
+
+    async def _history_start(self) -> datetime | None:
+        source = self.history_start
+        if isinstance(source, datetime):
+            return ensure_utc(source)
+        try:
+            reader = cast(Callable[[], Awaitable[Any]], source) if callable(source) else collection_history_start
+            value = await reader()
+        except Exception:
+            return None
+        return ensure_utc(value) if isinstance(value, datetime) else None
+
+    def _step_seconds(self) -> int:
+        if self.step_seconds:
+            return int(self.step_seconds)
+        try:
+            from greenkube.core.config import get_config
+            from greenkube.utils.time import parse_query_step_seconds
+
+            return parse_query_step_seconds(str(get_config().PROMETHEUS_QUERY_RANGE_STEP or "5m"))
+        except Exception:
+            return 300
 
     async def evaluate(
         self,
@@ -380,7 +532,15 @@ class AutomationPolicyEvaluator:
             if warning not in warnings:
                 warnings.append(warning)
 
-        self._evaluate_optional_live_gates(source, records, add_check, add_missing_evidence, add_warning)
+        self._evaluate_optional_live_gates(
+            source,
+            records,
+            add_check,
+            add_missing_evidence,
+            add_warning,
+            history_start=await self._history_start(),
+            step_seconds=self._step_seconds(),
+        )
 
         if self.plan_repository is None:
             self._reject_missing_history(add_check)
@@ -574,6 +734,9 @@ class AutomationPolicyEvaluator:
         add_check,
         add_missing_evidence,
         add_warning,
+        *,
+        history_start: datetime | None = None,
+        step_seconds: int = 300,
     ) -> None:
         evidence = source.evidence
         rollout = _optional_bool(evidence, "rollout_in_progress")
@@ -661,6 +824,8 @@ class AutomationPolicyEvaluator:
                     "recommendation_id": record.id,
                     "sample_count": sample_count,
                     "coverage_ratio": coverage,
+                    # minCoverage is evaluated against the data available since install (F7).
+                    "coverage_since_install": round(coverage_since_history(evidence, history_start, step_seconds), 4),
                 }
             )
 
@@ -681,7 +846,8 @@ class AutomationPolicyEvaluator:
             below_threshold = [
                 item
                 for item in sample_evidence
-                if item["sample_count"] < self.config.min_samples or item["coverage_ratio"] < self.config.min_coverage
+                if item["sample_count"] < self.config.min_samples
+                or item["coverage_since_install"] < self.config.min_coverage
             ]
             add_check(
                 "sample_count_coverage",

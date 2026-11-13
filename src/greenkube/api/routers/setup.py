@@ -598,6 +598,11 @@ async def setup_status() -> SetupStatus:
     capability_rows, _ = await _safe(_capabilities, "automation capabilities")
     heartbeat, _ = await _safe(_executor_heartbeat, "the plan executor heartbeat")
     earliest, earliest_ok = await _safe(_earliest_sample, "collected metrics")
+    if earliest_ok:
+        from greenkube.automation.policy import set_history_start
+
+        # Shared with the recommendation warm-up gates (F7).
+        set_history_start(earliest)
 
     rows = capability_rows or []
     globals_ = {row.subject: row for row in rows if row.scope == SCOPE_GLOBAL}

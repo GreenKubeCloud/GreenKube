@@ -232,8 +232,11 @@ async def decide_records(
             cluster = getattr(config, "CLUSTER_NAME", None) or "default"
             bindings = await elig.load_bindings(gitops_repo, cluster, current)
         open_prs = await elig.load_open_pr_ids(pr_repo)
+    from greenkube.automation.policy import collection_history_start
     from greenkube.utils.time import parse_query_step_seconds
 
+    # Warm-up gates are relative to the history collected since install (F7); cached.
+    await collection_history_start()
     ctx = elig.EligibilityContext(
         now=current,
         automation_configured=automation_configured,
