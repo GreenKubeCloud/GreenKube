@@ -213,6 +213,10 @@ async def push_signals(request: Request, inbox: SignalInboxRepository = Depends(
     through the ``push`` source; they become recommendations only through consensus.
     """
     document = await _json_body(request, MAX_SIGNAL_BATCH_BYTES)
+    claimed = document.get("source_id") if isinstance(document, dict) else None
+    if isinstance(claimed, str):
+        # Bound first: another client's batch is 403 whether or not it is valid.
+        _check_push_client(request, claimed)
     received_at = datetime.now(timezone.utc)
     batch, signals, errors = parse_batch(document, cluster_uid=_cluster_uid(), received_at=received_at)
     if batch is None:

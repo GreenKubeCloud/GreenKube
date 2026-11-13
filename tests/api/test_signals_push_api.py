@@ -211,6 +211,9 @@ def test_push_client_is_bound_to_the_api_key(tmp_path, monkeypatch):
             json={"source_id": "push:acme-optimizer", "complete": False, "signals": [_signal()]},
             headers=named,
         )
+        invalid_other = h.client.post(
+            "/api/v1/signals", json={"source_id": "push:acme-optimizer", "signals": "not-a-list"}, headers=ci
+        )
         admin_key = _key(h, "admin", name="ops")
         admin_other = h.client.post(
             "/api/v1/signals",
@@ -223,6 +226,8 @@ def test_push_client_is_bound_to_the_api_key(tmp_path, monkeypatch):
     assert other.json()["detail"]["code"] == "push_client_mismatch"
     assert "push:ci" in other.json()["detail"]["message"]
     assert slug.status_code == 200, slug.text
+    # Another client's batch is refused before it is validated.
+    assert invalid_other.status_code == 403
     # A key never writes another client's signals, whatever its scopes.
     assert admin_other.status_code == 403
     assert set(inbox.signals) and all(source in ("push:ci", "push:acme-optimizer") for source, _ in inbox.signals)
