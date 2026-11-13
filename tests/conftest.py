@@ -97,6 +97,22 @@ def mock_k8s_discovery(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_live_cluster_identity(monkeypatch):
+    """The savings ledger v2 never reads the kube-system UID of a live cluster in tests.
+
+    Jobs that dual-write the ledger (savings attribution, drift monitor) build
+    their own resolver; without this they would call the API server of the
+    developer's kubeconfig. Tests that need the reader import it directly.
+    """
+    from greenkube.verify.ledger import identity
+
+    async def _no_cluster():
+        return None
+
+    monkeypatch.setattr(identity, "read_kube_system_uid", _no_cluster)
+
+
+@pytest.fixture(autouse=True)
 def reset_savings_metrics_refresh_cache():
     """Make every test start with a scrape that reloads the savings gauges."""
     import sys
