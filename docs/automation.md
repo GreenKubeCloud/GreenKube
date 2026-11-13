@@ -289,11 +289,13 @@ A preview is auto-approved only when:
 - every decrease of a request is backed by GreenKube's own usage evidence or by at least two independent consensus
   votes;
 - no recommendation raises a request, unless `increases: true`: an increase is a reliability fix that costs money,
-  so a person approves it by default (roadmap H1).
+  so a person approves it by default (roadmap H1); an increase is also approved automatically only when GreenKube's
+  own analyzer sized it.
 
 Otherwise the plan waits for the click and the response lists `auto_approve_blockers`: `approve_scope_missing`,
 `rollback_plan`, `not_active`, `recommendation_missing`, `risk_above_auto_approve`, `confidence_below_auto_approve`,
-`consensus_contested`, `decrease_without_native_evidence`, `increase_requires_approval`, the approval's error code (for example `delivery_paused`), or
+`consensus_contested`, `decrease_without_native_evidence`, `increase_requires_approval`,
+`increase_without_native_evidence`, the approval's error code (for example `delivery_paused`), or
 `auto_approve_failed` when the approval failed unexpectedly (the preview is kept).
 
 ## Create and validate a pull request
@@ -361,7 +363,10 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
   as a projected **cost** (never as a saving) and the risk it reduces, and it is never auto-approved unless
   `automation.autoApprove.increases` is `true`. Sizing keeps the rules of [How GreenKube sizes
   increases](recommendation.md#how-greenkube-sizes-increases) (per-replica p99 bounded by the pod, warm-up excluded,
-  one step capped at `rightsizingMaxIncreaseFactor`).
+  one step capped at `rightsizingMaxIncreaseFactor`). Those bounds belong to GreenKube's own analyzer, so an increase
+  becomes a pull request only when the consensus chose GreenKube's value (`source` or `consensus.chosen_from`) backed
+  by usage samples. An increase chosen from VPA, Goldilocks or a pushed signal alone (the `SAFEST` consensus picks the
+  highest value) stays advisory.
 - **Limits.** The limit advice of the rightsizing rules (`config.recommendations.limitsPolicy`) travels with the
   request change as `evidence.limit_changes`:
   - an increase raises a CPU limit below the new request or throttled, and a memory limit below the request or

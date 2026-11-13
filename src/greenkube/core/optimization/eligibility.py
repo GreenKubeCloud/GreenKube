@@ -744,6 +744,10 @@ AUTO_APPROVE_CODES: Dict[str, str] = {
         "A request increase is a reliability fix that costs money; set automation.autoApprove.increases to "
         "approve increases automatically."
     ),
+    "increase_without_native_evidence": (
+        "A request increase is only approved automatically when GreenKube's own analyzer sized it "
+        "(pod-bounded usage, increase cap, warm-up excluded)."
+    ),
 }
 
 
@@ -877,6 +881,9 @@ def auto_approve_blockers(records: Sequence[Any], policy: AutoApprovePolicy, *, 
             blockers.append("consensus_contested")
         if proposes_decrease(record) and not has_native_evidence(record) and independent_votes(record) < 2:
             blockers.append("decrease_without_native_evidence")
-        if proposes_increase(record) and not policy.increases:
-            blockers.append("increase_requires_approval")
+        if proposes_increase(record):
+            if not policy.increases:
+                blockers.append("increase_requires_approval")
+            if not has_native_evidence(record):
+                blockers.append("increase_without_native_evidence")
     return list(dict.fromkeys(blockers))

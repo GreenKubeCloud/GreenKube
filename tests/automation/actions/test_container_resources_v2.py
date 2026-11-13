@@ -50,6 +50,9 @@ def _recommendation(
     current_limit: int | None = None,
     limit_changes: list[LimitChange] | None = None,
     container_kind: Literal["container", "sidecar", "init"] | None = None,
+    sample_count: int = 2016,
+    source: str = "greenkube",
+    consensus: dict | None = None,
 ) -> Recommendation:
     memory = rec_type == RecommendationType.RIGHTSIZING_MEMORY
     resource = "memory" if memory else "cpu"
@@ -68,6 +71,7 @@ def _recommendation(
         proposed_patch=PatchV2(container_name=container),
         limit_changes=limit_changes or [],
         container_kind=container_kind,
+        sample_count=sample_count,
     )
     return Recommendation(
         id=recommendation_id,
@@ -84,6 +88,8 @@ def _recommendation(
         recommended_memory_request_bytes=proposed if memory else None,
         current_cpu_request_millicores=None if memory else current,
         recommended_cpu_request_millicores=None if memory else proposed,
+        source=source,
+        consensus=consensus,
     )
 
 
@@ -105,6 +111,42 @@ def test_a_request_increase_becomes_an_action() -> None:
     assert operation.resources.limits == {}
     assert operation.remove_limits == []
     assert operation.container_kind == "container"
+
+
+@pytest.mark.parametrize(
+    ("source", "consensus", "sample_count"),
+    [
+        ("vpa", {"chosen_from": ["vpa"], "independent_votes": 1}, 2016),
+        ("goldilocks", {"chosen_from": ["goldilocks", "vpa"], "independent_votes": 1}, 2016),
+        ("push:ci", {"chosen_from": ["push:ci"], "independent_votes": 1}, 0),
+        ("greenkube", None, 0),
+    ],
+)
+def test_an_increase_not_sized_by_greenkube_stays_advisory(
+    source: str, consensus: dict | None, sample_count: int
+) -> None:
+    """Regression (review, H1): the wave-3a increase bounds (pod-bounded usage, 2x cap, warm-up
+    exclusion) live in the native analyzer only. A 5x VPA increase chosen by the SAFEST consensus
+    must not become a deliverable action."""
+    recommendation = _recommendation(
+        current=512 * MIB, proposed=5 * 512 * MIB, source=source, consensus=consensus, sample_count=sample_count
+    )
+    assert build_container_resource_actions([recommendation]) == {}
+
+
+def test_an_increase_greenkube_agrees_with_is_an_action() -> None:
+    recommendation = _recommendation(
+        source="vpa", consensus={"chosen_from": ["vpa", "greenkube.rightsizing_memory"], "independent_votes": 2}
+    )
+    assert _only_operation(recommendation).resources.requests == {"memory": "768Mi"}
+
+
+def test_external_decreases_keep_their_actions() -> None:
+    """Only increases need GreenKube's sizing: decreases from other sources are unchanged."""
+    recommendation = _recommendation(
+        current=768 * MIB, proposed=512 * MIB, source="vpa", consensus={"chosen_from": ["vpa"]}, sample_count=0
+    )
+    assert _only_operation(recommendation).resources.requests == {"memory": "512Mi"}
 
 
 def test_a_decrease_action_serializes_exactly_as_before() -> None:

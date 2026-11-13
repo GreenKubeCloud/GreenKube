@@ -612,11 +612,28 @@ def _resource_proposal(recommendation: Recommendation) -> _Proposal | None:
         for change in evidence.changes
     ):
         return None
+    if proposed > current and not _bounded_increase(recommendation):
+        return None
     limits = _limit_edits(evidence, resource, proposed)
     if limits is None:
         return None
     container_kind = evidence.container_kind or "container"
     return _Proposal(resource, quantity, limits, container_kind)
+
+
+def _bounded_increase(recommendation: Recommendation) -> bool:
+    """An increase is deliverable only when GreenKube's own analyzer sized it (H1).
+
+    The wave-3a increase bounds (pod-bounded usage, the
+    ``RIGHTSIZING_MAX_INCREASE_FACTOR`` cap, warm-up exclusion) are applied by the
+    native rightsizing analyzer only. A value chosen from another source (VPA,
+    Goldilocks, a pushed signal) under the SAFEST consensus may exceed them, so it
+    stays advisory: the consensus must have chosen GreenKube's value, backed by
+    usage samples.
+    """
+    from greenkube.core.optimization.eligibility import has_native_evidence
+
+    return has_native_evidence(recommendation)
 
 
 def _limit_edits(evidence: Any, resource: str, proposed_request: int) -> dict[str, str | None] | None:

@@ -126,7 +126,10 @@ def test_a_decrease_from_external_sources_needs_two_independent_votes():
     assert auto_approve_blockers([one_vote], POLICY, expected=1) == ["decrease_without_native_evidence"]
     assert auto_approve_blockers([two_votes], POLICY, expected=1) == []
     assert not proposes_decrease(increase)
-    assert auto_approve_blockers([increase], AutoApprovePolicy(True, "low", 0.8, increases=True), expected=1) == []
+    # An increase sized by another source may exceed the wave-3a bounds (H1): never approved automatically.
+    assert auto_approve_blockers([increase], AutoApprovePolicy(True, "low", 0.8, increases=True), expected=1) == [
+        "increase_without_native_evidence"
+    ]
     assert has_native_evidence(_record(source="krr", consensus={"chosen_from": ["greenkube.rightsizing_cpu"]}))
 
 
