@@ -72,3 +72,18 @@ def test_pool_unit_prices_use_trusted_rows_on_the_pool_nodes_only():
     assert prices["cpu"] == pytest.approx(0.08)
     assert prices["memory"] == pytest.approx(0.01)
     assert pool_unit_prices(outside, {"n1"}, 300) == {}
+
+
+def test_pool_unit_prices_leave_out_the_measured_workload():
+    """A workload resized below its usage moves its own cost/request ratio: it must not read as a price shift."""
+    change, plan = _setup()
+    window = TimeWindow(start=plan.pre.start, end=plan.pre.start + timedelta(hours=4))
+    own = [row.model_copy(update={"node": "n1"}) for row in workload_rows(window, cpu_price=0.5, ram_price=0.2)]
+    neighbours = [
+        row.model_copy(update={"node": "n1", "owner_name": "web", "pod_name": row.pod_name.replace("api", "web")})
+        for row in workload_rows(window, cpu_price=0.08, ram_price=0.01)
+    ]
+    prices = pool_unit_prices(own + neighbours, {"n1"}, 300, exclude=change.target.key)
+    assert prices["cpu"] == pytest.approx(0.08)
+    assert prices["memory"] == pytest.approx(0.01)
+    assert pool_unit_prices(own, {"n1"}, 300, exclude=change.target.key) == {}

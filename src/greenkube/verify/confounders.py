@@ -153,13 +153,28 @@ class PoolContext:
 _GIB = 1024.0**3
 
 
-def pool_unit_prices(rows: Iterable[Any], nodes: Set[str], step_seconds: int) -> Dict[str, float]:
-    """CPU and memory unit prices of the pods that ran on ``nodes`` (trusted cost with components only)."""
+def pool_unit_prices(
+    rows: Iterable[Any],
+    nodes: Set[str],
+    step_seconds: int,
+    *,
+    exclude: Optional[Tuple[str, str, str]] = None,
+) -> Dict[str, float]:
+    """CPU and memory unit prices of the pods that ran on ``nodes`` (trusted cost with components only).
+
+    ``exclude`` is the measured workload's target key: its own pods are left
+    out, because an allocator that charges ``max(request, usage)`` moves the
+    cost-per-request ratio of a workload resized below its usage although no
+    price changed, which would read as a pool price shift in a small pool.
+    """
+    from greenkube.core.optimization.targeting import target_key
     from greenkube.core.optimization.verifier import _coverage_seconds, cost_is_trusted
 
     totals = {"cpu": [0.0, 0.0], "memory": [0.0, 0.0]}
     for row in rows:
         if getattr(row, "node", None) not in nodes or not cost_is_trusted(row):
+            continue
+        if exclude is not None and target_key(row) == exclude:
             continue
         hours = _coverage_seconds(row, step_seconds) / 3600.0
         for resource, cost_attr, amount in (

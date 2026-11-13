@@ -315,8 +315,9 @@ class ChangeMeasurementService:
         pre_samples, post_samples = in_pools(pre), in_pools(post)
         pool_nodes = {node.name for sample in pre_samples + post_samples for node in sample.nodes}
         step = self._step()
-        prices_pre = pool_unit_prices(await self._pool_rows(plan.pre), pool_nodes, step)
-        prices_post = pool_unit_prices(await self._pool_rows(plan.post), pool_nodes, step)
+        own = change.target.key
+        prices_pre = pool_unit_prices(await self._pool_rows(plan.pre), pool_nodes, step, exclude=own)
+        prices_post = pool_unit_prices(await self._pool_rows(plan.post), pool_nodes, step, exclude=own)
         neighbours: List[ChangeEvent] = []
         try:
             landed = await self.changes.changes_landed_between(
