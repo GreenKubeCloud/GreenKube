@@ -146,7 +146,7 @@ spec:
                     - ALL
               env:
                 - name: GREENKUBE_POLARIS_REPORT_URL
-                  value: "http://{{ include "greenkube.fullname" . }}-api.{{ .Release.Namespace }}.svc:{{ $v.api.port }}/api/v1/sources/polaris/reports"
+                  value: "http://{{ include "greenkube.fullname" . }}-api.{{ .Release.Namespace }}.svc:{{ $v.api.port }}/api/v1/sources/polaris/reports{{ if eq (toString (dig "complete" true $job)) "false" }}?complete=false{{ end }}"
                 - name: GREENKUBE_SIGNALS_API_KEY
                   valueFrom:
                     secretKeyRef:

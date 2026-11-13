@@ -312,6 +312,7 @@
                   }
                 },
                 "extraArgs": {"type": "array", "items": {"type": "string"}},
+                "complete": {"type": "boolean"},
                 "apiKeySecret": {
                   "type": "object",
                   "properties": {"name": {"type": "string"}, "key": {"type": "string"}}

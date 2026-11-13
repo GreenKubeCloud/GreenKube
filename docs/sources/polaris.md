@@ -59,7 +59,8 @@ sources:
     job:
       enabled: true
       schedule: "37 3 * * *"
-      extraArgs: []            # e.g. ["--namespace", "shop"] (then push with complete=false yourself)
+      extraArgs: []            # e.g. ["--namespace", "shop"] (then set complete: false)
+      complete: true           # false posts with ?complete=false: a narrowed audit adds findings instead of replacing them all
       apiKeySecret: { name: greenkube-polaris, key: api-key }
 ```
 
@@ -77,7 +78,7 @@ The CronJob runs the Polaris image pinned by digest (`sources.polaris.job.image.
 |---|---|---|
 | `sources.settings.polaris.max_age_hours` | `168` | Audits older than this are no longer used. |
 | `sources.settings.polaris.enabled` | `auto` | `false` ignores pushed audits. |
-| `sources.polaris.job.*` | disabled | The CronJob above (`schedule`, `image`, `extraArgs`, `apiKeySecret`, `resources`, `activeDeadlineSeconds`, `rbac`, `serviceAccountName`). |
+| `sources.polaris.job.*` | disabled | The CronJob above (`schedule`, `image`, `extraArgs`, `complete`, `apiKeySecret`, `resources`, `activeDeadlineSeconds`, `rbac`, `serviceAccountName`). |
 
 ## Limitations
 

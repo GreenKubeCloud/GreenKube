@@ -77,6 +77,20 @@ tests:
           value: true
         documentIndex: 3
 
+  - it: pushes a narrowed audit as a partial report when complete is false
+    templates:
+      - templates/polaris-cronjob.yaml
+    set:
+      sources.polaris.job.enabled: true
+      sources.polaris.job.apiKeySecret.name: gk-polaris
+      sources.polaris.job.extraArgs: ["--namespace", "shop"]
+      sources.polaris.job.complete: false
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env[0].value
+          value: http://RELEASE-NAME-greenkube-api.NAMESPACE.svc:8000/api/v1/sources/polaris/reports?complete=false
+        documentIndex: 3
+
   - it: gives Polaris a read-only ClusterRole without Secrets or ConfigMaps
     templates:
       - templates/polaris-cronjob.yaml

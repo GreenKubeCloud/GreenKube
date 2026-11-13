@@ -618,6 +618,9 @@ sources:
         digest: sha256:7af688527df75c3825395ded8aeb3775fad2027228aa06c9959d39ae6c00e999
       # Extra `polaris audit` arguments, e.g. ["--namespace", "shop"].
       extraArgs: []
+      # true: each audit replaces every earlier Polaris finding. Set false when
+      # extraArgs narrows the audit (one namespace): findings are added or refreshed.
+      complete: true
       # Secret holding a GreenKube API key with scope signals:write (required).
       apiKeySecret:
         name: ""
