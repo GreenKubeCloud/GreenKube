@@ -26,6 +26,7 @@
 		valueOf
 	} from '$lib/recommendationDetail.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
+	import ManualApplyPanel from '$lib/components/ManualApplyPanel.svelte';
 
 	/** @type {{id: string}} */
 	export let data;
@@ -112,6 +113,9 @@
 	function mib(bytes) {
 		return bytes === null || bytes === undefined ? '—' : `${Math.round(bytes / (1024 * 1024))}Mi`;
 	}
+
+	/** The manual steps open at once when the page is reached through "Apply manually" (#manual). */
+	const manualOpen = typeof window !== 'undefined' && window.location.hash === '#manual';
 
 	function prTone(state) {
 		return { open: 'blue', merged: 'green', closed: 'dark', error: 'red', pending: 'yellow' }[state] ?? 'dark';
@@ -259,6 +263,11 @@
 				{/if}
 			</section>
 		</div>
+
+		<!-- Manual mode (H9): kubectl steps and "Mark as applied" for clusters without GitOps -->
+		{#if rec.status === 'active' && rec.id}
+			<ManualApplyPanel recommendationId={rec.id} open={manualOpen} on:applied={() => load(data?.id)} />
+		{/if}
 
 		<!-- Projected impact -->
 		{#if impact}

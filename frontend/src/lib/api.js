@@ -887,3 +887,26 @@ export function createApiKey({ name, scopes, expiresInDays = null }) {
 export function revokeApiKey(keyId) {
 	return request(`${BASE}/auth/api-keys/${encodeURIComponent(keyId)}`, {}, { method: 'DELETE' });
 }
+
+// --- Manual mode (roadmap H9) ---
+
+/**
+ * What to run by hand for one recommendation: `kubectl` commands, the patch, a diff and notes.
+ * @param {number|string} id
+ * @param {{ signal?: AbortSignal }} [opts]
+ * @returns {Promise<{recommendation_id: number, mode: 'patch'|'delete'|'advisory', action_kind: ?string,
+ *   target: ?Object, commands: {description: string, command: string}[], patch: ?Object, diff: ?string,
+ *   notes: string[], can_mark_applied: boolean}>}
+ */
+export function getManualGuide(id, { signal } = {}) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/manual`, {}, { signal });
+}
+
+/**
+ * "Mark as applied": record a change applied by hand; it is measured like a merged pull request.
+ * @param {number|string} id
+ * @returns {Promise<Object>} the applied recommendation
+ */
+export function markAppliedManually(id) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/manual/applied`, {}, { method: 'POST' });
+}
