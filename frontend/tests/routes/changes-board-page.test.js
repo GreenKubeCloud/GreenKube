@@ -173,6 +173,16 @@ describe('/changes board', () => {
 		expect(screen.getByTestId('stage-measuring')).toHaveTextContent('Deployment/api');
 	});
 
+	it('shows one alert when every read fails with the same message', async () => {
+		api.listChanges.mockRejectedValue(new TypeError('Failed to fetch'));
+		api.getOpenPullRequests.mockRejectedValue(new TypeError('Failed to fetch'));
+		api.listDeliveringRecommendations.mockRejectedValue(new TypeError('Failed to fetch'));
+		render(ChangesPage);
+
+		await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1));
+		expect(screen.getByRole('alert')).toHaveTextContent('Failed to fetch');
+	});
+
 	it('loads older changes with the cursor', async () => {
 		api.listChanges
 			.mockResolvedValueOnce({ items: [{ change_id: 'new', plan_id: 'plan-n', state: 'applied', state_updated_at: ago(1) }], next_cursor: 'c1' })

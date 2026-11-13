@@ -86,7 +86,8 @@
 	$: columns = groupByStage(visible).filter((column) => !stage || column.id === stage);
 	$: attentionCount = rows.filter((row) => row.attention).length;
 	$: filtered = Boolean(stage || namespace || attention || query);
-	$: errors = data ? Object.values(data.errors).filter(Boolean) : [];
+	// Several reads often fail with the same message (API down, 502, 401); keep one alert each.
+	$: errors = data ? [...new Set(Object.values(data.errors).filter(Boolean))] : [];
 	$: if (!loading) syncUrl(boardFilterQuery(filters));
 </script>
 
