@@ -78,7 +78,16 @@ tests:
           value: GreenKubeLedgerChainVerificationFailed
       - equal:
           path: spec.groups[1].rules[3].expr
-          value: increase(greenkube_ledger_chain_verification_failures_total[2h]) > 0
+          value: min by (cluster_uid) (greenkube_ledger_chain_ok) == 0
+      - equal:
+          path: spec.groups[1].rules[4].alert
+          value: GreenKubeLedgerProjectionBacklog
+      - equal:
+          path: spec.groups[1].rules[4].expr
+          value: max by (source_table) (greenkube_ledger_unprojected_rows) > 0
+      - matchRegex:
+          path: spec.groups[1].rules[4].annotations.description
+          pattern: '\{\{ \$labels.source_table \}\}'
 
   - it: should leave the controller loop alerts out when disabled
     set:

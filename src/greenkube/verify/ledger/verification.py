@@ -13,8 +13,11 @@ Each cluster's chain is walked in ``seq`` order. An entry passes when:
 The head verified last is stored in ``ledger_chain_status``: a chain that is
 shorter than that head, or whose entry at that position has another hash,
 lost its tail. Every failed verification increments
-``greenkube_ledger_chain_verification_failures_total{reason}`` (alerted by the
-chart's PrometheusRule) and is reported by ``GET /api/v2/ledger/summary``.
+``greenkube_ledger_chain_verification_failures_total{reason}`` and sets
+``greenkube_ledger_chain_ok{cluster_uid}`` to 0 until a verification passes
+again (the chart's PrometheusRule alerts on the gauge, so a failure found by
+the first pass of a pod alerts too, and stays alerting while the chain is
+broken) and is reported by ``GET /api/v2/ledger/summary``.
 
 The controller loop ``ledger-chain`` first catches the v2 ledger up with the
 v1 ledger (see :mod:`greenkube.verify.ledger.projector`), then verifies every
@@ -50,6 +53,12 @@ CHAIN_VERIFICATION_FAILURES = Counter(
 CHAIN_VERIFIED_ENTRIES = Gauge(
     "greenkube_ledger_chain_verified_entries",
     "Entries of the savings ledger hash chain verified by the last pass (all clusters).",
+    registry=OBSERVABILITY_REGISTRY,
+)
+CHAIN_OK = Gauge(
+    "greenkube_ledger_chain_ok",
+    "1 when the last verification of the cluster's savings ledger hash chain passed, 0 when it failed.",
+    ["cluster_uid"],
     registry=OBSERVABILITY_REGISTRY,
 )
 
@@ -115,11 +124,16 @@ async def verify_chain(
 
 
 async def _tail_lost(
-    repo: LedgerRepository, cluster_uid: str, result: ChainVerification
+    repo: LedgerRepository, result: ChainVerification, previous: Optional[ChainStatus]
 ) -> Optional[ChainVerification]:
-    """A chain shorter than the head verified before, or with another hash at that head, lost its tail."""
-    previous = await repo.get_chain_status(cluster_uid)
-    if previous is None or not previous.ok or previous.head_seq is None:
+    """A chain shorter than the head verified before, or with another hash at that head, lost its tail.
+
+    The anchor is the last head that passed: a failed verification keeps it
+    (see :func:`verify_ledger`), so a lost tail keeps failing, even once new
+    entries reuse its positions, until an operator resets the status row.
+    """
+    cluster_uid = result.cluster_uid
+    if previous is None or previous.head_seq is None:
         return None
     if (result.head_seq or 0) < previous.head_seq:
         return ChainVerification(
@@ -160,6 +174,7 @@ async def verify_ledger(
     results: Dict[str, ChainVerification] = {}
     total = 0
     for cluster_uid in await repo.clusters():
+        previous = await repo.get_chain_status(cluster_uid)
         checkpoint = marks.get(cluster_uid)
         incremental = not full and checkpoint is not None and moment - checkpoint[2] < FULL_VERIFICATION_INTERVAL
         if incremental:
@@ -173,7 +188,7 @@ async def verify_ledger(
         else:
             result = await verify_chain(repo, cluster_uid)
         if result.ok:
-            result = await _tail_lost(repo, cluster_uid, result) or result
+            result = await _tail_lost(repo, result, previous) or result
         if result.ok:
             full_at = checkpoint[2] if incremental and checkpoint is not None else moment
             marks[cluster_uid] = (result.head_seq or 0, result.head_hash, full_at)
@@ -187,15 +202,23 @@ async def verify_ledger(
                 result.reason,
                 result.detail,
             )
+        CHAIN_OK.labels(cluster_uid=cluster_uid).set(1 if result.ok else 0)
         total += result.entries
+        # A failure keeps the last head that passed as the anchor of the next verification.
+        if result.ok:
+            anchor_seq, anchor_hash = result.head_seq, result.head_hash
+        elif previous is not None:
+            anchor_seq, anchor_hash = previous.head_seq, previous.head_hash
+        else:
+            anchor_seq, anchor_hash = None, None
         await repo.record_chain_status(
             ChainStatus(
                 cluster_uid=cluster_uid,
                 verified_at=moment,
                 ok=result.ok,
                 entries=result.entries,
-                head_seq=result.head_seq,
-                head_hash=result.head_hash,
+                head_seq=anchor_seq,
+                head_hash=anchor_hash,
                 failure=None if result.ok else f"{result.reason}: {result.detail}",
             )
         )
@@ -221,6 +244,7 @@ async def run_ledger_chain() -> None:
 
 
 __all__ = [
+    "CHAIN_OK",
     "CHAIN_VERIFICATION_FAILURES",
     "ChainVerification",
     "DEFAULT_INTERVAL_SECONDS",

@@ -96,11 +96,19 @@ spec:
             summary: No GreenKube controller holds the leader Lease
             description: Collection, scans, apply detection, measurement and automation run only on the leader controller; none is running or scraped.
         - alert: GreenKubeLedgerChainVerificationFailed
-          expr: increase(greenkube_ledger_chain_verification_failures_total[2h]) > 0
+          expr: min by (cluster_uid) (greenkube_ledger_chain_ok) == 0
           labels:
             severity: critical
           annotations:
             summary: The GreenKube savings ledger hash chain failed verification
-            description: {{ `An entry of the append-only savings ledger was modified, removed or reordered ({{ $labels.reason }}); see GET /api/v2/ledger/summary (chain) and the controller logs.` | quote }}
+            description: {{ `An entry of the append-only savings ledger of cluster {{ $labels.cluster_uid }} was modified, removed or reordered; greenkube_ledger_chain_verification_failures_total gives the reason, GET /api/v2/ledger/summary (chain) and the controller logs the position.` | quote }}
+        - alert: GreenKubeLedgerProjectionBacklog
+          expr: max by (source_table) (greenkube_ledger_unprojected_rows) > 0
+          for: 3h
+          labels:
+            severity: warning
+          annotations:
+            summary: Savings accruals are missing from the GreenKube savings ledger v2
+            description: {{ `{{ $value }} row(s) of {{ $labels.source_table }} have no savings ledger v2 entry after full sweeps for 3 hours; the v2 totals do not reconcile with GET /api/v1/recommendations/savings. See greenkube_ledger_write_errors_total and the controller logs.` | quote }}
     {{- end }}
 {{- end }}

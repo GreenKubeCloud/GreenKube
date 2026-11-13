@@ -47,7 +47,7 @@ from greenkube.verify.ledger.model import (
     LedgerEntryDraft,
 )
 from greenkube.verify.ledger.projector import LedgerProjector
-from greenkube.verify.ledger.verification import CHAIN_VERIFICATION_FAILURES, verify_chain, verify_ledger
+from greenkube.verify.ledger.verification import CHAIN_OK, CHAIN_VERIFICATION_FAILURES, verify_chain, verify_ledger
 
 CLUSTER = "ledger-v2-cluster"
 CLUSTER_UID = "0b5c1d9e-7f6a-4d0e-9a51-kube-system"
@@ -332,6 +332,24 @@ async def test_verification_detects_a_removed_tail(ledger: LedgerDb):
     await ledger.execute("DELETE FROM savings_ledger_entries WHERE seq = 5")
     result = (await verify_ledger(ledger.repo, checkpoints={}))[CLUSTER_UID]
     assert not result.ok and result.reason == "truncated"
+    assert CHAIN_OK.labels(cluster_uid=CLUSTER_UID)._value.get() == 0
+    # The failure is sticky: the next pass still fails, and so does a chain re-extended over the lost tail.
+    again = (await verify_ledger(ledger.repo, checkpoints={}))[CLUSTER_UID]
+    assert not again.ok and again.reason == "truncated"
+    await ledger.repo.append(CLUSTER_UID, CLUSTER, [_draft("k5-forged"), _draft("k6")])
+    rewritten = (await verify_ledger(ledger.repo, checkpoints={}))[CLUSTER_UID]
+    assert not rewritten.ok and rewritten.reason == "head_rewritten"
+    assert CHAIN_OK.labels(cluster_uid=CLUSTER_UID)._value.get() == 0
+    status = await ledger.repo.get_chain_status(CLUSTER_UID)
+    assert status is not None and status.head_seq == 5  # the last head that passed stays the anchor
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_chain_ok_gauge_reports_each_verification(ledger: LedgerDb):
+    await ledger.repo.append(CLUSTER_UID, CLUSTER, [_draft(f"k{i}") for i in range(3)])
+    await verify_ledger(ledger.repo, checkpoints={})
+    assert CHAIN_OK.labels(cluster_uid=CLUSTER_UID)._value.get() == 1
 
 
 # ----------------------------------------------------------------------
