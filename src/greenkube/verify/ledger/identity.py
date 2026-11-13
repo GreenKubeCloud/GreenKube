@@ -11,7 +11,9 @@ first time it is resolved and never replaced, so the chain key stays stable
 even if a later read would answer differently. Without Kubernetes access (a
 local run, the demo) or when the read is forbidden, the identity falls back to
 ``name:<CLUSTER_NAME>`` (source ``cluster_name``). A transient error (API
-server unreachable, timeout) resolves nothing: the caller skips the ledger
+server unreachable, timeout, or no Kubernetes client while the process runs
+in a pod, where the in-cluster configuration can fail to load for a moment)
+resolves nothing: the caller skips the ledger
 write and retries later rather than writing under a key it would have to
 abandon (fail closed).
 
@@ -23,6 +25,7 @@ change rows.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Optional
 
@@ -64,16 +67,24 @@ async def read_kube_system_uid() -> Optional[str]:
     """UID of the ``kube-system`` namespace; ``None`` when there is no cluster or the read is forbidden.
 
     Raises:
-        ClusterIdentityUnavailable: any other failure (the read may succeed later).
+        ClusterIdentityUnavailable: any other failure (the read may succeed later), including
+            a missing Kubernetes client inside a pod (``KUBERNETES_SERVICE_HOST`` is set).
     """
+    in_cluster = bool(os.getenv("KUBERNETES_SERVICE_HOST"))
     try:
         from greenkube.core.k8s_client import get_core_v1_api
 
         api = await get_core_v1_api()
-    except Exception as exc:  # pragma: no cover - configuration errors depend on the host
+    except Exception as exc:
+        if in_cluster:
+            raise ClusterIdentityUnavailable(f"no Kubernetes client inside the cluster: {exc}") from exc
         logger.info("No Kubernetes client for the cluster identity: %s", exc)
         return None
     if api is None:
+        if in_cluster:
+            # In a pod the client exists unless its configuration failed to load: retry later
+            # rather than keying the chain by the cluster name for good.
+            raise ClusterIdentityUnavailable("the in-cluster Kubernetes configuration could not be loaded")
         return None
     try:
         namespace = await api.read_namespace("kube-system")
