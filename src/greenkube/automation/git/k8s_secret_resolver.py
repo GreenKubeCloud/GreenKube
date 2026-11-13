@@ -16,10 +16,18 @@ from greenkube.automation.git.credentials import (
     SecretReference,
     SecretResolverError,
 )
+from greenkube.automation.git.default_credentials import (
+    STATE_ABSENT,
+    STATE_PRESENT,
+    DefaultCredentialsSecret,
+    default_credentials_secret,
+)
 from greenkube.storage.base_gitops_repository import GitOpsProviderConfig
 
 DEFAULT_PROVIDER_SECRET_MOUNT = Path("/etc/greenkube/git-providers")
 _MAX_SECRET_BYTES = 1024 * 1024
+#: Use the process-wide API reader of the default credentials Secret (POD_NAMESPACE).
+_PROCESS_WIDE: Any = object()
 
 
 class MountedSecretFileResolver(KubernetesSecretResolver):
@@ -31,10 +39,40 @@ class MountedSecretFileResolver(KubernetesSecretResolver):
     keys. This resolver never queries the Kubernetes API.
     """
 
-    def __init__(self, mount_path: str | Path | None = None) -> None:
+    def __init__(self, mount_path: str | Path | None = None, *, api_secret: Any = _PROCESS_WIDE) -> None:
         configured_mount = os.getenv("GITOPS_SECRET_MOUNT")
         selected_mount = mount_path if mount_path is not None else configured_mount
         self.mount_path = Path(selected_mount) if selected_mount else DEFAULT_PROVIDER_SECRET_MOUNT
+        # The default credentials Secret is also read by name through the Kubernetes API, so
+        # creating it takes effect without waiting for the kubelet to refresh the volume.
+        self._api_secret = api_secret
+
+    def _api_secret_for(self, namespace: str | None, name: str) -> DefaultCredentialsSecret | None:
+        if namespace is not None:
+            return None
+        store = default_credentials_secret() if self._api_secret is _PROCESS_WIDE else self._api_secret
+        if isinstance(store, DefaultCredentialsSecret) and store.name == name:
+            return store
+        return None
+
+    def api_key_present(self, namespace: str | None, name: str, key: str) -> bool | None:
+        """Whether the API view of the default Secret holds ``key``; None when only the files can tell."""
+        store = self._api_secret_for(namespace, name)
+        return store.has(key) if store is not None else None
+
+    def api_value(self, namespace: str | None, name: str, key: str) -> bytes | None:
+        store = self._api_secret_for(namespace, name)
+        return store.value(key) if store is not None else None
+
+    async def refresh_api_secret(self, name: str) -> str | None:
+        """``get`` the default Secret now (readiness tick); its state, or None without the API reader."""
+        store = self._api_secret_for(None, name)
+        return await store.refresh() if store is not None else None
+
+    def start_api_watch(self, name: str) -> None:
+        store = self._api_secret_for(None, name)
+        if store is not None:
+            store.start_watch()
 
     def path_for_reference(self, namespace: str | None, name: str, key: str) -> Path:
         reference = SecretReference(namespace=namespace, name=name, key=key)
@@ -55,6 +93,8 @@ class MountedSecretFileResolver(KubernetesSecretResolver):
             reference = SecretReference.from_provider_config(provider)
         except (ValueError, RuntimeError):
             raise SecretResolverError("Git provider Secret reference is missing or invalid.") from None
+        if self.api_key_present(reference.namespace, reference.name, reference.key):
+            return
         path = self.path_for_reference(reference.namespace, reference.name, reference.key)
         try:
             with path.open("rb") as secret_file:
@@ -77,6 +117,15 @@ class MountedSecretFileResolver(KubernetesSecretResolver):
         except (ValueError, SecretResolverError):
             raise SecretResolverError("Git provider Secret reference is invalid.") from None
 
+        store = self._api_secret_for(namespace, name)
+        if store is not None:
+            state = await store.ensure_fresh()
+            if state == STATE_PRESENT:
+                return _decoded(store.value(key))
+            if state == STATE_ABSENT:
+                # Deleted: the mounted copy may lag behind by a kubelet sync period.
+                return None
+
         try:
             async with aiofiles.open(path, "rb") as secret_file:
                 value = await secret_file.read(_MAX_SECRET_BYTES + 1)
@@ -91,6 +140,17 @@ class MountedSecretFileResolver(KubernetesSecretResolver):
             return value.decode("utf-8")
         except UnicodeDecodeError:
             raise SecretResolverError("Git provider Secret key file is not valid UTF-8.") from None
+
+
+def _decoded(value: bytes | None) -> str | None:
+    if value is None:
+        return None
+    if len(value) > _MAX_SECRET_BYTES:
+        raise SecretResolverError("Git provider Secret key exceeds the supported size limit.")
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        raise SecretResolverError("Git provider Secret key is not valid UTF-8.") from None
 
 
 class CoreV1SecretApi(Protocol):

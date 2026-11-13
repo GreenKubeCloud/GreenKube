@@ -266,12 +266,30 @@ def allowlist_matches(repository: str, patterns: Iterable[str]) -> bool:
 class CredentialsInspector:
     """Checks which mounted Secret keys exist, without reading their values into memory."""
 
-    def __init__(self, mount_path: str | Path | None = None) -> None:
-        from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
+    def __init__(self, mount_path: str | Path | None = None, *, api_secret: Any = None) -> None:
+        from greenkube.automation.git.k8s_secret_resolver import _PROCESS_WIDE, MountedSecretFileResolver
 
-        self._resolver = MountedSecretFileResolver(mount_path)
+        # Without a mount path (production), the default Secret is also read through the
+        # Kubernetes API (get/watch on its one name): creating it activates delivery on the
+        # next tick instead of after the kubelet's volume refresh.
+        selected = api_secret if api_secret is not None else (_PROCESS_WIDE if mount_path is None else None)
+        self._resolver = MountedSecretFileResolver(mount_path, api_secret=selected)
+        #: Only the process-wide reader is watched (one watch per process, controller).
+        self._watch = selected is _PROCESS_WIDE
+
+    async def refresh(self, secret_name: str) -> None:
+        """Read the default Secret through the API now and keep watching it (controller)."""
+        try:
+            await self._resolver.refresh_api_secret(secret_name)
+            if self._watch:
+                self._resolver.start_api_watch(secret_name)
+        except Exception as error:  # the mounted files remain the fallback
+            logger.debug("Default credentials API read failed (%s).", type(error).__name__)
 
     def _present(self, namespace: str | None, name: str, key: str) -> bool:
+        from_api = self._resolver.api_key_present(namespace, name, key)
+        if from_api is not None:
+            return from_api
         try:
             path = self._resolver.path_for_reference(namespace, name, key)
             return path.is_file() and path.stat().st_size > 0
@@ -289,6 +307,12 @@ class CredentialsInspector:
     def default_credentials_host(self, secret_name: str) -> str | None:
         """Host the default token is bound to (``host`` key, else ``apiBaseUrl``); not a secret."""
         for key in DEFAULT_CREDENTIALS_HOST_KEYS:
+            if self._resolver.api_key_present(None, secret_name, key) is not None:
+                value = self._resolver.api_value(None, secret_name, key)
+                host = normalize_credentials_host((value or b"")[:_MAX_HOST_VALUE_BYTES].decode("utf-8", "replace"))
+                if host:
+                    return host
+                continue
             try:
                 path = self._resolver.path_for_reference(None, secret_name, key)
                 if not path.is_file():
@@ -473,6 +497,8 @@ class AutomationReadiness:
 
     async def run_once(self) -> ReadinessSnapshot:
         default_secret = str(getattr(self._config, "GITOPS_DEFAULT_CREDENTIALS_SECRET", "") or "")
+        if default_secret:
+            await self._credentials.refresh(default_secret)
         default_kind = self._credentials.default_credentials(default_secret) if default_secret else None
         patterns = tuple(getattr(self._config, "automation_repository_allowlist", (DISCOVERED_REPOSITORIES,)))
         allowed = await self._store.list_allowed_repositories()
