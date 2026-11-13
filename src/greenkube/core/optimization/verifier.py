@@ -953,9 +953,16 @@ class RecommendationVerifier:
         reading a baseline window. With ``strict`` a failed metrics read raises
         instead of being evaluated as missing data.
         """
+        gates, _ = await self.health_check_for(group, start, end, strict=strict)
+        return gates
+
+    async def health_check_for(
+        self, group: Sequence[RecommendationRecord], start: datetime, end: datetime, *, strict: bool = False
+    ) -> tuple[List[HealthGateResult], Optional[WorkloadHealthObservation]]:
+        """:meth:`health_gates_for` plus the health signals it read (OOM restarts for increases, H1)."""
         members = list(group)
         if not members:
-            return []
+            return [], None
         lead = members[0]
         step = _step_seconds(self.config)
         target = await self._read_series(lead, start, end, strict=strict)
@@ -974,7 +981,7 @@ class RecommendationVerifier:
             pods=pods,
         )
         observation.health = await self._collect_health(lead, pods, MeasurementWindows(start, start, start, end))
-        return self._health_gates(members, observation)
+        return self._health_gates(members, observation), observation.health
 
     async def _collect_health(
         self,

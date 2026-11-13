@@ -29,7 +29,8 @@ How an increase is sized (USER BUG 2, docs/recommendation.md):
 Limits follow ``RECOMMENDATION_LIMITS_POLICY`` (``keep`` by default): limits
 are left alone unless the change would make them invalid or unsafe, in which
 case the recommendation states the limit it requires as a structured
-:class:`LimitAdvice`.
+:class:`LimitAdvice`. :func:`planned_limit_changes` turns that advice into the
+limit edits a pull request delivers with the request change (H1).
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from greenkube.core.optimization.statistics import balanced_rightsizing_target, 
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
+    from greenkube.models.evidence import LimitChange
     from greenkube.models.workload_usage import UsageStats, WorkloadUsageSummary
 
 MIB = 1024 * 1024
@@ -462,3 +464,71 @@ def _memory_limit_advice(
             )
         ]
     return []
+
+
+def planned_limit_changes(
+    config: "Config",
+    summary: "WorkloadUsageSummary",
+    pod_summary: Optional["WorkloadUsageSummary"],
+    resource: Resource,
+    proposed_request: int,
+) -> List["LimitChange"]:
+    """Limit changes delivered with a request change of ``resource`` (H1).
+
+    Recomputed against the final proposed request (consensus may restate the
+    analyzer's value), from the same :class:`LimitAdvice` rules:
+
+    * an **increase** (reliability) carries every limit change it needs: a CPU
+      limit below the new request or throttled is raised to the advised floor
+      (or removed under ``remove_cpu``), a memory limit below the request or
+      110% of the observed maximum is raised to that floor. An increase never
+      lowers an existing limit: under ``memory_equals_request`` the memory limit
+      becomes ``max(request, 110% of the maximum)`` only when that raises it;
+    * a **decrease** carries the limits policy's own changes only
+      (``remove_cpu``, ``memory_equals_request``), so with the default ``keep``
+      a decrease leaves limits untouched;
+    * a set limit is never below the proposed request, and a memory limit is
+      never removed.
+    """
+    from greenkube.models.evidence import LimitChange
+
+    current_request = int((summary.cpu_request if resource == "cpu" else summary.memory_request) or 0)
+    if proposed_request <= 0 or current_request <= 0 or proposed_request == current_request:
+        return []
+    increase = proposed_request > current_request
+    policy = limits_policy(config)
+    stats, _ = _increase_stats(summary, pod_summary, resource) if increase else (None, [])
+    if resource == "cpu":
+        advice = _cpu_limit_advice(policy, summary, proposed_request, summary.throttling_ratio, stats)
+    else:
+        advice = _memory_limit_advice(policy, summary, proposed_request, stats)
+    current_limit = summary.cpu_limit if resource == "cpu" else summary.memory_limit
+    current_limit = int(current_limit) if current_limit else None
+    changes: List[LimitChange] = []
+    for item in advice:
+        if not increase and item.reason != "policy":
+            continue
+        if item.action == "remove":
+            if resource != "cpu" or current_limit is None:
+                continue
+            changes.append(LimitChange(resource="cpu", action="remove", current=current_limit, reason=item.reason))
+            continue
+        target = item.minimum
+        if target is None:
+            continue
+        if increase and item.action == "equal_to_request" and resource == "memory":
+            floor_stats = stats if stats is not None else summary.memory
+            peak = floor_stats.max * MEMORY_MAX_FACTOR if floor_stats is not None else 0.0
+            target = max(target, _round_up_mib(peak))
+        if target < proposed_request:
+            continue
+        if increase and current_limit is not None and target <= current_limit:
+            continue
+        if current_limit is not None and target == current_limit:
+            continue
+        changes.append(
+            LimitChange(
+                resource=resource, action="set", current=current_limit, proposed=int(target), reason=item.reason
+            )
+        )
+    return changes

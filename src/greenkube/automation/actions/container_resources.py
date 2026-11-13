@@ -1,9 +1,19 @@
-"""The ``container_resources`` action kind: per-container CPU/memory requests and limits (H0a).
+"""The ``container_resources`` action kind: per-container CPU/memory requests and limits (H0a, H1).
 
 Everything specific to ``SetContainerResources`` lives here: building actions from
 rightsizing recommendations, compiling to primitive field edits, request <= limit
 invariants, baseline coverage, the no-effective-change check, apply detection, the
 baseline-derived inverse and the pull-request section.
+
+Container resources v2 (H1):
+
+- request **increases** (reliability) become actions like decreases;
+- **limits** delivered with a request change (``evidence.limit_changes``): set, raise,
+  or remove the CPU limit; a memory limit is never removed;
+- **native sidecars and init containers** (``container_kind``) are addressed in
+  ``initContainers``;
+- every edited container keeps ``request <= limit`` (checked on the expected and the
+  rendered result).
 """
 
 from __future__ import annotations
@@ -33,11 +43,25 @@ from greenkube.automation.actions.base import (
     RiskClass,
     Support,
 )
-from greenkube.automation.actions.primitives import ListSelector, PathSegment, PrimitiveOp, SetField, format_path
-from greenkube.automation.actions.workloads import ACTION_API_VERSIONS, POD_SPEC_PATHS, WORKLOAD_API_VERSIONS
+from greenkube.automation.actions.primitives import (
+    ListSelector,
+    PathSegment,
+    PrimitiveOp,
+    RemoveField,
+    SetField,
+    format_path,
+)
+from greenkube.automation.actions.workloads import (
+    ACTION_API_VERSIONS,
+    CONTAINER_LISTS,
+    POD_SPEC_PATHS,
+    WORKLOAD_API_VERSIONS,
+)
 from greenkube.gitops.contracts import (
     ActionPlanV3,
+    ContainerKind,
     ContainerResources,
+    LimitResource,
     RendererKind,
     ResourceTarget,
     SetContainerResources,
@@ -73,8 +97,10 @@ _DECIMAL_SCALES = {
 }
 _BINARY_SCALES = {"Ki": 1, "Mi": 2, "Gi": 3, "Ti": 4, "Pi": 5, "Ei": 6}
 _MAX_KUBERNETES_QUANTITY = Fraction(2**63 - 1)
-#: Requests a GreenKube-managed Kustomize or post-renderer patch may carry.
+#: Requests and limits a GreenKube-managed Kustomize or post-renderer patch may carry.
 _PATCHABLE_REQUESTS = frozenset({"cpu", "memory"})
+#: Renderers that map container resources through Helm values (no removals, no init containers yet).
+_HELM_RENDERERS = frozenset({RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE})
 
 
 class ContainerResourcesSpec(ActionKindSpec):
@@ -103,8 +129,12 @@ class ContainerResourcesSpec(ActionKindSpec):
         names = [operation.container for operation in resource_operations]
         if len(names) != len(set(names)):
             raise ActionKindError("each container may have only one per-container rightsizing operation")
-        if any(not op.resources.requests and not op.resources.limits for op in resource_operations):
+        if any(
+            not op.resources.requests and not op.resources.limits and not op.remove_limits for op in resource_operations
+        ):
             raise ActionKindError("a rightsizing operation must set at least one resource quantity")
+        if any("memory" in op.remove_limits for op in resource_operations):
+            raise ActionKindError("GreenKube never removes a memory limit; set a higher memory limit instead")
 
     def subjects(self, operations: Sequence[TypedOperation]) -> set[str]:
         return {operation.container for operation in container_operations(operations)}
@@ -113,7 +143,7 @@ class ContainerResourcesSpec(ActionKindSpec):
         return {
             (operation.container, resource.lower())
             for operation in container_operations(operations)
-            for resource in {*operation.resources.requests, *operation.resources.limits}
+            for resource in {*operation.resources.requests, *operation.resources.limits, *operation.remove_limits}
         }
 
     def compile(self, target: ResourceTarget, operations: Sequence[TypedOperation]) -> list[PrimitiveOp]:
@@ -122,19 +152,18 @@ class ContainerResourcesSpec(ActionKindSpec):
             raise ActionKindError(f"unsupported workload kind: {target.kind}")
         primitives: list[PrimitiveOp] = []
         for operation in container_operations(operations):
+            container_path = (
+                *pod_spec_path,
+                CONTAINER_LISTS[operation.container_kind],
+                ListSelector("name", operation.container),
+                "resources",
+            )
             for section, values in (("requests", operation.resources.requests), ("limits", operation.resources.limits)):
                 for resource_name, quantity in values.items():
-                    path = format_path(
-                        (
-                            *pod_spec_path,
-                            "containers",
-                            ListSelector("name", operation.container),
-                            "resources",
-                            section,
-                            resource_name,
-                        )
-                    )
+                    path = format_path((*container_path, section, resource_name))
                     primitives.append(SetField(ref=target, path=path, value=quantity))
+            for resource_name in operation.remove_limits:
+                primitives.append(RemoveField(ref=target, path=format_path((*container_path, "limits", resource_name))))
         return primitives
 
     def validate_target(self, manifest: Mapping[str, Any], target: ResourceTarget) -> None:
@@ -149,9 +178,9 @@ class ContainerResourcesSpec(ActionKindSpec):
         operations: Sequence[TypedOperation],
     ) -> None:
         """Every changed container keeps valid quantities and requests within limits."""
-        containers = workload_containers(pod_spec(manifest, target.kind))
+        spec = pod_spec(manifest, target.kind)
         for operation in container_operations(operations):
-            container = find_container(containers, operation.container)
+            container = find_container(container_list(spec, operation.container_kind), operation.container)
             raw_resources = container.get("resources", {})
             if not isinstance(raw_resources, Mapping):
                 raise ActionInvariantError(f"container {operation.container!r} resources must be a mapping")
@@ -174,23 +203,26 @@ class ContainerResourcesSpec(ActionKindSpec):
                     )
 
     def owns_patch_field(self, kind: str, segments: Sequence[PathSegment], value: Any) -> bool:
-        field_ref = container_resource_field(kind, segments)
-        return (
-            field_ref is not None
-            and field_ref.section == "requests"
-            and field_ref.resource in _PATCHABLE_REQUESTS
-            and isinstance(value, str)
-            and bool(value)
-            and value == value.strip()
-        )
+        """CPU/memory requests and limits of named containers (``null``: a removed limit)."""
+        field_ref = container_resource_field(kind, segments, lists=frozenset(CONTAINER_LISTS.values()))
+        if field_ref is None or field_ref.resource not in _PATCHABLE_REQUESTS:
+            return False
+        if value is None:
+            return field_ref.section == "limits" and field_ref.resource == "cpu"
+        return isinstance(value, str) and bool(value) and value == value.strip()
 
     def renderer_support(self, renderer: RendererKind, operations: Sequence[TypedOperation]) -> Support:
-        if renderer is RendererKind.KUSTOMIZE:
+        if renderer in _HELM_RENDERERS:
             for operation in container_operations(operations):
-                if not operation.resources.requests:
-                    return Support.unsupported("each operation must set at least one container request")
-                if operation.resources.limits:
-                    return Support.unsupported("Kustomize v1 supports requests only; limits edits are unsupported")
+                if operation.remove_limits:
+                    return Support.unsupported(
+                        "Helm values planning cannot remove a limit yet; remove it in the chart values by hand"
+                    )
+                if operation.container_kind != "container":
+                    return Support.unsupported(
+                        "Helm values planning maps spec.containers only; sidecar and init container resources "
+                        "are unsupported"
+                    )
         return Support.supported()
 
     # -- baseline, apply detection, inverse ------------------------------------------------
@@ -240,10 +272,12 @@ class ContainerResourcesSpec(ActionKindSpec):
         seen: set[str] = set()
         for operation in resource_operations:
             requests = operation.resources.requests
-            if not requests or operation.resources.limits:
+            if not requests or operation.resources.limits or operation.remove_limits:
                 raise InverseUnsupportedError(
                     "rollback can restore only CPU and memory requests from the persisted baseline"
                 )
+            if operation.container_kind == "init":
+                raise InverseUnsupportedError("rollback cannot restore init container requests")
             if set(requests) - {"cpu", "memory"}:
                 raise InverseUnsupportedError(
                     "rollback cannot restore this resource request from the persisted baseline"
@@ -269,7 +303,9 @@ class ContainerResourcesSpec(ActionKindSpec):
             try:
                 inverse.append(
                     SetContainerResources(
-                        container=operation.container, resources=ContainerResources(requests=restored)
+                        container=operation.container,
+                        resources=ContainerResources(requests=restored),
+                        container_kind=operation.container_kind,
                     )
                 )
             except ValidationError as exc:
@@ -277,7 +313,14 @@ class ContainerResourcesSpec(ActionKindSpec):
         return inverse
 
     def supports_rollback(self, operations: Sequence[TypedOperation]) -> bool:
-        return bool(operations) and all(isinstance(operation, SetContainerResources) for operation in operations)
+        """Request-only changes of containers and native sidecars: the baseline records their requests."""
+        return bool(operations) and all(
+            isinstance(operation, SetContainerResources)
+            and not operation.resources.limits
+            and not operation.remove_limits
+            and operation.container_kind != "init"
+            for operation in operations
+        )
 
     def pr_section(self, operations: Sequence[TypedOperation], recommendation: Any = None) -> PrSection:
         del recommendation
@@ -292,6 +335,7 @@ class ContainerResourcesSpec(ActionKindSpec):
                 )
                 for name, value in values.items()
             ]
+            parts.extend(f"limits {name} removed" for name in operation.remove_limits)
             lines.append(f"{operation.container}: {', '.join(parts)}")
             # Requests then limits, each sorted by resource name: the order of the PR's Changes table.
             changes.extend(
@@ -302,10 +346,18 @@ class ContainerResourcesSpec(ActionKindSpec):
                 )
                 for name, value in sorted(values.items())
             )
+            changes.extend(
+                PrFieldChange(subject=operation.container, field=f"limits.{name}", proposed=REMOVED)
+                for name in sorted(operation.remove_limits)
+            )
         return PrSection(label=self.pr_label, title="Container resources", lines=tuple(lines), changes=tuple(changes))
 
 
 CONTAINER_RESOURCES = ContainerResourcesSpec()
+
+_LIMIT_RESOURCES: tuple[LimitResource, ...] = ("cpu", "memory")
+#: ``PrFieldChange.proposed`` of a removed limit.
+REMOVED = "removed"
 
 
 def container_operations(operations: Sequence[TypedOperation]) -> list[SetContainerResources]:
@@ -340,11 +392,15 @@ class ContainerResourceField:
     resource: str
 
 
-def container_resource_field(kind: str, segments: Sequence[PathSegment]) -> ContainerResourceField | None:
+def container_resource_field(
+    kind: str, segments: Sequence[PathSegment], *, lists: frozenset[str] = frozenset({"containers"})
+) -> ContainerResourceField | None:
     """The container resource a field path of a ``kind`` workload addresses, or ``None``.
 
     Renderers that map container resources rather than arbitrary fields (Helm values,
     Flux post-renderer patches) use this to decide which primitives they can express.
+    ``lists`` names the pod-spec container lists accepted (``spec.containers`` by default;
+    Kustomize patches also address ``initContainers``).
     """
     pod_spec_path = POD_SPEC_PATHS.get(kind)
     if pod_spec_path is None or len(segments) != len(pod_spec_path) + 5:
@@ -353,7 +409,7 @@ def container_resource_field(kind: str, segments: Sequence[PathSegment]) -> Cont
     selector, section, resource = rest[1], rest[3], rest[4]
     if (
         prefix != pod_spec_path
-        or rest[0] != "containers"
+        or rest[0] not in lists
         or not isinstance(selector, ListSelector)
         or selector.key != "name"
         or rest[2] != "resources"
@@ -377,6 +433,19 @@ def pod_spec(manifest: Mapping[str, Any], workload_kind: str) -> MutableMapping[
     if not isinstance(current, MutableMapping):
         raise ActionKindError(f"{workload_kind} pod specification must be a mapping")
     return current
+
+
+def container_list(spec: MutableMapping[str, Any], container_kind: str) -> list[MutableMapping[str, Any]]:
+    """The pod-spec list holding a container of ``container_kind`` (``initContainers`` for sidecars)."""
+    list_name = CONTAINER_LISTS.get(container_kind)
+    if list_name is None:
+        raise ActionKindError(f"unsupported container kind {container_kind!r}")
+    if list_name == "containers":
+        return workload_containers(spec)
+    values = spec.get(list_name)
+    if not isinstance(values, list) or any(not isinstance(value, MutableMapping) for value in values):
+        raise ActionKindError(f"workload target must contain an {list_name} list of mappings")
+    return values
 
 
 def workload_containers(spec: MutableMapping[str, Any]) -> list[MutableMapping[str, Any]]:
@@ -456,6 +525,20 @@ class _ContainerActionGroup:
     requests: dict[str, str] = field(default_factory=dict)
     recommendation_ids: dict[str, set[int]] = field(default_factory=lambda: defaultdict(set))
     conflicts: set[str] = field(default_factory=set)
+    #: Limit edits per resource (H1): a quantity to set, or ``None`` to remove the limit.
+    limits: dict[str, str | None] = field(default_factory=dict)
+    container_kind: ContainerKind = "container"
+
+
+@dataclass(frozen=True, slots=True)
+class _Proposal:
+    """One recommendation's request change and the limit edits delivered with it (H1)."""
+
+    resource: str
+    quantity: str
+    #: ``{resource: quantity}`` to set, ``None`` to remove.
+    limits: dict[str, str | None]
+    container_kind: ContainerKind
 
 
 @dataclass
@@ -478,8 +561,12 @@ def _memory_quantity(byte_count: int) -> str:
     return str(byte_count)
 
 
-def _resource_proposal(recommendation: Recommendation) -> tuple[str, str] | None:
-    """Return a resource quantity only when its per-container evidence agrees."""
+def _resource_proposal(recommendation: Recommendation) -> _Proposal | None:
+    """Return a resource change only when its per-container evidence agrees.
+
+    Decreases and reliability increases (H1) both qualify; limits come from
+    ``evidence.limit_changes`` and must keep ``request <= limit``.
+    """
     from greenkube.models.metrics import RecommendationType
 
     evidence = recommendation.evidence
@@ -516,7 +603,7 @@ def _resource_proposal(recommendation: Recommendation) -> tuple[str, str] | None
         or proposed is None
         or recommendation_current != current
         or evidence_proposed != proposed
-        or proposed >= current
+        or proposed == current
         or quantity is None
     ):
         return None
@@ -525,7 +612,58 @@ def _resource_proposal(recommendation: Recommendation) -> tuple[str, str] | None
         for change in evidence.changes
     ):
         return None
-    return resource, quantity
+    if proposed > current and not _bounded_increase(recommendation):
+        return None
+    limits = _limit_edits(evidence, resource, proposed)
+    if limits is None:
+        return None
+    container_kind = evidence.container_kind or "container"
+    return _Proposal(resource, quantity, limits, container_kind)
+
+
+def _bounded_increase(recommendation: Recommendation) -> bool:
+    """An increase is deliverable only when GreenKube's own analyzer sized it (H1).
+
+    The wave-3a increase bounds (pod-bounded usage, the
+    ``RIGHTSIZING_MAX_INCREASE_FACTOR`` cap, warm-up exclusion) are applied by the
+    native rightsizing analyzer only. A value chosen from another source (VPA,
+    Goldilocks, a pushed signal) under the SAFEST consensus may exceed them, so it
+    stays advisory: the consensus must have chosen GreenKube's value, backed by
+    usage samples.
+    """
+    from greenkube.core.optimization.eligibility import has_native_evidence
+
+    return has_native_evidence(recommendation)
+
+
+def _limit_edits(evidence: Any, resource: str, proposed_request: int) -> dict[str, str | None] | None:
+    """Limit edits of ``evidence.limit_changes`` for ``resource``; ``None`` when they would be unsafe.
+
+    A set limit must cover the proposed request; a memory limit is never removed. A
+    known current limit below the proposed request with no limit change fails closed:
+    the pull request would not apply (request > limit).
+    """
+    edits: dict[str, str | None] = {}
+    for change in getattr(evidence, "limit_changes", None) or []:
+        if change.resource != resource or resource in edits:
+            if change.resource == resource:
+                return None
+            continue
+        if change.action == "remove":
+            if resource != "cpu":
+                return None
+            edits[resource] = None
+        else:
+            value = change.proposed
+            if not isinstance(value, int) or isinstance(value, bool) or value < proposed_request:
+                return None
+            edits[resource] = _cpu_quantity(value) if resource == "cpu" else _memory_quantity(value)
+    if resource not in edits:
+        current = evidence.current
+        limit = current.cpu_limit_millicores if resource == "cpu" else current.memory_limit_bytes
+        if isinstance(limit, int) and limit > 0 and proposed_request > limit:
+            return None
+    return edits
 
 
 def _target_for(recommendation: Recommendation) -> tuple[ResourceTarget, str] | None:
@@ -577,16 +715,27 @@ def build_container_resource_actions(recommendations: Sequence[Recommendation]) 
         proposal = _resource_proposal(recommendation)
         if target is None or proposal is None:
             continue
-        resource, quantity = proposal
+        resource, quantity = proposal.resource, proposal.quantity
         resource_target, container_name = target
         key = (resource_target.namespace, resource_target.kind, resource_target.name)
         group = groups.setdefault(key, _ActionGroup(resource_target))
-        container_group = group.containers.setdefault(container_name, _ContainerActionGroup())
+        container_group = group.containers.get(container_name)
+        if container_group is None:
+            container_group = group.containers[container_name] = _ContainerActionGroup(
+                container_kind=proposal.container_kind
+            )
+        if container_group.container_kind != proposal.container_kind:
+            # Two scans disagree on where the container lives: never guess the pod-spec list.
+            container_group.conflicts.update(("cpu", "memory"))
+            continue
         existing = container_group.requests.get(resource)
-        if existing is not None and existing != quantity:
+        if existing is not None and (
+            existing != quantity or container_group.limits.get(resource, "") != proposal.limits.get(resource, "")
+        ):
             container_group.conflicts.add(resource)
         else:
             container_group.requests[resource] = quantity
+            container_group.limits.update(proposal.limits)
             container_group.recommendation_ids[resource].add(recommendation_id)
             seen_ids.add(recommendation_id)
 
@@ -609,8 +758,25 @@ def build_container_resource_actions(recommendations: Sequence[Recommendation]) 
             if not requests or not container_recommendations:
                 continue
             recommendation_ids.update(container_recommendations)
+            limits = {
+                resource: value
+                for resource, value in container_group.limits.items()
+                if resource in requests and value is not None
+            }
+            removals: list[LimitResource] = [
+                resource
+                for resource in _LIMIT_RESOURCES
+                if resource in requests
+                and resource in container_group.limits
+                and container_group.limits[resource] is None
+            ]
             operations.append(
-                SetContainerResources(container=container_name, resources=ContainerResources(requests=requests))
+                SetContainerResources(
+                    container=container_name,
+                    resources=ContainerResources(requests=requests, limits=limits),
+                    remove_limits=removals,
+                    container_kind=container_group.container_kind,
+                )
             )
         ordered_recommendations = sorted(recommendation_ids)
         if not ordered_recommendations or not operations:

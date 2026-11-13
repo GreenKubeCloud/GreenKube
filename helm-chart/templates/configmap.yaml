@@ -34,6 +34,8 @@ data:
   AUTOMATION_AUTO_APPROVE_ENABLED: {{ $autoApprove.enabled | default false | quote }}
   AUTOMATION_AUTO_APPROVE_MAX_RISK: {{ $autoApprove.maxRisk | default "low" | quote }}
   AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE: {{ hasKey $autoApprove "minConfidence" | ternary $autoApprove.minConfidence 0.8 | quote }}
+  # Container resources v2 (H1): request increases are auto-approved only on opt-in.
+  AUTOMATION_AUTO_APPROVE_INCREASES: {{ $autoApprove.increases | default false | quote }}
   GITOPS_PR_POLL_INTERVAL: {{ $prPollInterval | quote }}
   GITOPS_DISCOVERY_INTERVAL: {{ .Values.automation.discoveryInterval | default "5m" | quote }}
   GITOPS_BINDING_TTL: {{ .Values.automation.bindingTtl | default "30m" | quote }}

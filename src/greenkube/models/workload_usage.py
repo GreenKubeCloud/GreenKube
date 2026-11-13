@@ -169,6 +169,8 @@ class WorkloadUsageSummary:
     throttling_ratio: Optional[float] = None
     #: Why the container is believed to run a JVM (``JAVA_TOOL_OPTIONS``, ``-Xmx``, image name), None when not.
     jvm_hint: Optional[str] = None
+    #: Pod-spec list of the container (H1): ``container``, ``sidecar`` or ``init``; None when not read.
+    container_kind: Optional[str] = None
 
     @property
     def target(self) -> TargetKey:

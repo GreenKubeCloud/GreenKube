@@ -168,7 +168,8 @@
             "enabled": {"type": "boolean"},
             "maxRisk": {"type": "string", "enum": ["low", "medium", "high"]},
             "minConfidence": {"$ref": "#/definitions/ratio"},
-            "contested": {"type": "boolean", "enum": [false], "description": "Contested consensus is never auto-approved; only false is accepted."}
+            "contested": {"type": "boolean", "enum": [false], "description": "Contested consensus is never auto-approved; only false is accepted."},
+            "increases": {"type": "boolean", "description": "Also auto-approve request increases (reliability fixes that cost money, H1)."}
           }
         },
         "pullRequests": {

@@ -447,7 +447,13 @@ class K8sWorkloadReader:
                     continue
                 containers = _resource_field(pod_spec, "containers")
                 cpu, memory, container_requests = _sum_requests(containers)
-                request_values, request_values_valid = _read_container_request_values(containers)
+                # Native sidecars and classic init containers can be rightsized too (H1): their
+                # requests are recorded per container (names are unique across both lists) so
+                # their changes are detected as applied. Only regular containers enter the sums.
+                init_containers = list(_resource_field(pod_spec, "init_containers", "initContainers") or [])
+                request_values, request_values_valid = _read_container_request_values(
+                    [*(containers or []), *init_containers]
+                )
                 status = _resource_field(item, "status")
                 namespace = _resource_field(metadata, "namespace")
                 name = _resource_field(metadata, "name")

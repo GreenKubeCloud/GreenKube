@@ -71,7 +71,9 @@ from greenkube.verify.series import floor_hour, hourly_buckets, utc_hour
 from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
     MeasurementSettings,
+    ReliabilityOutcome,
     SavingsMeasurementStrategy,
+    increase_reliability,
     strategy_for,
 )
 
@@ -826,22 +828,38 @@ class ChangeMeasurementService:
         Raises :class:`MeasurementReadError` when the gates cannot be read, so
         no health check or decision is recorded from missing metrics.
         """
+        gates, _ = await self._health_and_reliability(members, start, end)
+        return gates
+
+    async def _health_and_reliability(
+        self, members: Sequence[RecommendationRecord], start: datetime, end: datetime
+    ) -> Tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
+        """Health gates per container and the reliability outcome of memory increases (H1)."""
         by_container: Dict[Optional[str], List[RecommendationRecord]] = {}
         for member in members:
             by_container.setdefault(member.container_name, []).append(member)
-        gates: List[HealthGateResult] = []
+        raw: Dict[Optional[str], List[HealthGateResult]] = {}
+        oom_restarts: Dict[Optional[str], Optional[int]] = {}
         for container, group in sorted(by_container.items(), key=lambda item: item[0] or ""):
             try:
-                results = await self.verifier.health_gates_for(group, start, end, strict=True)
+                gates, health = await self.verifier.health_check_for(group, start, end, strict=True)
             except Exception as exc:
                 raise MeasurementReadError(
                     f"health gates of {container or 'workload'} could not be evaluated: {exc}"
                 ) from exc
-            for gate in results:
+            raw[container] = list(gates)
+            oom_restarts[container] = health.oom_restart_count if health is not None else None
+        # A memory-request increase made because of OOM kills is judged on that container's kill
+        # rate (counted like its evidence), not on "any kill"; its OOM restarts leave the restart
+        # gate. Every other container keeps the strict gates (H1).
+        judged, reliability = increase_reliability(members, raw, start, end, oom_restarts)
+        gates: List[HealthGateResult] = []
+        for container in raw:
+            for gate in judged[container]:
                 if container and len(by_container) > 1:
                     gate = gate.model_copy(update={"detail": f"[{container}] {gate.detail}".strip()})
                 gates.append(gate)
-        return gates
+        return gates, reliability
 
     async def _interim_health(
         self, change: ChangeEvent, status: ChangeStatus, plan: WindowPlan, health_end: datetime, now: datetime
@@ -980,7 +998,17 @@ class ChangeMeasurementService:
             seed_parts=(change.change_id, status.sequence),
         )
         awaiting = [member for member in in_effect if _awaiting(member)]
-        gates = await self._health(awaiting, ensure_utc(plan.post.start), ensure_utc(plan.post.end)) if awaiting else []
+        gates, reliability = (
+            await self._health_and_reliability(awaiting, ensure_utc(plan.post.start), ensure_utc(plan.post.end))
+            if awaiting
+            else ([], None)
+        )
+        counterfactual_params = dict(result.counterfactual_params)
+        reasons = list(result.reasons)
+        if reliability is not None:
+            # The outcome of a reliability increase (H1); its cost stays in the estimates, as a cost.
+            counterfactual_params["reliability"] = reliability.as_dict()
+            reasons.append(f"reliability ({reliability.outcome.value}): {reliability.reason}")
         estimates = {item.quantity: item for item in result.estimates}
         allocations = []
         for share in allocate(in_effect, result.estimates):
@@ -1010,7 +1038,7 @@ class ChangeMeasurementService:
             windows=plan,
             load_driver=load.info if load is not None else None,
             counterfactual_params=_with_unavailable_drivers(
-                result.counterfactual_params, snapshot.collector_versions.get(UNAVAILABLE_DRIVERS_KEY), collected
+                counterfactual_params, snapshot.collector_versions.get(UNAVAILABLE_DRIVERS_KEY), collected
             ),
             estimates=result.estimates,
             confounders=confounders,
@@ -1018,7 +1046,7 @@ class ChangeMeasurementService:
             health=gates,
             allocations=allocations,
             outcome=result.outcome,
-            reasons=result.reasons,
+            reasons=reasons,
             supersedes_measurement_id=previous[-1].measurement_id if previous else None,
             decided_at=now,
         ).with_evidence_digest()

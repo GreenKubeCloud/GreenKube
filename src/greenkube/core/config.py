@@ -525,6 +525,9 @@ class Config(BaseSettings):
     AUTOMATION_AUTO_APPROVE_MAX_RISK: str = "low"
     AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE: float = Field(0.8, ge=0.0, le=1.0)
     AUTOMATION_AUTO_APPROVE_CONTESTED: bool = False
+    # Container resources v2 (H1): a request increase (reliability fix, costs money)
+    # is auto-approved only when this is true; off by default.
+    AUTOMATION_AUTO_APPROVE_INCREASES: bool = False
     # Deprecated (0.3.x, removed in 0.5): automation is always on. An explicit
     # AUTOMATION_ENABLED=false or AUTOMATION_MODE=disabled pauses delivery.
     AUTOMATION_ENABLED: Optional[bool] = None
