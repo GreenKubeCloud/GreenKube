@@ -334,3 +334,31 @@ def _plain(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_plain(item) for item in value]
     return value
+
+
+def strategic_merge_patch(primitives: Sequence[Any]) -> dict[str, Any]:
+    """The field edits among ``primitives`` as one patch document (manual mode, H9).
+
+    ``[name=api]`` selectors become list entries keyed by ``name`` (strategic merge), a
+    removed field becomes ``null``. Create and delete primitives are not field edits and
+    are left out.
+    """
+    patch: dict[str, Any] = {}
+    for operation in field_operations(primitives):
+        segments = operation.segments
+        node: Any = patch
+        for index, segment in enumerate(segments[:-1]):
+            following = segments[index + 1]
+            if isinstance(segment, ListSelector):
+                entry = next((item for item in node if item.get(segment.key) == segment.value), None)
+                if entry is None:
+                    entry = {segment.key: segment.value}
+                    node.append(entry)
+                node = entry
+            else:
+                node = node.setdefault(segment, [] if isinstance(following, ListSelector) else {})
+        leaf = segments[-1]
+        if isinstance(leaf, ListSelector):
+            raise PrimitiveApplyError("a field path must end with a field name, not a list selector")
+        node[leaf] = operation.value if isinstance(operation, SetField) else None
+    return patch

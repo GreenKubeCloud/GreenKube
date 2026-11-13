@@ -73,3 +73,39 @@ def test_no_rate_is_inconclusive_and_a_severe_confounder_contaminates() -> None:
     contaminated = _estimate(projected=50.0, confounders=[severe])
     assert contaminated.outcome is ChangeOutcome.CONTAMINATED
     assert contaminated.reasons == ["the node pool was replaced"]
+
+
+class _Changes:
+    async def spec_observations(self, namespace, kind, name, since=None):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_a_deletion_marked_applied_by_hand_is_recorded_against_the_deleted_resource() -> None:
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from greenkube.models.metrics import RecommendationRecord, RecommendationType
+    from greenkube.verify.service import ChangeMeasurementService
+
+    service = ChangeMeasurementService(
+        cast(Any, SimpleNamespace()),
+        None,
+        cast(Any, _Changes()),
+        verifier=cast(Any, object()),
+        config=SimpleNamespace(),
+    )
+    record = RecommendationRecord(
+        id=3,
+        pod_name="old-lb",
+        namespace="shop",
+        type=RecommendationType.ORPHANED_LOAD_BALANCER,
+        description="x",
+        scope="cluster",
+        application_method="manual",
+    )
+    change = await service._build_change("chg-1", [record], snapshot=None, plan=None, now=hour_now())
+
+    assert change.target.key == ("shop", "Service", "old-lb")
+    assert change.action_kind == "delete_resource"
+    assert change.application_method.value == "manual"
