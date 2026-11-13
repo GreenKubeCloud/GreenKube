@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: web
+  namespace: argocd
+  uid: 7b0f6f8e-3c2a-4d7e-9a51-0d1f2b3c4d5e
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: web
+  sources:
+    - repoURL: registry-1.docker.io/bitnamicharts
+      chart: nginx
+      targetRevision: 18.3.*
+      helm:
+        releaseName: web
+        valueFiles:
+          - $values/environments/prod/nginx.yaml
+    - repoURL: https://github.com/acme/env-config.git
+      targetRevision: main
+      ref: values
+status:
+  sync:
+    status: Synced
+    revisions:
+      - 18.3.1
+      - cccccccccccccccccccccccccccccccccccccccc
+  resources:
+    - version: v1
+      kind: Service
+      namespace: web
+      name: web-nginx
+    - group: apps
+      version: v1
+      kind: Deployment
+      namespace: web
+      name: web-nginx

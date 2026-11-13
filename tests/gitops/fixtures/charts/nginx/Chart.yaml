@@ -1,0 +1,17 @@
+# Recorded, trimmed copy of a Bitnami-style chart (oci://registry-1.docker.io/bitnamicharts/nginx):
+# a vendored "common" library dependency, resourcesPreset fallback and a metrics sidecar.
+annotations:
+  category: Infrastructure
+  licenses: Apache-2.0
+apiVersion: v2
+appVersion: 1.27.3
+dependencies:
+  - name: common
+    repository: oci://registry-1.docker.io/bitnamicharts
+    tags:
+      - bitnami-common
+    version: 2.x.x
+description: NGINX Open Source is a web server that can be also used as a reverse proxy.
+name: nginx
+type: application
+version: 18.3.1

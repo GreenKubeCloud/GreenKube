@@ -127,4 +127,5 @@ def test_helm_values_needs_a_mapping_for_the_container() -> None:
 
     assert unmapped.state == "needs_mapping"
     assert "'api'" in (unmapped.reason or "")
-    assert other_container.state == "unsupported"
+    assert other_container.state == "needs_mapping"
+    assert "'worker'" in (other_container.reason or "")

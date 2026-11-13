@@ -882,7 +882,7 @@ def test_flux_helm_release_does_not_hash_or_truncate_flux_default_release_names(
     assert len(expected_name) > 53
 
 
-def test_flux_helm_release_blocks_remote_chart_ref_with_a_precise_reason():
+def test_flux_helm_release_resolves_an_oci_chart_ref_for_remote_rendering():
     release = _fixture("flux-helmrelease.yaml")
     release["spec"].pop("chart")
     release["spec"]["chartRef"] = {
@@ -894,8 +894,10 @@ def test_flux_helm_release_blocks_remote_chart_ref_with_a_precise_reason():
     oci_repository = {
         "kind": "OCIRepository",
         "metadata": {"name": "payments-chart", "namespace": "flux-system"},
-        "spec": {"url": "oci://registry.example.test/payments"},
+        "spec": {"url": "oci://registry.example.test/payments", "ref": {"semver": "1.x"}},
+        "status": {"artifact": {"revision": "1.4.2@sha256:" + "d" * 64}},
     }
+    release["status"] = {"history": [{"chartVersion": "1.4.2", "status": "deployed"}]}
 
     source = discover_flux_helm_release(
         release,
@@ -910,8 +912,16 @@ def test_flux_helm_release_blocks_remote_chart_ref_with_a_precise_reason():
         },
     )[0]
 
-    assert source.status is BindingStatus.BLOCKED
-    assert source.reason == "remote-chart-not-in-snapshot"
+    assert source.status is BindingStatus.RESOLVED
+    assert source.reason is None
+    assert source.renderer_config["chart"] == {
+        "name": None,
+        "version": None,
+        "repo_url": "oci://registry.example.test/payments",
+        "source_kind": "OCIRepository",
+        "resolved_version": "1.4.2",
+        "digest": "sha256:" + "d" * 64,
+    }
     assert source.evidence["chart_ref"] == {
         "kind": "OCIRepository",
         "name": "payments-chart",

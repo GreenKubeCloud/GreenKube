@@ -1,0 +1,20 @@
+replicaCount: 1
+image:
+  registry: docker.io
+  repository: bitnami/nginx
+  tag: 1.27.3-debian-12-r5
+## Bitnami charts render a preset when resources is empty.
+resourcesPreset: "nano"
+resources: {}
+podAnnotations: {}
+metrics:
+  enabled: false
+  image:
+    registry: docker.io
+    repository: bitnami/nginx-exporter
+    tag: 1.4.0-debian-12-r2
+  resourcesPreset: "nano"
+  resources: {}
+staticSite:
+  sync:
+    resources: {}
