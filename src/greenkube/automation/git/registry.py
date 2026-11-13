@@ -53,6 +53,17 @@ logger = logging.getLogger(__name__)
 #: An unchanged provider check is written again after this many seconds (``last_checked_at``).
 PROVIDER_CHECK_REFRESH_SECONDS = 300.0
 
+#: Best-effort features: a 403 on these calls never marks the provider in error. The
+#: provider stays ``verified`` and the refused feature is recorded as degraded (for
+#: example a token that may open pull requests but not label them or comment).
+FEATURE_PULL_REQUEST_METADATA = "pull_request_metadata"
+FEATURE_COMMIT_STATUS = "commit_status"
+FEATURE_COMMENTS = "comments"
+FEATURE_CODEOWNERS = "codeowners"
+BEST_EFFORT_FEATURES = frozenset(
+    {FEATURE_PULL_REQUEST_METADATA, FEATURE_COMMIT_STATUS, FEATURE_COMMENTS, FEATURE_CODEOWNERS}
+)
+
 
 class GitProviderRegistryError(GitProviderError):
     """Base class for registry configuration errors."""
@@ -335,17 +346,20 @@ class _AuthorizedGitProvider(GitProvider):
         self,
         repository: GitRepository,
         operation: Callable[[], Awaitable[_RESULT]],
+        *,
+        feature: str | None = None,
     ) -> _RESULT:
+        """Run one provider call; ``feature`` names a best-effort call (labels, comments, ...)."""
         await self._authorize(repository)
         try:
             result = await operation()
         except GitProviderError as error:
             if self._checks is not None:
-                await self._checks.failed(error)
+                await self._checks.failed(error, feature=feature)
             raise _redact_provider_error(error, self._provider.token) from None
         if self._checks is not None:
             # Any successful authenticated call (archive fetch, PR polling, ...) proves the credential.
-            await self._checks.succeeded()
+            await self._checks.succeeded(feature=feature)
         return result
 
     async def get_default_branch(self, repo: GitRepository) -> str:
@@ -456,6 +470,7 @@ class _AuthorizedGitProvider(GitProvider):
             lambda: self._provider.add_pull_request_metadata(
                 repo, pull_request, labels=labels, reviewers=reviewers, team_reviewers=team_reviewers
             ),
+            feature=FEATURE_PULL_REQUEST_METADATA,
         )
 
     async def set_commit_status(
@@ -473,6 +488,7 @@ class _AuthorizedGitProvider(GitProvider):
             lambda: self._provider.set_commit_status(
                 repo, sha, state=state, context=context, description=description, target_url=target_url
             ),
+            feature=FEATURE_COMMIT_STATUS,
         )
 
     async def upsert_pull_request_comment(
@@ -486,13 +502,18 @@ class _AuthorizedGitProvider(GitProvider):
         return await self._call(
             repo,
             lambda: self._provider.upsert_pull_request_comment(repo, number, marker=marker, body=body),
+            feature=FEATURE_COMMENTS,
         )
 
     async def read_codeowners(self, repo: GitRepository, revision: str):
-        return await self._call(repo, lambda: self._provider.read_codeowners(repo, revision))
+        return await self._call(
+            repo, lambda: self._provider.read_codeowners(repo, revision), feature=FEATURE_CODEOWNERS
+        )
 
     async def codeowner_reviewers(self, repo: GitRepository, owners: Sequence[str]) -> tuple[list[str], list[str]]:
-        return await self._call(repo, lambda: self._provider.codeowner_reviewers(repo, owners))
+        return await self._call(
+            repo, lambda: self._provider.codeowner_reviewers(repo, owners), feature=FEATURE_CODEOWNERS
+        )
 
     async def test_connection(self) -> bool:
         try:
@@ -596,6 +617,7 @@ class ProviderCheckRecorder:
         self._refresh_seconds = refresh_seconds
         self._clock = clock
         self._last: dict[str, tuple[tuple[str, str | None], float]] = {}
+        self._features: dict[tuple[str, str], tuple[str | None, float]] = {}
 
     def bind(self, provider_id: str) -> "_BoundProviderChecks":
         return _BoundProviderChecks(self, provider_id)
@@ -616,18 +638,42 @@ class ProviderCheckRecorder:
             return
         self._last[provider_id] = (state, now)
 
+    async def note_feature(self, provider_id: str, feature: str, error_code: str | None) -> None:
+        """Record (or clear, with ``None``) a degraded best-effort feature; written on change only."""
+        key = (provider_id, feature)
+        now = self._clock()
+        last = self._features.get(key)
+        if last is not None and last[0] == error_code and now - last[1] < self._refresh_seconds:
+            return
+        note = getattr(self._repository, "record_provider_feature_note", None)
+        if note is None:
+            return
+        try:
+            await note(provider_id, feature, error_code)
+        except Exception as exc:
+            logger.warning("Could not record Git provider %s feature %s state: %s", provider_id, feature, exc)
+            return
+        self._features[key] = (error_code, now)
+
 
 @dataclass(frozen=True, slots=True)
 class _BoundProviderChecks:
     recorder: ProviderCheckRecorder
     provider_id: str
 
-    async def succeeded(self) -> None:
+    async def succeeded(self, *, feature: str | None = None) -> None:
         await self.recorder.record(self.provider_id, "verified")
+        if feature is not None:
+            await self.recorder.note_feature(self.provider_id, feature, None)
 
-    async def failed(self, error: GitProviderError) -> None:
+    async def failed(self, error: GitProviderError, *, feature: str | None = None) -> None:
         if isinstance(error, GitProviderTransientError):
             return
         code = {401: "auth_failed", 403: "permission_denied"}.get(error.status_code or 0)
+        if code == "permission_denied" and feature is not None and feature in BEST_EFFORT_FEATURES:
+            # The token works but may not use this optional feature (e.g. no issues
+            # permission for labels): keep the provider verified, note the feature.
+            await self.recorder.note_feature(self.provider_id, feature, code)
+            return
         if code is not None:
             await self.recorder.record(self.provider_id, "error", error_code=code)

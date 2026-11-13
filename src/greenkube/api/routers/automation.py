@@ -7,8 +7,9 @@ use ``/automation/plans`` and the recommendations' ``eligibility`` field.
 
 import json
 import os
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, List
+from typing import Any, List, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -134,6 +135,14 @@ async def automation_status(
     except Exception:
         configured_providers = []
     token_configured = False
+    degraded: dict[str, dict[str, str]] = {}
+    lister = getattr(repository, "list_provider_feature_notes", None)
+    if callable(lister):
+        try:
+            for note in await cast(Callable[[], Awaitable[list[dict[str, Any]]]], lister)():
+                degraded.setdefault(note["provider_id"], {})[note["feature"]] = note["error_code"]
+        except Exception:
+            degraded = {}
     for provider in configured_providers:
         if provider.id == "unresolved":
             continue
@@ -149,6 +158,9 @@ async def automation_status(
                 "capabilities": dict(provider.capabilities),
                 "last_checked_at": _iso_utc(provider.last_checked_at),
                 "last_error_code": provider.last_error_code,
+                # Best-effort features the token may not use (labels, comments, ...): the
+                # provider stays verified; these are notes, not errors.
+                "degraded_features": degraded.get(provider.id, {}),
                 "api_host": _safe_host(provider.api_base_url),
             }
         )
