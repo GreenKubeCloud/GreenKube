@@ -50,7 +50,8 @@ data:
   GITOPS_PR_COMMIT_STATUS: {{ hasKey $pr "commitStatus" | ternary $pr.commitStatus true | quote }}
   GITOPS_PR_LIFECYCLE_COMMENTS: {{ hasKey $pr "lifecycleComments" | ternary $pr.lifecycleComments true | quote }}
   GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS: {{ $pr.lifecycleLookbackDays | default 30 | quote }}
-  GREENKUBE_EXTERNAL_URL: {{ .Values.config.externalUrl | default "" | trimSuffix "/" | quote }}
+  # config.externalUrl, else derived from ingress.* or httpRoute.* (N6).
+  GREENKUBE_EXTERNAL_URL: {{ include "greenkube.externalUrl" . | quote }}
   GITOPS_RENDERER_URL: {{ printf "http://%s:%v" (include "greenkube.rendererName" .) (int $v.renderer.servicePort) | quote }}
   GITOPS_RENDERER_EGRESS_FIREWALL: {{ ($v.renderer.egressFirewall | default dict).enabled | default false | quote }}
   GITOPS_SECRET_MOUNT: "/etc/greenkube/git-providers"

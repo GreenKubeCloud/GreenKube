@@ -132,6 +132,23 @@ Standby replicas report their leader-only loops as `standby`, which counts as he
 
 **Chart alerts.** With `monitoring.prometheusRule.enabled`, the chart's PrometheusRule also installs `GreenKubeControllerLoopFailing`, `GreenKubeAutomationLoopStale` and `GreenKubeNoActiveController` as above (group `greenkube.controller`; `monitoring.prometheusRule.controllerAlerts: false` leaves them out). They read the controller metrics endpoint, so the chart renders them only together with the controller ServiceMonitor (`monitoring.serviceMonitor.enabled` and `collector.metricsPort` > 0).
 
+### Chart alerts
+
+With the controller loop alerts, the PrometheusRule installs the loop health group `greenkube.loop` (roadmap N7). Every expression reads metrics the controller already exports; thresholds are Helm values under `monitoring.prometheusRule.thresholds`, and `.github/scripts/promtool-check.sh` unit-tests the rules with `promtool` (`helm-chart/tests/promtool/`).
+
+| Alert | Expression (simplified) | Meaning |
+| --- | --- | --- |
+| `GreenKubeCollectionLagging` (warning, 15 min) | `greenkube_collection_watermark_lag_seconds{source}` × `greenkube_controller_leader` > `collectionLagSeconds` (1800) | The leader's collection watermark fell behind; a standby's frozen value is ignored. |
+| `GreenKubeRecommendationScanFailing` (warning, 15 min) | failed `greenkube_optimization_runs_total` in the last hour, unless one succeeded | Every scan of the last hour failed; the inbox is not refreshed. |
+| `GreenKubeRecommendationSourceFailing` (warning, 1 h) | `increase(greenkube_optimization_analyzer_failures_total[2h])` by `source` > 0 | One source keeps failing; its signals miss the consensus. |
+| `GreenKubeRecommendationScanStale` (warning, 15 min) | `time() - greenkube_last_successful_optimization_run_timestamp_seconds` > `recommendationScanStaleSeconds` (10800) | No successful scan for 3 hours; silent before the first success. |
+| `GreenKubeMeasurementStalled` (warning, 10 min) | `time() - greenkube_loop_last_success_timestamp_seconds{loop="recommendation-lifecycle"}` > `measurementStaleSeconds` (1800) | Apply detection, verification and change measurement are not advancing, so the measurement backlog grows. |
+| `GreenKubeLedgerChainVerificationFailed` (critical, group `greenkube.ledger`) | `increase(greenkube_ledger_chain_verification_failures_total[1h])` > 0, or a counter series that first appears above zero | A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted, export it and compare it with your last export before anything else writes to it. |
+
+The code exports no gauge of pending measurements yet, so the measurement backlog is alerted through the loop that drains it.
+
+The ledger alert sits in its own group, `greenkube.ledger`, rendered whenever `monitoring.serviceMonitor.enabled` is set, even with `controllerAlerts: false` or `controller.metricsPort: 0`, because the hash-chain verification may run in the API as well as in the controller.
+
 ## Collection telemetry
 
 The metric collection job publishes, on the control-loop registry:

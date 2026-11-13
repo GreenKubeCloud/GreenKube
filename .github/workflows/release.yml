@@ -2,9 +2,15 @@ name: Release — Build, Publish & GitHub Release
 
 # Triggered when a semver tag is pushed (e.g. v0.3.0).
 # 1. Runs the full test suite.
-# 2. Builds and pushes Docker image tagged with the version + "latest".
-# 3. Packages and publishes the Helm chart to GitHub Pages.
-# 4. Creates a GitHub Release with the changelog for this version.
+# 2. Builds and pushes Docker image tagged with the version + "latest", then
+#    signs it with cosign (keyless, GitHub OIDC), attaches a syft SPDX SBOM as
+#    a signed attestation and publishes SLSA build provenance (O6).
+# 3. Packages and publishes the Helm chart to GitHub Pages, with provenance.
+# 4. Creates a GitHub Release with the changelog for this version, the SBOM
+#    and the signed chart package.
+#
+# Every action is pinned by commit SHA (Dependabot keeps the pins current).
+# Verify a release: see SECURITY.md "Verifying releases".
 
 on:
   push:
@@ -13,6 +19,10 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  IMAGE: greenkube/greenkube
+
+permissions:
+  contents: read
 
 jobs:
   # ── Gate: run the full test suite before building anything ──
@@ -37,16 +47,16 @@ jobs:
     env:
       GREENKUBE_TEST_POSTGRES_DSN: postgresql://greenkube:greenkube_password@localhost:5432/greenkube_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
 
@@ -62,10 +72,18 @@ jobs:
         run: uv run pyrefly check
 
       - name: Test with coverage
-        run: uv run pytest --cov=greenkube --cov-report=term-missing --cov-report=xml
+        # shell: bash runs with -o pipefail, so a failing pytest (or coverage
+        # gate) fails this step even though its output is piped through tee.
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest --cov=greenkube --cov-report=term-missing --cov-report=xml -rs | tee pytest.log
+
+      - name: Check that the PostgreSQL tests ran
+        run: .github/scripts/check-postgres-ran.sh pytest.log
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: '3.17.3'
 
@@ -86,10 +104,10 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"
@@ -109,10 +127,18 @@ jobs:
     name: Docker Build & Push
     runs-on: ubuntu-latest
     needs: [test, frontend-test]
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # Keyless signing (cosign) and GitHub artifact attestations.
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.version.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -130,13 +156,13 @@ jobs:
           fi
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -151,7 +177,8 @@ jobs:
           docker run --rm greenkube/greenkube:release-smoke --help
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        id: build
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -165,6 +192,47 @@ jobs:
             APT_CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # BuildKit provenance and SBOM attestations in the image index.
+          provenance: mode=max
+          sbom: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Sign the image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Generate the SBOM with syft
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: greenkube-${{ steps.version.outputs.version }}.spdx.json
+          artifact-name: greenkube-${{ steps.version.outputs.version }}.spdx.json
+          upload-release-assets: false
+
+      - name: Attach the SBOM as a signed attestation
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SBOM: greenkube-${{ steps.version.outputs.version }}.spdx.json
+        run: cosign attest --yes --type spdxjson --predicate "${SBOM}" "${IMAGE}@${DIGEST}"
+
+      - name: Publish SLSA build provenance for the image
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: index.docker.io/${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify the signature
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
 
   # ── Package and publish Helm chart to GitHub Pages ──
   publish-helm-chart:
@@ -173,14 +241,16 @@ jobs:
     needs: build-and-push
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: '3.17.3'
 
@@ -193,7 +263,7 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14"
 
@@ -209,6 +279,27 @@ jobs:
           cp README.md helm-chart/README.md
           mkdir -p ./charts-packaged
           helm package ./helm-chart --destination ./charts-packaged
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Sign the chart package (keyless)
+        run: |
+          for chart in charts-packaged/*.tgz; do
+            cosign sign-blob --yes --bundle "${chart}.sigstore.json" "${chart}"
+          done
+
+      - name: Publish SLSA build provenance for the chart package
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: charts-packaged/*.tgz
+
+      - name: Keep the signed chart package for the GitHub Release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: helm-chart
+          path: charts-packaged/
+          if-no-files-found: error
 
       - name: Publish to GitHub Pages
         env:
@@ -227,6 +318,7 @@ jobs:
 
           mkdir -p /tmp/gh-pages/
           cp -r charts-packaged/*.tgz /tmp/gh-pages/
+          cp -r charts-packaged/*.tgz.sigstore.json /tmp/gh-pages/
           # Copy Artifact Hub repo metadata (must sit next to index.yaml)
           cp artifacthub-repo.yml /tmp/gh-pages/artifacthub-repo.yml
           # Keep the GitHub Pages site in sync with the latest version:
@@ -242,7 +334,7 @@ jobs:
             helm repo index . --url "https://GreenKubeCloud.github.io/GreenKube"
           fi
 
-          git add -f *.tgz
+          git add -f ./*.tgz ./*.tgz.sigstore.json
           git add index.yaml
           git add artifacthub-repo.yml
           git add README.md CHANGELOG.md docs assets
@@ -258,16 +350,22 @@ jobs:
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: [build-and-push, publish-helm-chart]
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the SBOM and the signed chart package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release-assets
+          merge-multiple: true
 
       - name: Extract changelog for this version
         id: changelog
@@ -276,12 +374,14 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           CHANGELOG=$(sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG.md)
           # Use EOF delimiter for multiline output
-          echo "body<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$CHANGELOG" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "body<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: "GreenKube v${{ steps.version.outputs.version }}"
           body: |
@@ -291,7 +391,7 @@ jobs:
 
             ---
 
-            **Docker:** `docker pull greenkube/greenkube:${{ steps.version.outputs.version }}`
+            **Docker:** `docker pull greenkube/greenkube:${{ steps.version.outputs.version }}` (digest `${{ needs.build-and-push.outputs.digest }}`)
 
             **Helm:**
             ```bash
@@ -299,5 +399,12 @@ jobs:
             helm repo update
             helm install greenkube greenkube/greenkube -n greenkube --create-namespace
             ```
+
+            **Supply chain:** the image is signed with cosign (keyless) and carries an SPDX SBOM attestation and SLSA build provenance; the chart package ships with its Sigstore bundle. See [Verifying releases](https://github.com/${{ github.repository }}/blob/main/SECURITY.md#verifying-releases).
+          files: |
+            release-assets/*.spdx.json
+            release-assets/*.tgz
+            release-assets/*.tgz.sigstore.json
+          fail_on_unmatched_files: true
           draft: false
           prerelease: false

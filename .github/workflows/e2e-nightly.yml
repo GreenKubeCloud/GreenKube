@@ -1,0 +1,121 @@
+name: E2E — Loop on Minikube
+
+# The end-to-end loop (roadmap O1) on a fresh Minikube cluster: hack/e2e
+# builds the image from this commit, installs GreenKube with the quickstart
+# values next to Argo CD, Flux, Gitea and kube-prometheus-stack, then drives a
+# sample workload through recommendation -> plan -> PR -> merge -> sync ->
+# apply -> measurement, through Argo CD and then Flux. The evidence of every
+# step (steps.jsonl, API responses) and cluster diagnostics are uploaded as
+# the "e2e-evidence" artifact, whatever the outcome.
+#
+# Nightly, on demand, and on pull requests that touch delivery or verification.
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+    inputs:
+      flux:
+        description: Also run the Flux variant
+        type: boolean
+        default: true
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - 'src/greenkube/automation/**'
+      - 'src/greenkube/gitops/**'
+      - 'src/greenkube/verify/**'
+      - 'hack/e2e/**'
+      - 'docs/examples/quickstart/**'
+      - '.github/e2e/**'
+      - '.github/workflows/e2e-nightly.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  loop:
+    name: End-to-end loop (Argo CD + Flux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      E2E_KUBE_CONTEXT: minikube
+      E2E_FLUX: ${{ (github.event_name != 'workflow_dispatch' || inputs.flux) && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Outside the checkout, so the evidence never enters the image build context.
+      - name: Choose the evidence directory
+        run: echo "E2E_STATE_DIR=${RUNNER_TEMP}/greenkube-e2e" >>"${GITHUB_ENV}"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: '3.17.3'
+
+      - name: Start Minikube
+        uses: medyagh/setup-minikube@e9e035a86bbc3caea26a450bd4dbf9d0c453682e # v0.0.21
+        with:
+          minikube-version: 1.37.0
+          kubernetes-version: v1.33.1
+          driver: docker
+          container-runtime: docker
+          cpus: max
+          memory: max
+
+      - name: Install Prometheus, Argo CD, Flux and Gitea
+        run: .github/e2e/bootstrap-minikube.sh
+
+      - name: Run the loop (make e2e)
+        run: make e2e
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p "${E2E_STATE_DIR}/evidence/cluster"
+          cd "${E2E_STATE_DIR}/evidence/cluster"
+          kubectl get nodes -o wide >nodes.txt 2>&1 || true
+          kubectl get pods -A -o wide >pods.txt 2>&1 || true
+          kubectl get events -A --sort-by=.lastTimestamp >events.txt 2>&1 || true
+          kubectl -n argocd get applications -o yaml >argocd-applications.yaml 2>&1 || true
+          kubectl -n flux-system get gitrepositories,kustomizations -o yaml >flux.yaml 2>&1 || true
+          kubectl -n greenkube-e2e-apps get deploy -o yaml >sample-apps.yaml 2>&1 || true
+          for pod in $(kubectl -n greenkube get pods -o name 2>/dev/null); do
+            name="${pod#pod/}"
+            kubectl -n greenkube logs "${pod}" --all-containers --timestamps >"greenkube-${name}.log" 2>&1 || true
+            kubectl -n greenkube logs "${pod}" --all-containers --timestamps --previous >"greenkube-${name}.previous.log" 2>/dev/null || true
+          done
+          # Never upload credentials: drop anything that looks like a token file.
+          find "${E2E_STATE_DIR}" -name '*token*' -delete || true
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-evidence
+          path: ${{ runner.temp }}/greenkube-e2e/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Summarize the steps
+        if: always()
+        run: |
+          steps="${E2E_STATE_DIR}/evidence/steps.jsonl"
+          {
+            echo "## End-to-end loop"
+            echo
+            if [[ -s "${steps}" ]]; then
+              echo "| Step | Status | Detail |"
+              echo "| --- | --- | --- |"
+              jq -r '"| \(.step) | \(.status) | \(.detail | gsub("\\|"; "/") | .[0:160]) |"' "${steps}"
+            else
+              echo "No step was recorded."
+            fi
+          } >>"${GITHUB_STEP_SUMMARY}"

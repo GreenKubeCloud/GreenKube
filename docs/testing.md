@@ -38,7 +38,17 @@ PostgreSQL tests run when `GREENKUBE_TEST_POSTGRES_DSN` is set. Each test create
 GreenKube with `DB_SCHEMA`, and drops that schema after the test. This keeps tests isolated without needing to create or
 drop whole databases.
 
-For local development, start the bundled ephemeral PostgreSQL container:
+`make test-pg` does it in one command (roadmap O8): it starts the throwaway PostgreSQL of `docker-compose.test.yml`,
+runs pytest with `GREENKUBE_TEST_POSTGRES_DSN` pointing at it, fails if any PostgreSQL test was skipped, and removes the
+container. `TEST_PG_PORT` changes the host port (default `5432`), `TESTS` the test paths (default `tests`),
+`PYTEST_ARGS` the flags, and `TEST_PG_KEEP=1` keeps the container:
+
+```bash
+make test-pg
+make test-pg TEST_PG_PORT=55432 TESTS="tests/storage tests/integration tests/api"
+```
+
+To drive it by hand, start the bundled ephemeral PostgreSQL container:
 
 ```bash
 docker compose -f docker-compose.test.yml up -d postgres-test
@@ -47,7 +57,8 @@ pytest tests/integration/test_real_database_repositories.py
 docker compose -f docker-compose.test.yml down -v
 ```
 
-The compose service uses the official `postgres:18.0-alpine3.22` image, exposes port `5432`, and stores data on `tmpfs`, so the
+The compose service uses the official `postgres:18.0-alpine3.22` image, exposes port `${GREENKUBE_TEST_PG_PORT:-5432}`, and stores data on `tmpfs`
+(`/var/lib/postgresql`, the data root of the PostgreSQL 18 images), so the
 database is disposable and starts cleanly for local test sessions.
 
 ## CI/CD
@@ -58,9 +69,19 @@ The main GitHub Actions CI job starts a PostgreSQL service container and exports
 GREENKUBE_TEST_POSTGRES_DSN=postgresql://greenkube:greenkube_password@localhost:5432/greenkube_test
 ```
 
-The regular `pytest --cov=greenkube ...` command then runs both SQLite and PostgreSQL variants of the contract tests.
+The regular `pytest --cov=greenkube ...` command then runs both SQLite and PostgreSQL variants of the contract tests. The job runs pytest with
+`-rs` and `.github/scripts/check-postgres-ran.sh` fails it when any test was skipped for a missing
+`GREENKUBE_TEST_POSTGRES_DSN`, so PostgreSQL coverage cannot silently disappear (O8).
 Because every PostgreSQL test uses its own schema, tests can be added without coupling their data setup to global CI
 database state.
+
+The chart jobs run `helm lint`, `helm unittest` and `.github/scripts/promtool-check.sh` (the PrometheusRule alerts
+unit-tested with `promtool`). The `psa-restricted` job creates a kind cluster and runs
+`.github/scripts/psa-restricted-check.sh`: several renders of the chart go through `kubectl apply --dry-run=server` in a
+namespace that enforces Pod Security "restricted", and any "would violate PodSecurity" warning fails the job. Run it
+locally against any disposable cluster with `PSA_KUBE_CONTEXT=<context> .github/scripts/psa-restricted-check.sh`
+(contexts named `kind-*` need no variable). The `actionlint` job checks the workflows; every action is pinned by
+commit SHA.
 
 ## End-to-end loop on a live cluster
 
@@ -74,3 +95,13 @@ request, merge, GitOps sync, apply detection and measurement. The scripts live i
 and that the sample repository and GitOps objects agree. `tests/e2e/test_harness_safety.py` also always runs: with
 stub `kubectl`, `helm` and `curl` binaries, it checks that the harness scripts refuse any kubectl context other than
 `E2E_KUBE_CONTEXT` and never update or delete objects without the harness's ownership marker.
+
+### Nightly in CI
+
+`.github/workflows/e2e-nightly.yml` runs `make e2e` every night, on demand (`workflow_dispatch`, with an option to
+skip the Flux variant) and on pull requests that touch `automation/`, `gitops/`, `verify/`, `hack/e2e/` or the
+quickstart assets. `.github/e2e/bootstrap-minikube.sh` first installs the prerequisites on a fresh Minikube at pinned
+versions (metrics-server, kube-prometheus-stack with 30-second scrapes, Argo CD, Flux, Gitea with an admin user
+`greenkube` and an API token). The evidence directory (`steps.jsonl` and the saved API responses), pod logs, events
+and the GitOps objects are uploaded as the `e2e-evidence` artifact on every run, and the job summary lists each step.
+The bootstrap script refuses to run outside GitHub Actions unless `E2E_BOOTSTRAP_ALLOW=1`.

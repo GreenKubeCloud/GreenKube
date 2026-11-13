@@ -95,5 +95,88 @@ spec:
           annotations:
             summary: No GreenKube controller holds the leader Lease
             description: Collection, scans, apply detection, measurement and automation run only on the leader controller; none is running or scraped.
+    {{- $thresholds := .Values.monitoring.prometheusRule.thresholds | default dict }}
+    {{- $collectionLag := int ($thresholds.collectionLagSeconds | default 1800) }}
+    {{- $scanStale := int ($thresholds.recommendationScanStaleSeconds | default 10800) }}
+    {{- $measurementStale := int ($thresholds.measurementStaleSeconds | default 1800) }}
+    # Loop health (N7): collection watermark, recommendation scans and
+    # measurement. Every series comes from the controller metrics endpoint,
+    # hence the same rendering condition as greenkube.controller.
+    - name: greenkube.loop
+      rules:
+        - alert: GreenKubeCollectionLagging
+          # Only the leader collects: a standby keeps the last value it set.
+          expr: |
+            max by (source) (
+              greenkube_collection_watermark_lag_seconds
+              * on (job, instance) group_left ()
+              greenkube_controller_leader
+            ) > {{ $collectionLag }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube metric collection is falling behind
+            description: {{ printf "The %s collection watermark is {{ $value | humanizeDuration }} behind (threshold %ds): recommendations and measurements read stale data. See the collection loop in GET /api/v1/automation/status and the controller logs." "{{ $labels.source }}" $collectionLag | quote }}
+        - alert: GreenKubeRecommendationScanFailing
+          expr: |
+            sum(increase(greenkube_optimization_runs_total{status="failed"}[1h])) > 0
+            unless
+            sum(increase(greenkube_optimization_runs_total{status="succeeded"}[1h])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube recommendation scans are failing
+            description: Every recommendation scan of the last hour failed and none succeeded; the inbox is not refreshed. See GET /api/v1/optimization/runs and the controller logs.
+        - alert: GreenKubeRecommendationSourceFailing
+          expr: sum by (source) (increase(greenkube_optimization_analyzer_failures_total[2h])) > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: A GreenKube recommendation source keeps failing
+            description: {{ `Recommendation source {{ $labels.source }} failed during scans for more than an hour; its signals are missing from consensus. See the Sources page (/sources).` | quote }}
+        - alert: GreenKubeRecommendationScanStale
+          expr: |
+            (time() - max(greenkube_last_successful_optimization_run_timestamp_seconds) > {{ $scanStale }})
+            and
+            max(greenkube_last_successful_optimization_run_timestamp_seconds) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: No GreenKube recommendation scan has succeeded recently
+            description: {{ printf "The last successful recommendation scan is older than %ds." $scanStale | quote }}
+        - alert: GreenKubeMeasurementStalled
+          expr: time() - max(greenkube_loop_last_success_timestamp_seconds{loop="recommendation-lifecycle"}) > {{ $measurementStale }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube measurements are not advancing
+            description: {{ printf "The recommendation-lifecycle loop (apply detection, verification, change measurement) has not succeeded for more than %ds: applied changes wait unmeasured and the measurement backlog grows." $measurementStale | quote }}
+    {{- end }}
+    {{- if .Values.monitoring.serviceMonitor.enabled }}
+    # Ledger integrity (N7). Rendered whenever a GreenKube process is scraped,
+    # independently of the controller alerts: the verification may run in the
+    # API as well as in the controller. The second clause catches a counter
+    # series that first appears already above zero (created on its first
+    # failure, or right after a restart), which increase() cannot see.
+    - name: greenkube.ledger
+      rules:
+        - alert: GreenKubeLedgerChainVerificationFailed
+          expr: |
+            sum(increase(greenkube_ledger_chain_verification_failures_total[1h])) > 0
+            or
+            sum(
+              greenkube_ledger_chain_verification_failures_total
+                unless greenkube_ledger_chain_verification_failures_total offset 1h
+            ) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: The GreenKube savings ledger failed its hash-chain verification
+            description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
     {{- end }}
 {{- end }}

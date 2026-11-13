@@ -164,6 +164,45 @@ the Ingress controller, set `config.trustedProxyIps` to its addresses so GreenKu
 set `auth.session.secureCookie: always`. Set `config.externalUrl` for links in pull requests, and
 `config.rootPath` when served under a sub-path.
 
+The chart can create the route for you (roadmap N6); the first host also becomes the base of the links in pull
+requests (`GREENKUBE_EXTERNAL_URL`) unless `config.externalUrl` is set:
+
+```yaml
+# Ingress
+ingress:
+  enabled: true
+  className: nginx
+  hosts: [greenkube.example.com]
+  tls:
+    - secretName: greenkube-tls
+      hosts: [greenkube.example.com]
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+
+# or a Gateway API HTTPRoute attached to an existing Gateway
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: shared-gateway
+      namespace: gateway-system
+  hostnames: [greenkube.example.com]
+```
+
+See [Exposure](configuration.md#exposure-ingress-httproute) for every key.
+
+## Pod Security Admission
+
+Every pod the chart renders by default (api, controller, renderer, bundled PostgreSQL, credentials bootstrap Job, Helm
+test pod, and the optional worker and KRR CronJob) meets the Kubernetes Pod Security Standard `restricted`: non-root,
+no privilege escalation, all capabilities dropped and `RuntimeDefault` seccomp. The bundled PostgreSQL needs no root
+init container. You can install into a namespace labelled `pod-security.kubernetes.io/enforce=restricted`; CI checks
+it with a server-side dry run on kind (roadmap N5).
+
+One option is outside `restricted`: `renderer.egressFirewall.enabled=true` adds an init container that runs as root with
+`NET_ADMIN` to install a deny-all egress firewall. It is off by default and only meant for CNIs that do not enforce
+NetworkPolicy; keep it off in a `restricted` namespace and rely on the renderer's egress NetworkPolicy, or label the
+namespace `baseline`/`privileged` if you need it.
+
 ## Optional: high availability
 
 High availability is two numbers, not another install:

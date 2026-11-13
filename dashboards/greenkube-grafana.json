@@ -49,15 +49,15 @@
   ],
   "id": null,
   "uid": "greenkube-fingreenops",
-  "title": "GreenKube FinGreenOps Dashboard",
-  "description": "FinGreenOps dashboard for Kubernetes — sustainability score, CO₂ emissions (Scope 2 & 3), cloud costs, regional node cleanliness, top namespace impact, pod spend, and realized savings.",
+  "title": "GreenKube — Savings & Footprint",
+  "description": "Savings and footprint of the GreenKube optimization loop — realized savings, CO₂e emissions (Scope 2 & 3), cloud costs, regional node cleanliness, top namespace impact and pod spend.",
   "tags": [
     "greenkube",
-    "fingreenops",
+    "savings",
+    "finops",
     "carbon",
     "cost",
-    "kubernetes",
-    "sustainability"
+    "kubernetes"
   ],
   "style": "dark",
   "timezone": "utc",

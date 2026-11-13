@@ -468,6 +468,10 @@ monitoring:
   prometheusRule:
     enabled: false       # Optional automation backlog/stuck-state alerts; requires the PrometheusRule CRD
     controllerAlerts: true # Controller loop alerts (rendered only with the controller ServiceMonitor)
+    thresholds:          # Loop health alerts (group greenkube.loop), rendered with the controller alerts
+      collectionLagSeconds: 1800
+      recommendationScanStaleSeconds: 10800
+      measurementStaleSeconds: 1800
     namespace: monitoring
     additionalLabels: {}
   serviceMonitor:
@@ -483,9 +487,28 @@ monitoring:
 
 The controller's own metrics endpoint is configured with `controller.metricsPort` (see [Controller metrics endpoint](#controller-metrics-endpoint-controllermetricsport)); `serviceMonitor.enabled` also adds its ServiceMonitor.
 
-`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. With `prometheusRule.controllerAlerts` (default `true`) it also installs the controller loop alerts `GreenKubeControllerLoopFailing` (a loop failed 3 ticks in a row for 10 minutes), `GreenKubeAutomationLoopStale` (the automation controller loop has not succeeded for 10 minutes) and `GreenKubeNoActiveController` (no controller holds the Lease, or none is scraped, for 5 minutes); they read the controller metrics endpoint, so they render only together with the controller ServiceMonitor (`serviceMonitor.enabled` and `collector.metricsPort` > 0). The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
+`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. With `prometheusRule.controllerAlerts` (default `true`) it also installs the controller loop alerts `GreenKubeControllerLoopFailing` (a loop failed 3 ticks in a row for 10 minutes), `GreenKubeAutomationLoopStale` (the automation controller loop has not succeeded for 10 minutes) and `GreenKubeNoActiveController` (no controller holds the Lease, or none is scraped, for 5 minutes); they read the controller metrics endpoint, so they render only together with the controller ServiceMonitor (`serviceMonitor.enabled` and `collector.metricsPort` > 0). Together with the controller loop alerts it installs the loop health alerts (group `greenkube.loop`, roadmap N7): `GreenKubeCollectionLagging` (the leader's `greenkube_collection_watermark_lag_seconds{source}` above `thresholds.collectionLagSeconds` for 15 minutes), `GreenKubeRecommendationScanFailing` (every scan of the last hour failed), `GreenKubeRecommendationSourceFailing` (a source failed during scans for over an hour), `GreenKubeRecommendationScanStale` (no successful scan for `thresholds.recommendationScanStaleSeconds`), `GreenKubeMeasurementStalled` (the `recommendation-lifecycle` loop, which runs apply detection, verification and change measurement, has not succeeded for `thresholds.measurementStaleSeconds`) and `GreenKubeLedgerChainVerificationFailed` (critical: `greenkube_ledger_chain_verification_failures_total` increased). See [Observability and SLOs](observability-slos.md#chart-alerts). The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
 
 When enabled, the chart applies policies to standalone app/worker pods or production API/controller/worker pods. It allows DNS and the bundled PostgreSQL connection, plus Prometheus and the ready-check ingress paths; other external egress requires an explicit `additionalEgress` rule. No unrestricted internet egress is added.
+
+### Exposure (`ingress`, `httpRoute`)
+
+Optional, off by default (roadmap N6). Both route their hosts to the `<release>-api` Service, which serves the UI and the API, under `config.rootPath` (or `/`).
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `ingress.enabled` | `false` | Render a `networking.k8s.io/v1` Ingress. |
+| `ingress.className` | `""` | IngressClass; empty uses the cluster default. |
+| `ingress.hosts` | `[]` | Host names (required when enabled). The first one sets `GREENKUBE_EXTERNAL_URL` unless `config.externalUrl` is set. |
+| `ingress.tls` | `[]` | Standard Ingress TLS entries (`secretName`, `hosts`). The external URL uses `https` when an entry lists the first host or lists no hosts. |
+| `ingress.annotations`, `ingress.labels` | `{}` | Added to the Ingress (e.g. `cert-manager.io/cluster-issuer`). |
+| `httpRoute.enabled` | `false` | Render a Gateway API `gateway.networking.k8s.io/v1` HTTPRoute (needs the Gateway API CRDs). |
+| `httpRoute.parentRefs` | `[]` | Gateways to attach to (required when enabled), e.g. `[{name: shared-gateway, namespace: gateway-system, sectionName: https}]`. |
+| `httpRoute.hostnames` | `[]` | Host names; the first one sets `GREENKUBE_EXTERNAL_URL` when no Ingress host or `config.externalUrl` does. |
+| `httpRoute.scheme` | `https` | Scheme of the URL built from the first hostname (`http` when the listener does not terminate TLS). |
+| `httpRoute.annotations`, `httpRoute.labels` | `{}` | Added to the HTTPRoute. |
+
+`GREENKUBE_EXTERNAL_URL` (pull-request deep links) is, in order: `config.externalUrl`; the first Ingress host; the first HTTPRoute hostname; empty. A wildcard first host (`*.example.com`) builds no URL. With `monitoring.networkPolicy.enabled`, allow the ingress controller or gateway pods in `monitoring.networkPolicy.additionalIngress`.
 
 ### PostgreSQL StatefulSet (`postgres`)
 

@@ -1,0 +1,220 @@
+# promtool unit tests of the greenkube.loop alerts (roadmap N7), run by
+# .github/scripts/promtool-check.sh against the rule file rendered from
+# templates/prometheusrule.yaml with the default thresholds.
+rule_files:
+  - greenkube-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # Collection watermark lag: only the leader's gauge counts.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_collection_watermark_lag_seconds{job="greenkube-controller-metrics",instance="leader:9102",source="prometheus"}'
+        values: '3600x40'
+      - series: 'greenkube_controller_leader{job="greenkube-controller-metrics",instance="leader:9102"}'
+        values: '1x40'
+      # A former leader keeps its last (stale) value; it must not alert.
+      - series: 'greenkube_collection_watermark_lag_seconds{job="greenkube-controller-metrics",instance="standby:9102",source="opencost"}'
+        values: '7200x40'
+      - series: 'greenkube_controller_leader{job="greenkube-controller-metrics",instance="standby:9102"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GreenKubeCollectionLagging
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GreenKubeCollectionLagging
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source: prometheus
+            exp_annotations:
+              summary: GreenKube metric collection is falling behind
+              description: "The prometheus collection watermark is 1h 0m 0s behind (threshold 1800s): recommendations and measurements read stale data. See the collection loop in GET /api/v1/automation/status and the controller logs."
+
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_collection_watermark_lag_seconds{job="c",instance="leader:9102",source="prometheus"}'
+        values: '400x40'
+      - series: 'greenkube_controller_leader{job="c",instance="leader:9102"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: GreenKubeCollectionLagging
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # Recommendation scans
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Two failed runs, no success.
+      - series: 'greenkube_optimization_runs_total{job="c",instance="leader:9102",status="failed"}'
+        values: '0 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GreenKubeRecommendationScanFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: GreenKube recommendation scans are failing
+              description: Every recommendation scan of the last hour failed and none succeeded; the inbox is not refreshed. See GET /api/v1/optimization/runs and the controller logs.
+
+  - interval: 1m
+    input_series:
+      # One failure, then a success in the same hour: no alert.
+      - series: 'greenkube_optimization_runs_total{job="c",instance="leader:9102",status="failed"}'
+        values: '0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      - series: 'greenkube_optimization_runs_total{job="c",instance="leader:9102",status="succeeded"}'
+        values: '0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GreenKubeRecommendationScanFailing
+        exp_alerts: []
+
+  - interval: 5m
+    input_series:
+      # The kubecost source fails at every hourly scan.
+      - series: 'greenkube_optimization_analyzer_failures_total{job="c",instance="leader:9102",source="kubecost"}'
+        values: '0+1x36'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: GreenKubeRecommendationSourceFailing
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: GreenKubeRecommendationSourceFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source: kubecost
+            exp_annotations:
+              summary: A GreenKube recommendation source keeps failing
+              description: Recommendation source kubecost failed during scans for more than an hour; its signals are missing from consensus. See the Sources page (/sources).
+
+  - interval: 5m
+    input_series:
+      # Last success at t=100s; nothing since.
+      - series: 'greenkube_last_successful_optimization_run_timestamp_seconds{job="c",instance="leader:9102"}'
+        values: '100x60'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: GreenKubeRecommendationScanStale
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: GreenKubeRecommendationScanStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: No GreenKube recommendation scan has succeeded recently
+              description: The last successful recommendation scan is older than 10800s.
+
+  - interval: 5m
+    input_series:
+      # A fresh install before its first scan exports 0: no alert.
+      - series: 'greenkube_last_successful_optimization_run_timestamp_seconds{job="c",instance="leader:9102"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: GreenKubeRecommendationScanStale
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # Measurement (recommendation-lifecycle loop)
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_loop_last_success_timestamp_seconds{job="c",instance="leader:9102",loop="recommendation-lifecycle"}'
+        values: '60x60'
+      # Another loop that keeps succeeding does not hide the stall.
+      - series: 'greenkube_loop_last_success_timestamp_seconds{job="c",instance="leader:9102",loop="collection"}'
+        values: '0+60x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: GreenKubeMeasurementStalled
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: GreenKubeMeasurementStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: GreenKube measurements are not advancing
+              description: "The recommendation-lifecycle loop (apply detection, verification, change measurement) has not succeeded for more than 1800s: applied changes wait unmeasured and the measurement backlog grows."
+
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_loop_last_success_timestamp_seconds{job="c",instance="leader:9102",loop="recommendation-lifecycle"}'
+        values: '0+300x12'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: GreenKubeMeasurementStalled
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # Ledger hash chain
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_ledger_chain_verification_failures_total{job="c",instance="leader:9102"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: The GreenKube savings ledger failed its hash-chain verification
+              description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
+
+  # A counter series that first appears already at 1 (created on its first
+  # failure, or right after a restart) is invisible to increase(); the
+  # "unless ... offset 1h" clause still fires, and resolves after an hour.
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_ledger_chain_verification_failures_total{job="api",instance="api:8000"}'
+        values: '_x3 1x80'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: The GreenKube savings ledger failed its hash-chain verification
+              description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
+      - eval_time: 30m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: The GreenKube savings ledger failed its hash-chain verification
+              description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
+      - eval_time: 75m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts: []
+
+  # A healthy counter that appears at 0 never alerts.
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_ledger_chain_verification_failures_total{job="api",instance="api:8000"}'
+        values: '_x3 0x80'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: GreenKubeLedgerChainVerificationFailed
+        exp_alerts: []
