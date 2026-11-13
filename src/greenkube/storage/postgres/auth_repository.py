@@ -7,13 +7,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from greenkube.auth.models import ApiKey, AuthSession, User
+from greenkube.auth.models import ApiKey, AuthSession, OidcLogin, User
 from greenkube.storage.base_auth_repository import AuthRepository
 from greenkube.utils.time import ensure_utc
 
 _USER_COLUMNS = (
-    "id, username, password_hash, role, must_change_password, created_at, updated_at, password_changed_at, disabled_at"
+    "id, username, password_hash, role, must_change_password, created_at, updated_at, password_changed_at, "
+    "disabled_at, auth_source, external_id"
 )
+_OIDC_COLUMNS = "state_sha256, nonce, code_verifier, redirect_uri, return_to, created_at, expires_at"
 _SESSION_COLUMNS = (
     "token_sha256, id, user_id, created_at, last_seen_at, idle_expires_at, absolute_expires_at, "
     "remember, user_agent, ip, revoked_at"
@@ -36,6 +38,8 @@ def _user(row) -> User:
         updated_at=ensure_utc(row["updated_at"]),
         password_changed_at=_utc(row["password_changed_at"]),
         disabled_at=_utc(row["disabled_at"]),
+        auth_source=row["auth_source"] or "local",
+        external_id=row["external_id"],
     )
 
 
@@ -81,6 +85,20 @@ def _user_values(user: User) -> tuple:
         ensure_utc(user.updated_at),
         _utc(user.password_changed_at),
         _utc(user.disabled_at),
+        user.auth_source,
+        user.external_id,
+    )
+
+
+def _oidc_login(row) -> OidcLogin:
+    return OidcLogin(
+        state_sha256=row["state_sha256"],
+        nonce=row["nonce"],
+        code_verifier=row["code_verifier"],
+        redirect_uri=row["redirect_uri"],
+        return_to=row["return_to"],
+        created_at=ensure_utc(row["created_at"]),
+        expires_at=ensure_utc(row["expires_at"]),
     )
 
 
@@ -104,8 +122,8 @@ class PostgresAuthRepository(AuthRepository):
     async def create_user(self, user: User) -> bool:
         async with self.db_manager.connection_scope() as conn:
             status = await conn.execute(
-                f"INSERT INTO auth_users ({_USER_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
-                "ON CONFLICT (username) DO NOTHING",
+                f"INSERT INTO auth_users ({_USER_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+                "ON CONFLICT DO NOTHING",
                 *_user_values(user),
             )
         return _affected(status) == 1
@@ -116,8 +134,8 @@ class PostgresAuthRepository(AuthRepository):
         async with self.db_manager.transaction() as conn:
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext('greenkube.auth.first_user'))")
             status = await conn.execute(
-                f"INSERT INTO auth_users ({_USER_COLUMNS}) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9 "
-                "WHERE NOT EXISTS (SELECT 1 FROM auth_users) ON CONFLICT (username) DO NOTHING",
+                f"INSERT INTO auth_users ({_USER_COLUMNS}) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11 "
+                "WHERE NOT EXISTS (SELECT 1 FROM auth_users) ON CONFLICT DO NOTHING",
                 *_user_values(user),
             )
         return _affected(status) == 1
@@ -149,6 +167,59 @@ class PostgresAuthRepository(AuthRepository):
     async def any_user_must_change_password(self) -> bool:
         async with self.db_manager.connection_scope() as conn:
             return bool(await conn.fetchval("SELECT EXISTS (SELECT 1 FROM auth_users WHERE must_change_password)"))
+
+    # --- SSO identities and roles (F16) -----------------------------------------
+    async def get_user_by_external_id(self, external_id: str) -> User | None:
+        async with self.db_manager.connection_scope() as conn:
+            row = await conn.fetchrow(f"SELECT {_USER_COLUMNS} FROM auth_users WHERE external_id = $1", external_id)
+        return _user(row) if row else None
+
+    async def list_users(self) -> list[User]:
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(f"SELECT {_USER_COLUMNS} FROM auth_users ORDER BY username")
+        return [_user(row) for row in rows]
+
+    async def set_role(self, user_id: str, role: str, *, now: datetime) -> bool:
+        async with self.db_manager.connection_scope() as conn:
+            status = await conn.execute(
+                "UPDATE auth_users SET role = $1, updated_at = $2 WHERE id = $3", role, ensure_utc(now), user_id
+            )
+        return _affected(status) == 1
+
+    async def set_disabled(self, user_id: str, disabled_at: datetime | None, *, now: datetime) -> bool:
+        async with self.db_manager.connection_scope() as conn:
+            status = await conn.execute(
+                "UPDATE auth_users SET disabled_at = $1, updated_at = $2 WHERE id = $3",
+                _utc(disabled_at),
+                ensure_utc(now),
+                user_id,
+            )
+        return _affected(status) == 1
+
+    async def create_oidc_login(self, login: OidcLogin) -> None:
+        async with self.db_manager.connection_scope() as conn:
+            await conn.execute(
+                f"INSERT INTO auth_oidc_logins ({_OIDC_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                login.state_sha256,
+                login.nonce,
+                login.code_verifier,
+                login.redirect_uri,
+                login.return_to,
+                ensure_utc(login.created_at),
+                ensure_utc(login.expires_at),
+            )
+
+    async def consume_oidc_login(self, state_sha256: str) -> OidcLogin | None:
+        async with self.db_manager.connection_scope() as conn:
+            row = await conn.fetchrow(
+                f"DELETE FROM auth_oidc_logins WHERE state_sha256 = $1 RETURNING {_OIDC_COLUMNS}", state_sha256
+            )
+        return _oidc_login(row) if row else None
+
+    async def purge_oidc_logins(self, *, now: datetime) -> int:
+        async with self.db_manager.connection_scope() as conn:
+            status = await conn.execute("DELETE FROM auth_oidc_logins WHERE expires_at <= $1", ensure_utc(now))
+        return _affected(status)
 
     # --- sessions ----------------------------------------------------------
     async def create_session(self, session: AuthSession) -> None:

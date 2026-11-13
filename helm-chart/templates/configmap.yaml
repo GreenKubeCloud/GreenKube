@@ -135,6 +135,36 @@ data:
   AUTH_ADMIN_USERNAME: {{ $admin.username | default "admin" | quote }}
   AUTH_INITIAL_ADMIN_SECRET: {{ include "greenkube.initialAdminSecretName" . | quote }}
 
+  # --- Single sign-on and roles (F16) ---
+  {{- $mode := .Values.config.apiAuthMode | default "session" }}
+  {{- $roles := $auth.roles | default dict }}
+  {{- $proxy := $auth.proxy | default dict }}
+  {{- $oidc := $auth.oidc | default dict }}
+  {{- if and (eq $mode "proxy") (not .Values.config.trustedProxyIps) }}
+  {{- fail "config.apiAuthMode=proxy needs config.trustedProxyIps: identity headers are trusted only from the authentication proxy addresses." }}
+  {{- end }}
+  {{- if and (eq $mode "oidc") (or (not $oidc.issuer) (not $oidc.clientId)) }}
+  {{- fail "config.apiAuthMode=oidc needs auth.oidc.issuer and auth.oidc.clientId." }}
+  {{- end }}
+  {{- $groups := dict }}
+  {{- range $role, $members := ($roles.groups | default dict) }}
+  {{- if $members }}{{- $_ := set $groups $role $members }}{{- end }}
+  {{- end }}
+  AUTH_LOCAL_LOGIN: {{ ternary "true" "false" (ne $auth.localLogin false) | quote }}
+  AUTH_ROLE_GROUPS: {{ ternary "" ($groups | toJson) (empty $groups) | quote }}
+  AUTH_DEFAULT_ROLE: {{ $roles.defaultRole | default "viewer" | quote }}
+  AUTH_PROXY_USER_HEADERS: {{ $proxy.userHeaders | default "X-Forwarded-User" | quote }}
+  AUTH_PROXY_GROUPS_HEADERS: {{ $proxy.groupsHeaders | default "X-Forwarded-Groups" | quote }}
+  {{- if eq $mode "oidc" }}
+  OIDC_ISSUER: {{ $oidc.issuer | quote }}
+  OIDC_AUDIENCE: {{ $oidc.clientId | quote }}
+  {{- end }}
+  OIDC_SCOPES: {{ $oidc.scopes | default "openid profile email" | quote }}
+  OIDC_USERNAME_CLAIM: {{ $oidc.usernameClaim | default "preferred_username" | quote }}
+  OIDC_GROUPS_CLAIM: {{ $oidc.groupsClaim | default "groups" | quote }}
+  OIDC_REDIRECT_URL: {{ $oidc.redirectUrl | default "" | quote }}
+  OIDC_PROVIDER_NAME: {{ $oidc.providerName | default "SSO" | quote }}
+
   # --- Estimator Defaults ---
   {{- with .Values.config.defaults.instance }}
   DEFAULT_INSTANCE_VCORES: {{ .vcores | quote }}

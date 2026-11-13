@@ -56,8 +56,8 @@ image:
 |-----|---------|-------------|
 | `config.logLevel` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `config.environment` | `production` | Runtime environment. Production never serves anonymous requests. |
-| `config.apiAuthMode` | `session` | `API_AUTH_MODE`. `session`: account sign-in with server-side sessions plus scoped API keys; `api_key`: Bearer API keys only; `oidc`: reserved (`503`). See [Authentication](authentication.md). |
-| `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress). |
+| `config.apiAuthMode` | `session` | `API_AUTH_MODE`. `session`: account sign-in with server-side sessions plus scoped API keys; `api_key`: Bearer API keys only; `proxy`: single sign-on through an authentication proxy whose identity headers are trusted only from `config.trustedProxyIps` (required); `oidc`: native OpenID Connect sign-in (`auth.oidc.*`). See [Authentication](authentication.md). |
+| `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress) and, with `apiAuthMode: proxy`, the only peers whose identity headers are accepted. |
 | `config.externalUrl` | `""` | `GREENKUBE_EXTERNAL_URL`. Public URL of the GreenKube UI (http(s), no query or fragment), used for deep links in pull requests, commit statuses and status comments. Empty: no links. |
 | `config.clusterName` | `""` | Cluster name used as a label in Prometheus metrics |
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |
@@ -610,6 +610,19 @@ config:
 | `auth.session.absoluteLifetime` | `7d` | `AUTH_SESSION_ABSOLUTE_LIFETIME` | Maximum session lifetime. |
 | `auth.session.rememberLifetime` | `30d` | `AUTH_SESSION_REMEMBER_LIFETIME` | Lifetime with **Keep me signed in**. |
 | `auth.login.rateLimit` | `5/minute` | `AUTH_LOGIN_RATE_LIMIT` | Failed sign-ins per username (four times as many per client IP) before an exponential lockout. |
+| `auth.localLogin` | `true` | `AUTH_LOCAL_LOGIN` | In `proxy` and `oidc` modes, local accounts (the break-glass admin) still sign in with a password. `false`: SSO only (`POST /auth/login` answers `409`). |
+| `auth.roles.groups.{admin,operator,viewer}` | `[]` | `AUTH_ROLE_GROUPS` | IdP groups granting each role (rendered as a JSON object role to groups). An SSO user gets the highest role any of its groups grants, recomputed at every sign-in. |
+| `auth.roles.defaultRole` | `viewer` | `AUTH_DEFAULT_ROLE` | Role of an SSO user in no listed group: `viewer`, `operator`, `admin`, or `none` (access refused). |
+| `auth.proxy.userHeaders` | `X-Forwarded-User` | `AUTH_PROXY_USER_HEADERS` | Identity header the authentication proxy sets and overwrites (`apiAuthMode: proxy`). Several comma-separated headers form separate families; a request carrying more than one family is refused. |
+| `auth.proxy.groupsHeaders` | `X-Forwarded-Groups` | `AUTH_PROXY_GROUPS_HEADERS` | Groups header paired with each user header (same position); never more entries than `userHeaders`. |
+| `auth.oidc.issuer` | `""` | `OIDC_ISSUER` | OpenID Connect issuer (`apiAuthMode: oidc`, required, `https`). Discovery reads `<issuer>/.well-known/openid-configuration`. |
+| `auth.oidc.clientId` | `""` | `OIDC_AUDIENCE` | OAuth client id registered at the provider (required with `oidc`). |
+| `auth.oidc.existingSecret` | `""` | `OIDC_CLIENT_SECRET` | Secret holding the client secret (key `auth.oidc.existingSecretKey`, default `clientSecret`), mounted into the API. Empty: public client protected by PKCE. |
+| `auth.oidc.scopes` | `openid profile email` | `OIDC_SCOPES` | Requested scopes (`openid` is always added). Add your provider's groups scope when groups are not in the ID token by default. |
+| `auth.oidc.usernameClaim` | `preferred_username` | `OIDC_USERNAME_CLAIM` | Claim used as the username (then `preferred_username`, `email`, `sub`). The account is keyed by the issuer's `sub`. |
+| `auth.oidc.groupsClaim` | `groups` | `OIDC_GROUPS_CLAIM` | Claim holding the groups (a list, or a comma-separated string). |
+| `auth.oidc.redirectUrl` | `""` | `OIDC_REDIRECT_URL` | Redirect URI registered at the provider. Empty: `<config.externalUrl>/api/v1/auth/oidc/callback`, or the request's origin when `externalUrl` is empty. |
+| `auth.oidc.providerName` | `SSO` | `OIDC_PROVIDER_NAME` | Label of the **Sign in with ...** button. |
 | `monitoring.serviceMonitor.bearerTokenSecret` | `{name: "", key: token}` | | Secret with a `metrics:read` API key for the Prometheus scrape. Empty uses the deprecated bootstrap key. |
 
 `SESSION_COOKIE_NAME` (default `greenkube_session`) is not exposed in values.

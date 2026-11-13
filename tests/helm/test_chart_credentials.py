@@ -94,15 +94,22 @@ def _template_actions(text: str) -> list[str]:
     return [re.sub(r'"(?:\\.|[^"\\])*"|`[^`]*`', '""', action) for action in actions]
 
 
+# NOTES.txt is printed by helm install/upgrade and never applied to the cluster, so it
+# cannot make a sync unstable. It reads the initial-admin Secret (read-only) to stop
+# pointing to a consumed password (N11); under `helm template` the lookup is empty.
+NOTES_LOOKUP_ALLOWED = {"NOTES.txt": {"lookup"}}
+
+
 def test_templates_do_not_call_cluster_lookups_or_random_generators():
     pattern = re.compile(r"\b(" + "|".join(NON_DETERMINISTIC_FUNCTIONS) + r")\b")
     offenders = []
     for template in sorted((CHART_PATH / "templates").rglob("*")):
         if not template.is_file():
             continue
+        allowed = NOTES_LOOKUP_ALLOWED.get(template.name, set())
         for action in _template_actions(template.read_text(encoding="utf-8")):
             match = pattern.search(action)
-            if match:
+            if match and match.group(1) not in allowed:
                 offenders.append(f"{template}: {match.group(1)} in {action.strip()[:80]}")
     assert offenders == []
 

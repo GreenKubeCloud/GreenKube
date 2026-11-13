@@ -40,9 +40,11 @@ from greenkube.api.dependencies import (
     get_pull_request_repository,
     get_recommendation_repository,
     get_savings_ledger_repository,
+    require_scope,
     validate_namespace,
 )
 from greenkube.api.routers.optimization import enqueue_refresh, get_optimization_run_repository
+from greenkube.auth.principal import Scope
 from greenkube.core.config import get_config
 from greenkube.core.optimization.scoring import normalize_profile, profile_names
 from greenkube.core.optimization.track_record import load_track_record
@@ -385,7 +387,11 @@ async def get_recommendation_detail(
     return decided
 
 
-@router.patch("/recommendations/{rec_id}/apply", response_model=RecommendationRecord)
+@router.patch(
+    "/recommendations/{rec_id}/apply",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
+    response_model=RecommendationRecord,
+)
 async def apply_recommendation(
     rec_id: int,
     request: ApplyRecommendationRequest,
@@ -457,6 +463,7 @@ async def _validate_declared_savings(rec_id: int, request: ApplyRecommendationRe
 
 @router.post(
     "/recommendations/{rec_id}/remeasure",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
     response_model=RecommendationRecord,
     status_code=202,
 )
@@ -490,7 +497,11 @@ async def remeasure_recommendation(
         raise HTTPException(status_code=409, detail=str(e))
 
 
-@router.post("/recommendations/{rec_id}/rollback-review/dismiss", response_model=RecommendationRecord)
+@router.post(
+    "/recommendations/{rec_id}/rollback-review/dismiss",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
+    response_model=RecommendationRecord,
+)
 async def dismiss_rollback_review(
     rec_id: int,
     request: DismissRollbackReviewRequest,
@@ -537,7 +548,11 @@ async def list_recommendation_events(
     return await reco_repo.get_events(rec_id)
 
 
-@router.patch("/recommendations/{rec_id}/ignore", response_model=RecommendationRecord)
+@router.patch(
+    "/recommendations/{rec_id}/ignore",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
+    response_model=RecommendationRecord,
+)
 async def ignore_recommendation(
     rec_id: int,
     request: IgnoreRecommendationRequest,
@@ -563,7 +578,11 @@ async def ignore_recommendation(
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.delete("/recommendations/{rec_id}/ignore", response_model=RecommendationRecord)
+@router.delete(
+    "/recommendations/{rec_id}/ignore",
+    dependencies=[Depends(require_scope(Scope.WRITE))],
+    response_model=RecommendationRecord,
+)
 async def unignore_recommendation(
     rec_id: int,
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),

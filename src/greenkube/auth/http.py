@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from starlette.requests import Request
 from starlette.responses import Response
 
+from greenkube.auth.peer import transport_peer
 from greenkube.auth.settings import AuthSettings
 
 CSRF_HEADER = "X-CSRF-Token"
@@ -35,9 +36,14 @@ def _is_trusted(host: str, networks) -> bool:
     return any(address in network for network in networks)
 
 
+def peer_address(request: Request) -> str:
+    """The TCP peer of the request, before any ``X-Forwarded-For`` rewrite."""
+    return transport_peer(request.scope, request.client.host if request.client else "")
+
+
 def from_trusted_proxy(request: Request, settings: AuthSettings) -> bool:
-    host = request.client.host if request.client else ""
-    return _is_trusted(host, _networks(settings.trusted_proxy_ips))
+    """Whether the connection itself comes from ``TRUSTED_PROXY_IPS`` (never the forwarded client)."""
+    return _is_trusted(peer_address(request), _networks(settings.trusted_proxy_ips))
 
 
 def client_ip(request: Request, settings: AuthSettings) -> str:
@@ -49,7 +55,7 @@ def client_ip(request: Request, settings: AuthSettings) -> str:
     and cannot be trusted (they would let one client spread its sign-in attempts
     over many per-IP budgets).
     """
-    host = request.client.host if request.client else "unknown"
+    host = peer_address(request) or "unknown"
     networks = _networks(settings.trusted_proxy_ips)
     if not _is_trusted(host, networks):
         return host

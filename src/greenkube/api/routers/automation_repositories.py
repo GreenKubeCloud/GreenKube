@@ -17,9 +17,11 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from greenkube.api.dependencies import require_scope
+from greenkube.auth.principal import Scope
 from greenkube.automation.readiness import repository_ref
 from greenkube.storage.automation_capability_repository import SCOPE_REPOSITORY, AutomationCapabilityRepository
 
@@ -84,7 +86,11 @@ async def repository_suggestions() -> RepositorySuggestions:
         raise HTTPException(status_code=503, detail="Repository suggestions are not available yet.") from None
 
 
-@router.post("/automation/repositories/allowlist", response_model=AllowlistResponse)
+@router.post(
+    "/automation/repositories/allowlist",
+    dependencies=[Depends(require_scope(Scope.ADMIN))],
+    response_model=AllowlistResponse,
+)
 async def allow_repositories(body: AllowlistRequest, request: Request) -> AllowlistResponse:
     """Allow discovered repositories (``admin``); the controller applies it within a minute."""
     known = {suggestion.repo_url: suggestion for suggestion in await _suggestions()}

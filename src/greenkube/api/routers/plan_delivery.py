@@ -23,6 +23,7 @@ from greenkube.api.dependencies import (
     AutomationPlanApiService,
     get_authenticated_actor,
     get_automation_plan_service,
+    require_scope,
 )
 from greenkube.api.routers.plans import _ERROR_RESPONSES, _error_response, _plan_response, _service_unavailable
 from greenkube.api.schemas import (
@@ -31,6 +32,7 @@ from greenkube.api.schemas import (
     AutomationPlanDeliveryRequest,
     AutomationPlanDeliveryResponse,
 )
+from greenkube.auth.principal import Scope
 from greenkube.automation.delivery import PatchUnavailableError, build_plan_patch
 from greenkube.gitops.contracts import Plan, PlanStatus, public_repository_url
 
@@ -127,6 +129,7 @@ async def download_automation_plan_patch(
 
 @router.post(
     "/automation/plans/{plan_id}/delivery",
+    dependencies=[Depends(require_scope(Scope.PLANS_DELIVER))],
     response_model=AutomationPlanDeliveryResponse,
     status_code=201,
     responses=_ERROR_RESPONSES,

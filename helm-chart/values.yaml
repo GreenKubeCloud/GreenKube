@@ -286,8 +286,12 @@ config:
   environment: production
   # session (default): sign in to the UI with a username and password
   # (server-side sessions); machines use scoped API keys (Bearer gk_...).
-  # api_key: Bearer API keys only, no browser sign-in. See auth.* below and
-  # docs/authentication.md.
+  # api_key: Bearer API keys only, no browser sign-in.
+  # proxy: single sign-on through an authentication proxy (oauth2-proxy,
+  # Authentik, Pomerium) whose identity headers are trusted only from
+  # config.trustedProxyIps (required). oidc: native OpenID Connect sign-in
+  # (auth.oidc.*). Both create the same server-side sessions and map IdP groups
+  # to roles (auth.roles). See auth.* below and docs/authentication.md.
   apiAuthMode: session
   # Public URL of the GreenKube UI (e.g. https://greenkube.example.com), used for
   # deep links in pull requests and commit statuses. Empty: no links.
@@ -698,6 +702,47 @@ auth:
     # Failed sign-ins allowed per username (4x per client IP) before an
     # exponential lockout.
     rateLimit: 5/minute
+  # --- Single sign-on and roles (F16) ---
+  # Roles: viewer (read), operator (approve plans, ignore/restore, mark
+  # applied), admin (settings, users, API keys, repository allowlist).
+  # Local accounts keep a password sign-in in proxy and oidc modes (break-glass
+  # admin); set false to offer SSO only.
+  localLogin: true
+  roles:
+    # IdP groups granting each role; a user gets the highest matching role.
+    # The role of an SSO account is recomputed from its groups at every sign-in.
+    groups:
+      admin: []
+      operator: []
+      viewer: []
+    # Role of an SSO user in no listed group: viewer, operator, admin, or none
+    # (refuse access).
+    defaultRole: viewer
+  proxy:
+    # Identity headers the authentication proxy sets AND overwrites (config.apiAuthMode=proxy),
+    # accepted only from config.trustedProxyIps. The n-th groups header pairs with the n-th
+    # user header; a request carrying more than one family is refused. Defaults match
+    # oauth2-proxy --pass-user-headers.
+    userHeaders: X-Forwarded-User
+    groupsHeaders: X-Forwarded-Groups
+  oidc:
+    # Issuer URL (https), e.g. https://keycloak.example.com/realms/acme
+    # (config.apiAuthMode=oidc). Discovery reads <issuer>/.well-known/openid-configuration.
+    issuer: ''
+    # OAuth client id registered at the provider (OIDC_AUDIENCE).
+    clientId: ''
+    # Optional Secret holding the client secret (confidential client); without it
+    # GreenKube is a public client protected by PKCE.
+    existingSecret: ''
+    existingSecretKey: clientSecret
+    scopes: openid profile email
+    usernameClaim: preferred_username
+    groupsClaim: groups
+    # Redirect URI registered at the provider. Empty: <config.externalUrl>/api/v1/auth/oidc/callback,
+    # or the request's own origin when config.externalUrl is empty.
+    redirectUrl: ''
+    # Label of the sign-in button.
+    providerName: SSO
 
 # ---------------------------------------------------------------------------
 # Secrets

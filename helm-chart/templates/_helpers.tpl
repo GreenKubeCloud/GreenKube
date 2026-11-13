@@ -111,12 +111,13 @@ outside the Helm release, so the chart never renders generated values (N1).
 
 {{/*
 Name of the Secret holding the generated first-admin password (F14), or empty
-when auth.admin.existingSecret provides it, sessions are off, or RBAC is not
-created (nothing could generate or read it then).
+when auth.admin.existingSecret provides it, sessions are off (api_key mode), or
+RBAC is not created (nothing could generate or read it then). SSO modes (F16)
+keep the local admin as a break-glass account.
 */}}
 {{- define "greenkube.initialAdminSecretName" -}}
 {{- $admin := (.Values.auth | default dict).admin | default dict -}}
-{{- if and .Values.rbac.create (eq (.Values.config.apiAuthMode | default "session") "session") (not $admin.existingSecret) -}}
+{{- if and .Values.rbac.create (ne (.Values.config.apiAuthMode | default "session") "api_key") (not $admin.existingSecret) -}}
 {{- printf "%s-initial-admin" (include "greenkube.fullname" . | trunc 49 | trimSuffix "-") -}}
 {{- end -}}
 {{- end -}}
@@ -286,6 +287,14 @@ Secret (see greenkube.secretNameFor), and a Secret without keys is omitted.
     items:
       - key: {{ $admin.existingSecretKey | default "password" }}
         path: AUTH_ADMIN_PASSWORD
+{{- end -}}
+{{- $oidc := ($context.Values.auth | default dict).oidc | default dict -}}
+{{- if and $oidc.existingSecret (eq .component "api") (eq ($context.Values.config.apiAuthMode | default "session") "oidc") }}
+- secret:
+    name: {{ $oidc.existingSecret }}
+    items:
+      - key: {{ $oidc.existingSecretKey | default "clientSecret" }}
+        path: OIDC_CLIENT_SECRET
 {{- end -}}
 {{- end -}}
 
