@@ -31,11 +31,12 @@ def _signal(**overrides) -> dict:
     return signal
 
 
-def _key(h, *scopes: str) -> dict:
+def _key(h, *scopes: str, name: str = "ci") -> dict:
+    """A fresh API key; its name is the push client it may write (``push:<name>``)."""
     h.login()
     created = h.client.post(
         "/api/v1/auth/api-keys",
-        json={"name": "-".join(scopes).replace(":", "_"), "scopes": list(scopes)},
+        json={"name": name, "scopes": list(scopes)},
         headers=h.csrf(),
     )
     assert created.status_code in (200, 201), created.text
@@ -188,3 +189,82 @@ async def test_json_body_stops_reading_at_the_limit():
 
     assert raised.value.status_code == 413
     assert len(received) == 3
+
+
+def test_push_client_is_bound_to_the_api_key(tmp_path, monkeypatch):
+    """G6: a scoped key named ``ci`` may write ``push:ci`` only; another client id is 403."""
+    inbox = MemoryInbox()
+    with auth_harness(tmp_path, monkeypatch) as h:
+        h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
+        ci = _key(h, "signals:write", name="ci")
+        own = h.client.post(
+            "/api/v1/signals", json={"source_id": "push:ci", "complete": True, "signals": [_signal()]}, headers=ci
+        )
+        other = h.client.post(
+            "/api/v1/signals",
+            json={"source_id": "push:acme-optimizer", "complete": True, "signals": [_signal()]},
+            headers=ci,
+        )
+        named = _key(h, "signals:write", name="Acme Optimizer")
+        slug = h.client.post(
+            "/api/v1/signals",
+            json={"source_id": "push:acme-optimizer", "complete": False, "signals": [_signal()]},
+            headers=named,
+        )
+        invalid_other = h.client.post(
+            "/api/v1/signals", json={"source_id": "push:acme-optimizer", "signals": "not-a-list"}, headers=ci
+        )
+        admin_key = _key(h, "admin", name="ops")
+        admin_other = h.client.post(
+            "/api/v1/signals",
+            json={"source_id": "push:ci", "complete": False, "signals": [_signal()]},
+            headers=admin_key,
+        )
+
+    assert own.status_code == 200, own.text
+    assert other.status_code == 403
+    assert other.json()["detail"]["code"] == "push_client_mismatch"
+    assert "push:ci" in other.json()["detail"]["message"]
+    assert slug.status_code == 200, slug.text
+    # Another client's batch is refused before it is validated.
+    assert invalid_other.status_code == 403
+    # A key never writes another client's signals, whatever its scopes.
+    assert admin_other.status_code == 403
+    assert set(inbox.signals) and all(source in ("push:ci", "push:acme-optimizer") for source, _ in inbox.signals)
+    assert [b.source_id for b in inbox.batches] == ["push:ci", "push:acme-optimizer"]
+
+
+def test_signed_in_users_and_the_bootstrap_key_are_not_bound_to_one_client():
+    from greenkube.api.routers.signals import push_client_of
+    from greenkube.auth.principal import ANONYMOUS, Principal
+
+    assert push_client_of(Principal(kind="apikey", name="CI pipeline #2")) == "ci-pipeline-2"
+    assert push_client_of(Principal(kind="apikey", name="--")) == ""
+    assert push_client_of(Principal(kind="apikey", name="legacy", legacy=True)) is None
+    assert push_client_of(Principal(kind="user", name="alice", session_id="s")) is None
+    assert push_client_of(ANONYMOUS) is None
+    assert push_client_of(None) is None
+
+
+POLARIS_FIXTURE = Path(__file__).resolve().parents[1] / "sources" / "fixtures" / "polaris_report.json"
+
+
+def test_polaris_report_needs_signals_write_and_is_stored(tmp_path, monkeypatch):
+    """G4: a Polaris audit pushed by a signals:write key becomes polaris hygiene signals."""
+    assert required_scope("POST", "/api/v1/sources/polaris/reports") == "signals:write"
+    inbox = MemoryInbox()
+    with auth_harness(tmp_path, monkeypatch) as h:
+        h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
+        reader = _key(h, "read", "write", name="reader")
+        refused = h.client.post("/api/v1/sources/polaris/reports", content=POLARIS_FIXTURE.read_bytes(), headers=reader)
+        headers = _key(h, "signals:write", name="polaris-job")
+        stored = h.client.post("/api/v1/sources/polaris/reports", content=POLARIS_FIXTURE.read_bytes(), headers=headers)
+        invalid = h.client.post("/api/v1/sources/polaris/reports", json={"scans": []}, headers=headers)
+
+    assert refused.status_code == 403
+    assert stored.status_code == 200, stored.text
+    payload = stored.json()
+    assert payload["source_id"] == "polaris" and payload["accepted"] == 5 and payload["complete"] is True
+    assert {d["code"] for d in payload["diagnostics"]} >= {"passed", "ignored_severity", "invalid_entry"}
+    assert {source for source, _ in inbox.signals} == {"polaris"}
+    assert invalid.status_code == 422 and invalid.json()["errors"][0]["type"] == "polaris_report"

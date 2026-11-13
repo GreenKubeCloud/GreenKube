@@ -541,6 +541,41 @@ class TestActiveRecommendationFilters:
         assert len(data) == 1
         assert data[0]["source"] == "vpa"
 
+    def test_source_filter_matches_every_source_behind_the_consensus(self, client, mock_reco_repo):
+        """E6/G1: ``?source=goldilocks`` finds a VPA-chosen recommendation Goldilocks also supports."""
+        from greenkube.models.metrics import RecommendationSource
+
+        mock_reco_repo.get_active_recommendations = AsyncMock(
+            return_value=[
+                RecommendationRecord(
+                    id=1,
+                    pod_name="api",
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_CPU,
+                    description="vpa chosen, goldilocks and krr agree",
+                    source=RecommendationSource.VPA,
+                    consensus={"policy": "safest", "source_ids": ["vpa", "goldilocks", "krr"]},
+                ),
+                RecommendationRecord(
+                    id=2,
+                    pod_name="db",
+                    namespace="prod",
+                    type=RecommendationType.RIGHTSIZING_MEMORY,
+                    description="native only",
+                    source=RecommendationSource.GREENKUBE,
+                    consensus={"policy": "safest", "source_ids": ["greenkube.rightsizing_memory"]},
+                ),
+            ]
+        )
+
+        goldilocks = client.get("/api/v1/recommendations/active?source=goldilocks").json()
+        krr = client.get("/api/v1/recommendations/active?source=krr").json()
+        vpa = client.get("/api/v1/recommendations/active?source=vpa").json()
+
+        assert [r["id"] for r in goldilocks] == [1]
+        assert [r["id"] for r in krr] == [1]
+        assert [r["id"] for r in vpa] == [1]
+
     def test_filters_by_risk_level(self, client, mock_reco_repo):
         mock_reco_repo.get_active_recommendations = AsyncMock(
             return_value=[

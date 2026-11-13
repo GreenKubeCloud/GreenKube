@@ -26,7 +26,9 @@ The `push` source is `unavailable` until something was pushed, and `degraded` wh
 
 ## Permissions
 
-An API key with scope `signals:write` (an admin creates it with `POST /api/v1/auth/api-keys` with `{"name": "ci", "scopes": ["signals:write"]}`). The key can push signals and KRR reports, nothing else.
+An API key with scope `signals:write` (an admin creates it with `POST /api/v1/auth/api-keys` with `{"name": "ci", "scopes": ["signals:write"]}`). The key can push signals and connector reports (KRR, Polaris), nothing else.
+
+**A key is bound to one client.** A scoped API key may only push batches whose `source_id` is `push:<key name>`: the key name in lowercase, every character other than `[a-z0-9_.-]` replaced by `-` (a key named `ci` writes `push:ci`, a key named `Acme Optimizer` writes `push:acme-optimizer`). Any other `source_id` answers `403` with `{"code": "push_client_mismatch"}`, whatever the key's scopes (an `admin` key included), so a leaked CI key cannot overwrite or withdraw another client's advice. Signed-in administrators and the deprecated bootstrap key `GREENKUBE_API_KEY` are not bound. Create one key per client.
 
 ## Example
 
@@ -64,7 +66,7 @@ Schema errors answer `422` with an RFC 6901 JSON pointer per problem:
              "message": "Input should be greater than or equal to 0", "type": "greater_than_equal"}]}
 ```
 
-Other answers: `400` (not JSON), `403` (key without `signals:write`), `409` (an incomplete batch would make the client hold more than 50,000 signals: send a complete batch), `413` (body over 8 MiB), `503` (database unavailable).
+Other answers: `400` (not JSON), `403` (key without `signals:write`, or a `source_id` other than the key's own client: `push_client_mismatch`), `409` (an incomplete batch would make the client hold more than 50,000 signals: send a complete batch), `413` (body over 8 MiB), `503` (database unavailable).
 
 ## Configuration
 

@@ -1,8 +1,18 @@
 {
-  "_comment": "Kubecost 3.x answers (finops-agent): the version probe reports 3.x, request sizing is wrapped in {\"Recommendations\": [...]}, node-group sizing replaced cluster sizing and several clusters report through one aggregator.",
+  "_comment": "Kubecost 3.x answers (finops-agent and aggregator): the version probe reports 3.x, request sizing is wrapped in {\"Recommendations\": [...]} and several clusters report through one aggregator. The 3.x API directory still documents the Cluster Right-Sizing Recommendation API (/model/savings/clusterSizingETL) behind the renamed 'Node Group Sizing' page; its answer is keyed by cluster.",
+  "_provenance": {
+    "kind": "synthetic",
+    "basis": "Shaped after the IBM Kubecost self-hosted 3.x API directory (which links the 2.x pages of request sizing V2, abandoned workloads and cluster right-sizing; no node-group sizing API is listed) and the IBM rightsizing example (GET http://<kubecost>:9090/model/savings/requestSizingV2 read as .Recommendations[]). Not recorded from a live Kubecost 3.x: values are invented.",
+    "checked": "2026-11"
+  },
   "clusterInfo": {
     "code": 200,
-    "data": {"id": "prod-eu", "name": "prod-eu", "provider": "GCP", "version": "v3.1.0"}
+    "data": {
+      "id": "prod-eu",
+      "name": "prod-eu",
+      "provider": "GCP",
+      "version": "v3.1.0"
+    }
   },
   "requestSizingV2": {
     "Recommendations": [
@@ -12,10 +22,23 @@
         "controllerKind": "deployment",
         "controllerName": "api",
         "containerName": "web",
-        "recommendedRequest": {"cpu": "300m", "memory": "512Mi"},
-        "monthlySavings": {"cpu": 16.0, "memory": 2.1},
-        "latestKnownRequest": {"cpu": "1000m", "memory": "1Gi"},
-        "currentEfficiency": {"cpu": 0.2, "memory": 0.41, "total": 0.25}
+        "recommendedRequest": {
+          "cpu": "300m",
+          "memory": "512Mi"
+        },
+        "monthlySavings": {
+          "cpu": 16.0,
+          "memory": 2.1
+        },
+        "latestKnownRequest": {
+          "cpu": "1000m",
+          "memory": "1Gi"
+        },
+        "currentEfficiency": {
+          "cpu": 0.2,
+          "memory": 0.41,
+          "total": 0.25
+        }
       },
       {
         "clusterID": "prod-us",
@@ -23,17 +46,174 @@
         "controllerKind": "deployment",
         "controllerName": "api",
         "containerName": "web",
-        "recommendedRequest": {"cpu": "400m", "memory": "512Mi"},
-        "monthlySavings": {"cpu": 12.0, "memory": 2.1},
-        "latestKnownRequest": {"cpu": "1000m", "memory": "1Gi"},
-        "currentEfficiency": {"cpu": 0.3, "memory": 0.41, "total": 0.3}
+        "recommendedRequest": {
+          "cpu": "400m",
+          "memory": "512Mi"
+        },
+        "monthlySavings": {
+          "cpu": 12.0,
+          "memory": 2.1
+        },
+        "latestKnownRequest": {
+          "cpu": "1000m",
+          "memory": "1Gi"
+        },
+        "currentEfficiency": {
+          "cpu": 0.3,
+          "memory": 0.41,
+          "total": 0.3
+        }
       }
     ],
     "TotalMonthlySavings": 32.2
   },
-  "abandonedWorkloads": {"code": 200, "data": []},
-  "nodeGroupSizing": {
+  "abandonedWorkloads": {
     "code": 200,
-    "data": {"monthlySavings": 120.0, "nodeGroups": [{"name": "default", "recommendedNodeType": "n2-standard-4"}]}
+    "data": []
+  },
+  "clusterSizingETL": {
+    "code": 200,
+    "data": {
+      "prod-eu": {
+        "recommendations": {
+          "single": {
+            "pools": [
+              {
+                "type": {
+                  "provider": "GCP",
+                  "name": "n2-standard-4",
+                  "vCPUs": 4,
+                  "RAMGB": 16,
+                  "hourlyPrice": 0.19,
+                  "sharedCore": false,
+                  "architecture": "x86"
+                },
+                "count": 3,
+                "totalMonthlyCost": 416.1
+              }
+            ],
+            "nodeCount": 3,
+            "monthlySavings": 120.0,
+            "totalMonthlyCost": 416.1
+          },
+          "multi": {
+            "pools": [
+              {
+                "type": {
+                  "provider": "GCP",
+                  "name": "n2-standard-2",
+                  "vCPUs": 2,
+                  "RAMGB": 8,
+                  "hourlyPrice": 0.097,
+                  "sharedCore": false,
+                  "architecture": "x86"
+                },
+                "count": 4,
+                "totalMonthlyCost": 283.24
+              },
+              {
+                "type": {
+                  "provider": "GCP",
+                  "name": "e2-small",
+                  "vCPUs": 2,
+                  "RAMGB": 2,
+                  "hourlyPrice": 0.017,
+                  "sharedCore": false,
+                  "architecture": "x86"
+                },
+                "count": 1,
+                "totalMonthlyCost": 12.41
+              }
+            ],
+            "nodeCount": 5,
+            "monthlySavings": 240.6,
+            "totalMonthlyCost": 295.6
+          }
+        },
+        "parameters": {
+          "clusterId": "prod-eu",
+          "clusterName": "prod-eu",
+          "nonDaemonSetPodCount": 42
+        },
+        "preferences": {
+          "minNodeCount": 3,
+          "targetUtilization": 0.65
+        },
+        "currentClusterInfo": {
+          "monthlyRate": 536.2,
+          "nodes": 6
+        }
+      },
+      "prod-us": {
+        "recommendations": {
+          "single": {
+            "pools": [
+              {
+                "type": {
+                  "provider": "GCP",
+                  "name": "n2-standard-4",
+                  "vCPUs": 4,
+                  "RAMGB": 16,
+                  "hourlyPrice": 0.19,
+                  "sharedCore": false,
+                  "architecture": "x86"
+                },
+                "count": 3,
+                "totalMonthlyCost": 416.1
+              }
+            ],
+            "nodeCount": 3,
+            "monthlySavings": 0.0,
+            "totalMonthlyCost": 416.1
+          },
+          "multi": {
+            "pools": [
+              {
+                "type": {
+                  "provider": "GCP",
+                  "name": "n2-standard-2",
+                  "vCPUs": 2,
+                  "RAMGB": 8,
+                  "hourlyPrice": 0.097,
+                  "sharedCore": false,
+                  "architecture": "x86"
+                },
+                "count": 4,
+                "totalMonthlyCost": 283.24
+              },
+              {
+                "type": {
+                  "provider": "GCP",
+                  "name": "e2-small",
+                  "vCPUs": 2,
+                  "RAMGB": 2,
+                  "hourlyPrice": 0.017,
+                  "sharedCore": false,
+                  "architecture": "x86"
+                },
+                "count": 1,
+                "totalMonthlyCost": 12.41
+              }
+            ],
+            "nodeCount": 5,
+            "monthlySavings": -3.0,
+            "totalMonthlyCost": 295.6
+          }
+        },
+        "parameters": {
+          "clusterId": "prod-us",
+          "clusterName": "prod-us",
+          "nonDaemonSetPodCount": 42
+        },
+        "preferences": {
+          "minNodeCount": 3,
+          "targetUtilization": 0.65
+        },
+        "currentClusterInfo": {
+          "monthlyRate": 536.2,
+          "nodes": 6
+        }
+      }
+    }
   }
 }

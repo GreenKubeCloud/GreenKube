@@ -275,3 +275,29 @@ async def test_a_pushed_deletion_supports_a_deletion_another_source_proposes():
     consensus = _consensus(zombie)
     assert set(consensus.source_ids) == {"greenkube", "push:janitor"}
     assert str(getattr(zombie.source, "value", zombie.source)) == "greenkube"
+
+
+def _gke(config: Config):
+    from greenkube.signals.connectors.gke import GkeRecommenderSource, GkeSettings
+    from tests.sources.test_gke_connector import API, METADATA, FakeGoogle  # pyrefly: ignore[missing-import]
+
+    return GkeRecommenderSource(
+        GkeSettings(),
+        _deps(config),
+        transport=httpx.MockTransport(FakeGoogle()),
+        metadata_url=METADATA,
+        api_url=API,
+    )
+
+
+async def test_consensus_spans_three_independent_wave4_sources():
+    """G7 x E6: VPA (Goldilocks), KRR and the GKE recommender vote on one container (three engine families)."""
+    recs = await _recommendations([_vpa, _krr, _gke])
+
+    cpu = _on_target(recs, RecommendationType.RIGHTSIZING_CPU)
+    consensus = _consensus(cpu)
+    assert consensus.spread["cpu_request_m"] == {"goldilocks": 300, "vpa": 250, "krr": 250, "gke": 260}
+    assert consensus.independent_votes == 3
+    assert {"vpa", "krr", "gke"} <= set(consensus.source_ids)
+    # safest keeps the least aggressive value.
+    assert cpu.recommended_cpu_request_millicores == 300

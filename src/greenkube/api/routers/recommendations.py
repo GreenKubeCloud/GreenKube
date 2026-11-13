@@ -108,7 +108,14 @@ def _filter_records(
     """Applies optional source/risk/capability filters in Python."""
     result = records
     if source:
-        result = [r for r in result if _enum_value(r.source) == source]
+        # Every source behind a consensus recommendation matches (E6/G1), as in /api/v2/recommendations.
+        result = [
+            r
+            for r in result
+            if _enum_value(r.source) == source
+            or source in r.sources
+            or source in ((r.consensus or {}).get("source_ids") or [] if isinstance(r.consensus, dict) else [])
+        ]
     if risk_level:
         result = [r for r in result if _enum_value(r.risk_level) == risk_level]
     if capability:

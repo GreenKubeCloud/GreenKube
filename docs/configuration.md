@@ -198,6 +198,14 @@ Sources produce the signals recommendations are built from: one per native analy
 | `sources.krr.job.extraArgs` | — | `[]` | Extra KRR arguments (`--namespace`, `--history_duration`...). |
 | `sources.krr.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:write` API key. |
 | `sources.krr.job.resources`, `activeDeadlineSeconds` | — | `100m`/`512Mi` requests, `2Gi` limit; `3600` | KRR container resources and job deadline. |
+| `sources.polaris.job.enabled` | — | `false` | Run [Fairwinds Polaris](sources/polaris.md) as a CronJob that pushes its audit to `POST /api/v1/sources/polaris/reports`. Needs `sources.polaris.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:write`) and `config.api.enabled`. |
+| `sources.polaris.job.schedule` | — | `37 3 * * *` | Cron schedule of the Polaris job. |
+| `sources.polaris.job.image.*` | — | `quay.io/fairwinds/polaris` 10.1.8 by digest | Polaris image; `digest` is required (`sha256:<64 hex>`). |
+| `sources.polaris.job.extraArgs` | — | `[]` | Extra `polaris audit` arguments. |
+| `sources.polaris.job.complete` | — | `true` | `true`: each audit replaces every earlier Polaris finding. Set `false` when `extraArgs` narrows the audit (for example one namespace): the job posts with `?complete=false` and adds or refreshes findings. |
+| `sources.polaris.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:write` API key. |
+| `sources.polaris.job.resources`, `activeDeadlineSeconds` | — | `50m`/`128Mi` requests, `512Mi` limit; `1800` | Polaris container resources and job deadline. |
+| `sources.polaris.job.rbac.create`, `serviceAccountName` | — | `true`, `""` | Create the job's read-only ServiceAccount and ClusterRole, or bring your own. |
 | `sources.krr.job.rbac.create`, `serviceAccountName` | — | `true`, `""` | Create the job's ServiceAccount and read-only ClusterRole, or use an existing ServiceAccount. |
 
 Connector settings in `sources.settings` (all optional, validated by each source):

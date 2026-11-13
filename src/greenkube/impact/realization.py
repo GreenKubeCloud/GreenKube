@@ -24,6 +24,15 @@ PodDisruptionBudgets that allow no disruption, scheduled zero budgets, Karpenter
 ``DisruptionBlocked`` events and an unhealthy Cluster Autoscaler. Karpenter
 ``Unconsolidatable`` events are reported as reasons without changing the factor.
 
+Karpenter's Prometheus metrics (roadmap G5), when Prometheus exports them, say
+whether consolidation actually happens: ``karpenter_voluntary_disruption_decisions_total``
+over :data:`KARPENTER_METRICS_WINDOW` counts the consolidation decisions and
+``karpenter_voluntary_disruption_eligible_nodes`` the nodes Karpenter considers
+removable now. No consolidation decision over the window while nodes are
+eligible is a blocker of every consolidating pool; decisions are reported as
+evidence. ``karpenter_nodepools_cost_total`` is reported per pool. Metrics that
+are not exported change nothing; metrics that cannot be read are noted.
+
 Everything here is pure except :func:`refresh_realization_context`, which
 reads the cluster (through :class:`~greenkube.collectors.autoscaler_collector.AutoscalerCollector`)
 from the controller's collection cycle and caches the result in the process.
@@ -162,6 +171,42 @@ class KarpenterEventObservation:
     message: str = ""
 
 
+#: Lookback of the Karpenter metrics (PromQL range).
+KARPENTER_METRICS_WINDOW = "7d"
+#: ``reason`` label values of consolidation decisions (Karpenter v1; ``drifted`` and others are not consolidation).
+CONSOLIDATION_REASONS = frozenset({"underutilized", "empty"})
+UNAVAILABLE_KARPENTER_METRICS = "Karpenter metrics"
+
+
+@dataclass(frozen=True)
+class KarpenterMetricsObservation:
+    """Karpenter's Prometheus metrics over :data:`KARPENTER_METRICS_WINDOW` (roadmap G5).
+
+    ``None`` members are metrics Prometheus does not export (another Karpenter
+    version or provider): they are never read as zero.
+    """
+
+    #: ``increase(karpenter_voluntary_disruption_decisions_total)`` summed by ``reason`` (lowercase).
+    decisions: Optional[Mapping[str, float]] = None
+    #: ``karpenter_voluntary_disruption_eligible_nodes`` summed by ``reason`` (lowercase).
+    eligible_nodes: Optional[Mapping[str, float]] = None
+    #: ``increase(karpenter_nodepools_cost_total)`` per NodePool.
+    pool_costs: Optional[Mapping[str, float]] = None
+    window: str = KARPENTER_METRICS_WINDOW
+
+    @property
+    def consolidations(self) -> Optional[float]:
+        if self.decisions is None:
+            return None
+        return sum(value for reason, value in self.decisions.items() if reason in CONSOLIDATION_REASONS)
+
+    @property
+    def eligible(self) -> Optional[float]:
+        if self.eligible_nodes is None:
+            return None
+        return sum(value for reason, value in self.eligible_nodes.items() if reason in CONSOLIDATION_REASONS)
+
+
 #: Karpenter events that block consolidation of their pool (a blocker, factor × 0.5).
 BLOCKING_KARPENTER_EVENTS = frozenset({"DisruptionBlocked"})
 #: Karpenter events reported as reasons only (nodes Karpenter cannot consolidate right now).
@@ -195,6 +240,8 @@ class RealizationInputs:
     cluster_autoscaler: Optional[ClusterAutoscalerObservation] = None
     #: Karpenter disruption events (roadmap G5); None when they could not be read.
     karpenter_events: Optional[Sequence[KarpenterEventObservation]] = ()
+    #: Karpenter Prometheus metrics (roadmap G5); None when not read (no Prometheus, no Karpenter).
+    karpenter_metrics: Optional[KarpenterMetricsObservation] = None
     #: Inputs that could not be read; reported as reasons, never silently ignored.
     unavailable: Tuple[str, ...] = ()
 
@@ -215,9 +262,11 @@ class PoolRealization:
     nodes: Tuple[str, ...] = ()
     consolidation_policy: Optional[str] = None
     blocked: bool = False
+    #: ``increase(karpenter_nodepools_cost_total)`` over the metrics window, when exported.
+    observed_cost: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "pool": self.pool,
             "factor": self.factor,
             "autoscaler": self.autoscaler,
@@ -225,6 +274,9 @@ class PoolRealization:
             "blocked": self.blocked,
             "reasons": list(self.reasons),
         }
+        if self.observed_cost is not None:
+            data["observed_cost"] = self.observed_cost
+        return data
 
 
 @dataclass(frozen=True)
@@ -358,6 +410,8 @@ def resolve_realization(
             unconsolidatable.setdefault(pool_name, set()).add(f"{event.kind}/{event.name}")
 
     notes = tuple(f"{name} could not be read" for name in inputs.unavailable)
+    metrics = inputs.karpenter_metrics
+    metric_reason, metric_blocker = _metric_evidence(metrics)
     ca = inputs.cluster_autoscaler
     pools: Dict[str, PoolRealization] = {}
 
@@ -377,6 +431,12 @@ def resolve_realization(
             reasons.append(
                 f"Karpenter reports {len(unconsolidatable[name])} object(s) of NodePool {name} as Unconsolidatable"
             )
+        consolidating = policy in CONSOLIDATING_POLICIES
+        if consolidating and metric_reason:
+            reasons.append(metric_reason)
+        cost = metrics.pool_costs.get(name) if metrics is not None and metrics.pool_costs is not None else None
+        if cost is not None and metrics is not None:
+            reasons.append(f"karpenter_nodepools_cost_total of NodePool {name} rose by {cost:g} over {metrics.window}")
         budget_states = {_budget_blocks(budget) for budget in pool.budgets}
         blocked = False
         if "always" in budget_states:
@@ -384,6 +444,8 @@ def resolve_realization(
             reasons.append(f"Karpenter NodePool {name} has a disruption budget of zero nodes")
         else:
             pool_blockers = list(blockers.get(name, []))
+            if consolidating and metric_blocker:
+                pool_blockers.append(metric_blocker)
             if "scheduled" in budget_states:
                 pool_blockers.append(f"Karpenter NodePool {name} has a scheduled zero disruption budget")
             if pool_blockers:
@@ -398,6 +460,7 @@ def resolve_realization(
             nodes=tuple(sorted(members.get(name, []))),
             consolidation_policy=policy,
             blocked=blocked,
+            observed_cost=cost,
         )
 
     # Nodes labeled with a Karpenter pool while the NodePools could not be read.
@@ -449,6 +512,30 @@ def resolve_realization(
         default_pool=CLUSTER_POOL,
         observed_at=now,
         notes=notes,
+    )
+
+
+def _metric_evidence(metrics: Optional[KarpenterMetricsObservation]) -> Tuple[Optional[str], Optional[str]]:
+    """``(reason, blocker)`` the cluster-wide Karpenter metrics add to consolidating pools."""
+    if metrics is None:
+        return None, None
+    consolidations, eligible = metrics.consolidations, metrics.eligible
+    if consolidations is None:
+        return None, None
+    if consolidations > 0:
+        return (
+            f"Karpenter made {consolidations:g} consolidation decision(s) over the last {metrics.window} "
+            "(karpenter_voluntary_disruption_decisions_total)",
+            None,
+        )
+    if eligible:
+        return None, (
+            f"Karpenter made no consolidation decision over the last {metrics.window} although "
+            f"{eligible:g} node(s) are eligible (karpenter_voluntary_disruption_*)"
+        )
+    return (
+        f"Karpenter made no consolidation decision over the last {metrics.window}; no node is eligible now",
+        None,
     )
 
 

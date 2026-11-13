@@ -1,0 +1,189 @@
+{{- /*
+Optional Polaris job (roadmap G4): run Fairwinds Polaris on a schedule and push
+its audit to POST /api/v1/sources/polaris/reports. Disabled by default.
+
+* An init container runs `polaris audit --format=json --output-file /report/polaris.json`
+  with a read-only ClusterRole of its own (see docs/sources/polaris.md).
+* The upload container (the GreenKube image, no extra tool) posts the report
+  with an API key of scope signals:write read from sources.polaris.job.apiKeySecret.
+*/ -}}
+{{- include "greenkube.requireChartDefaults" . -}}
+{{- $job := dig "polaris" "job" dict (.Values.sources | default dict) -}}
+{{- if $job.enabled }}
+{{- $v := include "greenkube.values" . | fromYaml }}
+{{- $secretName := required "sources.polaris.job.apiKeySecret.name is required: a Secret holding a GreenKube API key with scope signals:write" (dig "apiKeySecret" "name" "" $job) }}
+{{- $digest := dig "image" "digest" "" $job | toString }}
+{{- if not (regexMatch "^sha256:[0-9a-fA-F]{64}$" $digest) }}
+{{- fail "sources.polaris.job.image.digest must pin the Polaris image (sha256:<64 hexadecimal characters>)" }}
+{{- end }}
+{{- $rbacCreate := dig "rbac" "create" true $job }}
+{{- $name := printf "%s-polaris" (include "greenkube.fullname" . | trunc 54 | trimSuffix "-") }}
+{{- if $rbacCreate }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: polaris
+---
+# Polaris audits workload specs: read-only, no Secrets, no ConfigMaps.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: polaris
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes", "namespaces", "services", "replicationcontrollers"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+  verbs: ["get", "list"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list"]
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get", "list"]
+- apiGroups: ["policy"]
+  resources: ["poddisruptionbudgets"]
+  verbs: ["get", "list"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses", "networkpolicies"]
+  verbs: ["get", "list"]
+- apiGroups: ["argoproj.io"]
+  resources: ["rollouts"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: polaris
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+- kind: ServiceAccount
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: polaris
+spec:
+  schedule: {{ $job.schedule | default "37 3 * * *" | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ $job.activeDeadlineSeconds | default 1800 }}
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            {{- include "greenkube.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: polaris
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ if $rbacCreate }}{{ $name }}{{ else }}{{ required "sources.polaris.job.serviceAccountName is required when sources.polaris.job.rbac.create is false" $job.serviceAccountName }}{{ end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: polaris
+              image: "{{ dig "image" "repository" "quay.io/fairwinds/polaris" $job }}@{{ $digest }}"
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              env:
+                - name: HOME
+                  value: /tmp
+              command:
+                - polaris
+                - audit
+                - --format=json
+                - --output-file=/report/polaris.json
+                {{- range ($job.extraArgs | default list) }}
+                - {{ . | quote }}
+                {{- end }}
+              resources:
+                {{- toYaml ($job.resources | default dict) | nindent 16 }}
+              volumeMounts:
+                - name: report
+                  mountPath: /report
+                - name: tmp
+                  mountPath: /tmp
+          containers:
+            - name: upload
+              image: "{{ include "greenkube.image" . }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              env:
+                - name: GREENKUBE_POLARIS_REPORT_URL
+                  value: "http://{{ include "greenkube.fullname" . }}-api.{{ .Release.Namespace }}.svc:{{ $v.api.port }}/api/v1/sources/polaris/reports{{ if eq (toString (dig "complete" true $job)) "false" }}?complete=false{{ end }}"
+                - name: GREENKUBE_SIGNALS_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $secretName }}
+                      key: {{ dig "apiKeySecret" "key" "api-key" $job }}
+              command:
+                - python
+                - -c
+                - |
+                  import os, sys, urllib.request
+                  with open("/report/polaris.json", "rb") as report:
+                      body = report.read()
+                  request = urllib.request.Request(
+                      os.environ["GREENKUBE_POLARIS_REPORT_URL"],
+                      data=body,
+                      method="POST",
+                      headers={
+                          "Content-Type": "application/json",
+                          "Authorization": "Bearer " + os.environ["GREENKUBE_SIGNALS_API_KEY"],
+                      },
+                  )
+                  with urllib.request.urlopen(request, timeout=120) as response:
+                      print(response.status, response.read(2000).decode("utf-8", "replace"))
+                  sys.exit(0)
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              volumeMounts:
+                - name: report
+                  mountPath: /report
+                  readOnly: true
+          volumes:
+            - name: report
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}
+{{- end }}
