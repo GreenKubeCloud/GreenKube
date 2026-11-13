@@ -107,11 +107,27 @@ def _evidence_window(evidence: Any) -> tuple[float | None, datetime | None, date
     return window_seconds, start, end
 
 
+def _usable_history_start(history_start: datetime | None, end: datetime | None) -> datetime | None:
+    """The install's first sample, or None when it cannot apply to this evidence.
+
+    A first sample at or after the evidence window end (stale persisted evidence,
+    or retention moving the earliest stored sample forward) says nothing about
+    the history behind this evidence: treat it as unknown (full lookback).
+    """
+    if history_start is None:
+        return None
+    history_start = ensure_utc(history_start)
+    if end is not None and history_start >= end:
+        return None
+    return history_start
+
+
 def available_history_seconds(evidence: Any, history_start: datetime | None, step_seconds: int = 300) -> float | None:
     """Seconds of the observation window covered by data since install, capped at the lookback."""
     window, start, end = _evidence_window(evidence)
     if window is None:
         return None
+    history_start = _usable_history_start(history_start, end)
     if history_start is None or end is None:
         return window
     first = max(start, ensure_utc(history_start)) if start is not None else ensure_utc(history_start)
@@ -153,6 +169,7 @@ def evidence_eligible_at(
     step = max(int(step_seconds or 300), 1)
     coverage = getattr(evidence, "coverage_ratio", 0.0)
     coverage = float(coverage) if isinstance(coverage, (int, float)) and not isinstance(coverage, bool) else 0.0
+    history_start = _usable_history_start(history_start, end)
     if history_start is not None:
         first = max(start, ensure_utc(history_start)) if start is not None else ensure_utc(history_start)
     else:

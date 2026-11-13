@@ -503,3 +503,16 @@ class TestWarmUpSinceInstall:
         assert coverage_since_history(evidence, NOW - timedelta(days=30)) == pytest.approx(0.2)
         # Installed two days ago: 0.2 of the week is 1.4 days of the 2 available.
         assert coverage_since_history(evidence, NOW - timedelta(days=2)) == pytest.approx(0.7)
+
+    def test_a_history_start_after_the_evidence_window_is_treated_as_unknown(self):
+        """Stale evidence, or retention moving the first stored sample forward, must not inflate coverage."""
+        from greenkube.automation.policy import coverage_since_history
+
+        evidence = RecommendationEvidence(
+            sample_count=200,
+            coverage_ratio=0.1,
+            observation_window_start=NOW - timedelta(days=7),
+            observation_window_end=NOW - timedelta(days=1),
+            observation_window_seconds=6 * 86400,
+        )
+        assert coverage_since_history(evidence, NOW - timedelta(hours=1)) == pytest.approx(0.1)
