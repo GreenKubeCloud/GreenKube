@@ -24,7 +24,6 @@ from greenkube.gitops.contracts import (
     ActionPlanV3,
     AddHorizontalPodAutoscaler,
     ContainerResources,
-    DeleteResource,
     Plan,
     PlanStatus,
     ResourceTarget,
@@ -56,11 +55,11 @@ def test_container_resources_is_the_built_in_kind() -> None:
     assert operation_subjects(action) == {"api"}
 
 
-@pytest.mark.parametrize("operation", [DeleteResource(), AddHorizontalPodAutoscaler(min_replicas=1, max_replicas=2)])
+@pytest.mark.parametrize("operation", [AddHorizontalPodAutoscaler(min_replicas=1, max_replicas=2)])
 def test_operations_without_a_kind_are_explained(operation: Any) -> None:
     action = raw_cases._action(operations=[operation])
 
-    with pytest.raises(UnknownActionKindError, match="only per-container rightsizing operations are supported"):
+    with pytest.raises(UnknownActionKindError, match="only per-container rightsizing, resource deletion operations"):
         ACTION_KINDS.spec_for_action(action)
     assert action_kind_of(action) is None
     assert operation_subjects(action) == set()

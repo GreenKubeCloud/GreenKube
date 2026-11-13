@@ -7,9 +7,9 @@ services:
       POSTGRES_USER: greenkube
       POSTGRES_PASSWORD: greenkube_password
     ports:
-      - "5432:5432"
+      - "${GREENKUBE_TEST_PG_PORT:-5432}:5432"
     tmpfs:
-      - /var/lib/postgresql/data
+      - /var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U greenkube -d greenkube_test"]
       interval: 5s

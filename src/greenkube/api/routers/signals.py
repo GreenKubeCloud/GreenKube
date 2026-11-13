@@ -3,6 +3,7 @@
 Endpoints (API key scope ``signals:write``):
   POST /signals                - A batch of ``signal.v1alpha1`` signals (``source_id: push:<client>``)
   POST /sources/krr/reports    - A Robusta KRR JSON report (``krr simple -f json``)
+  POST /sources/polaris/reports - A Fairwinds Polaris audit report (``polaris audit --format=json``)
 
 Pushed signals are stored in the inbox and used by the next scans through the
 ``push`` and ``krr`` sources: they reach recommendations only through
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
@@ -29,6 +31,7 @@ from greenkube.signals.connectors.inbox import (
     create_signal_inbox_repository,
 )
 from greenkube.signals.connectors.krr import KRR_SOURCE_ID, KrrReportError, parse_krr_report
+from greenkube.signals.connectors.polaris import POLARIS_SOURCE_ID, PolarisReportError, parse_polaris_report
 from greenkube.signals.connectors.push import PointerError, parse_batch
 from greenkube.signals.sdk import Diagnostic
 
@@ -39,6 +42,7 @@ router = APIRouter()
 #: Largest accepted bodies (bytes).
 MAX_SIGNAL_BATCH_BYTES = 8 * 1024 * 1024
 MAX_KRR_REPORT_BYTES = 64 * 1024 * 1024
+MAX_POLARIS_REPORT_BYTES = 64 * 1024 * 1024
 #: Inbox rows not pushed again for this long are pruned on the next push.
 INBOX_RETENTION = timedelta(days=30)
 
@@ -76,6 +80,37 @@ def _cluster_uid() -> str:
 def _actor(request: Request) -> Optional[str]:
     principal = getattr(request.state, "principal", None)
     return getattr(principal, "actor", None)
+
+
+_CLIENT_INVALID = re.compile(r"[^a-z0-9_.-]+")
+
+
+def push_client_of(principal: Any) -> Optional[str]:
+    """The only push client a principal may write (``push:<client>``), or None when it is not bound.
+
+    A scoped API key is bound to the client named after it: the key name in
+    lowercase, every other character than ``[a-z0-9_.-]`` replaced by ``-``
+    (``CI pipeline`` writes ``push:ci-pipeline``). An empty result means the key
+    name gives no valid client: the key cannot push signals. Signed-in users
+    (administrators), the deprecated bootstrap key and the anonymous principal
+    of an unsecured instance are not bound.
+    """
+    if principal is None or getattr(principal, "kind", None) != "apikey" or getattr(principal, "legacy", False):
+        return None
+    slug = _CLIENT_INVALID.sub("-", str(getattr(principal, "name", "") or "").lower())
+    return slug.lstrip("-_.")[:63].rstrip("-_.") if slug else ""
+
+
+def _check_push_client(request: Request, source_id: str) -> None:
+    """403 unless the principal may write ``source_id`` (roadmap G6)."""
+    client = push_client_of(getattr(request.state, "principal", None))
+    if client is None or source_id == f"push:{client}":
+        return
+    if client:
+        message = f"This API key may only push signals as 'push:{client}' (the client is the key name)."
+    else:
+        message = "This API key's name gives no push client: create a key named after the client (e.g. 'ci')."
+    raise HTTPException(status_code=403, detail={"code": "push_client_mismatch", "message": message})
 
 
 async def _json_body(request: Request, limit: int) -> Any:
@@ -178,10 +213,15 @@ async def push_signals(request: Request, inbox: SignalInboxRepository = Depends(
     through the ``push`` source; they become recommendations only through consensus.
     """
     document = await _json_body(request, MAX_SIGNAL_BATCH_BYTES)
+    claimed = document.get("source_id") if isinstance(document, dict) else None
+    if isinstance(claimed, str):
+        # Bound first: another client's batch is 403 whether or not it is valid.
+        _check_push_client(request, claimed)
     received_at = datetime.now(timezone.utc)
     batch, signals, errors = parse_batch(document, cluster_uid=_cluster_uid(), received_at=received_at)
     if batch is None:
         return _invalid(errors, "The signal batch does not match schema signal-batch.v1alpha1.")
+    _check_push_client(request, batch.source_id)
     unique = list({signal.signal_id: signal for signal in signals}.values())
     diagnostics: List[Diagnostic] = []
     if len(unique) < len(signals):
@@ -238,6 +278,46 @@ async def push_krr_report(
     return await _store(
         inbox,
         source_id=KRR_SOURCE_ID,
+        complete=complete,
+        signals=parsed.signals,
+        received_at=received_at,
+        actor=_actor(request),
+        diagnostics=parsed.diagnostics,
+    )
+
+
+@router.post(
+    "/sources/polaris/reports",
+    response_model=PushResponse,
+    responses={
+        400: {"description": "The body is not JSON."},
+        413: {"description": "Body too large."},
+        422: {"model": SignalValidationResponse, "description": "The body is not a Polaris JSON report."},
+    },
+)
+async def push_polaris_report(
+    request: Request,
+    complete: bool = Query(
+        True,
+        description="True when the report audits the whole cluster (replaces earlier reports); false for a "
+        "partial audit (for example one namespace), which only adds or refreshes findings.",
+    ),
+    inbox: SignalInboxRepository = Depends(get_signal_inbox),
+):
+    """Push a Fairwinds Polaris audit (``polaris audit --format=json``); its findings are used by the next scans.
+
+    Findings are hygiene advice (never pull requests); missing CPU or memory
+    requests also get a request computed by GreenKube from observed usage.
+    """
+    document = await _json_body(request, MAX_POLARIS_REPORT_BYTES)
+    received_at = datetime.now(timezone.utc)
+    try:
+        parsed = parse_polaris_report(document, cluster_uid=_cluster_uid(), received_at=received_at)
+    except PolarisReportError as exc:
+        return _invalid([PointerError(pointer=exc.pointer, message=str(exc), type=exc.type)], "Not a Polaris report.")
+    return await _store(
+        inbox,
+        source_id=POLARIS_SOURCE_ID,
         complete=complete,
         signals=parsed.signals,
         received_at=received_at,

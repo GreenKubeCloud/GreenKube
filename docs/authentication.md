@@ -11,13 +11,17 @@ Both resolve to one identity, the *principal*, which GreenKube records in audit 
 entries: `user:<username>` for people, `apikey:<key name>` for scoped keys, and `api-key:<digest>` for the deprecated
 bootstrap key.
 
-This page covers the default mode, `config.apiAuthMode: session` (setting `API_AUTH_MODE`). The other modes are:
+The mode is `config.apiAuthMode` (setting `API_AUTH_MODE`):
 
 | Mode | Browser sign-in | API keys | Use |
 |---|---|---|---|
-| `session` (default) | yes | scoped keys and the deprecated bootstrap key | Every installation |
+| `session` (default) | local accounts (username and password) | scoped keys and the deprecated bootstrap key | Every installation |
+| `proxy` | single sign-on through an authentication proxy (oauth2-proxy, Authentik, Pomerium), plus local accounts | same | Clusters that already front their tools with an auth proxy |
+| `oidc` | native OpenID Connect (**Sign in with ...**), plus local accounts | same | Any OpenID Connect provider (Keycloak, Dex, Entra ID, Okta, Google, GitLab) |
 | `api_key` | no (`POST /auth/login` answers `409`) | scoped keys and the bootstrap key | Headless installations driven only by machines |
-| `oidc` | reserved for SSO (roadmap F16); answers `503` | | |
+
+Every browser mode ends in the same server-side session, cookie and CSRF protection described below; only the way
+the user proves who they are differs. See [Single sign-on](#single-sign-on) and [Roles](#roles).
 
 ## First sign-in
 
@@ -32,7 +36,8 @@ kubectl -n greenkube get secret greenkube-initial-admin \
 1. Open the dashboard and sign in as `admin` with that password.
 2. GreenKube asks you to choose a new password (at least 12 characters) before anything else.
 3. GreenKube then erases the initial password from the Secret. The Secret stays, empty, so a later
-   `helm upgrade` or Argo CD sync never issues a second initial password.
+   `helm upgrade` or Argo CD sync never issues a second initial password. From then on, the notes printed by
+   `helm upgrade` no longer point to that Secret: they print the reset command of [Recovery](#recovery) instead.
 
 Where the initial password comes from:
 
@@ -119,13 +124,152 @@ requests queues instead of exhausting the Pod's memory.
 
 Counters live in each API process: with several replicas, an attacker gets at most the budget times the number of
 replicas. `greenkube_auth_failures_total{reason}` counts `bad_credentials`, `rate_limited`, `invalid_session`,
-`invalid_api_key`, `csrf` and `forbidden_scope` rejections.
+`invalid_api_key`, `csrf`, `forbidden_scope`, `untrusted_proxy_header` and `sso` rejections.
 
 ### Passwords
 
 Passwords are hashed with scrypt from the Python standard library (`N=2^15`, `r=8`, `p=1`, 16-byte random salt,
 32-byte key), stored as `scrypt$N$r$p$salt$hash`. A hash with weaker parameters is upgraded at the next successful
 sign-in. Passwords need at least 12 characters (at most 256) and must differ from the username.
+
+## Roles
+
+| Role | Can |
+|---|---|
+| `viewer` | Read everything (dashboards, recommendations, plans, changes, ledger, settings) |
+| `operator` | Everything a viewer can, plus approve plans (which opens pull requests), cancel and delete plans, preview rollbacks, ignore and restore recommendations, mark them applied, request re-measurements, report out-of-band deliveries |
+| `admin` | Everything, plus users and roles, API keys and the repository allowlist |
+
+- Roles are enforced on the server, twice: the global authentication dependency maps every request to a scope, and
+  each mutating route also declares the scope it needs (`require_scope`), so a gap in one table never opens a route.
+  A viewer gets `403` (`INSUFFICIENT_SCOPE`) on plan approval and every other mutation.
+- The bootstrap account is an `admin`. Administrators manage local accounts in **Account > Users and roles**
+  (`/settings/account`) or with `GET/POST /api/v1/auth/users` and `PATCH /api/v1/auth/users/{id}` (`{"role": ...}`,
+  `{"disabled": true}`). A new local account chooses its own password at its first sign-in. Disabling an account
+  signs out all of its sessions. The last active admin can be neither demoted nor disabled (`409 LAST_ADMIN`).
+- Single sign-on accounts get their role from their groups (below) at every sign-in; it cannot be edited in the UI.
+- Operator (`write`, `approve`, `plans:deliver`) covers the day-to-day loop: plans and their delivery,
+  recommendation decisions, repository bindings (`/api/v1/repository-bindings`) and GitOps discovery and provider
+  routes (`/api/v1/gitops/*`). Admin is required for users and roles (`/api/v1/auth/users`), API keys
+  (`/api/v1/auth/api-keys`) and the repository allowlist.
+
+## Single sign-on
+
+Both SSO modes create, at the first sign-in, a GreenKube account bound to the identity provider (`auth_source`
+`proxy` or `oidc`) and then issue the usual server-side session. These accounts have no password. An SSO identity
+never takes over an existing account: when its username is already used (for example by the local `admin`), the
+sign-in is refused with `ACCOUNT_CONFLICT`.
+
+Local accounts keep signing in with their password in both modes (`auth.localLogin: true`, the default), so the
+bootstrap `admin` remains a break-glass account when the identity provider is down. Set `auth.localLogin: false` to
+offer single sign-on only.
+
+### Group to role mapping
+
+```yaml
+auth:
+  roles:
+    groups:
+      admin: [platform-admins]
+      operator: [sre, "acme:oncall"]
+    defaultRole: viewer   # or none: refuse users in no listed group
+```
+
+A user receives the highest role any of their groups grants, else `defaultRole`. With `defaultRole: none`, a user in
+no listed group is refused (`NO_ROLE`). The role is recomputed at every sign-in (and on every request in `proxy`
+mode), so removing someone from a group takes effect at their next session (immediately behind a proxy).
+
+### Authentication proxy (`config.apiAuthMode: proxy`)
+
+```yaml
+config:
+  apiAuthMode: proxy
+  trustedProxyIps: 10.42.0.0/16      # the proxy Pods or the Ingress controller, required
+auth:
+  proxy:
+    userHeaders: X-Forwarded-User      # defaults (oauth2-proxy --pass-user-headers)
+    groupsHeaders: X-Forwarded-Groups
+```
+
+- GreenKube accepts identity headers **only** when the TCP connection comes from an address listed in
+  `config.trustedProxyIps`. The check uses the connection itself, never the `X-Forwarded-For` client the proxy
+  reports, so proxied requests are recognised and an end user whose own address falls in a trusted range does not
+  pass for the proxy. A request carrying an identity or groups header from any other peer is rejected with
+  `401 UNTRUSTED_PROXY_HEADER` (and counted as `greenkube_auth_failures_total{reason="untrusted_proxy_header"}`),
+  whatever cookie or account it also carries. The chart refuses to render `proxy` mode without `trustedProxyIps`,
+  and the API refuses to start without it.
+- **Configure only the headers your proxy sets and overwrites.** A proxy strips or overwrites the header family it
+  manages and passes any other header through unchanged, so a client could add a second family (for example
+  `X-Auth-Request-User: alice` and `X-Auth-Request-Groups: platform-admins` next to oauth2-proxy's
+  `X-Forwarded-*`). GreenKube never merges families: the n-th `groupsHeaders` entry belongs to the n-th
+  `userHeaders` entry, only the groups header paired with the user header is read, and a request carrying headers
+  of more than one configured family, or a repeated user header, is refused with `401 INVALID_IDENTITY`. List
+  several families only when the proxy overwrites all of them.
+- List only the proxy's own addresses: every peer in that list can claim any identity. Keep the GreenKube Service
+  unreachable around the proxy, for example with `monitoring.networkPolicy`. A session started through the proxy is
+  only accepted through it: replayed from any other peer it is refused with `401 UNTRUSTED_PROXY_HEADER`.
+- The first `GET /api/v1/auth/me` of an identity starts its session (the dashboard does this on load). Reads work at
+  once; mutations need the session's CSRF token, so a header-only request is refused with `CSRF_REJECTED` and the
+  dashboard refreshes `/auth/me` and retries.
+- oauth2-proxy as a reverse proxy: `--pass-user-headers` (on by default) sets `X-Forwarded-User` and
+  `X-Forwarded-Groups`, the defaults. oauth2-proxy behind ingress-nginx `auth-url`: `--set-xauthrequest` returns
+  `X-Auth-Request-User` and `X-Auth-Request-Groups` to the Ingress, which copies them with
+  `nginx.ingress.kubernetes.io/auth-response-headers: X-Auth-Request-User,X-Auth-Request-Groups`; set
+  `auth.proxy.userHeaders: X-Auth-Request-User` and `auth.proxy.groupsHeaders: X-Auth-Request-Groups`, and list the
+  ingress controller Pods in `trustedProxyIps`. Authentik's proxy outpost sends `X-authentik-username` and
+  `X-authentik-groups`: set `auth.proxy.userHeaders: X-authentik-username` and
+  `auth.proxy.groupsHeaders: X-authentik-groups`. Pomerium: forward the claims as headers (`jwt_claims_headers`)
+  and point the two settings at them.
+- A local account that signs in with its password keeps its own session even through the proxy.
+
+### OpenID Connect (`config.apiAuthMode: oidc`)
+
+```yaml
+config:
+  apiAuthMode: oidc
+  externalUrl: https://greenkube.example.com
+auth:
+  oidc:
+    issuer: https://keycloak.example.com/realms/acme
+    clientId: greenkube
+    existingSecret: greenkube-oidc        # key clientSecret; omit for a public client
+    groupsClaim: groups
+    providerName: Acme SSO
+  roles:
+    groups:
+      admin: [greenkube-admins]
+      operator: [greenkube-operators]
+```
+
+Register `https://greenkube.example.com/api/v1/auth/oidc/callback` as the redirect URI (or set
+`auth.oidc.redirectUrl`). The sign-in page then shows **Sign in with Acme SSO**.
+
+How the flow is protected:
+
+- **Authorization code with PKCE** (`S256`), never the implicit flow. The code verifier, the `state` and the `nonce`
+  are 256-bit random values stored server-side (table `auth_oidc_logins`, keyed by the SHA-256 of the state), so any
+  API replica can finish the sign-in. A pending sign-in expires after ten minutes and is deleted when used: a
+  replayed callback fails (`state_expired`).
+- The `state` is also bound to the browser by an `HttpOnly`, `SameSite=Lax` cookie limited to
+  `/api/v1/auth/oidc/`: a callback opened in another browser fails (`state_mismatch`), which defeats login CSRF.
+- **Discovery** must name the configured issuer exactly, endpoints must use `https` (plain `http` only outside
+  production) and, when the provider lists its PKCE methods, `S256` must be one of them.
+- **ID token**: the signature is verified against the provider's JWKS (`RS256/384/512`, `PS256/384/512`,
+  `ES256/384/512`, `EdDSA`; `none` and shared-secret `HS*` algorithms are refused, keys are re-fetched once when an
+  unknown `kid` appears). Then `iss`, `aud` (and `azp` with several audiences), `exp`, `iat`, `nbf` (60-second
+  leeway), `nonce` and `sub` are checked.
+- The account is keyed by the issuer's `sub`, never by the username, so renaming a user at the provider keeps the
+  same GreenKube account. The username comes from `auth.oidc.usernameClaim` (then `preferred_username`, `email`,
+  `sub`), the groups from `auth.oidc.groupsClaim`. Some providers only include groups when asked: add their scope
+  to `auth.oidc.scopes` (for example `groups` for Dex or Okta) or configure a groups mapper (Keycloak).
+- A confidential client authenticates with `client_secret_basic` (or `client_secret_post` when the provider supports
+  only that). Without a secret GreenKube is a public client, protected by PKCE.
+- Failures go back to the sign-in page with a stable code (`?sso_error=denied`, `state_mismatch`, `state_expired`,
+  `invalid_token`, `provider_unavailable`, `token_exchange_failed`, `no_role`, `account_conflict`,
+  `account_disabled`) shown as a message; the details go to the API log and to
+  `greenkube_auth_failures_total{reason="sso"}`. The return path after sign-in is always a local path.
+- GreenKube sessions are independent of the provider's: signing out of GreenKube does not sign out of the provider,
+  and the GreenKube session lasts `auth.session.*`.
 
 ## API keys
 
@@ -148,12 +292,12 @@ curl -X POST https://greenkube.example.com/api/v1/auth/api-keys \
 | `write` | Mutations: scans, ignore/restore, mark applied, plan previews, binding resolution |
 | `approve` | Plan approval, which opens pull requests: `POST /api/v1/automation/plans/{id}/approve` |
 | `plans:deliver` | Report that an approved plan was delivered outside GreenKube (`POST /api/v1/automation/plans/{id}/delivery`, `patch` and `ci` delivery modes). A CI job needs `read` + `plans:deliver` only |
-| `signals:write` | Pushing signals: `POST /api/v1/signals` ([Push API](sources/push.md)) and `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)) |
+| `signals:write` | Pushing signals: `POST /api/v1/signals` ([Push API](sources/push.md)), `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)) and `POST /api/v1/sources/polaris/reports` ([Polaris](sources/polaris.md)). A key pushes `POST /api/v1/signals` batches only as `push:<key name>` (`403 push_client_mismatch` otherwise) |
 | `metrics:read` | Only the Prometheus endpoint `/prometheus/metrics` |
 | `admin` | Everything, including API keys |
 
 User roles map to the same scopes: `viewer` (`read`, `metrics:read`), `operator` (adds `write`, `approve` and `plans:deliver`) and
-`admin` (everything). The bootstrap account is an `admin`; more accounts and SSO roles arrive with roadmap F16.
+`admin` (everything). See [Roles](#roles).
 
 ### Prometheus
 
@@ -188,28 +332,45 @@ The controller and automation-worker metrics endpoints still accept only this ke
 |---|---|---|
 | `POST` | `/api/v1/auth/login` | `{username, password, remember}`. Sets the session cookie; returns the principal and its CSRF token. |
 | `POST` | `/api/v1/auth/logout` | Revokes the current session and clears the cookie (`204`). |
-| `GET` | `/api/v1/auth/me` | The current principal (`kind`, `name`, `role`, `scopes`, `must_change_password`, `csrf_token`, session). `401` when signed out. |
+| `GET` | `/api/v1/auth/me` | The current principal (`kind`, `name`, `role`, `scopes`, `auth_source`, `must_change_password`, `csrf_token`, session). `401` when signed out. Behind a trusted proxy, starts the identity's session. |
 | `POST` | `/api/v1/auth/password` | `{current_password, new_password}`. Revokes every session, issues a new cookie. |
 | `GET` | `/api/v1/auth/sessions` | Active sessions of the signed-in user. |
 | `DELETE` | `/api/v1/auth/sessions/{id}` | Signs out one session. |
 | `GET`, `POST` | `/api/v1/auth/api-keys` | List or create keys (`admin`). |
 | `DELETE` | `/api/v1/auth/api-keys/{id}` | Revoke a key (`admin`). |
+| `GET` | `/api/v1/auth/providers` | Public: sign-in options (`mode`, `password`, `sso`) for the sign-in page. |
+| `GET` | `/api/v1/auth/oidc/login` | Starts an OpenID Connect sign-in (`?return_to=/path`); redirects to the provider. |
+| `GET` | `/api/v1/auth/oidc/callback` | Provider redirect: finishes the sign-in, sets the session cookie, redirects to the return path. |
+| `GET`, `POST` | `/api/v1/auth/users` | List accounts, or create a local account `{username, password, role}` (`admin`). |
+| `PATCH` | `/api/v1/auth/users/{id}` | `{role}` and/or `{disabled}` (`admin`). |
 
 Until the initial password is changed, every other endpoint answers `403` with code `PASSWORD_CHANGE_REQUIRED`.
 
 ## Recovery
 
-If nobody can sign in any more (forgotten admin password), delete the accounts and their sessions, then either set
-`auth.admin.existingSecret` to a Secret holding a new password, or delete the emptied Secret
-`<release>-initial-admin` and run `helm upgrade` (or sync) so that the hook issues a new initial password. Restart
-the API: on its next start it creates the admin again.
+Once the initial password has been used, GreenKube erases it from `<release>-initial-admin` and `helm upgrade` no
+longer points to it. To reset a forgotten password of a local account, run from the API Pod (which already holds the
+database credentials):
+
+```bash
+kubectl -n greenkube exec deploy/greenkube-api -- greenkube auth reset-password admin
+```
+
+The command prints a new random password once, forces a change at the next sign-in, re-enables the account and
+signs out all of its sessions. It never touches other accounts, and refuses single sign-on accounts (they have no
+password).
+
+As a last resort (no API Pod can start), delete the accounts and their sessions, then either set
+`auth.admin.existingSecret` to a Secret holding a new password, or delete the emptied Secret `<release>-initial-admin`
+and run `helm upgrade` (or sync) so that the hook issues a new initial password. Restart the API: on its next start it
+creates the admin again. Single sign-on accounts are created again at their next sign-in.
 
 ```bash
 kubectl -n greenkube exec -it greenkube-postgres-0 -- \
   psql -U greenkube -d greenkube -c "DELETE FROM auth_sessions; DELETE FROM auth_users;"
 ```
 
-## Security review checklist (F14)
+## Security review checklist (F14, F16)
 
 | Item | Implementation |
 |---|---|
@@ -221,3 +382,14 @@ kubectl -n greenkube exec -it greenkube-postgres-0 -- \
 | Constant-time comparisons | API-key secrets, the bootstrap key and CSRF tokens use `hmac.compare_digest`; sessions are looked up by SHA-256 |
 | Secrets in logs | Passwords, tokens and keys are never logged; key creation logs only the `gk_<id>` prefix and the actor |
 | Storage | Session tokens and API-key secrets stored as SHA-256 only; passwords as scrypt hashes |
+| Proxy identity headers | Accepted only when the TCP peer (recorded before `X-Forwarded-For` is applied, never the forwarded client) is in `TRUSTED_PROXY_IPS` (required in `proxy` mode, enforced at startup and in the chart); any identity or groups header from another peer is a `401` before any account or session is used |
+| Proxy header families | One configured user header and its paired groups header per request; headers of a second family or a repeated user header are refused (`INVALID_IDENTITY`), groups are never merged across families; defaults are the single `X-Forwarded-User` / `X-Forwarded-Groups` family |
+| Proxy sessions | A session started by the proxy is refused from any peer outside `TRUSTED_PROXY_IPS` |
+| Header-only principals | May read; may not mutate without a session and its CSRF token (`CSRF_REJECTED`), so an ambient proxy cookie cannot be used cross-site |
+| OIDC flow | Authorization code + PKCE `S256`; 256-bit `state`, `nonce` and verifier stored server-side, single use, ten-minute expiry; `state` bound to the browser by an `HttpOnly` `SameSite=Lax` cookie scoped to `/api/v1/auth/oidc/` |
+| ID token | Signature verified against the JWKS (asymmetric algorithms only, never `none` or `HS*`); `iss`, `aud`, `azp`, `exp`, `iat`, `nbf`, `nonce`, `sub` checked; discovery must name the configured issuer over `https` |
+| Open redirects | The post-sign-in return path is reduced to a local path (`//host`, absolute URLs, backslashes and `/api/` are refused) |
+| Account takeover | SSO accounts are keyed by `proxy:<user>` / `oidc:<sub>`; an SSO identity never merges into an existing account (`ACCOUNT_CONFLICT`); SSO accounts have no password and fail password sign-in in constant time |
+| Roles | Enforced server-side by the scope table and by `require_scope` on every mutating route; a test asserts that a viewer gets `403` on every mutating route of the app; the last active admin cannot be demoted or disabled |
+| Group mapping | Malformed `AUTH_ROLE_GROUPS` or `AUTH_DEFAULT_ROLE` stop the API at startup; `defaultRole: none` refuses unmapped users |
+| Initial password | Erased from the Secret once used; NOTES no longer points to it and prints `greenkube auth reset-password` instead |

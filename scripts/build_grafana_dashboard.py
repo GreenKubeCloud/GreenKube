@@ -1276,13 +1276,14 @@ DASHBOARD = {
         {"type": "panel", "id": "geomap", "name": "Geomap", "version": ""},
     ],
     "id": None,
+    # The uid is kept so that existing imports, links and the Grafana.com listing keep working.
     "uid": "greenkube-fingreenops",
-    "title": "GreenKube FinGreenOps Dashboard",
+    "title": "GreenKube — Savings & Footprint",
     "description": (
-        "FinGreenOps dashboard for Kubernetes — sustainability score, CO₂ emissions (Scope 2 & 3), "
-        "cloud costs, regional node cleanliness, top namespace impact, pod spend, and realized savings."
+        "Savings and footprint of the GreenKube optimization loop — realized savings, CO₂e emissions "
+        "(Scope 2 & 3), cloud costs, regional node cleanliness, top namespace impact and pod spend."
     ),
-    "tags": ["greenkube", "fingreenops", "carbon", "cost", "kubernetes", "sustainability"],
+    "tags": ["greenkube", "savings", "finops", "carbon", "cost", "kubernetes"],
     "style": "dark",
     "timezone": "utc",
     "editable": True,

@@ -125,6 +125,8 @@ class ReliabilitySignals:
     throttled: Dict[Tuple[TargetKey, str], float] = field(default_factory=dict)
     periods: Dict[Tuple[TargetKey, str], float] = field(default_factory=dict)
     jvm: Dict[Tuple[TargetKey, str], str] = field(default_factory=dict)
+    #: Pod-spec list of each container (H1): ``container``, ``sidecar`` or ``init``.
+    container_kinds: Dict[Tuple[TargetKey, str], str] = field(default_factory=dict)
     #: kube-state-metrics answered: a target without OOM kills has 0, not unknown.
     oom_known: bool = False
 
@@ -201,10 +203,9 @@ async def read_prometheus_signals(
     return signals
 
 
-def jvm_hints_from_pods(pods: Iterable[Any], snapshot: UsageSnapshot) -> Dict[Tuple[TargetKey, str], str]:
-    """JVM hints per target container from Kubernetes pod objects (``V1Pod`` or alike)."""
+def _pod_targets(pods: Iterable[Any], snapshot: UsageSnapshot) -> Iterable[Tuple[TargetKey, Any]]:
+    """``(target, pod spec)`` of each pod whose target has usage summaries."""
     known = set(snapshot.summaries)
-    hints: Dict[Tuple[TargetKey, str], str] = {}
     for pod in pods:
         metadata = getattr(pod, "metadata", None)
         spec = getattr(pod, "spec", None)
@@ -218,8 +219,27 @@ def jvm_hints_from_pods(pods: Iterable[Any], snapshot: UsageSnapshot) -> Dict[Tu
         if owner_kind == "ReplicaSet" and owner_name and "-" in owner_name:
             owner_kind, owner_name = "Deployment", owner_name.rsplit("-", 1)[0]
         target = target_for_pod(metadata.namespace, metadata.name, known, owner_kind, owner_name)
-        if target is None:
-            continue
+        if target is not None:
+            yield target, spec
+
+
+def container_kinds_from_pods(pods: Iterable[Any], snapshot: UsageSnapshot) -> Dict[Tuple[TargetKey, str], str]:
+    """Pod-spec list of each target container (H1): ``container``, ``sidecar`` (an init container
+    with ``restartPolicy: Always``) or ``init``; the first pod read wins."""
+    kinds: Dict[Tuple[TargetKey, str], str] = {}
+    for target, spec in _pod_targets(pods, snapshot):
+        for container in getattr(spec, "containers", None) or []:
+            kinds.setdefault((target, container.name), "container")
+        for container in getattr(spec, "init_containers", None) or []:
+            kind = "sidecar" if getattr(container, "restart_policy", None) == "Always" else "init"
+            kinds.setdefault((target, container.name), kind)
+    return kinds
+
+
+def jvm_hints_from_pods(pods: Iterable[Any], snapshot: UsageSnapshot) -> Dict[Tuple[TargetKey, str], str]:
+    """JVM hints per target container from Kubernetes pod objects (``V1Pod`` or alike)."""
+    hints: Dict[Tuple[TargetKey, str], str] = {}
+    for target, spec in _pod_targets(pods, snapshot):
         for container in getattr(spec, "containers", None) or []:
             env_names = [getattr(var, "name", "") for var in getattr(container, "env", None) or []]
             command = [*(getattr(container, "command", None) or []), *(getattr(container, "args", None) or [])]
@@ -261,6 +281,9 @@ def apply_signals(snapshot: UsageSnapshot, signals: ReliabilitySignals) -> None:
                 summary.throttling_ratio = max(0.0, min(throttled / periods, 1.0))
             if hint:
                 summary.jvm_hint = hint
+            kind = signals.container_kinds.get((target, name)) if name != POD_LEVEL else None
+            if kind:
+                summary.container_kind = kind
 
 
 async def attach_reliability_signals(
@@ -291,6 +314,7 @@ async def attach_reliability_signals(
     try:
         pods = await (list_pods or _list_pods)()
         signals.jvm = jvm_hints_from_pods(pods, snapshot)
+        signals.container_kinds = container_kinds_from_pods(pods, snapshot)
     except Exception as error:
         logger.warning("Could not read pod specs for JVM detection: %s", error)
     apply_signals(snapshot, signals)

@@ -1,0 +1,148 @@
+suite: loop health alerts (roadmap N7)
+# Behaviour of the expressions is tested with promtool
+# (helm-chart/tests/promtool/, .github/scripts/promtool-check.sh).
+templates:
+  - templates/prometheusrule.yaml
+
+tests:
+  - it: renders the loop group with the controller loop alerts
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 4
+      - equal:
+          path: spec.groups[2].name
+          value: greenkube.loop
+      - equal:
+          path: spec.groups[2].rules[0].alert
+          value: GreenKubeCollectionLagging
+      - equal:
+          path: spec.groups[2].rules[1].alert
+          value: GreenKubeRecommendationScanFailing
+      - equal:
+          path: spec.groups[2].rules[2].alert
+          value: GreenKubeRecommendationSourceFailing
+      - equal:
+          path: spec.groups[2].rules[3].alert
+          value: GreenKubeRecommendationScanStale
+      - equal:
+          path: spec.groups[2].rules[4].alert
+          value: GreenKubeMeasurementStalled
+      - lengthEqual:
+          path: spec.groups[2].rules
+          count: 5
+      - equal:
+          path: spec.groups[3].name
+          value: greenkube.ledger
+      - equal:
+          path: spec.groups[3].rules[0].alert
+          value: GreenKubeLedgerChainVerificationFailed
+
+  - it: reads only metric names the code exports
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.groups[2].rules[0].expr
+          pattern: greenkube_collection_watermark_lag_seconds
+      - matchRegex:
+          path: spec.groups[2].rules[0].expr
+          pattern: greenkube_controller_leader
+      - matchRegex:
+          path: spec.groups[2].rules[1].expr
+          pattern: greenkube_optimization_runs_total\{status="failed"\}
+      - matchRegex:
+          path: spec.groups[2].rules[2].expr
+          pattern: greenkube_optimization_analyzer_failures_total
+      - matchRegex:
+          path: spec.groups[2].rules[3].expr
+          pattern: greenkube_last_successful_optimization_run_timestamp_seconds
+      - matchRegex:
+          path: spec.groups[2].rules[4].expr
+          pattern: greenkube_loop_last_success_timestamp_seconds\{loop="recommendation-lifecycle"\}
+      - matchRegex:
+          path: spec.groups[3].rules[0].expr
+          pattern: greenkube_ledger_chain_ok
+      - equal:
+          path: spec.groups[3].rules[0].labels.severity
+          value: critical
+
+  - it: applies the default thresholds
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.groups[2].rules[0].expr
+          pattern: '\) > 1800\n$'
+      - matchRegex:
+          path: spec.groups[2].rules[3].expr
+          pattern: '> 10800\)'
+      - matchRegex:
+          path: spec.groups[2].rules[4].expr
+          pattern: '> 1800$'
+
+  - it: applies custom thresholds
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+      monitoring.prometheusRule.thresholds:
+        collectionLagSeconds: 900
+        recommendationScanStaleSeconds: 7200
+        measurementStaleSeconds: 3600
+    asserts:
+      - matchRegex:
+          path: spec.groups[2].rules[0].expr
+          pattern: '\) > 900\n$'
+      - matchRegex:
+          path: spec.groups[2].rules[0].annotations.description
+          pattern: 'threshold 900s'
+      - matchRegex:
+          path: spec.groups[2].rules[3].expr
+          pattern: '> 7200\)'
+      - matchRegex:
+          path: spec.groups[2].rules[4].expr
+          pattern: '> 3600$'
+
+  - it: rejects a threshold below its floor
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.thresholds.collectionLagSeconds: 5
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects an unknown threshold
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.thresholds.scanLag: 600
+    asserts:
+      - failedTemplate: {}
+
+  - it: leaves the loop group out without the controller metrics endpoint
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: false
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 1
+      - equal:
+          path: spec.groups[0].name
+          value: greenkube.automation
+
+  - it: leaves the loop group out with the controller alerts but keeps the ledger alert
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+      monitoring.prometheusRule.controllerAlerts: false
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 2
+      - equal:
+          path: spec.groups[1].name
+          value: greenkube.ledger

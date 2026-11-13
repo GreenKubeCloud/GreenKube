@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
 
-from greenkube.core.optimization.actions import build_action_plans
+from greenkube.core.optimization.actions import build_action_plans, may_build_action_plans
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.context_builder import ContextBuilder
 from greenkube.core.optimization.dedup import (
@@ -42,7 +42,7 @@ from greenkube.core.optimization.providers.base import RecommendationSource
 from greenkube.core.optimization.registry import build_signal_sources, cluster_uid
 from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
 from greenkube.core.recommendation_reconciliation import RecommendationDiff, compute_diff, supporting_sources
-from greenkube.models.metrics import Recommendation, RecommendationPatchV2, RecommendationRecord, RecommendationType
+from greenkube.models.metrics import Recommendation, RecommendationPatchV2, RecommendationRecord
 from greenkube.models.optimization_run import (
     OptimizationRun,
     OptimizationRunCompletion,
@@ -542,14 +542,7 @@ class OptimizationEngine:
         namespace: Optional[str],
     ) -> None:
         """Attach v3 actions only after recommendation IDs are assigned by persistence."""
-        has_candidates = any(
-            recommendation.type in (RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY)
-            and recommendation.container_name
-            and recommendation.evidence is not None
-            and recommendation.evidence.proposed_patch is not None
-            for recommendation in recommendations
-        )
-        if not has_candidates:
+        if not may_build_action_plans(recommendations):
             return
 
         get_active = getattr(reco_repo, "get_active_recommendations", None)

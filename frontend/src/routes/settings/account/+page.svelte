@@ -1,8 +1,9 @@
 <script>
-	/** Account: password change, active sessions with revoke, sign out (K11). */
+	/** Account: role, password change, active sessions with revoke, sign out (K11); users and roles for admins (F16). */
 	import { onMount } from 'svelte';
 	import { listSessions, revokeSession, logout } from '$lib/api.js';
-	import { currentUser } from '$lib/stores.js';
+	import { currentUser, hasScope } from '$lib/stores.js';
+	import UsersCard from './UsersCard.svelte';
 	import Card from '$lib/components/Card.svelte';
 	import DataState from '$lib/components/DataState.svelte';
 	import PasswordChangeForm from '$lib/components/PasswordChangeForm.svelte';
@@ -64,6 +65,15 @@
 		return [match?.[1] === 'Edg' ? 'Edge' : match?.[1], os].filter(Boolean).join(' · ') || userAgent.slice(0, 60);
 	}
 
+	const ROLE_HELP = {
+		viewer: 'read everything',
+		operator: 'approve plans, ignore and restore recommendations, mark them applied',
+		admin: 'everything, including users, API keys and the repository allowlist'
+	};
+	const SOURCE_LABEL = { local: 'local account', proxy: 'single sign-on (authentication proxy)', oidc: 'single sign-on (OpenID Connect)' };
+
+	$: isSso = $currentUser?.auth_source === 'proxy' || $currentUser?.auth_source === 'oidc';
+
 	onMount(load);
 </script>
 
@@ -72,16 +82,31 @@
 		<h1 class="text-2xl font-bold text-dark-100">Account</h1>
 		<p class="text-sm text-dark-500 mt-1">
 			Signed in as <span class="text-dark-300">{$currentUser?.name ?? '—'}</span>
-			{#if $currentUser?.role}({$currentUser.role}){/if}
+			{#if $currentUser?.auth_source}
+				<span class="text-dark-500">· {SOURCE_LABEL[$currentUser.auth_source] ?? $currentUser.auth_source}</span>
+			{/if}
 		</p>
+		{#if $currentUser?.role}
+			<p class="text-sm text-dark-400 mt-1" data-testid="account-role">
+				Role <span class="badge-green">{$currentUser.role}</span>
+				<span class="text-dark-500">— {ROLE_HELP[$currentUser.role] ?? ''}</span>
+				{#if isSso}<span class="text-dark-500">(from your identity provider groups)</span>{/if}
+			</p>
+		{/if}
 	</div>
 
 	<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-		<Card title="Change password" icon="🔑">
-			{#if message}
-				<p class="mb-3 text-xs text-green-400" role="status">{message}</p>
+		<Card title={isSso ? 'Password' : 'Change password'} icon="🔑">
+			{#if isSso}
+				<p class="text-sm text-dark-400" data-testid="sso-password">
+					You sign in through single sign-on: change your password at your identity provider.
+				</p>
+			{:else}
+				{#if message}
+					<p class="mb-3 text-xs text-green-400" role="status">{message}</p>
+				{/if}
+				<PasswordChangeForm username={$currentUser?.name || ''} on:changed={handleChanged} />
 			{/if}
-			<PasswordChangeForm username={$currentUser?.name || ''} on:changed={handleChanged} />
 		</Card>
 
 		<Card title="Active sessions" icon="🖥️">
@@ -120,4 +145,8 @@
 			</DataState>
 		</Card>
 	</div>
+
+	{#if hasScope($currentUser, 'admin') && $currentUser?.kind === 'user'}
+		<UsersCard currentUserName={$currentUser?.name || ''} />
+	{/if}
 </div>

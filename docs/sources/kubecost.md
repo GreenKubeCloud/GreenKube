@@ -21,11 +21,11 @@ GreenKube reads Kubecost's savings APIs and turns them into signals (roadmap G3)
 | version probe | `/model/clusterInfo` | `/model/clusterInfo` |
 | request sizing | `/model/savings/requestSizingV2` | `/model/savings/requestSizingV2` |
 | abandoned workloads | `/model/savings/abandonedWorkloads` | `/model/savings/abandonedWorkloads` |
-| node-group sizing | `/model/savings/clusterSizingETL` | `/model/savings/nodeGroupSizing` |
+| node-group sizing | `/model/savings/clusterSizingETL` | `/model/savings/clusterSizingETL` |
 
-Kubecost 3.x moved to the `finops-agent` with ClickHouse and renamed cluster sizing "Node Group Sizing"; validate the paths against your deployed version. An endpoint that answers `404` is reported as a `path_not_found` diagnostic and skipped (the rest of the run still counts); override any path with `paths`. An unknown version uses the 2.x map and the source reports `degraded`.
+Kubecost 3.x moved to the `finops-agent` with ClickHouse and renamed cluster sizing "Node Group Sizing" in its UI. The 3.x map was checked against the IBM Kubecost self-hosted 3.x API directory (November 2026): it still lists request sizing V2, abandoned workloads and the Cluster Right-Sizing Recommendation API, and no node-group sizing API, so 3.x keeps `/model/savings/clusterSizingETL` (earlier GreenKube builds guessed `/model/savings/nodeGroupSizing`). Validate the paths against your deployed version. An endpoint that answers `404` is reported as a `path_not_found` diagnostic and skipped (the rest of the run still counts); override any path with `paths`. An unknown version uses the 2.x map and the source reports `degraded`.
 
-Answers wrapped as `{"code": 200, "data": …}` or `{"Recommendations": […]}` and bare arrays are all accepted. The test fixtures (`tests/sources/fixtures/kubecost/v2.json`, `v3.json`) follow the documented response shapes; check them against a recording of your version when you upgrade Kubecost.
+Answers wrapped as `{"code": 200, "data": …}` or `{"Recommendations": […]}` and bare arrays are all accepted. Cluster sizing answers are read in the documented shape (`data` keyed by cluster id, each with `recommendations.single`/`multi` and `parameters.clusterId`): only this cluster's entry is used (the one named by `cluster_id`, or the only one), the advisory reports the best strategy's monthly saving and keeps every strategy's saving in `evidence.data.monthly_savings_by_strategy`. The older flat shape (`totalMonthlySavings` at the top) is still accepted. The test fixtures (`tests/sources/fixtures/kubecost/v2.json`, `v3.json`) are **synthetic**, labelled as such in their `_provenance` field: they follow the documented response shapes, not a recording of a live Kubecost. Check them against a recording of your version when you upgrade Kubecost.
 
 ## Permissions
 

@@ -34,6 +34,8 @@ data:
   AUTOMATION_AUTO_APPROVE_ENABLED: {{ $autoApprove.enabled | default false | quote }}
   AUTOMATION_AUTO_APPROVE_MAX_RISK: {{ $autoApprove.maxRisk | default "low" | quote }}
   AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE: {{ hasKey $autoApprove "minConfidence" | ternary $autoApprove.minConfidence 0.8 | quote }}
+  # Container resources v2 (H1): request increases are auto-approved only on opt-in.
+  AUTOMATION_AUTO_APPROVE_INCREASES: {{ $autoApprove.increases | default false | quote }}
   GITOPS_PR_POLL_INTERVAL: {{ $prPollInterval | quote }}
   GITOPS_DISCOVERY_INTERVAL: {{ .Values.automation.discoveryInterval | default "5m" | quote }}
   GITOPS_BINDING_TTL: {{ .Values.automation.bindingTtl | default "30m" | quote }}
@@ -50,7 +52,8 @@ data:
   GITOPS_PR_COMMIT_STATUS: {{ hasKey $pr "commitStatus" | ternary $pr.commitStatus true | quote }}
   GITOPS_PR_LIFECYCLE_COMMENTS: {{ hasKey $pr "lifecycleComments" | ternary $pr.lifecycleComments true | quote }}
   GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS: {{ $pr.lifecycleLookbackDays | default 30 | quote }}
-  GREENKUBE_EXTERNAL_URL: {{ .Values.config.externalUrl | default "" | trimSuffix "/" | quote }}
+  # config.externalUrl, else derived from ingress.* or httpRoute.* (N6).
+  GREENKUBE_EXTERNAL_URL: {{ include "greenkube.externalUrl" . | quote }}
   GITOPS_RENDERER_URL: {{ printf "http://%s:%v" (include "greenkube.rendererName" .) (int $v.renderer.servicePort) | quote }}
   GITOPS_RENDERER_EGRESS_FIREWALL: {{ ($v.renderer.egressFirewall | default dict).enabled | default false | quote }}
   GITOPS_SECRET_MOUNT: "/etc/greenkube/git-providers"
@@ -78,6 +81,12 @@ data:
   KUBERNETES_METRICS_API_ENABLED: {{ .Values.config.kubernetesMetricsApiEnabled | quote }}
   GITOPS_HELM_KUBE_VERSION: {{ .Capabilities.KubeVersion.Version | quote }}
   GITOPS_HELM_API_VERSIONS_JSON: {{ .Capabilities.APIVersions | toJson | quote }}
+  {{- /* Remote Helm charts and chart values-path mappings (H2). */}}
+  {{- $helmCharts := .Values.automation.helm | default dict }}
+  {{- $remoteCharts := $helmCharts.remoteCharts | default dict }}
+  GITOPS_HELM_REMOTE_CHARTS: {{ hasKey $remoteCharts "enabled" | ternary $remoteCharts.enabled true | quote }}
+  GITOPS_HELM_CHART_HOSTS: {{ $remoteCharts.allowedHosts | default list | toJson | quote }}
+  GITOPS_HELM_CHART_MAPPINGS: {{ $helmCharts.chartMappings | default list | toJson | quote }}
 
   # --- Database Config (PostgreSQL only; SQLite is for local development) ---
   DB_TYPE: "postgres"
@@ -133,6 +142,36 @@ data:
   AUTH_LOGIN_RATE_LIMIT: {{ ($auth.login | default dict).rateLimit | default "5/minute" | quote }}
   AUTH_ADMIN_USERNAME: {{ $admin.username | default "admin" | quote }}
   AUTH_INITIAL_ADMIN_SECRET: {{ include "greenkube.initialAdminSecretName" . | quote }}
+
+  # --- Single sign-on and roles (F16) ---
+  {{- $mode := .Values.config.apiAuthMode | default "session" }}
+  {{- $roles := $auth.roles | default dict }}
+  {{- $proxy := $auth.proxy | default dict }}
+  {{- $oidc := $auth.oidc | default dict }}
+  {{- if and (eq $mode "proxy") (not .Values.config.trustedProxyIps) }}
+  {{- fail "config.apiAuthMode=proxy needs config.trustedProxyIps: identity headers are trusted only from the authentication proxy addresses." }}
+  {{- end }}
+  {{- if and (eq $mode "oidc") (or (not $oidc.issuer) (not $oidc.clientId)) }}
+  {{- fail "config.apiAuthMode=oidc needs auth.oidc.issuer and auth.oidc.clientId." }}
+  {{- end }}
+  {{- $groups := dict }}
+  {{- range $role, $members := ($roles.groups | default dict) }}
+  {{- if $members }}{{- $_ := set $groups $role $members }}{{- end }}
+  {{- end }}
+  AUTH_LOCAL_LOGIN: {{ ternary "true" "false" (ne $auth.localLogin false) | quote }}
+  AUTH_ROLE_GROUPS: {{ ternary "" ($groups | toJson) (empty $groups) | quote }}
+  AUTH_DEFAULT_ROLE: {{ $roles.defaultRole | default "viewer" | quote }}
+  AUTH_PROXY_USER_HEADERS: {{ $proxy.userHeaders | default "X-Forwarded-User" | quote }}
+  AUTH_PROXY_GROUPS_HEADERS: {{ $proxy.groupsHeaders | default "X-Forwarded-Groups" | quote }}
+  {{- if eq $mode "oidc" }}
+  OIDC_ISSUER: {{ $oidc.issuer | quote }}
+  OIDC_AUDIENCE: {{ $oidc.clientId | quote }}
+  {{- end }}
+  OIDC_SCOPES: {{ $oidc.scopes | default "openid profile email" | quote }}
+  OIDC_USERNAME_CLAIM: {{ $oidc.usernameClaim | default "preferred_username" | quote }}
+  OIDC_GROUPS_CLAIM: {{ $oidc.groupsClaim | default "groups" | quote }}
+  OIDC_REDIRECT_URL: {{ $oidc.redirectUrl | default "" | quote }}
+  OIDC_PROVIDER_NAME: {{ $oidc.providerName | default "SSO" | quote }}
 
   # --- Estimator Defaults ---
   {{- with .Values.config.defaults.instance }}
@@ -204,8 +243,12 @@ data:
   CHANGE_MEASUREMENT_EPSILON_RATIO: {{ if hasKey . "epsilonRatio" }}{{ .epsilonRatio | quote }}{{ else }}"0.02"{{ end }}
   CHANGE_DRIFT_THRESHOLD: {{ if hasKey . "driftThreshold" }}{{ .driftThreshold | quote }}{{ else }}"0.5"{{ end }}
   CHANGE_DRIFT_SUSTAINED_DAYS: {{ if hasKey . "driftSustainedDays" }}{{ .driftSustainedDays | int | quote }}{{ else }}"3"{{ end }}
+  CHANGE_MEASUREMENT_ACCELERATED: {{ ternary "true" "false" (eq .accelerated true) | quote }}
   {{- end }}
   {{- end }}
+
+  # --- Savings ledger v2 (C6) ---
+  LEDGER_CHAIN_VERIFY_INTERVAL: {{ dig "ledger" "chainVerifyInterval" "1h" .Values.config | quote }}
 
   # --- Recommendation sources (Source SDK) ---
   {{- with .Values.sources }}

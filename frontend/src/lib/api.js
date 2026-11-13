@@ -888,6 +888,67 @@ export function revokeApiKey(keyId) {
 	return request(`${BASE}/auth/api-keys/${encodeURIComponent(keyId)}`, {}, { method: 'DELETE' });
 }
 
+// ---------------------------------------------------------------------------
+// Single sign-on and roles (F16)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sign-in options: {mode, password, sso: {kind: 'oidc'|'proxy', name, login_path} | null}.
+ * Public and best effort: resolves to null on any error (the password form stays).
+ */
+export async function getAuthProviders() {
+	try {
+		const res = await fetch(buildUrl(`${BASE}/auth/providers`, {}), { credentials: 'same-origin' });
+		return res.ok ? await res.json() : null;
+	} catch {
+		return null;
+	}
+}
+
+/** URL that starts an OpenID Connect sign-in and comes back to `returnTo` (a local path). */
+export function ssoLoginUrl(loginPath = '/auth/oidc/login', returnTo = '/') {
+	const target = typeof returnTo === 'string' && returnTo.startsWith('/') && !returnTo.startsWith('//') ? returnTo : '/';
+	return buildUrl(`${BASE}${loginPath}`, { return_to: target });
+}
+
+/** Every account with its role and sign-in source (admin only). */
+export function listUsers() {
+	return request(`${BASE}/auth/users`);
+}
+
+/** Create a local account; it chooses a new password at its first sign-in (admin only). */
+export function createUser({ username, password, role = 'viewer' }) {
+	return request(`${BASE}/auth/users`, {}, jsonOptions('POST', { username, password, role }));
+}
+
+/** Change a role ({role}) or disable/enable an account ({disabled}) (admin only). */
+export function updateUser(userId, changes) {
+	return request(`${BASE}/auth/users/${encodeURIComponent(userId)}`, {}, jsonOptions('PATCH', changes));
+}
+
+// --- Manual mode (roadmap H9) ---
+
+/**
+ * What to run by hand for one recommendation: `kubectl` commands, the patch, a diff and notes.
+ * @param {number|string} id
+ * @param {{ signal?: AbortSignal }} [opts]
+ * @returns {Promise<{recommendation_id: number, mode: 'patch'|'delete'|'advisory', action_kind: ?string,
+ *   target: ?Object, commands: {description: string, command: string}[], patch: ?Object, diff: ?string,
+ *   notes: string[], can_mark_applied: boolean}>}
+ */
+export function getManualGuide(id, { signal } = {}) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/manual`, {}, { signal });
+}
+
+/**
+ * "Mark as applied": record a change applied by hand; it is measured like a merged pull request.
+ * @param {number|string} id
+ * @returns {Promise<Object>} the applied recommendation
+ */
+export function markAppliedManually(id) {
+	return request(`${BASE}/recommendations/${encodeURIComponent(id)}/manual/applied`, {}, { method: 'POST' });
+}
+
 // --- Changes board (K4) ----------------------------------------------------
 
 /**

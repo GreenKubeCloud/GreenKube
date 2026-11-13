@@ -211,11 +211,14 @@ automation:
   # click; it is still a pull request, still reviewed in Git. Contested consensus
   # is never auto-approved (contested must stay false), and a decrease also needs
   # GreenKube's own usage evidence or two independent agreeing sources.
+  # increases: also auto-approve request increases (reliability fixes that cost
+  # money, roadmap H1); off by default, so a person approves every increase.
   autoApprove:
     enabled: false
     maxRisk: low
     minConfidence: 0.8
     contested: false
+    increases: false
   pullRequests:
     draft: false
     labels: [] # Optional extra labels; missing labels are created where the provider allows it.
@@ -243,6 +246,28 @@ automation:
     # (synced, applied, measuring, outcome) for lifecycleLookbackDays after the merge.
     lifecycleComments: true
     lifecycleLookbackDays: 30
+  # Helm charts (docs/automation.md#helm-support). Remote charts (HTTP repositories,
+  # OCI registries) are pre-fetched by the controller, verified against the digest
+  # their repository publishes and rendered offline: the renderer sandbox keeps no
+  # network egress. Values edits land in the values file of the Argo CD $values
+  # source or, for Flux, in a managed post-renderer patch.
+  helm:
+    remoteCharts:
+      enabled: true
+      # Hosts the controller may fetch charts from: "host", "host:port" or "*.domain".
+      # Empty: any public host named by a discovered Argo CD/Flux chart source
+      # (loopback, link-local and metadata addresses are always refused). When set,
+      # Docker Hub charts also need auth.docker.io and *.docker.com; plain-HTTP
+      # repositories must always be listed.
+      allowedHosts: []
+    # Values-path mappings per chart and version, tried before the built-in registry
+    # of well-known charts (Bitnami, ingress-nginx, cert-manager...). Each mapping is
+    # still render-validated: a wrong one fails closed instead of editing anything.
+    #   - chart: nginx          # chart name or <repository>/<name>; globs allowed
+    #     version: "18.3.1"     # exact version or glob ("18.*"); default "*"
+    #     container: nginx      # container name or glob; default "*"
+    #     path: resources       # dotted values path ending with "resources"
+    chartMappings: []
 
 image:
   repository: greenkube/greenkube
@@ -286,8 +311,12 @@ config:
   environment: production
   # session (default): sign in to the UI with a username and password
   # (server-side sessions); machines use scoped API keys (Bearer gk_...).
-  # api_key: Bearer API keys only, no browser sign-in. See auth.* below and
-  # docs/authentication.md.
+  # api_key: Bearer API keys only, no browser sign-in.
+  # proxy: single sign-on through an authentication proxy (oauth2-proxy,
+  # Authentik, Pomerium) whose identity headers are trusted only from
+  # config.trustedProxyIps (required). oidc: native OpenID Connect sign-in
+  # (auth.oidc.*). Both create the same server-side sessions and map IdP groups
+  # to roles (auth.roles). See auth.* below and docs/authentication.md.
   apiAuthMode: session
   # Public URL of the GreenKube UI (e.g. https://greenkube.example.com), used for
   # deep links in pull requests and commit statuses. Empty: no links.
@@ -548,6 +577,16 @@ config:
       driftThreshold: 0.5
       # Consecutive drifted days (1 to 7) after which the change is regressed.
       driftSustainedDays: 3
+      # Demo and quickstart only: lifts the 7-day minimum of preWindowDays (down to
+      # 1 hour) so a change is measured minutes after it lands. Measurements on such
+      # windows match few or no hours of the week and are mostly inconclusive. Keep
+      # false in production: the defaults above are the safe minimum.
+      accelerated: false
+  # Savings ledger v2 (roadmap C6): append-only, hash-chained entries.
+  ledger:
+    # How often the controller catches the ledger up and verifies its hash chain
+    # (greenkube_ledger_chain_verification_failures_total counts failures).
+    chainVerifyInterval: 1h
 
 # ---------------------------------------------------------------------------
 # Recommendation sources (Source SDK, docs/sources.md)
@@ -598,6 +637,40 @@ sources:
           memory: 512Mi
         limits:
           memory: 2Gi
+      # Create the job's ServiceAccount and read-only ClusterRole; set false
+      # and serviceAccountName to bring your own.
+      rbac:
+        create: true
+      serviceAccountName: ""
+  # Fairwinds Polaris (docs/sources/polaris.md). Audits pushed to
+  # POST /api/v1/sources/polaris/reports (from CI or this job) become hygiene
+  # findings; missing requests get a request computed from observed usage.
+  polaris:
+    # Optional job mode: a CronJob runs `polaris audit` and pushes its JSON report.
+    job:
+      enabled: false
+      schedule: "37 3 * * *"
+      # Pinned by digest (multi-arch index of the tag).
+      image:
+        repository: quay.io/fairwinds/polaris
+        tag: "10.1.8"
+        digest: sha256:7af688527df75c3825395ded8aeb3775fad2027228aa06c9959d39ae6c00e999
+      # Extra `polaris audit` arguments, e.g. ["--namespace", "shop"].
+      extraArgs: []
+      # true: each audit replaces every earlier Polaris finding. Set false when
+      # extraArgs narrows the audit (one namespace): findings are added or refreshed.
+      complete: true
+      # Secret holding a GreenKube API key with scope signals:write (required).
+      apiKeySecret:
+        name: ""
+        key: api-key
+      activeDeadlineSeconds: 1800
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          memory: 512Mi
       # Create the job's ServiceAccount and read-only ClusterRole; set false
       # and serviceAccountName to bring your own.
       rbac:
@@ -664,6 +737,47 @@ auth:
     # Failed sign-ins allowed per username (4x per client IP) before an
     # exponential lockout.
     rateLimit: 5/minute
+  # --- Single sign-on and roles (F16) ---
+  # Roles: viewer (read), operator (approve plans, ignore/restore, mark
+  # applied), admin (settings, users, API keys, repository allowlist).
+  # Local accounts keep a password sign-in in proxy and oidc modes (break-glass
+  # admin); set false to offer SSO only.
+  localLogin: true
+  roles:
+    # IdP groups granting each role; a user gets the highest matching role.
+    # The role of an SSO account is recomputed from its groups at every sign-in.
+    groups:
+      admin: []
+      operator: []
+      viewer: []
+    # Role of an SSO user in no listed group: viewer, operator, admin, or none
+    # (refuse access).
+    defaultRole: viewer
+  proxy:
+    # Identity headers the authentication proxy sets AND overwrites (config.apiAuthMode=proxy),
+    # accepted only from config.trustedProxyIps. The n-th groups header pairs with the n-th
+    # user header; a request carrying more than one family is refused. Defaults match
+    # oauth2-proxy --pass-user-headers.
+    userHeaders: X-Forwarded-User
+    groupsHeaders: X-Forwarded-Groups
+  oidc:
+    # Issuer URL (https), e.g. https://keycloak.example.com/realms/acme
+    # (config.apiAuthMode=oidc). Discovery reads <issuer>/.well-known/openid-configuration.
+    issuer: ''
+    # OAuth client id registered at the provider (OIDC_AUDIENCE).
+    clientId: ''
+    # Optional Secret holding the client secret (confidential client); without it
+    # GreenKube is a public client protected by PKCE.
+    existingSecret: ''
+    existingSecretKey: clientSecret
+    scopes: openid profile email
+    usernameClaim: preferred_username
+    groupsClaim: groups
+    # Redirect URI registered at the provider. Empty: <config.externalUrl>/api/v1/auth/oidc/callback,
+    # or the request's own origin when config.externalUrl is empty.
+    redirectUrl: ''
+    # Label of the sign-in button.
+    providerName: SSO
 
 # ---------------------------------------------------------------------------
 # Secrets
@@ -832,6 +946,18 @@ monitoring:
     # render only when the controller ServiceMonitor does (serviceMonitor.enabled and
     # controller.metricsPort > 0).
     controllerAlerts: true
+    # Loop health alerts (N7, group greenkube.loop, rendered with the controller
+    # loop alerts): GreenKubeCollectionLagging, GreenKubeRecommendationScanFailing,
+    # GreenKubeRecommendationSourceFailing, GreenKubeRecommendationScanStale,
+    # GreenKubeMeasurementStalled and GreenKubeLedgerChainVerificationFailed.
+    thresholds:
+      # Collection watermark behind now (leader only).
+      collectionLagSeconds: 1800
+      # Age of the last successful recommendation scan (scans run hourly).
+      recommendationScanStaleSeconds: 10800
+      # Age of the last successful recommendation-lifecycle tick (apply
+      # detection, verification and change measurement; runs every 5 minutes).
+      measurementStaleSeconds: 1800
 
   serviceMonitor:
     # Create a ServiceMonitor for Prometheus Operator to discover GreenKube metrics.
@@ -866,3 +992,39 @@ monitoring:
     # namespace-specific client. Entries use the Kubernetes NetworkPolicy
     # ingress schema and are appended to the Prometheus rule.
     additionalIngress: []
+
+# ---------------------------------------------------------------------------
+# Exposure (roadmap N6): optional Ingress or Gateway API HTTPRoute to the api
+# Service, which serves both the UI and the API from "/". The first host also
+# sets GREENKUBE_EXTERNAL_URL (pull-request deep links) unless
+# config.externalUrl is set. With monitoring.networkPolicy.enabled, allow the
+# ingress controller or gateway pods in monitoring.networkPolicy.additionalIngress.
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  # IngressClass name (e.g. nginx, traefik). Empty: the cluster default class.
+  className: ''
+  # Host names routed to GreenKube; the first one builds the external URL.
+  hosts: []
+  # Standard Ingress TLS entries, e.g.
+  #   - secretName: greenkube-tls
+  #     hosts: [greenkube.example.com]
+  # The external URL uses https when an entry covers the first host.
+  tls: []
+  annotations: {}
+  labels: {}
+
+httpRoute:
+  enabled: false
+  # Gateways to attach to (required), e.g.
+  #   - name: shared-gateway
+  #     namespace: gateway-system
+  #     sectionName: https
+  parentRefs: []
+  # Host names matched by the route; the first one builds the external URL.
+  hostnames: []
+  # Scheme of the external URL built from the first hostname: https when the
+  # Gateway listener terminates TLS, http otherwise.
+  scheme: https
+  annotations: {}
+  labels: {}

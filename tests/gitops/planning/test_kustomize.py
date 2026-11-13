@@ -226,17 +226,29 @@ class _FakeKustomizeRunner:
             and resource["metadata"]["name"] == target["name"]
             and resource["metadata"]["namespace"] == target["namespace"]
         )
-        patch_containers = patch["spec"]["template"]["spec"]["containers"]
-        containers = match["spec"]["template"]["spec"]["containers"]
-        for patch_container in patch_containers:
-            container = next(item for item in containers if item["name"] == patch_container["name"])
-            current = container.setdefault("resources", {}).setdefault("requests", {})
-            current.update(patch_container["resources"]["requests"])
-        by_name = {container["name"]: container for container in containers}
-        patch_order = [container["name"] for container in patch_containers]
-        match["spec"]["template"]["spec"]["containers"] = [by_name[name] for name in patch_order] + [
-            container for container in containers if container["name"] not in patch_order
-        ]
+        _strategic_merge(match["spec"], patch["spec"])
+
+
+def _strategic_merge(target: dict[str, Any], patch: Mapping[str, Any]) -> None:
+    """Strategic merge of a managed patch: ``null`` deletes, lists merge by ``name`` (patch order first)."""
+    for key, value in patch.items():
+        if value is None:
+            target.pop(key, None)
+        elif isinstance(value, Mapping):
+            child = target.setdefault(key, {})
+            _strategic_merge(child, value)
+        elif isinstance(value, list) and all(isinstance(item, Mapping) and "name" in item for item in value):
+            items = target.setdefault(key, [])
+            for patch_item in value:
+                item = next(entry for entry in items if entry["name"] == patch_item["name"])
+                _strategic_merge(item, patch_item)
+            by_name = {item["name"]: item for item in items}
+            patch_order = [item["name"] for item in value]
+            target[key] = [by_name[name] for name in patch_order] + [
+                item for item in items if item["name"] not in patch_order
+            ]
+        else:
+            target[key] = value
 
 
 def test_plan_adds_managed_patch_and_overlay_entry_deterministically(tmp_path: Path):
@@ -593,37 +605,126 @@ def test_render_diff_rejects_changes_to_unrelated_resources(tmp_path: Path):
         snapshot.close()
 
 
-def test_request_limits_are_the_only_supported_kustomize_edit(tmp_path: Path):
+def _limits_action(**operation: Any) -> ActionPlanV3:
+    return ActionPlanV3(
+        action_id="act-1",
+        recommendation_ids=[42],
+        target=ResourceTarget(api_version="apps/v1", kind="Deployment", namespace="payments", name="api"),
+        operations=[SetContainerResources(container="api", **operation)],
+        constraints={},
+        evidence_ref="recommendation/42",
+    )
+
+
+def _rendered_api(plan_content: str | None) -> dict[str, Any]:
+    patch = _yaml().load(plan_content or "")
+    return patch["spec"]["template"]["spec"]["containers"][0]
+
+
+def test_kustomize_plans_a_request_increase_with_a_raised_limit(tmp_path: Path):
+    """H1: limits are part of the managed patch; the rendered result keeps request <= limit."""
     snapshot = _snapshot(tmp_path, BASE_FILES)
+    action = _limits_action(
+        resources=ContainerResources(requests={"memory": "768Mi"}, limits={"memory": "1Gi"}),
+    )
+    try:
+        plan = KustomizePlanner(runner=_FakeKustomizeRunner()).plan(action, _source(), snapshot, BASE_REVISION)
+        patch_edit = next(edit for edit in plan.files if "greenkube-patches/" in edit.path)
+        assert _rendered_api(patch_edit.content) == {
+            "name": "api",
+            "resources": {"limits": {"memory": "1Gi"}, "requests": {"memory": "768Mi"}},
+        }
+        assert '"memory": "1Gi"' in plan.rendered_diff
+    finally:
+        snapshot.close()
+
+
+def test_kustomize_removes_the_cpu_limit_with_a_null_patch(tmp_path: Path):
+    snapshot = _snapshot(tmp_path, BASE_FILES)
+    action = _limits_action(resources=ContainerResources(requests={"cpu": "300m"}), remove_limits=["cpu"])
+    try:
+        plan = KustomizePlanner(runner=_FakeKustomizeRunner()).plan(action, _source(), snapshot, BASE_REVISION)
+        patch_edit = next(edit for edit in plan.files if "greenkube-patches/" in edit.path)
+        assert "cpu: null" in (patch_edit.content or "")
+        assert _rendered_api(patch_edit.content)["resources"] == {"limits": {"cpu": None}, "requests": {"cpu": "300m"}}
+        assert '"cpu": "1"' in plan.rendered_diff
+    finally:
+        snapshot.close()
+
+
+def test_kustomize_increase_above_the_limit_fails_closed(tmp_path: Path):
+    """An increase never leaves a request above its limit (the rendered result is checked)."""
+    snapshot = _snapshot(tmp_path, BASE_FILES)
+    action = _limits_action(resources=ContainerResources(requests={"memory": "768Mi"}))
+    try:
+        with pytest.raises(KustomizePlanError, match="exceeds its limit"):
+            KustomizePlanner(runner=_FakeKustomizeRunner()).plan(action, _source(), snapshot, BASE_REVISION)
+    finally:
+        snapshot.close()
+
+
+def test_kustomize_plans_native_sidecar_resources(tmp_path: Path):
+    deployment = DEPLOYMENT.replace(
+        "      containers:\n",
+        "      initContainers:\n"
+        "        - name: proxy\n"
+        "          image: example/proxy:v1\n"
+        "          restartPolicy: Always\n"
+        "          resources:\n"
+        "            requests:\n"
+        "              cpu: 50m\n"
+        "      containers:\n",
+    )
+    files = {**BASE_FILES, "apps/payments/base/deployment.yaml": deployment}
+    snapshot = _snapshot(tmp_path, files)
     action = ActionPlanV3(
         action_id="act-1",
         recommendation_ids=[42],
-        target=ResourceTarget(
-            api_version="apps/v1",
-            kind="Deployment",
-            namespace="payments",
-            name="api",
-        ),
+        target=ResourceTarget(api_version="apps/v1", kind="Deployment", namespace="payments", name="api"),
         operations=[
             SetContainerResources(
-                container="api",
-                resources=ContainerResources(requests={"cpu": "300m"}, limits={"cpu": "800m"}),
+                container="proxy", resources=ContainerResources(requests={"cpu": "20m"}), container_kind="sidecar"
             )
         ],
         constraints={},
         evidence_ref="recommendation/42",
     )
-
     try:
-        with pytest.raises(KustomizePlanError, match="requests only"):
-            KustomizePlanner(runner=_FakeKustomizeRunner()).plan(
-                action,
-                _source(),
-                snapshot,
-                BASE_REVISION,
-            )
+        plan = KustomizePlanner(runner=_FakeKustomizeRunner()).plan(action, _source(), snapshot, BASE_REVISION)
+        patch_edit = next(edit for edit in plan.files if "greenkube-patches/" in edit.path)
+        patch = _yaml().load(patch_edit.content or "")
+        assert patch["spec"]["template"]["spec"] == {
+            "initContainers": [{"name": "proxy", "resources": {"requests": {"cpu": "20m"}}}]
+        }
     finally:
         snapshot.close()
+
+
+def test_kustomize_existing_managed_limit_patch_is_preserved(tmp_path: Path):
+    """A managed patch that already sets a limit is GreenKube's own field and is merged, not refused."""
+    snapshot = _snapshot(tmp_path, BASE_FILES)
+    first = _limits_action(resources=ContainerResources(requests={"memory": "768Mi"}, limits={"memory": "1Gi"}))
+    try:
+        plan = KustomizePlanner(runner=_FakeKustomizeRunner()).plan(first, _source(), snapshot, BASE_REVISION)
+    finally:
+        snapshot.close()
+    files = dict(BASE_FILES)
+    for edit in plan.files:
+        files[edit.path] = edit.content or ""
+    (tmp_path / "second").mkdir()
+    second_snapshot = _snapshot(tmp_path / "second", files)
+    second = _limits_action(resources=ContainerResources(requests={"cpu": "300m"}), remove_limits=["cpu"])
+    try:
+        replanned = KustomizePlanner(runner=_FakeKustomizeRunner()).plan(
+            second, _source(), second_snapshot, BASE_REVISION
+        )
+        patch_edit = next(edit for edit in replanned.files if "greenkube-patches/" in edit.path)
+        assert _rendered_api(patch_edit.content)["resources"] == {
+            "limits": {"cpu": None, "memory": "1Gi"},
+            "requests": {"cpu": "300m", "memory": "768Mi"},
+        }
+    finally:
+        second_snapshot.close()
 
 
 def test_missing_pinned_kustomize_binary_fails_without_raw_fallback(tmp_path: Path):

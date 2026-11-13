@@ -11,7 +11,7 @@ The controller reads, read-only:
 - Karpenter events `DisruptionBlocked` (a blocker: the pool's factor is halved, with the event in the reasons) and `Unconsolidatable` (reported in the reasons, factor unchanged) on NodePools, NodeClaims and Nodes;
 - `do-not-disrupt` / `safe-to-evict` annotations and blocking PodDisruptionBudgets.
 
-These feed the [RealizationContext](../methodology/impact-model.md#realization-factor). Events that cannot be read (RBAC) are reported as "Karpenter events could not be read", never as "no blocker". Karpenter's Prometheus metrics (`karpenter_nodepools_cost_total`, `karpenter_voluntary_disruption_decisions_total`) are not read yet.
+These feed the [RealizationContext](../methodology/impact-model.md#realization-factor). Events that cannot be read (RBAC) are reported as "Karpenter events could not be read", never as "no blocker". When `PROMETHEUS_URL` is set, Karpenter's metrics are read too (no extra permission): `karpenter_voluntary_disruption_decisions_total` (consolidation decisions over 7 days, listed as evidence), `karpenter_voluntary_disruption_eligible_nodes` (no decision while nodes are eligible halves the factor of consolidating pools) and `karpenter_nodepools_cost_total` (cost increase per pool, recorded as `observed_cost`). Metrics that are not exported change nothing.
 
 ## NodePool advice
 

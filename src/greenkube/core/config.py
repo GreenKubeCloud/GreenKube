@@ -34,6 +34,25 @@ def parse_gitops_duration_seconds(value: str) -> float:
 DISCOVERED_REPOSITORIES = "@discovered"
 
 
+def parse_helm_chart_hosts(value: str) -> tuple[str, ...]:
+    """Parse ``GITOPS_HELM_CHART_HOSTS``: a JSON list of host, host:port or *.domain patterns."""
+    import json
+
+    text = (value or "").strip()
+    if not text:
+        return ()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        raise ValueError("GITOPS_HELM_CHART_HOSTS must be a JSON list of hosts") from None
+    if not isinstance(parsed, list) or any(not isinstance(item, str) or not item.strip() for item in parsed):
+        raise ValueError("GITOPS_HELM_CHART_HOSTS must be a JSON list of non-empty hosts")
+    hosts = tuple(item.strip().lower() for item in parsed)
+    if any(re.fullmatch(r"(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?", host) is None for host in hosts):
+        raise ValueError("GITOPS_HELM_CHART_HOSTS entries must be host, host:port or *.domain patterns")
+    return hosts
+
+
 def parse_repository_allowlist(value: str) -> tuple[str, ...]:
     """Parse ``AUTOMATION_REPOSITORY_ALLOWLIST``: a JSON list (or comma list) of patterns."""
     import json
@@ -62,6 +81,10 @@ def parse_repository_allowlist(value: str) -> tuple[str, ...]:
     if not patterns:
         raise ValueError("AUTOMATION_REPOSITORY_ALLOWLIST needs at least one pattern (use @discovered)")
     return tuple(patterns)
+
+
+#: Shortest baseline window (days) an accelerated (demo/quickstart) change measurement accepts: 1 hour.
+ACCELERATED_MIN_PRE_WINDOW_DAYS = 1 / 24
 
 
 def _scan_interval_seconds(value: str) -> int:
@@ -296,6 +319,26 @@ class Config(BaseSettings):
     AUTH_ADMIN_PASSWORD: Optional[str] = None
     # Secret holding the generated initial admin password (Helm: <release>-initial-admin).
     AUTH_INITIAL_ADMIN_SECRET: str = ""
+    # --- Single sign-on and roles (F16) ---
+    # proxy: identity headers from TRUSTED_PROXY_IPS only; oidc: native OpenID Connect
+    # (authorization code + PKCE, OIDC_ISSUER, OIDC_AUDIENCE = client id).
+    # Local accounts keep signing in with a password in SSO modes unless this is false.
+    AUTH_LOCAL_LOGIN: bool = True
+    # Identity headers set (overwritten) by the proxy; the n-th groups header pairs with the n-th
+    # user header and only one family may appear on a request. Defaults: oauth2-proxy --pass-user-headers.
+    AUTH_PROXY_USER_HEADERS: str = "X-Forwarded-User"
+    AUTH_PROXY_GROUPS_HEADERS: str = "X-Forwarded-Groups"
+    # JSON object role -> IdP groups, e.g. {"admin": ["platform-admins"], "operator": ["sre"]}.
+    AUTH_ROLE_GROUPS: str = ""
+    # Role of an SSO user without a mapped group: viewer, operator, admin or none (no access).
+    AUTH_DEFAULT_ROLE: str = "viewer"
+    OIDC_CLIENT_SECRET: Optional[str] = None
+    OIDC_SCOPES: str = "openid profile email"
+    OIDC_USERNAME_CLAIM: str = "preferred_username"
+    OIDC_GROUPS_CLAIM: str = "groups"
+    # Defaults to <GREENKUBE_EXTERNAL_URL>/api/v1/auth/oidc/callback.
+    OIDC_REDIRECT_URL: str = ""
+    OIDC_PROVIDER_NAME: str = "SSO"
     API_RATE_LIMIT: str = "60/minute"
     ROOT_PATH: str = ""
     METRICS_LIST_MAX_RANGE_DAYS: int = 30
@@ -429,8 +472,9 @@ class Config(BaseSettings):
     # Record every detected change with a baseline snapshot and measure it with a
     # counterfactual and a bootstrap CI. Off: changes are measured by the interim verifier.
     CHANGE_MEASUREMENT_ENABLED: bool = True
-    # Baseline window (days) ending at the PR merge or plan approval; at least 7 so every hour of the week matches.
-    CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: float = Field(7.0, ge=7)
+    # Baseline window (days) ending at the PR merge or plan approval; at least 7 so every hour of the week matches
+    # (at least 1 hour with CHANGE_MEASUREMENT_ACCELERATED, see below).
+    CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: float = Field(7.0, gt=0)
     # Post-change window (days) starting after the rollout and its warm-up.
     CHANGE_MEASUREMENT_POST_WINDOW_DAYS: float = Field(7.0, gt=0)
     # Hours after rollout completion excluded from the post-window.
@@ -445,6 +489,12 @@ class Config(BaseSettings):
     # saving is lost on each of CHANGE_DRIFT_SUSTAINED_DAYS consecutive days.
     CHANGE_DRIFT_THRESHOLD: float = Field(0.5, gt=0, le=1)
     CHANGE_DRIFT_SUSTAINED_DAYS: int = Field(3, ge=1, le=7)
+    # Demo and quickstart only: lifts the 7-day minimum of the baseline window down to 1 hour so a
+    # change is decided minutes after it lands. Off in every production default.
+    CHANGE_MEASUREMENT_ACCELERATED: bool = False
+    # --- Savings ledger v2 (roadmap C6) ---
+    # How often the controller catches the hash-chained ledger up and verifies its chain (s, m or h).
+    LEDGER_CHAIN_VERIFY_INTERVAL: str = "1h"
     # Interval between lifecycle jobs (apply detection, verification, expiry).
     RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
     # Interval between scheduled, leader-gated recommendation scans in the
@@ -475,6 +525,9 @@ class Config(BaseSettings):
     AUTOMATION_AUTO_APPROVE_MAX_RISK: str = "low"
     AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE: float = Field(0.8, ge=0.0, le=1.0)
     AUTOMATION_AUTO_APPROVE_CONTESTED: bool = False
+    # Container resources v2 (H1): a request increase (reliability fix, costs money)
+    # is auto-approved only when this is true; off by default.
+    AUTOMATION_AUTO_APPROVE_INCREASES: bool = False
     # Deprecated (0.3.x, removed in 0.5): automation is always on. An explicit
     # AUTOMATION_ENABLED=false or AUTOMATION_MODE=disabled pauses delivery.
     AUTOMATION_ENABLED: Optional[bool] = None
@@ -506,6 +559,19 @@ class Config(BaseSettings):
     GITOPS_PR_LIFECYCLE_COMMENTS: bool = True
     # How long after the merge the status comment keeps being refreshed.
     GITOPS_PR_LIFECYCLE_LOOKBACK_DAYS: int = Field(30, ge=1, le=365)
+
+    # --- Helm remote charts (H2, docs/automation.md#helm-support) ---
+    # The controller pre-fetches the exact remote chart (HTTP repository or OCI registry)
+    # a discovered Argo CD/Flux source deployed, verifies its digest and renders it offline
+    # in the renderer sandbox. false keeps remote charts fail-closed (remote-charts-disabled).
+    GITOPS_HELM_REMOTE_CHARTS: bool = True
+    # JSON list of chart hosts the controller may contact ("host", "host:port", "*.domain").
+    # Empty: any public host named by a discovered chart source. Loopback, link-local and
+    # metadata addresses are always refused; plain-HTTP hosts must be listed.
+    GITOPS_HELM_CHART_HOSTS: str = "[]"
+    # JSON list of per-chart values-path mappings, checked before the built-in registry:
+    # [{"chart": "nginx", "version": "18.3.1", "container": "nginx", "path": "resources"}].
+    GITOPS_HELM_CHART_MAPPINGS: str = "[]"
 
     # --- Cloud provider & PUE ---
     # DEFAULT_PUE may be overridden by the datacenter profile for the configured CLOUD_PROVIDER
@@ -620,6 +686,23 @@ class Config(BaseSettings):
 
         return validate_template(value)
 
+    @field_validator("GITOPS_HELM_CHART_HOSTS", mode="after")
+    @classmethod
+    def _validate_helm_chart_hosts(cls, value: str) -> str:
+        parse_helm_chart_hosts(value)
+        return value
+
+    @field_validator("GITOPS_HELM_CHART_MAPPINGS", mode="after")
+    @classmethod
+    def _validate_helm_chart_mappings(cls, value: str) -> str:
+        from greenkube.gitops.planning.helm_mappings import ChartMappingConfigError, parse_chart_mappings
+
+        try:
+            parse_chart_mappings(value)
+        except ChartMappingConfigError as exc:
+            raise ValueError(f"GITOPS_HELM_CHART_MAPPINGS is invalid: {exc}") from None
+        return value
+
     @field_validator("GITOPS_DISCOVERY_INTERVAL", mode="before")
     @classmethod
     def _default_blank_discovery_interval(cls, value: Any) -> Any:
@@ -712,6 +795,16 @@ class Config(BaseSettings):
         seconds = _scan_interval_seconds(normalized)
         if not 60 <= seconds <= 86_400:
             raise ValueError("RECOMMENDATION_SCAN_INTERVAL must be between 1m and 24h.")
+        return normalized
+
+    @field_validator("LEDGER_CHAIN_VERIFY_INTERVAL", mode="after")
+    @classmethod
+    def _validate_ledger_chain_verify_interval(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        match = re.fullmatch(r"(\d+)([smh])", normalized)
+        seconds = int(match.group(1)) * {"s": 1, "m": 60, "h": 3600}[match.group(2)] if match else 0
+        if not 60 <= seconds <= 86_400:
+            raise ValueError("LEDGER_CHAIN_VERIFY_INTERVAL must be a duration between 1m and 24h (e.g. 1h).")
         return normalized
 
     @field_validator("RECOMMENDATION_APPLY_TOLERANCE", mode="after")
@@ -837,12 +930,26 @@ class Config(BaseSettings):
         self.API_AUTH_MODE = self.API_AUTH_MODE.lower()
         if self.ENVIRONMENT not in ("development", "test", "production"):
             raise ValueError("ENVIRONMENT must be 'development', 'test', or 'production'.")
-        if self.API_AUTH_MODE not in ("api_key", "oidc", "session"):
-            raise ValueError("API_AUTH_MODE must be 'api_key', 'oidc', or 'session'.")
+        if self.API_AUTH_MODE not in ("api_key", "oidc", "proxy", "session"):
+            raise ValueError("API_AUTH_MODE must be 'api_key', 'oidc', 'proxy', or 'session'.")
         if self.API_AUTH_MODE == "oidc" and (not self.OIDC_ISSUER or not self.OIDC_AUDIENCE):
             raise ValueError("OIDC_ISSUER and OIDC_AUDIENCE are required when API_AUTH_MODE is 'oidc'.")
-        if self.API_AUTH_MODE == "session" and not self.SESSION_COOKIE_NAME:
-            raise ValueError("SESSION_COOKIE_NAME must not be empty when API_AUTH_MODE is 'session'.")
+        if self.API_AUTH_MODE == "oidc" and not str(self.OIDC_ISSUER).startswith("https://"):
+            if self.ENVIRONMENT == "production" or not str(self.OIDC_ISSUER).startswith("http://"):
+                raise ValueError("OIDC_ISSUER must be an https:// URL.")
+        if self.API_AUTH_MODE == "proxy" and not self.TRUSTED_PROXY_IPS.strip():
+            # Fail closed: identity headers from anyone would let any client choose its identity.
+            raise ValueError("TRUSTED_PROXY_IPS must list the authentication proxy when API_AUTH_MODE is 'proxy'.")
+        _user_headers = [h for h in str(self.AUTH_PROXY_USER_HEADERS or "").split(",") if h.strip()]
+        _group_headers = [h for h in str(self.AUTH_PROXY_GROUPS_HEADERS or "").split(",") if h.strip()]
+        if len(_group_headers) > max(1, len(_user_headers)):
+            raise ValueError("AUTH_PROXY_GROUPS_HEADERS must not list more headers than AUTH_PROXY_USER_HEADERS.")
+        if self.API_AUTH_MODE != "api_key" and not self.SESSION_COOKIE_NAME:
+            raise ValueError("SESSION_COOKIE_NAME must not be empty when browser sessions are enabled.")
+        from greenkube.auth.roles import normalize_default_role, parse_role_groups
+
+        parse_role_groups(self.AUTH_ROLE_GROUPS)
+        self.AUTH_DEFAULT_ROLE = normalize_default_role(self.AUTH_DEFAULT_ROLE)
         # Auto-detect cluster name when not explicitly configured
         if not self.CLUSTER_NAME:
             self.CLUSTER_NAME = self._auto_detect_cluster_name()
@@ -865,6 +972,25 @@ class Config(BaseSettings):
                 "Unknown CLOUD_PROVIDER '%s' - falling back to DEFAULT_PUE=%s",
                 self.CLOUD_PROVIDER,
                 self.DEFAULT_PUE,
+            )
+
+        # Change measurement windows (C3): the 7-day baseline is the safe minimum; only an explicit
+        # accelerated (demo/quickstart) setting may shorten it, never below one hour.
+        minimum_pre_window = ACCELERATED_MIN_PRE_WINDOW_DAYS if self.CHANGE_MEASUREMENT_ACCELERATED else 7.0
+        if self.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS < minimum_pre_window:
+            raise ValueError(
+                f"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS must be at least {minimum_pre_window:g} "
+                + (
+                    "with CHANGE_MEASUREMENT_ACCELERATED."
+                    if self.CHANGE_MEASUREMENT_ACCELERATED
+                    else "(7 days so every hour of the week is matched; CHANGE_MEASUREMENT_ACCELERATED "
+                    "allows shorter demo windows)."
+                )
+            )
+        if self.CHANGE_MEASUREMENT_ACCELERATED:
+            logging.getLogger(__name__).warning(
+                "CHANGE_MEASUREMENT_ACCELERATED is on: change measurements use demo windows and are not "
+                "representative. Do not use it in production."
             )
 
         # Cross-field validation
@@ -1001,6 +1127,11 @@ class Config(BaseSettings):
     def automation_repository_allowlist(self) -> tuple[str, ...]:
         """Configured repository allowlist patterns; ``@discovered`` is expanded at run time."""
         return parse_repository_allowlist(self.AUTOMATION_REPOSITORY_ALLOWLIST)
+
+    @property
+    def helm_chart_hosts(self) -> tuple[str, ...]:
+        """Hosts the controller may fetch remote Helm charts from; empty means discovered hosts."""
+        return parse_helm_chart_hosts(self.GITOPS_HELM_CHART_HOSTS)
 
     @property
     def gitops_discovery_interval_seconds(self) -> float:

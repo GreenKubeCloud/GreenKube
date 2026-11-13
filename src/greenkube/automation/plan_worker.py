@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Literal, Protocol, TypeVar, cast
 
-from greenkube.automation.actions import action_kind_of
+from greenkube.automation.actions import ActionKindError, action_kind_of
 from greenkube.automation.delivery import (
     EXTERNAL_DELIVERY_RESUME_AFTER,
     normalized_url,
@@ -73,8 +73,11 @@ from greenkube.gitops.contracts import (
     Plan,
     PlanStatus,
     PreApplyWorkloadBaseline,
+    ResourceTarget,
     WorkloadSource,
+    configured_binding_ttl,
 )
+from greenkube.gitops.discovery.inventory import CONTROLLER_PRUNE_EVIDENCE
 from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.models.metrics import (
     PullRequestRecord,
@@ -282,6 +285,18 @@ class PlanBindingReader(Protocol):
     ) -> WorkloadBinding | None: ...
 
 
+class PlanResourceBindingReader(Protocol):
+    """Resource bindings persisted by discovery (H0d) for kinds bound by GVK and name."""
+
+    async def get(self, cluster: str, ref: ResourceTarget) -> Any: ...
+
+
+class PlanResourceReader(Protocol):
+    """Reads one live resource; ``None`` when it does not exist (H0c baselines)."""
+
+    async def read_resource(self, ref: ResourceTarget) -> Mapping[str, Any] | None: ...
+
+
 class RegistryPlanProviderResolver:
     """Resolve provider configuration, construct the target and enforce its allowlist."""
 
@@ -389,6 +404,8 @@ class PlanWorker:
         lease_seconds: int = 900,
         render_settings: PullRequestRenderSettings | None = None,
         pull_request_features: PullRequestFeatures | None = None,
+        resource_reader: PlanResourceReader | None = None,
+        resource_binding_reader: PlanResourceBindingReader | None = None,
     ) -> None:
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be a positive integer")
@@ -400,6 +417,8 @@ class PlanWorker:
         self.recommendation_repository = recommendation_repository
         self.workload_reader = workload_reader
         self.binding_reader = binding_reader
+        self.resource_reader = resource_reader
+        self.resource_binding_reader = resource_binding_reader
         self.pull_request_options = pull_request_options or EMPTY_PULL_REQUEST_OPTIONS
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lease_seconds = lease_seconds
@@ -609,6 +628,10 @@ class PlanWorker:
         return persisted.file_plan.base_revision
 
     async def _validate_current_binding(self, plan: Plan) -> None:
+        spec = action_kind_of(plan.action)
+        if spec is not None and spec.binding_scope == "resource":
+            await self._validate_current_resource_binding(plan)
+            return
         if self.binding_reader is None:
             return
         source = plan.source
@@ -664,7 +687,117 @@ class PlanWorker:
                 action_status=ActionStatus.NONE,
             )
 
+    async def _validate_current_resource_binding(self, plan: Plan) -> None:
+        """The resource binding a resource-bound plan was approved on must be unchanged (H0d).
+
+        Fails closed: with no binding reader the check is retried rather than skipped; a
+        binding that is gone, ambiguous, moved, older than the binding TTL, or whose
+        controller stopped pruning since approval makes the plan stale.
+        """
+        if self.resource_binding_reader is None:
+            raise PlanWorkerError(
+                "Could not verify the GitOps resource binding because no resource binding reader is configured; "
+                "verify worker configuration, then retry.",
+                retryable=True,
+            )
+        source = plan.source
+        try:
+            stored = await self.resource_binding_reader.get(source.cluster, plan.action.target)
+        except Exception as exc:
+            raise PlanWorkerError(
+                "Could not verify the current GitOps resource binding before applying the plan.",
+                retryable=True,
+            ) from exc
+        binding = getattr(stored, "binding", None)
+        current = binding.workload_source() if binding is not None else None
+        fields = (
+            "id",
+            "provider_id",
+            "repo_url",
+            "ref",
+            "path",
+            "controller_kind",
+            "controller_name",
+            "controller_namespace",
+            "renderer",
+        )
+        if current is None or any(getattr(source, name) != getattr(current, name) for name in fields):
+            raise PlanWorkerError(
+                "The GitOps resource binding changed or is no longer resolved; refresh discovery and re-plan "
+                "before applying.",
+                plan_status=PlanStatus.STALE,
+                action_status=ActionStatus.NONE,
+            )
+        observed_at = getattr(stored, "observed_at", None)
+        if (
+            not isinstance(observed_at, datetime)
+            or ensure_utc(self.clock()) - ensure_utc(observed_at) >= configured_binding_ttl()
+        ):
+            raise PlanWorkerError(
+                "The GitOps resource binding is older than the binding TTL (discovery stopped refreshing it); "
+                "refresh discovery and re-plan before applying.",
+                plan_status=PlanStatus.STALE,
+                action_status=ActionStatus.NONE,
+            )
+        if (
+            source.evidence.get(CONTROLLER_PRUNE_EVIDENCE) is True
+            and current.evidence.get(CONTROLLER_PRUNE_EVIDENCE) is not True
+        ):
+            raise PlanWorkerError(
+                "The GitOps controller managing the resource stopped pruning after approval, so merging would not "
+                "delete it; re-plan to review the new warning before applying.",
+                plan_status=PlanStatus.STALE,
+                action_status=ActionStatus.NONE,
+            )
+
+    async def _ensure_resource_baseline(self, execution: _Execution | None, plan: Plan) -> Plan:
+        """Pre-apply check of a resource-bound kind from the live resource (H0c ``capture_baseline``).
+
+        Runs once, while the plan is still approved: the kind decides from the live object
+        whether the change still makes sense (a resource to delete must still exist and not
+        be opted out). A kind that returns a baseline has it persisted like a workload one.
+        """
+        spec = action_kind_of(plan.action)
+        if spec is None or plan.status is not PlanStatus.APPROVED or plan.pre_apply_baseline is not None:
+            return plan
+        if self.resource_reader is None:
+            raise PlanWorkerError(
+                "Could not read the action target because no Kubernetes resource reader is configured; verify "
+                "worker configuration and Kubernetes read access, then retry.",
+                retryable=True,
+            )
+        await self._heartbeat(execution)
+        target = plan.action.target
+        try:
+            live = await self.resource_reader.read_resource(target)
+        except Exception as exc:
+            raise PlanWorkerError(
+                f"Could not read {target.kind} {target.name!r} from Kubernetes before applying the plan; verify API "
+                "availability and read permissions, then retry.",
+                retryable=True,
+            ) from exc
+        try:
+            baseline = spec.capture_baseline(live, target)
+        except ActionKindError as exc:
+            detail = str(exc)
+            no_change = detail.startswith(NO_EFFECTIVE_CHANGE_REASON)
+            raise PlanWorkerError(
+                detail if no_change else f"{detail}; no branch or pull request was created.",
+                plan_status=PlanStatus.FAILED,
+                action_status=ActionStatus.FAILED,
+                reason_code=NO_EFFECTIVE_CHANGE_REASON if no_change else None,
+            ) from exc
+        if baseline is None:
+            return plan
+        persisted = await self.plans.set_plan_pre_apply_baseline_if_absent(plan.plan_id, baseline)
+        if persisted is None or not _same_plan_content(plan, persisted):
+            raise _replan_error("Persisted plan content changed while saving its pre-apply baseline.")
+        return persisted
+
     async def _ensure_pre_apply_baseline(self, execution: _Execution | None, plan: Plan) -> Plan:
+        spec = action_kind_of(plan.action)
+        if spec is not None and not spec.requires_workload_baseline:
+            return await self._ensure_resource_baseline(execution, plan)
         baseline = plan.pre_apply_baseline
         if baseline is None:
             if plan.status is not PlanStatus.APPROVED:

@@ -273,6 +273,7 @@ automation:
     maxRisk: low
     minConfidence: 0.8
     contested: false
+    increases: false
 ```
 
 Off by default. When enabled, **Open PR** (`POST /api/v1/automation/plans`) approves the fresh preview in the same
@@ -286,11 +287,15 @@ A preview is auto-approved only when:
 - no recommendation has a contested consensus (`consensus.contested` or the `consensus_contested` warning): a hard
   stop, whatever the settings (`contested` accepts only `false`);
 - every decrease of a request is backed by GreenKube's own usage evidence or by at least two independent consensus
-  votes.
+  votes;
+- no recommendation raises a request, unless `increases: true`: an increase is a reliability fix that costs money,
+  so a person approves it by default (roadmap H1); an increase is also approved automatically only when GreenKube's
+  own analyzer sized it.
 
 Otherwise the plan waits for the click and the response lists `auto_approve_blockers`: `approve_scope_missing`,
 `rollback_plan`, `not_active`, `recommendation_missing`, `risk_above_auto_approve`, `confidence_below_auto_approve`,
-`consensus_contested`, `decrease_without_native_evidence`, the approval's error code (for example `delivery_paused`), or
+`consensus_contested`, `decrease_without_native_evidence`, `increase_requires_approval`,
+`increase_without_native_evidence`, the approval's error code (for example `delivery_paused`), or
 `auto_approve_failed` when the approval failed unexpectedly (the preview is kept).
 
 ## Create and validate a pull request
@@ -349,28 +354,187 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
 
 | Kind | Operation | What it changes | Renderers | Rollback | Apply detection |
 |---|---|---|---|---|---|
-| `container_resources` | `set_container_resources` | CPU/memory requests (and, on raw manifests and Helm, limits) of named containers of a `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, `ReplicaSet`, `ReplicationController` or `Pod` | Raw, Kustomize (requests only), Helm values, Flux HelmRelease post-renderer | Restores the recorded pre-apply requests (request-only changes) | Live per-container request within tolerance of the planned value |
+| `container_resources` | `set_container_resources` | CPU/memory requests (decreases and reliability increases) and limits (set, raise, remove the CPU limit) of named containers and native sidecars of a `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, Argo `Rollout`, `ReplicaSet`, `ReplicationController` or `Pod` | Raw, Kustomize, Helm values and Flux HelmRelease post-renderer (requests and limit values; no limit removal or sidecars) | Restores the recorded pre-apply requests (request-only changes) | Live per-container request within tolerance of the planned value |
+| `delete_resource` | `delete_resource` | Removes an orphaned `LoadBalancer` Service or `PersistentVolume` from Git (see [Deleting orphaned resources](#deleting-orphaned-resources)) | Raw, Kustomize | None: a revert recreates the manifest, not the data or the address | The resource is absent from the cluster |
+
+### Container resources v2: increases, limits, sidecars (H1)
+
+- **Increases.** A request increase (p99 close to the request, OOM kills, a working set near the memory limit) opens
+  a pull request like a decrease. It is a reliability fix: the PR carries the `reliability` label, shows the change
+  as a projected **cost** (never as a saving) and the risk it reduces, and it is never auto-approved unless
+  `automation.autoApprove.increases` is `true`. Sizing keeps the rules of [How GreenKube sizes
+  increases](recommendation.md#how-greenkube-sizes-increases) (per-replica p99 bounded by the pod, warm-up excluded,
+  one step capped at `rightsizingMaxIncreaseFactor`). Those bounds belong to GreenKube's own analyzer, so an increase
+  becomes a pull request only when the consensus chose GreenKube's value (`source` or `consensus.chosen_from`) backed
+  by usage samples. An increase chosen from VPA, Goldilocks or a pushed signal alone (the `SAFEST` consensus picks the
+  highest value) stays advisory.
+- **Limits.** The limit advice of the rightsizing rules (`config.recommendations.limitsPolicy`) travels with the
+  request change as `evidence.limit_changes`:
+  - an increase raises a CPU limit below the new request or throttled, and a memory limit below the request or
+    110% of the observed maximum; it never lowers a limit;
+  - `remove_cpu` removes the CPU limit (raw manifests: the key is deleted; Kustomize: a `cpu: null` strategic-merge
+    deletion in the managed patch);
+  - `memory_equals_request` sets the memory limit to the request (decreases) or raises it to at least 110% of the
+    observed maximum (increases);
+  - with the default `keep`, a decrease never touches limits.
+  A memory limit is never removed. A request above an unchanged limit fails closed (the action is not built, and
+  planning rejects any rendered `request > limit`).
+- **Native sidecars and init containers.** Scans read the pod specs and record where each container lives:
+  a native sidecar (init container with `restartPolicy: Always`) is addressed in `initContainers`. Helm planners map
+  `spec.containers` only and refuse sidecar edits with an explanation.
+- **Workload kinds.** `CronJob` (through `spec.jobTemplate`), `Job` and Argo `Rollout` (`argoproj.io/v1alpha1`,
+  inline `spec.template`; a Rollout with `workloadRef` fails closed) are addressable targets. Recommendations reach
+  them once the owner and GitOps binding of the workload are resolved.
+- **Rollback.** Request-only changes (containers and native sidecars) roll back automatically; a change that edits
+  limits is reverted by reverting its pull request, and the PR says so.
+- **Measurement.** A memory increase is measured on reliability: the OOM-kill rate of that container after the
+  rollout (OOM restarts, in the unit of the scan's evidence) is compared with the rate the recommendation observed
+  before it, and those OOM restarts no longer fail the restart gate; other containers and CPU-only increases
+  keep the strict "any OOM kill fails" gate (see [Savings measurement: reliability
+  increases](methodology/savings-measurement.md#reliability-increases-h1)).
 
 Every other recommendation type remains visible but shows "Manual change required" and cannot open a PR. Every plan, whatever its kind, is render-validated the same way: the rendered resources after the edit must differ from the rendered resources before it by exactly the kind's expected change (the fields it sets, plus the resources it creates or deletes), and the kind's invariants must hold (for container resources, every request stays within its limit). Anything else fails closed.
 
+## Deleting orphaned resources
+
+Orphaned `LoadBalancer` Services (`ORPHANED_LOAD_BALANCER`) and `PersistentVolume`s (`ORPHANED_PERSISTENT_VOLUME`)
+can become a deletion pull request (roadmap H6). Zombie workloads and idle namespaces stay manual
+(`deletion_requires_review`): deleting a Namespace manifest removes everything in it, and a zombie's owner may be
+recreated by its own controller.
+
+**Evidence first.** A deletion action is only built for a recommendation that passed the deletion evidence model
+(selector-less, owned and gateway/mesh/ingress Services are never reported; EndpointSlices, route references and the
+`DELETION_MIN_UNUSED_DAYS` persistence are required; `greenkube.io/ignore`/`greenkube.io/keep` opt out). Planning
+checks the manifest in Git again (an opted-out resource, a Service that is not a `LoadBalancer` or an infrastructure
+namespace is refused), and the plan worker reads the live object before any Git write: a resource already gone fails
+the plan with `no_effective_change`; an opted-out one, a `PersistentVolume` that is `Bound` again or a Service that is
+no longer of type `LoadBalancer` fails it.
+
+**Where the resource lives in Git.** Discovery persists the Argo CD `status.resources` and Flux `status.inventory`
+entries of the kinds registered action kinds target (table `resource_bindings`, migration 0087) with the managing
+controller's resolved Git location (from its workload bindings) and whether it prunes. A resource listed by no
+controller (`resource_binding_missing`), by several (`ambiguous_binding`), by a controller without a resolved source
+(`binding_unresolved`) or refreshed more than `automation.bindingTtl` ago (`binding_stale`) cannot become a pull
+request. A cluster-scoped binding is stored with the empty namespace; its plan source uses the reserved namespace
+`_cluster`, which no real namespace can match.
+At delivery, the plan worker reads the binding again and marks the plan `stale` when it moved, is no longer resolved,
+is older than `automation.bindingTtl`, or when the controller stopped pruning since approval; without a binding reader
+the delivery is retried, never skipped.
+
+**The edit.**
+
+| Layout | What the pull request removes |
+|---|---|
+| Raw | The whole file when it holds only the resource; otherwise its document of a multi-document file, or its item of a `kind: List`. |
+| Kustomize | The file and its `resources:` entry when the file holds only the resource; otherwise its document. A file listed by several Kustomizations, a shared base, and a generated or renamed resource are refused. |
+| Helm | Unsupported: a chart-rendered resource can only be removed through a values toggle. |
+
+The rendered result must differ from the rendered source by exactly the deleted resource (generic expected-delta
+validation).
+
+**Gates and warnings.**
+
+- Argo CD `syncPolicy.automated.prune` or Flux `spec.prune` disabled: the plan and the eligibility carry
+  `deletion_prune_disabled`, since removing the manifest will not delete the live object.
+- A `PersistentVolume` with `reclaimPolicy: Retain` (or none): the plan carries `persistent_volume_retained`; the
+  cloud disk must be released by hand to stop its cost.
+- Deletions are `medium` (LoadBalancer) or `high` (volume) risk, so `automation.policy.maxRiskLevel` decides whether
+  they can be planned (`policy_risk_exceeded` otherwise).
+- A deletion is **never auto-approved** (`deletion_requires_review` in `auto_approve_blockers`); eligibility shows
+  `deletion_reviewed_in_pr`.
+
+**Applied and measured.** Apply detection marks the recommendation applied once its plan synced and the resource is
+absent (a read error is never taken for absence); a resource deleted by hand while no plan is in flight is detected the
+same way (`detected`). The change is measured by `ResourceDeletionStrategy`: the realized saving is the rate the
+resource was charged before the change (its trusted cost in the baseline window, otherwise the allocated rate frozen
+with the recommendation: the OpenCost per-asset cost or the configured rate), `not_realized` if the resource is still
+observed after the change. The strategy only claims a saving for a change whose absence was read from the cluster
+(rollout completion source `resource_absent`); any other deletion change is `inconclusive`.
+
+## Manual mode
+
+Clusters without GitOps (or resources outside it) use the manual mode (roadmap H9). The recommendation detail page
+shows **Apply manually**, and every active card on the recommendations page links to it:
+
+- `GET /api/v1/recommendations/{id}/manual` (`read`) returns the steps: for a typed change, a `kubectl patch` built
+  from the same primitives a pull request would write (strategic merge for pod-template workloads), a server-side dry
+  run and `kubectl rollout status`; for an orphaned LoadBalancer or volume, `kubectl delete` with a dry run first; for
+  other kinds, an advisory note. It also returns the patch, a readable diff and notes (irreversible deletion, retained
+  disks, a GitOps controller reverting a manual patch).
+- `POST /api/v1/recommendations/{id}/manual/applied` (`write`, "Mark as applied") records an active recommendation as
+  applied by hand with a change id: the change-measurement pipeline records the change and measures it like a merged
+  pull request (application method `manual`). A recommendation with an open pull request is applied by its merge
+  (`409`), and so is one whose plan is approved or being delivered. For a deletion, GreenKube first reads the
+  resource: it is marked applied only once the cluster answers that it is absent (`409` while it still exists, `503`
+  when it cannot be read), so no saving is claimed for a resource that is still there.
+
+GreenKube never runs these commands: Git, or the operator, stays the only write path.
+
 ## Supported source layouts
 
-Only CPU and memory rightsizing recommendations (the `container_resources` kind) currently have GitOps action planners. Other recommendation types remain visible but show "Manual change required" and cannot open a PR.
+CPU and memory rightsizing recommendations (the `container_resources` kind) and orphaned LoadBalancer and volume deletions (`delete_resource`, raw and Kustomize only) have GitOps action planners. Other recommendation types remain visible but show "Manual change required" and cannot open a PR.
 
 | Source | Supported | Notes |
 |---|---|---|
 | Argo CD raw YAML | Yes | Uses the Application's resource inventory and a raw manifest planner. |
 | Argo CD Kustomize | Yes | Plans the overlay and render-validates the result. |
-| Argo CD Helm with a local chart and Git-managed values files | Yes | The chart must live in the same repository and revision as the values. Infers a unique values file/container mapping when possible; otherwise offers a server-validated one-time mapping. |
-| Argo CD Helm with a remote chart (Helm repository, OCI, or another Git repository) | No | The chart is not in the snapshot; fails closed. |
+| Argo CD Helm with a local chart and Git-managed values files | Yes | The chart must live in the same repository and revision as the values. Infers a unique values file/container mapping when possible; otherwise offers a server-validated one-time mapping. Several containers of one workload are planned in one edit. |
+| Argo CD multi-source Helm: remote chart (Helm repository or OCI registry) + `$values` Git source | Yes | The edit lands in the last values file of the `$values` source. The exact chart version Argo CD deployed is pre-fetched, digest-verified and rendered offline ([Helm support](#helm-support)). |
+| Argo CD Helm with a remote chart and no Git-managed values file | No | Nothing in Git to edit (`remote-chart-values-not-in-git`); fails closed. |
+| Argo CD Helm with a chart in another Git repository | No | The chart is not in the snapshot; fails closed. |
 | Argo CD Helm with inline `valuesObject` / `parameters` | No | Fails closed; move values to a Git-managed values file. |
-| Argo CD multi-source Helm | Partial | Only when the chart is local to the values repository; source indices are handled server-side. A remote chart source fails closed. |
+| Argo CD multi-source Helm with a local chart | Yes | Source indices are handled server-side. |
 | Flux Kustomization (raw/Kustomize) | Yes | Uses the Flux inventory and exact source revision. The overlay is rendered as Flux builds it: `spec.targetNamespace`, `namePrefix` and `nameSuffix` are applied to the root Kustomization for the render only (see below). |
 | Flux HelmRelease with local same-revision Git chart | Yes | Renders `valuesFiles`, `valuesFrom`, and inline values, then applies the managed post-renderer edit. |
 | Flux HelmRelease `chartRef` to a Git-backed HelmChart | Yes | The HelmChart must exist in the same immutable snapshot. |
-| Flux HelmRelease with remote HelmRepository/OCI chart | No | The chart artifact is not in the snapshot; fails closed. |
+| Flux HelmRelease with a HelmRepository chart (HTTP or `type: oci`), or `chartRef` to an OCIRepository | Yes | The deployed chart version (and, for an OCIRepository, its digest) is pre-fetched, verified and rendered offline; the managed post-renderer patch is written to the Git-owned HelmRelease. Chart `valuesFiles` of a remote chart fail closed (`remote-chart-values-files`). |
 | Flux `valuesFrom` that is runtime-only, cross-repository, cross-revision, or uses `targetPath` | No | Fails closed with a typed reason. |
 | Manual binding resolution | Yes | An operator can select one server-provided candidate for an ambiguous/unresolved binding. |
+
+### Helm support
+
+| Chart | Rendered from | Values edit | Container mapping |
+|---|---|---|---|
+| Local chart (same repository and revision) | The repository snapshot | Last Git-managed values file (Argo CD) or managed post-renderer (Flux) | Explicit mapping, else render probe of the values file |
+| HTTP Helm repository (`https://.../index.yaml`) | Pre-fetched by the controller, verified against the `digest` of `index.yaml` | Same | Configured mapping, built-in registry, then render probe |
+| OCI registry (`oci://` or Argo CD's scheme-less form) | Pre-fetched anonymously, verified against the manifest digest (`Docker-Content-Digest`) and the chart layer digest; a Flux OCIRepository also pins the digest it deployed | Same | Same |
+| Bucket, private registry needing credentials, chart version range without a deployed version | Not rendered | | Fails closed with a reason code |
+
+**Remote charts.** The renderer sandbox has no network, so the controller fetches the remote chart: exactly the version the controller deployed (Argo CD `status.sync.revisions`, Flux `status.history[0].chartVersion`; a range such as `18.3.*` alone is never rendered). The archive must match the digest its repository publishes, is unpacked in memory (bounded; no links, no paths outside the chart), and is staged into the render workspace for the duration of the plan. Remote dependencies must be vendored in the chart archive (`charts/`, packaged `.tgz` dependencies are unpacked); nothing is fetched at render time. Because packaged charts commonly define helpers that use `lookup` or random functions without calling them, a remote chart is rendered twice instead of being scanned statically: differing output fails closed as `nondeterministic-chart-render`. The plan carries the provenance (`remote Helm chart <reference> rendered from sha256:...`) in its validation warnings and in the PR body.
+
+The controller only contacts hosts named by the discovered chart source, and never loopback, link-local or metadata addresses. `automation.helm.remoteCharts.allowedHosts` narrows that to a list (`host`, `host:port`, `*.domain`; Docker Hub also needs `auth.docker.io` and `*.docker.com`; plain-HTTP repositories must always be listed). Registry bearer tokens are anonymous and never follow a redirect to another host. `automation.helm.remoteCharts.enabled=false` makes every remote chart fail closed (`remote-charts-disabled`).
+
+| Reason | Meaning | Plan status |
+|---|---|---|
+| `chart-version-unresolved` | No exact deployed chart version is known | Unsupported source |
+| `chart-host-not-allowed` | Host outside the allowlist, plain HTTP, or an internal address | Unsupported source |
+| `chart-registry-auth-required` | The registry refuses anonymous pulls | Unsupported source |
+| `remote-charts-disabled` | `automation.helm.remoteCharts.enabled=false` | Unsupported source |
+| `chart-digest-mismatch`, `chart-digest-unavailable` | The archive does not match its published or deployed digest, or none is published | Render validation failed |
+| `chart-not-found`, `chart-archive-invalid`, `chart-size-limit` | The chart could not be fetched or unpacked safely | Render validation failed |
+| `nondeterministic-chart-render` | Two renders of the same inputs differ | Render validation failed |
+
+**Values-path mapping.** For each container of the plan, GreenKube finds where the chart reads its `resources`, in this order, and keeps a candidate only when editing it changes exactly that container in the render:
+
+1. the explicit mapping of the Application (`greenkube.cloud/helm-values-mapping` annotation) for its container;
+2. `automation.helm.chartMappings` entries matching the chart (name or `<repository>/<name>`, globs allowed), its version and the container; a matching but wrong entry fails closed rather than falling through;
+3. the built-in registry: Bitnami charts (`resources`, `<container>.resources`, `primary`/`master`/`controller`/`server.resources`, `metrics.resources`), ingress-nginx, cert-manager, podinfo, grafana, bjw-s app-template and stakater application;
+4. a render probe of every `resources` path of the Git values file and of the chart's default values; exactly one must match, otherwise the plan is `needs_chart_mapping`.
+
+For a remote chart the edit may create the values path in the Git file. When `resources` is missing or empty there, it is first seeded with the container's currently rendered resources, so a chart that falls back to a preset when `resources` is empty (Bitnami `resourcesPreset`) keeps its limits:
+
+```yaml
+# environments/prod/nginx.yaml after a plan for containers nginx and metrics
+replicaCount: 2
+metrics:
+  enabled: true
+  resources:
+    requests: {cpu: 20m, ephemeral-storage: 50Mi, memory: 128Mi}
+    limits: {cpu: 150m, ephemeral-storage: 2Gi, memory: 192Mi}
+resources:
+  requests: {cpu: 50m, ephemeral-storage: 50Mi, memory: 64Mi}
+  limits: {cpu: 150m, ephemeral-storage: 2Gi, memory: 192Mi}
+```
 
 When discovery cannot choose a single owner, the binding is `ambiguous`, `unresolved`, or `blocked` and plans fail closed. The **Automation & GitOps** page lists actionable bindings and their safe candidate provenance. Manual resolutions are generation-bound, expire at `automation.bindingTtl` (default 30 minutes), and are written to the audit trail.
 
@@ -634,8 +798,11 @@ SLOs and example alert rules are documented in [Observability and SLOs](observab
 
 ## Limitations
 
-- Only CPU and memory rightsizing recommendations have GitOps planners.
-- Remote Helm/Kustomize artifacts, Argo CD inline Helm values, Flux `valuesFrom.targetPath`, cross-repository/revision values, chart dependencies, and unmanaged post-renderers fail closed.
+- Only CPU and memory rightsizing recommendations and orphaned LoadBalancer/PersistentVolume deletions have GitOps planners; a deletion has no automated rollback.
+- A resource's Git location comes from its controller's resolved workload bindings. An Argo CD Application or Flux Kustomization that manages only PersistentVolumes or Services, and no workload, leaves them unresolved (`binding_unresolved`), so their deletions stay manual.
+- Resource bindings are replaced on every discovery refresh: when one controller API fails during a refresh, its resources temporarily report `resource_binding_missing` until the next successful refresh.
+- The `greenkube.io/source` annotation binding for unmanaged resources is not implemented; manual mode (snippets and "Mark as applied") covers them.
+- Remote Kustomize artifacts, Argo CD inline Helm values, Flux `valuesFrom.targetPath`, cross-repository/revision values, dependencies of local charts, remote charts that need registry credentials or whose dependencies are not vendored, chart `valuesFiles` of remote Flux charts, and unmanaged post-renderers fail closed. Remote Helm charts from HTTP repositories and OCI registries are supported ([Helm support](#helm-support)); Flux remote charts are edited through the managed post-renderer, not `spec.values`.
 - Argo CD Applications that are not stored in Git have no PR target.
 - Provider archive downloads must be available at the resolved full commit SHA. GreenKube does not fall back to a mutable branch or per-file reads.
 - Descendant sync confirmation needs a provider ancestry API: GitHub compare, GitLab merge base, or a Gitea release that serves `GET /repos/{owner}/{repo}/compare/{basehead}`. Without it, a controller that already runs a later commit stays pending (`ancestry_unavailable`) until the sync timeout.

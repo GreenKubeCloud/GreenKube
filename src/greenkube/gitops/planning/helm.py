@@ -1,4 +1,4 @@
-"""Render-validated planning for local Helm charts and Git-owned Flux releases."""
+"""Render-validated planning for Helm charts (local or pre-fetched remote) and Git-owned Flux releases."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ import io
 import json
 import re
 from collections.abc import Mapping, MutableMapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator, Protocol
+from typing import Any, Iterator, Protocol, cast
 
 from pydantic import ValidationError
 from ruamel.yaml import YAML
@@ -40,6 +40,13 @@ from greenkube.gitops.contracts import (
 )
 from greenkube.gitops.discovery.common import flux_release_name, text
 from greenkube.gitops.planning.digest import plan_digest
+from greenkube.gitops.planning.helm_mappings import (
+    ChartIdentity,
+    ChartMappingConfigError,
+    ChartMappingRule,
+    mapping_candidates,
+    parse_chart_mappings,
+)
 from greenkube.gitops.planning.kustomize import (
     KustomizePlanError,
     _canonical_repo_path,
@@ -69,6 +76,17 @@ from greenkube.gitops.planning.raw_manifest import (
     _validate_operation_resources,
     _validate_rendered_change,
 )
+from greenkube.gitops.renderers.charts import (
+    ChartFetchError,
+    ChartHostNotAllowedError,
+    ChartReference,
+    ChartReferenceError,
+    ChartRegistryAuthRequiredError,
+    ChartVersionUnresolvedError,
+    FetchedChart,
+    RemoteChartFetcher,
+    RemoteChartsDisabledError,
+)
 from greenkube.gitops.renderers.helm import HelmError, HelmRenderer
 from greenkube.gitops.renderers.raw import RawRenderError, RawRenderResult, render_raw
 from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST, revision_commit
@@ -79,6 +97,8 @@ _MAX_FLUX_VALUES_FILES = 32
 _MAX_FLUX_VALUES_BYTES = 8_388_608
 _HELMRELEASE_KIND = re.compile(r"(?m)^\s*kind\s*:\s*['\"]?HelmRelease(?:['\"])?\s*(?:#.*)?$")
 _HELMRELEASE_JSON_KIND = re.compile(r'"kind"\s*:\s*"HelmRelease"')
+_REMOTE_CHART_STAGING_ROOT = ".greenkube-render/charts"
+_MAX_MAPPING_PROBES = 64
 _MANAGED_ANNOTATION = "greenkube.cloud/managed"
 _ACTION_ID_ANNOTATION = "greenkube.cloud/action-id"
 
@@ -126,6 +146,10 @@ class _HelmRenderEngine(Protocol):
     ) -> RawRenderResult: ...
 
 
+class _ChartFetcher(Protocol):
+    def fetch(self, reference: ChartReference) -> FetchedChart: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _HelmContext:
     root: Path
@@ -134,6 +158,7 @@ class _HelmContext:
     release_name: str
     release_namespace: str
     values_files: tuple[str, ...]
+    remote_chart: FetchedChart | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,16 +228,47 @@ class _FluxHelmReleaseContext:
     temporary_values: Mapping[str, str]
 
 
+class _RemoteChartSupport:
+    """Lazily built remote-chart fetcher and configured chart mappings shared by the Helm planners."""
+
+    def __init__(
+        self,
+        chart_fetcher: _ChartFetcher | None,
+        chart_mappings: Sequence[ChartMappingRule] | None,
+    ) -> None:
+        self._chart_fetcher = chart_fetcher
+        self._chart_mappings = None if chart_mappings is None else tuple(chart_mappings)
+
+    @property
+    def chart_fetcher(self) -> _ChartFetcher:
+        if self._chart_fetcher is None:
+            self._chart_fetcher = RemoteChartFetcher.from_settings()
+        return self._chart_fetcher
+
+    @property
+    def chart_mappings(self) -> tuple[ChartMappingRule, ...]:
+        if self._chart_mappings is None:
+            from greenkube.core.config import get_config
+
+            try:
+                self._chart_mappings = parse_chart_mappings(getattr(get_config(), "GITOPS_HELM_CHART_MAPPINGS", "[]"))
+            except ChartMappingConfigError as exc:
+                raise HelmValuesUnsupportedError(f"automation.helm.chartMappings is invalid: {exc}") from exc
+        return self._chart_mappings
+
+
 class HelmValuesPlanner:
-    """Plan an explicit values-file mapping after render validation."""
+    """Plan a Git-owned values-file edit after render validation (local or remote chart)."""
 
     renderer_kind = RendererKind.HELM_VALUES
 
     def supports(self, op: PrimitiveOp, binding: WorkloadSource) -> Support:
-        """Container resource fields only; a values path must be mapped for the container.
+        """Container resource fields only; a values path must be mapped for each container.
 
-        An explicit ``values_mapping`` on the binding names that path. Without one, ``plan``
-        infers it by a render probe and fails with ``needs_chart_mapping`` when it cannot.
+        An explicit ``values_mapping`` on the binding names that path for one container.
+        Other containers (and bindings without one) are mapped at plan time by the
+        configured and built-in chart mappings or a render probe, which fail with
+        ``needs_chart_mapping`` when no unique path is found.
         """
         support, container = _helm_primitive_support(op, "Helm values")
         if not support.ok:
@@ -226,10 +282,13 @@ class HelmValuesPlanner:
         else:
             return Support.needs_mapping(
                 f"no explicit values mapping for container {container!r}; "
-                "the values path is inferred by a render probe at plan time"
+                "the values path is resolved by the chart mapping registry or a render probe at plan time"
             )
         if mapped_container != container:
-            return Support.unsupported(f"the explicit values mapping does not name container {container!r}")
+            return Support.needs_mapping(
+                f"the explicit values mapping names container {mapped_container!r}; the values path of "
+                f"container {container!r} is resolved by the chart mapping registry or a render probe at plan time"
+            )
         return Support.supported()
 
     def __init__(
@@ -238,8 +297,11 @@ class HelmValuesPlanner:
         renderer: _HelmRenderEngine | None = None,
         expected_version: str = DEFAULT_HELM_VERSION,
         binary: str = "helm",
+        chart_fetcher: _ChartFetcher | None = None,
+        chart_mappings: Sequence[ChartMappingRule] | None = None,
     ) -> None:
         self.renderer = renderer or HelmRenderer(expected_version=expected_version, binary=binary)
+        self._remote = _RemoteChartSupport(chart_fetcher, chart_mappings)
 
     def render_source(
         self,
@@ -250,22 +312,25 @@ class HelmValuesPlanner:
         *,
         mapping: HelmValuesMapping | Mapping[str, Any] | None = None,
     ) -> RawRenderResult:
-        """Render one validated local Argo CD chart snapshot without editing its files."""
-        operations, context, _ = _prepare_helm_values_plan(
-            action,
-            source,
-            snapshot,
-            base_revision,
-            mapping,
-            renderer=self.renderer,
-        )
-        result = _render_chart(
-            self.renderer,
-            snapshot,
-            context,
-            source.renderer,
-            HelmValuesUnsupportedError,
-        )
+        """Render one validated Argo CD chart (local or pre-fetched) without editing its files."""
+        with ExitStack() as stack:
+            operations, context, _ = _prepare_helm_values_plan(
+                action,
+                source,
+                snapshot,
+                base_revision,
+                mapping,
+                renderer=self.renderer,
+                remote=self._remote,
+                stack=stack,
+            )
+            result = _render_chart(
+                self.renderer,
+                snapshot,
+                context,
+                source.renderer,
+                HelmValuesUnsupportedError,
+            )
         _require_exact_target(result, action.target, HelmValuesUnsupportedError)
         _require_target_containers(result, action.target, operations, HelmValuesUnsupportedError)
         return replace(result, renderer=RendererKind.HELM_VALUES)
@@ -281,46 +346,51 @@ class HelmValuesPlanner:
     ) -> FilePlan:
         if isinstance(base_revision, str):
             base_revision = base_revision.lower()
-        operations, context, selected_mapping = _prepare_helm_values_plan(
-            action,
-            source,
-            snapshot,
-            base_revision,
-            mapping,
-            renderer=self.renderer,
-        )
-        before = _render_chart(
-            self.renderer,
-            snapshot,
-            context,
-            source.renderer,
-            HelmValuesUnsupportedError,
-        )
-        _require_exact_target(before, action.target, HelmValuesUnsupportedError)
-        _require_target_containers(before, action.target, operations, HelmValuesUnsupportedError)
-
-        values_path = selected_mapping.file_path
-        original_values = _read_source_file(context.root, context.files, values_path, HelmValuesUnsupportedError)
-        updated_values = _edit_values_file(
-            original_values,
-            values_path,
-            selected_mapping.path,
-            operations,
-        )
-        if updated_values == original_values:
-            raise HelmValuesPlanError("the requested container resources are already present in the values file")
-
-        with _stage(context.root, context.files, {values_path: updated_values}, HelmValuesPlanError):
-            after = _render_chart(
+        with ExitStack() as stack:
+            operations, context, selected_mappings = _prepare_helm_values_plan(
+                action,
+                source,
+                snapshot,
+                base_revision,
+                mapping,
+                renderer=self.renderer,
+                remote=self._remote,
+                stack=stack,
+            )
+            before = _render_chart(
                 self.renderer,
                 snapshot,
                 context,
                 source.renderer,
                 HelmValuesUnsupportedError,
             )
+            _require_exact_target(before, action.target, HelmValuesUnsupportedError)
+            _require_target_containers(before, action.target, operations, HelmValuesUnsupportedError)
+
+            values_path = selected_mappings[0].file_path
+            original_values = _read_source_file(context.root, context.files, values_path, HelmValuesUnsupportedError)
+            updated_values = _edit_values_file_paths(
+                original_values,
+                values_path,
+                _mapping_edits(selected_mappings, operations, before, action.target, context),
+                materialize=context.remote_chart is not None,
+            )
+            if updated_values == original_values:
+                raise HelmValuesPlanError("the requested container resources are already present in the values file")
+
+            with _stage(context.root, context.files, {values_path: updated_values}, HelmValuesPlanError):
+                after = _render_chart(
+                    self.renderer,
+                    snapshot,
+                    context,
+                    source.renderer,
+                    HelmValuesUnsupportedError,
+                )
         before_resources = _resources_by_identity(before)
         after_resources = _resources_by_identity(after)
         target_identity = _target_identity(action.target)
+        if target_identity not in after_resources:
+            raise HelmValuesUnsupportedError("the exact workload target was not produced by the edited values")
         if before_resources[target_identity] == after_resources[target_identity]:
             raise HelmValuesUnsupportedError("explicit values mapping does not change the rendered target container")
         try:
@@ -368,8 +438,10 @@ class FluxHelmReleasePlanner:
         renderer: _HelmRenderEngine | None = None,
         expected_version: str = DEFAULT_HELM_VERSION,
         binary: str = "helm",
+        chart_fetcher: _ChartFetcher | None = None,
     ) -> None:
         self.renderer = renderer or HelmRenderer(expected_version=expected_version, binary=binary)
+        self._remote = _RemoteChartSupport(chart_fetcher, ())
 
     def render_source(
         self,
@@ -380,15 +452,26 @@ class FluxHelmReleasePlanner:
         *,
         expected_manifest_path: str | None = None,
     ) -> RawRenderResult:
-        """Render one exact Flux source using only the supported local HelmRelease subset."""
+        """Render one exact Flux source (Git, HelmRepository or OCIRepository chart) with its post-renderers."""
         revision = base_revision.lower() if isinstance(base_revision, str) else base_revision
-        prepared = _prepare_flux_helm_release_context(
-            action,
-            source,
-            snapshot,
-            revision,
-            expected_manifest_path=expected_manifest_path,
-        )
+        with ExitStack() as stack:
+            prepared = _prepare_flux_helm_release_context(
+                action,
+                source,
+                snapshot,
+                revision,
+                expected_manifest_path=expected_manifest_path,
+                remote=self._remote,
+                stack=stack,
+            )
+            return self._render_prepared(action, snapshot, prepared)
+
+    def _render_prepared(
+        self,
+        action: ActionPlanV3,
+        snapshot: ArchiveSnapshot,
+        prepared: _FluxHelmReleaseContext,
+    ) -> RawRenderResult:
         with _stage(
             prepared.root,
             prepared.files,
@@ -422,13 +505,26 @@ class FluxHelmReleasePlanner:
     ) -> FilePlan:
         if isinstance(base_revision, str):
             base_revision = base_revision.lower()
-        prepared = _prepare_flux_helm_release_context(
-            action,
-            source,
-            snapshot,
-            base_revision,
-            expected_manifest_path=None,
-        )
+        with ExitStack() as stack:
+            prepared = _prepare_flux_helm_release_context(
+                action,
+                source,
+                snapshot,
+                base_revision,
+                expected_manifest_path=None,
+                remote=self._remote,
+                stack=stack,
+            )
+            return self._plan_prepared(action, source, snapshot, base_revision, prepared)
+
+    def _plan_prepared(
+        self,
+        action: ActionPlanV3,
+        source: WorkloadSource,
+        snapshot: ArchiveSnapshot,
+        base_revision: str,
+        prepared: _FluxHelmReleaseContext,
+    ) -> FilePlan:
         operations = prepared.operations
         root = prepared.root
         snapshot_files = prepared.files
@@ -547,6 +643,8 @@ def _prepare_flux_helm_release_context(
     base_revision: str,
     *,
     expected_manifest_path: str | None,
+    remote: _RemoteChartSupport | None = None,
+    stack: ExitStack | None = None,
 ) -> _FluxHelmReleaseContext:
     operations, root, snapshot_files = _validate_common_request(
         action,
@@ -573,19 +671,31 @@ def _prepare_flux_helm_release_context(
     spec = _mapping(parsed_release.document.get("spec"))
     if spec is None:
         raise FluxHelmReleasePlanError("Git-owned HelmRelease spec must be a mapping")
-    (
-        chart_path,
-        release_name,
-        release_namespace,
-        chart_values_files,
-        ignore_missing_values_files,
-    ) = _flux_chart_context(
+    flux_chart = _flux_chart_context(
         root,
         snapshot_files,
         source,
         spec,
         base_revision,
     )
+    chart_values_files = flux_chart.values_files
+    ignore_missing_values_files = flux_chart.ignore_missing_values_files
+    remote_chart: FetchedChart | None = None
+    if flux_chart.reference is not None:
+        if remote is None or stack is None:
+            raise FluxHelmReleaseUnsupportedError("remote-chart-not-in-snapshot: no chart fetcher is configured")
+        remote_chart = _fetch_remote_chart(
+            remote.chart_fetcher,
+            flux_chart.reference,
+            FluxHelmReleaseUnsupportedError,
+        )
+        chart_path = stack.enter_context(
+            _staged_remote_chart(root, snapshot_files, remote_chart, FluxHelmReleasePlanError)
+        )
+    elif flux_chart.chart_path is not None:
+        chart_path = flux_chart.chart_path
+    else:  # pragma: no cover - _flux_chart_context returns a path or a reference
+        raise FluxHelmReleaseUnsupportedError("the Flux chart location could not be resolved")
     values_from = _load_flux_values_from(root, snapshot_files, source, spec, base_revision)
     inline_values = spec.get("values")
     if inline_values is None:
@@ -617,9 +727,10 @@ def _prepare_flux_helm_release_context(
         root=root,
         files=snapshot_files,
         chart_path=chart_path,
-        release_name=release_name,
-        release_namespace=release_namespace,
+        release_name=flux_chart.release_name,
+        release_namespace=flux_chart.release_namespace,
         values_files=(overlay_path,) if overlay_path is not None else (),
+        remote_chart=remote_chart,
     )
     return _FluxHelmReleaseContext(
         operations=tuple(operations),
@@ -690,7 +801,9 @@ def _prepare_helm_values_plan(
     mapping: HelmValuesMapping | Mapping[str, Any] | None,
     *,
     renderer: _HelmRenderEngine,
-) -> tuple[list[SetContainerResources], _HelmContext, HelmValuesMapping]:
+    remote: _RemoteChartSupport | None = None,
+    stack: ExitStack | None = None,
+) -> tuple[list[SetContainerResources], _HelmContext, tuple[HelmValuesMapping, ...]]:
     operations, root, snapshot_files = _validate_common_request(
         action,
         source,
@@ -699,40 +812,49 @@ def _prepare_helm_values_plan(
         RendererKind.HELM_VALUES,
         HelmValuesPlanError,
     )
-    if len(operations) != 1:
-        raise HelmValuesUnsupportedError("values planning supports exactly one explicitly mapped container")
+    if not operations:
+        raise HelmValuesUnsupportedError("values planning needs at least one container operation")
+    if len({operation.container for operation in operations}) != len(operations):
+        raise HelmValuesUnsupportedError("values planning needs one operation per container")
     if source.controller_kind is not ControllerKind.ARGOCD:
         raise HelmValuesUnsupportedError("Helm values planning is supported only for Argo CD sources")
     config = source.renderer_config
     chart_config = _mapping(config.get("chart"))
     if chart_config is None:
         raise HelmValuesUnsupportedError("Helm renderer configuration must include chart metadata")
-    if chart_config.get("name") not in (None, ""):
-        raise HelmValuesUnsupportedError("remote Helm charts cannot be rendered from this repository snapshot")
-    chart_repository = chart_config.get("repo")
-    if chart_repository not in (None, "", source.repo_url):
-        raise HelmValuesUnsupportedError("remote or cross-repository Helm charts cannot be planned")
-    _reject_inline_helm_values(config)
 
-    chart_path = _canonical_path(source.path, allow_root=True, error=HelmValuesUnsupportedError)
-    if not _chart_exists(snapshot_files, chart_path):
-        raise HelmValuesUnsupportedError("local Helm chart is not available in the repository snapshot")
-    chart_metadata_path = _join_path(chart_path, "Chart.yaml")
-    chart_metadata_content = _read_source_file(
-        root,
-        snapshot_files,
-        chart_metadata_path,
-        HelmValuesUnsupportedError,
-    )
-    chart_metadata, _, _ = _load_values(
-        chart_metadata_content,
-        chart_metadata_path,
-        HelmValuesUnsupportedError,
-        round_trip=False,
-    )
-    if not isinstance(chart_metadata, Mapping):
-        raise HelmValuesUnsupportedError("local chart metadata must be a mapping")
-    _reject_chart_dependencies(chart_metadata, HelmValuesUnsupportedError)
+    remote_chart: FetchedChart | None = None
+    if chart_config.get("name") not in (None, ""):
+        if remote is None or stack is None:
+            raise HelmValuesUnsupportedError("remote Helm charts cannot be rendered from this repository snapshot")
+        _reject_inline_helm_values(config)
+        reference = _argo_chart_reference(chart_config)
+        remote_chart = _fetch_remote_chart(remote.chart_fetcher, reference, HelmValuesUnsupportedError)
+        chart_path = stack.enter_context(_staged_remote_chart(root, snapshot_files, remote_chart, HelmValuesPlanError))
+    else:
+        chart_repository = chart_config.get("repo")
+        if chart_repository not in (None, "", source.repo_url):
+            raise HelmValuesUnsupportedError("remote or cross-repository Helm charts cannot be planned")
+        _reject_inline_helm_values(config)
+        chart_path = _canonical_path(source.path, allow_root=True, error=HelmValuesUnsupportedError)
+        if not _chart_exists(snapshot_files, chart_path):
+            raise HelmValuesUnsupportedError("local Helm chart is not available in the repository snapshot")
+        chart_metadata_path = _join_path(chart_path, "Chart.yaml")
+        chart_metadata_content = _read_source_file(
+            root,
+            snapshot_files,
+            chart_metadata_path,
+            HelmValuesUnsupportedError,
+        )
+        chart_metadata, _, _ = _load_values(
+            chart_metadata_content,
+            chart_metadata_path,
+            HelmValuesUnsupportedError,
+            round_trip=False,
+        )
+        if not isinstance(chart_metadata, Mapping):
+            raise HelmValuesUnsupportedError("local chart metadata must be a mapping")
+        _reject_chart_dependencies(chart_metadata, HelmValuesUnsupportedError)
 
     raw_values_files = config.get("values_files", [])
     if raw_values_files is None:
@@ -766,35 +888,381 @@ def _prepare_helm_values_plan(
         release_name=release_name,
         release_namespace=release_namespace,
         values_files=values_files,
+        remote_chart=remote_chart,
     )
     mapping_files = values_files
-    if not mapping_files:
+    if not mapping_files and remote_chart is None:
         default_values_path = _join_path(chart_path, "values.yaml")
         if default_values_path in snapshot_files:
             mapping_files = (default_values_path,)
+    if remote_chart is not None and not mapping_files:
+        raise HelmValuesUnsupportedError(
+            "remote-chart-values-not-in-git: the remote chart has no Git-managed values file to edit"
+        )
 
     configured_mapping = config.get("values_mapping")
-    if mapping is not None or configured_mapping is not None:
-        selected_mapping = _select_values_mapping(
-            mapping,
-            configured_mapping,
-            mapping_files,
-            snapshot_files,
-            operations[0].container,
-        )
+    if remote_chart is None and len(operations) == 1:
+        if mapping is not None or configured_mapping is not None:
+            selected_mapping = _select_values_mapping(
+                mapping,
+                configured_mapping,
+                mapping_files,
+                snapshot_files,
+                operations[0].container,
+            )
+        else:
+            selected_mapping = _infer_values_mapping(
+                action,
+                operations,
+                source,
+                snapshot,
+                context,
+                mapping_files,
+                snapshot_files,
+                renderer,
+            )
+        _validate_values_mapping_source(source, selected_mapping, mapping_files)
+        return operations, context, (selected_mapping,)
+
+    explicit = _explicit_values_mapping(mapping, configured_mapping, mapping_files, snapshot_files, operations)
+    if remote_chart is None:
+        selected: list[HelmValuesMapping] = []
+        for operation in operations:
+            if explicit is not None and explicit.container == operation.container:
+                selected.append(explicit)
+                continue
+            selected.append(
+                _infer_values_mapping(
+                    action,
+                    [operation],
+                    source,
+                    snapshot,
+                    context,
+                    mapping_files,
+                    snapshot_files,
+                    renderer,
+                )
+            )
     else:
-        selected_mapping = _infer_values_mapping(
-            action,
-            operations,
-            source,
-            snapshot,
-            context,
-            mapping_files,
-            snapshot_files,
-            renderer,
+        selected = list(
+            _resolve_remote_values_mappings(
+                action,
+                operations,
+                source,
+                snapshot,
+                context,
+                mapping_files[-1],
+                renderer,
+                explicit,
+                remote.chart_mappings if remote is not None else (),
+            )
         )
-    _validate_values_mapping_source(source, selected_mapping, mapping_files)
-    return operations, context, selected_mapping
+    if len({item.file_path for item in selected}) != 1:
+        raise HelmValuesUnsupportedError("every container mapping must target the same final values file")
+    if len({item.path for item in selected}) != len(selected):
+        raise HelmValuesNeedsMappingError("needs_chart_mapping")
+    for item in selected:
+        _validate_values_mapping_source(source, item, mapping_files)
+    return operations, context, tuple(selected)
+
+
+def _explicit_values_mapping(
+    requested: HelmValuesMapping | Mapping[str, Any] | None,
+    configured: object,
+    mapping_files: Sequence[str],
+    snapshot_files: Mapping[str, Any],
+    operations: Sequence[SetContainerResources],
+) -> HelmValuesMapping | None:
+    if requested is None and configured is None:
+        return None
+    candidate = _coerce_values_mapping(requested) or _coerce_values_mapping(configured)
+    container = candidate.container if candidate is not None else ""
+    if container not in {operation.container for operation in operations}:
+        raise HelmValuesUnsupportedError("the explicit values mapping does not name the exact action container")
+    return _select_values_mapping(requested, configured, mapping_files, snapshot_files, container)
+
+
+def _argo_chart_reference(chart_config: Mapping[str, Any]) -> ChartReference:
+    """The exact remote chart Argo CD deployed: its resolved version, else an exact targetRevision."""
+    version = chart_config.get("resolved_version") or chart_config.get("version")
+    try:
+        return ChartReference.parse(
+            chart_config.get("repo"),
+            chart_config.get("name"),
+            version,
+            expected_digest=chart_config.get("digest"),
+        )
+    except ChartFetchError as exc:
+        raise HelmValuesUnsupportedError(str(exc)) from exc
+
+
+_POLICY_FETCH_ERRORS = (
+    RemoteChartsDisabledError,
+    ChartHostNotAllowedError,
+    ChartRegistryAuthRequiredError,
+    ChartVersionUnresolvedError,
+    ChartReferenceError,
+)
+
+
+def _fetch_remote_chart(
+    fetcher: _ChartFetcher,
+    reference: ChartReference,
+    unsupported_error: type[HelmPlanError],
+) -> FetchedChart:
+    """Pre-fetch a digest-verified remote chart; policy refusals are unsupported, the rest fail validation."""
+    try:
+        chart = fetcher.fetch(reference)
+    except _POLICY_FETCH_ERRORS as exc:
+        raise unsupported_error(f"remote chart {reference.display} cannot be rendered: {exc}") from exc
+    except ChartFetchError as exc:
+        raise HelmPlanError(f"remote chart {reference.display} could not be fetched: {exc}") from exc
+    if not isinstance(chart, FetchedChart):
+        raise unsupported_error("the chart fetcher did not return a verified chart")
+    return chart
+
+
+def _staged_chart_path(chart: FetchedChart) -> str:
+    return f"{_REMOTE_CHART_STAGING_ROOT}/{chart.archive_digest.removeprefix('sha256:')[:16]}/{chart.name}"
+
+
+@contextmanager
+def _staged_remote_chart(
+    root: Path,
+    snapshot_files: Mapping[str, Any],
+    chart: FetchedChart,
+    error_type: type[HelmPlanError],
+) -> Iterator[str]:
+    """Write a verified chart into the render workspace for the duration of planning."""
+    chart_path = _staged_chart_path(chart)
+    if any(_is_in_scope(path, _REMOTE_CHART_STAGING_ROOT) for path in snapshot_files):
+        raise error_type("the repository already contains the remote chart staging directory")
+    created_files: list[Path] = []
+    created_directories: list[Path] = []
+    try:
+        try:
+            for relative, content in chart.files.items():
+                target = root.joinpath(*PurePosixPath(chart_path).parts, *PurePosixPath(relative).parts)
+                missing: list[Path] = []
+                current = target.parent
+                while current != root and not current.exists():
+                    missing.append(current)
+                    current = current.parent
+                for directory in reversed(missing):
+                    directory.mkdir()
+                    created_directories.append(directory)
+                if target.exists() or target.is_symlink():
+                    raise error_type("the remote chart staging path is not empty")
+                target.write_bytes(content)
+                created_files.append(target)
+        except OSError as exc:
+            raise error_type("the remote chart could not be staged for render validation") from exc
+        yield chart_path
+    finally:
+        for path in reversed(created_files):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for directory in reversed(created_directories):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+
+
+def _chart_identity(chart: FetchedChart) -> ChartIdentity:
+    metadata, _, _ = _load_values(
+        chart.file_text("Chart.yaml") or "",
+        "Chart.yaml",
+        HelmValuesUnsupportedError,
+        round_trip=False,
+    )
+    dependencies: list[tuple[str, str]] = []
+    raw_dependencies = metadata.get("dependencies") if isinstance(metadata, Mapping) else None
+    for item in raw_dependencies if isinstance(raw_dependencies, list) else []:
+        if isinstance(item, Mapping) and isinstance(item.get("name"), str):
+            repository = item.get("repository")
+            dependencies.append((item["name"], repository if isinstance(repository, str) else ""))
+    return ChartIdentity(
+        name=chart.name,
+        version=chart.version,
+        repository=chart.reference.repository,
+        dependencies=tuple(dependencies),
+    )
+
+
+def _remote_chart_defaults(chart: FetchedChart) -> Mapping[str, Any]:
+    content = chart.file_text("values.yaml")
+    if content is None:
+        return {}
+    try:
+        document, _, _ = _load_values(content, "values.yaml", HelmValuesUnsupportedError, round_trip=False)
+    except HelmValuesUnsupportedError:
+        return {}
+    return document if isinstance(document, Mapping) else {}
+
+
+def _resolve_remote_values_mappings(
+    action: ActionPlanV3,
+    operations: Sequence[SetContainerResources],
+    source: WorkloadSource,
+    snapshot: ArchiveSnapshot,
+    context: _HelmContext,
+    file_path: str,
+    renderer: _HelmRenderEngine,
+    explicit: HelmValuesMapping | None,
+    configured_rules: Sequence[ChartMappingRule],
+) -> tuple[HelmValuesMapping, ...]:
+    """Map every container of a remote chart: explicit, configured, built-in, then render probe."""
+    chart = context.remote_chart
+    if chart is None:
+        raise HelmValuesUnsupportedError("remote chart mapping requires a pre-fetched chart")
+    before = _render_chart(renderer, snapshot, context, source.renderer, HelmValuesUnsupportedError)
+    _require_exact_target(before, action.target, HelmValuesUnsupportedError)
+    _require_target_containers(before, action.target, operations, HelmValuesUnsupportedError)
+    try:
+        _validate_rendered_change(before, before, action.target, action.target.kind, list(operations))
+    except RawManifestPlanError as exc:
+        _raise_resource_validation_error(exc, skip_unsupported=True)
+    else:
+        raise HelmValuesPlanError("the requested container resources are already present in the rendered chart")
+
+    original_values = _read_source_file(context.root, context.files, file_path, HelmValuesUnsupportedError)
+    document, _, _ = _load_values(original_values, file_path, HelmValuesUnsupportedError, round_trip=False)
+    if document is None:
+        document = {}
+    if not isinstance(document, Mapping):
+        raise HelmValuesUnsupportedError(f"{file_path}: Helm values root must be a mapping")
+    identity = _chart_identity(chart)
+    probe_paths = tuple(
+        sorted(set(_resource_values_paths(document)) | set(_resource_values_paths(_remote_chart_defaults(chart))))
+    )
+    source_index, source_index_ambiguous = _inferred_values_source_index(source, file_path)
+    probes = 0
+
+    def valid(path: tuple[str, ...], operation: SetContainerResources) -> bool:
+        nonlocal probes
+        probes += 1
+        if probes > _MAX_MAPPING_PROBES:
+            raise HelmValuesNeedsMappingError("needs_chart_mapping")
+        return _probe_values_path(
+            action, operation, source, snapshot, context, file_path, original_values, path, before, renderer
+        )
+
+    selected: list[HelmValuesMapping] = []
+    for operation in operations:
+        chosen: tuple[str, ...] | None = None
+        if explicit is not None and explicit.container == operation.container:
+            if not valid(explicit.path, operation):
+                raise HelmValuesUnsupportedError(
+                    f"the explicit values mapping {'.'.join(explicit.path)} does not change only container "
+                    f"{operation.container!r} of {chart.reference.display}"
+                )
+            selected.append(explicit)
+            continue
+        candidates, configured = mapping_candidates(identity, operation.container, configured=configured_rules)
+        for candidate in candidates:
+            if valid(candidate.path, operation):
+                chosen = candidate.path
+                break
+        if chosen is None and configured:
+            raise HelmValuesUnsupportedError(
+                f"the configured chart mapping for {chart.name} {chart.version} does not render a change of "
+                f"only container {operation.container!r}"
+            )
+        if chosen is None:
+            matches = [path for path in probe_paths if valid(path, operation)]
+            if len(matches) != 1:
+                raise HelmValuesNeedsMappingError("needs_chart_mapping")
+            chosen = matches[0]
+        if source_index_ambiguous:
+            raise HelmValuesNeedsMappingError("needs_chart_mapping")
+        selected.append(
+            HelmValuesMapping(
+                file_path=file_path,
+                container=operation.container,
+                path=chosen,
+                source_index=source_index,
+            )
+        )
+    return tuple(selected)
+
+
+def _probe_values_path(
+    action: ActionPlanV3,
+    operation: SetContainerResources,
+    source: WorkloadSource,
+    snapshot: ArchiveSnapshot,
+    context: _HelmContext,
+    file_path: str,
+    original_values: str,
+    path: tuple[str, ...],
+    before: RawRenderResult,
+    renderer: _HelmRenderEngine,
+) -> bool:
+    """True when editing ``path`` changes exactly ``operation``'s container in the render."""
+    seed = _rendered_container_resources(before, action.target, operation.container)
+    try:
+        updated = _edit_values_file_paths(
+            original_values,
+            file_path,
+            [(path, (operation,), seed)],
+            materialize=True,
+        )
+    except HelmValuesUnsupportedError:
+        return False
+    if updated == original_values:
+        return False
+    try:
+        with _stage(context.root, context.files, {file_path: updated}, HelmValuesPlanError):
+            after = _render_chart(renderer, snapshot, context, source.renderer, HelmValuesUnsupportedError)
+        _require_exact_target(after, action.target, HelmValuesUnsupportedError)
+        _require_target_containers(after, action.target, [operation], HelmValuesUnsupportedError)
+        _validate_rendered_change(before, after, action.target, action.target.kind, [operation])
+    except HelmValuesUnsupportedError:
+        return False
+    except RawManifestPlanError as exc:
+        _raise_resource_validation_error(exc, skip_unsupported=True)
+        return False
+    return True
+
+
+def _rendered_container_resources(
+    result: RawRenderResult,
+    target: ResourceTarget,
+    container_name: str,
+) -> Mapping[str, Any]:
+    try:
+        manifest = _resources_by_identity(result)[_target_identity(target)]
+        container = _find_container(_containers(_pod_spec(manifest, target.kind)), container_name)
+    except (KeyError, RawManifestPlanError):
+        return {}
+    resources = container.get("resources")
+    return copy.deepcopy(_plain(resources)) if isinstance(resources, Mapping) else {}
+
+
+_ValuesEdit = tuple[tuple[str, ...], Sequence[SetContainerResources], Mapping[str, Any] | None]
+
+
+def _mapping_edits(
+    mappings: Sequence[HelmValuesMapping],
+    operations: Sequence[SetContainerResources],
+    before: RawRenderResult,
+    target: ResourceTarget,
+    context: _HelmContext,
+) -> list[_ValuesEdit]:
+    if len(mappings) == 1 and len(operations) == 1 and context.remote_chart is None:
+        return [(mappings[0].path, tuple(operations), None)]
+    by_container = {operation.container: operation for operation in operations}
+    edits: list[_ValuesEdit] = []
+    for item in mappings:
+        operation = by_container.get(item.container)
+        if operation is None:
+            raise HelmValuesUnsupportedError("a values mapping does not name an action container")
+        seed = _rendered_container_resources(before, target, item.container) if context.remote_chart else None
+        edits.append((item.path, (operation,), seed))
+    return edits
 
 
 def _validate_common_request(
@@ -1133,20 +1601,68 @@ def _edit_values_file(
     values_path: tuple[str, ...],
     operations: Sequence[SetContainerResources],
 ) -> str:
+    return _edit_values_file_paths(content, path, [(values_path, operations, None)], materialize=False)
+
+
+def _edit_values_file_paths(
+    content: str,
+    path: str,
+    edits: Sequence[_ValuesEdit],
+    *,
+    materialize: bool,
+) -> str:
+    """Merge each edit's container resources at its values path, in one round trip.
+
+    With ``materialize`` (remote charts, whose defaults live outside Git) a missing
+    path is created, and a missing or empty ``resources`` mapping is first seeded with
+    the container's currently rendered resources: a chart that falls back to a preset
+    when ``resources`` is empty (Bitnami ``resourcesPreset``) keeps its other values.
+    """
     document, yaml, is_json = _load_values(content, path, HelmValuesUnsupportedError, round_trip=True)
+    if document is None and materialize and not is_json:
+        document = CommentedMap()
     if not isinstance(document, MutableMapping):
         raise HelmValuesUnsupportedError(f"{path}: Helm values root must be a mapping")
-    resources = _mapping_at_path(document, values_path)
-    if resources is None:
-        raise HelmValuesUnsupportedError(f"{path}: explicit values path is not a mapping in the Git-owned file")
-    for operation in operations:
-        for field_name, quantities in (
-            ("requests", operation.resources.requests),
-            ("limits", operation.resources.limits),
-        ):
-            if quantities:
-                _merge_resource_section(resources, field_name, quantities, path)
+    for values_path, operations, seed in edits:
+        if materialize:
+            resources = _materialized_mapping_at_path(document, values_path, is_json)
+        else:
+            resources = _mapping_at_path(document, values_path)
+        if resources is None:
+            raise HelmValuesUnsupportedError(f"{path}: explicit values path is not a mapping in the Git-owned file")
+        if materialize and seed and not resources:
+            for field_name in ("requests", "limits"):
+                seeded = seed.get(field_name)
+                if isinstance(seeded, Mapping) and seeded:
+                    section = {} if is_json else CommentedMap()
+                    for resource_name in sorted(seeded):
+                        section[resource_name] = seeded[resource_name]
+                    resources[field_name] = section
+        for operation in operations:
+            for field_name, quantities in (
+                ("requests", operation.resources.requests),
+                ("limits", operation.resources.limits),
+            ):
+                if quantities:
+                    _merge_resource_section(resources, field_name, quantities, path)
     return _dump_values(document, content, yaml, path, is_json)
+
+
+def _materialized_mapping_at_path(
+    document: MutableMapping[str, Any],
+    path: tuple[str, ...],
+    is_json: bool,
+) -> MutableMapping[str, Any] | None:
+    current: MutableMapping[str, Any] = document
+    for token in path:
+        child = current.get(token)
+        if child is None:
+            child = {} if is_json else CommentedMap()
+            current[token] = child
+        if not isinstance(child, MutableMapping):
+            return None
+        current = child
+    return current
 
 
 def _merge_resource_section(
@@ -1267,13 +1783,25 @@ def _render_chart(
     error_type: type[HelmPlanError],
 ) -> RawRenderResult:
     try:
-        result = renderer.render(
-            snapshot,
-            context.chart_path,
-            release_name=context.release_name,
-            release_namespace=context.release_namespace,
-            values_files=context.values_files,
-        )
+        if context.remote_chart is None:
+            result = renderer.render(
+                snapshot,
+                context.chart_path,
+                release_name=context.release_name,
+                release_namespace=context.release_namespace,
+                values_files=context.values_files,
+            )
+        else:
+            # Pre-fetched charts need the renderer's vendored-dependency and
+            # double-render determinism mode (HelmRenderer.render(remote_chart=True)).
+            result = cast(Any, renderer).render(
+                snapshot,
+                context.chart_path,
+                release_name=context.release_name,
+                release_namespace=context.release_namespace,
+                values_files=context.values_files,
+                remote_chart=True,
+            )
     except HelmError as exc:
         raise error_type(f"bounded Helm render failed closed: {exc}") from exc
     if (
@@ -1285,6 +1813,11 @@ def _render_chart(
         raise error_type("Helm renderer did not return a validated render result")
     if planner_renderer not in {RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}:
         raise error_type("Helm planner renderer kind is invalid")
+    if context.remote_chart is not None:
+        result = replace(
+            result,
+            warnings=tuple(sorted({*result.warnings, context.remote_chart.provenance})),
+        )
     return result
 
 
@@ -1458,13 +1991,28 @@ def _find_release_manifest(
     return candidates[0]
 
 
+@dataclass(frozen=True, slots=True)
+class _FluxChart:
+    """Where a HelmRelease's chart comes from: a Git path in the snapshot, or an exact remote chart."""
+
+    chart_path: str | None
+    reference: ChartReference | None
+    release_name: str
+    release_namespace: str
+    values_files: tuple[str, ...]
+    ignore_missing_values_files: bool
+
+
+_REMOTE_FLUX_SOURCE_KINDS = frozenset({"HelmRepository", "OCIRepository"})
+
+
 def _flux_chart_context(
     root: Path,
     snapshot_files: Mapping[str, Any],
     source: WorkloadSource,
     spec: Mapping[str, Any],
     base_revision: str,
-) -> tuple[str, str, str, tuple[str, ...], bool]:
+) -> _FluxChart:
     renderer_config = _mapping(source.renderer_config)
     if renderer_config is None:
         raise FluxHelmReleaseUnsupportedError("Flux renderer configuration must be a mapping")
@@ -1472,6 +2020,7 @@ def _flux_chart_context(
     if configured_chart is None:
         raise FluxHelmReleaseUnsupportedError("Flux renderer configuration is missing chart ownership metadata")
 
+    remote_chart_name: str | None = None
     if "chartRef" in spec:
         chart_ref = _mapping(spec.get("chartRef"))
         if chart_ref is None:
@@ -1487,13 +2036,24 @@ def _flux_chart_context(
             or discovered_chart_ref.get("namespace") != chart_ref_namespace
         ):
             raise FluxHelmReleaseUnsupportedError("Flux chartRef changed after source discovery")
-        if chart_ref_kind != "HelmChart":
+        if chart_ref_kind not in {"HelmChart", "OCIRepository"}:
             raise FluxHelmReleaseUnsupportedError(
-                f"remote-chart-not-in-snapshot: chartRef kind {chart_ref_kind!r} is not a local HelmChart"
+                f"remote-chart-not-in-snapshot: chartRef kind {chart_ref_kind!r} is not a HelmChart or OCIRepository"
             )
-        source_ref = _mapping(renderer_config.get("chart_source_ref"))
-        if source_ref is None:
-            raise FluxHelmReleaseUnsupportedError("Flux HelmChart source identity was not captured during discovery")
+        if chart_ref_kind == "OCIRepository":
+            source_ref: Mapping[str, Any] = {
+                "kind": "OCIRepository",
+                "name": chart_ref_name,
+                "namespace": chart_ref_namespace,
+            }
+        else:
+            discovered_source_ref = _mapping(renderer_config.get("chart_source_ref"))
+            if discovered_source_ref is None:
+                raise FluxHelmReleaseUnsupportedError(
+                    "Flux HelmChart source identity was not captured during discovery"
+                )
+            source_ref = discovered_source_ref
+            remote_chart_name = text(configured_chart.get("name"))
         configured_version = configured_chart.get("version")
         raw_values_files: Any = renderer_config.get("chart_values_files", [])
         ignore_missing_values_files: Any = renderer_config.get("chart_ignore_missing_values_files", False)
@@ -1502,14 +2062,16 @@ def _flux_chart_context(
         chart_spec = _mapping(raw_chart.get("spec")) if raw_chart is not None else None
         if chart_spec is None:
             raise FluxHelmReleaseUnsupportedError("HelmRelease spec.chart.spec must be a mapping")
-        source_ref = _mapping(chart_spec.get("sourceRef"))
-        if source_ref is None or (text(source_ref.get("kind")) or "HelmRepository") != "GitRepository":
+        spec_source_ref = _mapping(chart_spec.get("sourceRef"))
+        source_kind = text(spec_source_ref.get("kind")) or "HelmRepository" if spec_source_ref is not None else None
+        if spec_source_ref is None or source_kind not in {"GitRepository", "HelmRepository"}:
             raise FluxHelmReleaseUnsupportedError(
-                "remote-chart-not-in-snapshot: HelmRepository/OCIRepository chart artifacts are not in the Git snapshot"
+                "remote-chart-not-in-snapshot: only GitRepository and HelmRepository chart sources can be rendered"
             )
+        source_ref = spec_source_ref
         configured_source_ref = _mapping(renderer_config.get("chart_source_ref"))
         if configured_source_ref is not None and (
-            configured_source_ref.get("kind") != "GitRepository"
+            configured_source_ref.get("kind") != source_kind
             or configured_source_ref.get("name") != text(source_ref.get("name"))
             or configured_source_ref.get("namespace")
             != (text(source_ref.get("namespace")) or source.controller_namespace)
@@ -1518,8 +2080,52 @@ def _flux_chart_context(
         configured_version = chart_spec.get("version")
         raw_values_files = chart_spec.get("valuesFiles", [])
         ignore_missing_values_files = chart_spec.get("ignoreMissingValuesFiles", False)
+        remote_chart_name = text(chart_spec.get("chart"))
 
-    if (text(source_ref.get("kind")) or "HelmRepository") != "GitRepository":
+    source_kind = text(source_ref.get("kind")) or "HelmRepository"
+    source_evidence = _mapping(source.evidence.get("source_ref"))
+    if source_evidence is None:
+        raise FluxHelmReleaseUnsupportedError("Flux chart source identity was not captured during discovery")
+    expected_source_namespace = text(source_ref.get("namespace")) or source.controller_namespace
+    if (
+        source_evidence.get("kind") != source_kind
+        or source_evidence.get("name") != source_ref.get("name")
+        or (source_evidence.get("namespace") or source.controller_namespace) != expected_source_namespace
+    ):
+        raise FluxHelmReleaseUnsupportedError("Flux chart source reference changed after source discovery")
+
+    chart_values_files = _normalize_flux_chart_values_files(raw_values_files)
+    discovered_values_files = _normalize_flux_chart_values_files(renderer_config.get("chart_values_files", []))
+    if chart_values_files != discovered_values_files:
+        raise FluxHelmReleaseUnsupportedError("Flux chart.spec.valuesFiles changed after source discovery")
+    if type(ignore_missing_values_files) is not bool:
+        raise FluxHelmReleaseUnsupportedError("Flux ignoreMissingValuesFiles must be a boolean")
+    discovered_ignore_missing = renderer_config.get("chart_ignore_missing_values_files", False)
+    if type(discovered_ignore_missing) is not bool or discovered_ignore_missing != ignore_missing_values_files:
+        raise FluxHelmReleaseUnsupportedError("Flux ignoreMissingValuesFiles changed after source discovery")
+
+    release_name, release_namespace = _flux_release_identity(source, spec, renderer_config)
+    if source_kind in _REMOTE_FLUX_SOURCE_KINDS:
+        reference = _flux_remote_chart_reference(
+            configured_chart,
+            source_kind=source_kind,
+            chart_name=remote_chart_name,
+            configured_version=configured_version,
+        )
+        if chart_values_files:
+            raise FluxHelmReleaseUnsupportedError(
+                "remote-chart-values-files: chart.spec.valuesFiles of a remote chart are not rendered"
+            )
+        return _FluxChart(
+            chart_path=None,
+            reference=reference,
+            release_name=release_name,
+            release_namespace=release_namespace,
+            values_files=(),
+            ignore_missing_values_files=False,
+        )
+
+    if source_kind != "GitRepository":
         raise FluxHelmReleaseUnsupportedError("remote-chart-not-in-snapshot: chart source is not a GitRepository")
     raw_chart_path = configured_chart.get("name")
     if not isinstance(raw_chart_path, str):
@@ -1538,17 +2144,6 @@ def _flux_chart_context(
         raise FluxHelmReleaseUnsupportedError(
             "chart-source-not-in-snapshot: Flux Git chart belongs to another repository"
         )
-
-    source_evidence = _mapping(source.evidence.get("source_ref"))
-    if source_evidence is None:
-        raise FluxHelmReleaseUnsupportedError("Flux chart source identity was not captured during discovery")
-    expected_source_namespace = text(source_ref.get("namespace")) or source.controller_namespace
-    if (
-        source_evidence.get("kind") != source_ref.get("kind")
-        or source_evidence.get("name") != source_ref.get("name")
-        or (source_evidence.get("namespace") or source.controller_namespace) != expected_source_namespace
-    ):
-        raise FluxHelmReleaseUnsupportedError("Flux chart source reference changed after source discovery")
     source_revision = revision_commit(source.source_revision) if source.source_revision else None
     if source_revision is None or source_revision != base_revision.lower():
         raise FluxHelmReleaseUnsupportedError(
@@ -1580,17 +2175,51 @@ def _flux_chart_context(
         raise FluxHelmReleaseUnsupportedError("Flux local chart version selector cannot be resolved exactly")
     if not _local_chart_version_selector_matches(configured_chart.get("version"), actual_chart_version):
         raise FluxHelmReleaseUnsupportedError("Flux chart version changed after source discovery")
+    return _FluxChart(
+        chart_path=chart_path,
+        reference=None,
+        release_name=release_name,
+        release_namespace=release_namespace,
+        values_files=chart_values_files,
+        ignore_missing_values_files=ignore_missing_values_files,
+    )
 
-    chart_values_files = _normalize_flux_chart_values_files(raw_values_files)
-    discovered_values_files = _normalize_flux_chart_values_files(renderer_config.get("chart_values_files", []))
-    if chart_values_files != discovered_values_files:
-        raise FluxHelmReleaseUnsupportedError("Flux chart.spec.valuesFiles changed after source discovery")
-    if type(ignore_missing_values_files) is not bool:
-        raise FluxHelmReleaseUnsupportedError("Flux ignoreMissingValuesFiles must be a boolean")
-    discovered_ignore_missing = renderer_config.get("chart_ignore_missing_values_files", False)
-    if type(discovered_ignore_missing) is not bool or discovered_ignore_missing != ignore_missing_values_files:
-        raise FluxHelmReleaseUnsupportedError("Flux ignoreMissingValuesFiles changed after source discovery")
 
+def _flux_remote_chart_reference(
+    configured_chart: Mapping[str, Any],
+    *,
+    source_kind: str,
+    chart_name: str | None,
+    configured_version: Any,
+) -> ChartReference:
+    """The exact chart Flux deployed from a HelmRepository or OCIRepository (digest-pinned when known)."""
+    if configured_chart.get("source_kind") != source_kind:
+        raise FluxHelmReleaseUnsupportedError("Flux chart source kind changed after source discovery")
+    if configured_version not in (None, "") and configured_version != configured_chart.get("version"):
+        raise FluxHelmReleaseUnsupportedError("Flux chart version changed after source discovery")
+    repository_url = configured_chart.get("repo_url")
+    if not isinstance(repository_url, str) or not repository_url:
+        raise FluxHelmReleaseUnsupportedError("chart-source-url-unresolved: the Flux chart source has no URL")
+    if source_kind == "OCIRepository":
+        repository, _, name = repository_url.rstrip("/").rpartition("/")
+        if not repository.lower().startswith("oci://") or not name:
+            raise FluxHelmReleaseUnsupportedError("the Flux OCIRepository URL must be oci://<registry>/<path>/<chart>")
+    else:
+        if chart_name is None or chart_name != configured_chart.get("name"):
+            raise FluxHelmReleaseUnsupportedError("Flux chart name changed after source discovery")
+        repository, name = repository_url, chart_name
+    version = configured_chart.get("resolved_version") or configured_version
+    try:
+        return ChartReference.parse(repository, name, version, expected_digest=configured_chart.get("digest"))
+    except ChartFetchError as exc:
+        raise FluxHelmReleaseUnsupportedError(str(exc)) from exc
+
+
+def _flux_release_identity(
+    source: WorkloadSource,
+    spec: Mapping[str, Any],
+    renderer_config: Mapping[str, Any],
+) -> tuple[str, str]:
     release_name = flux_release_name(source.controller_name, spec)
     release_namespace = spec.get("targetNamespace") or source.controller_namespace
     if len(release_name) > 53:
@@ -1609,7 +2238,7 @@ def _flux_chart_context(
         raise FluxHelmReleaseUnsupportedError("Flux HelmRelease releaseName must be explicit")
     if not isinstance(release_namespace, str) or not release_namespace.strip():
         raise FluxHelmReleaseUnsupportedError("Flux HelmRelease targetNamespace must be explicit")
-    return chart_path, release_name, release_namespace, chart_values_files, ignore_missing_values_files
+    return release_name, release_namespace
 
 
 def _normalize_flux_chart_values_files(value: Any) -> tuple[str, ...]:

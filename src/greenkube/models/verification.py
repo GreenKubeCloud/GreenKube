@@ -35,6 +35,9 @@ class WorkloadHealthObservation(BaseModel):
     """
 
     oom_kill_count: Optional[int] = None
+    #: Container restarts whose termination was ``OOMKilled``, summed over pods (the unit of
+    #: ``evidence.oom_events``); ``oom_kill_count`` counts pods with a kill (H1).
+    oom_restart_count: Optional[int] = None
     readiness_ratio: Optional[float] = None
     throttling_ratio: Optional[float] = None
     source: str = "prometheus"

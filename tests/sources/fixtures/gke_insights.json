@@ -1,0 +1,94 @@
+{
+  "_provenance": {
+    "kind": "synthetic",
+    "basis": "Shaped after the documented Recommender API resources: InsightType list (v1beta1 insightTypes.list: insightTypes[].name, nextPageToken) and Insight (name, description, targetResources, insightSubtype, content, lastRefreshTime, observationPeriod, stateInfo.state, category, severity), with the GKE subtypes WORKLOAD_OVERPROVISIONED and WORKLOAD_UNDERPROVISIONED and the insight type google.container.DiagnosisInsight from the GKE documentation. The content of DiagnosisInsight is not publicly documented: the container list below is an assumption the parser reads defensively. Not recorded from a live project: names and values are invented.",
+    "checked": "2026-11"
+  },
+  "metadata": {
+    "project/project-id": "acme-prod",
+    "project/numeric-project-id": "123456",
+    "instance/attributes/cluster-name": "prod-gke",
+    "instance/attributes/cluster-location": "europe-west1-b",
+    "instance/service-accounts/default/token": "{\"access_token\": \"ya29.test-token\", \"expires_in\": 3599, \"token_type\": \"Bearer\"}"
+  },
+  "insightTypes": {
+    "insightTypes": [
+      {"name": "insightTypes/google.compute.firewall.Insight"},
+      {"name": "insightTypes/google.container.DiagnosisInsight"}
+    ]
+  },
+  "insights": {
+    "europe-west1-b": {
+      "insights": [
+        {
+          "name": "projects/123456/locations/europe-west1-b/insightTypes/google.container.DiagnosisInsight/insights/ins-over-api",
+          "description": "Workload CPU and memory utilization stayed under 50% for 90% of the last 15 days.",
+          "targetResources": [
+            "//container.googleapis.com/projects/acme-prod/locations/europe-west1-b/clusters/prod-gke/k8s/namespaces/shop/apps/deployments/api"
+          ],
+          "insightSubtype": "WORKLOAD_OVERPROVISIONED",
+          "content": {
+            "containerRecommendations": [
+              {
+                "containerName": "web",
+                "currentRequests": {"cpu": "1", "memory": "1Gi"},
+                "recommendedRequests": {"cpu": "260m", "memory": "512Mi"}
+              }
+            ],
+            "futureField": {"ignored": true}
+          },
+          "lastRefreshTime": "2026-11-01T06:00:00Z",
+          "observationPeriod": "1296000s",
+          "stateInfo": {"state": "ACTIVE"},
+          "category": "COST",
+          "severity": "MEDIUM",
+          "etag": "\"abc\""
+        },
+        {
+          "name": "projects/123456/locations/europe-west1-b/insightTypes/google.container.DiagnosisInsight/insights/ins-under-db",
+          "description": "Workload memory utilization is close to its requests.",
+          "targetResources": [
+            "//container.googleapis.com/projects/acme-prod/locations/europe-west1-b/clusters/prod-gke/k8s/namespaces/shop/apps/statefulsets/db"
+          ],
+          "insightSubtype": "WORKLOAD_UNDERPROVISIONED",
+          "content": {},
+          "observationPeriod": "1296000s",
+          "stateInfo": {"state": "ACTIVE"},
+          "category": "RELIABILITY",
+          "severity": "HIGH"
+        },
+        {
+          "name": "projects/123456/locations/europe-west1-b/insightTypes/google.container.DiagnosisInsight/insights/ins-other-cluster",
+          "targetResources": [
+            "//container.googleapis.com/projects/acme-prod/locations/europe-west1-b/clusters/staging-gke/k8s/namespaces/shop/apps/deployments/api"
+          ],
+          "insightSubtype": "WORKLOAD_OVERPROVISIONED",
+          "content": {"containerRecommendations": [{"containerName": "web", "recommendedRequests": {"cpu": "100m"}}]},
+          "stateInfo": {"state": "ACTIVE"}
+        },
+        {
+          "name": "projects/123456/locations/europe-west1-b/insightTypes/google.container.DiagnosisInsight/insights/ins-dismissed",
+          "targetResources": [
+            "//container.googleapis.com/projects/acme-prod/locations/europe-west1-b/clusters/prod-gke/k8s/namespaces/shop/apps/deployments/worker"
+          ],
+          "insightSubtype": "WORKLOAD_OVERPROVISIONED",
+          "content": {},
+          "stateInfo": {"state": "DISMISSED"}
+        }
+      ],
+      "nextPageToken": "page-2"
+    },
+    "europe-west1-b#page-2": {
+      "insights": [
+        {
+          "name": "projects/123456/locations/europe-west1-b/insightTypes/google.container.DiagnosisInsight/insights/ins-node-pool",
+          "targetResources": [
+            "//container.googleapis.com/projects/acme-prod/locations/europe-west1-b/clusters/prod-gke/nodePools/default"
+          ],
+          "insightSubtype": "NODE_POOL_UNDERUTILIZED",
+          "stateInfo": {"state": "ACTIVE"}
+        }
+      ]
+    }
+  }
+}

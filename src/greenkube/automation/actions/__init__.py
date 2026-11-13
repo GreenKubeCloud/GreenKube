@@ -21,6 +21,7 @@ from greenkube.automation.actions.base import (
     UnknownActionKindError,
 )
 from greenkube.automation.actions.container_resources import CONTAINER_RESOURCES, ContainerResourcesSpec
+from greenkube.automation.actions.delete_resource import DELETE_RESOURCE, DeleteResourceSpec
 from greenkube.automation.actions.primitives import (
     CreateResource,
     DeleteResource,
@@ -44,10 +45,12 @@ from greenkube.automation.actions.registry import (
 )
 
 register_action_kind(CONTAINER_RESOURCES)
+register_action_kind(DELETE_RESOURCE)
 
 __all__ = [
     "ACTION_KINDS",
     "CONTAINER_RESOURCES",
+    "DELETE_RESOURCE",
     "ActionBaseline",
     "ActionInvariantError",
     "ActionKindError",
@@ -56,6 +59,7 @@ __all__ = [
     "AppliedVerdict",
     "ContainerResourcesSpec",
     "CreateResource",
+    "DeleteResourceSpec",
     "DeleteResource",
     "InverseConflictError",
     "InverseUnsupportedError",

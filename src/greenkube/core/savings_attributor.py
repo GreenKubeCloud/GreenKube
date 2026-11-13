@@ -28,6 +28,13 @@ outcome (roadmap C0.4):
 
 Each recommendation is processed in isolation: an invalid record increments
 ``greenkube_attribution_errors_total`` and never blocks the others.
+
+Dual write (roadmap C6): when a ledger projector is given, every run that
+reached the database is followed by a pass of the append-only, hash-chained
+savings ledger v2 (``savings_ledger_entries``), which projects the rows just
+written. The v1 ledger stays the source of the legacy views; a failed v2 pass
+is counted (``greenkube_ledger_write_errors_total``) and caught up by the
+``ledger-chain`` controller loop, never failing the accrual.
 """
 
 from __future__ import annotations
@@ -289,8 +296,11 @@ class SavingsAttributor:
         fence: Optional[Callable[[], bool]] = None,
         initial_backfill: timedelta = INITIAL_BACKFILL,
         max_slots_per_run: int = MAX_SLOTS_PER_RUN,
+        ledger: Any = None,
     ) -> None:
         self._repo = savings_repo
+        #: Optional :class:`~greenkube.verify.ledger.projector.LedgerProjector` (dual write, C6).
+        self._ledger = ledger
         self._cluster = cluster_name
         self._stream = stream
         self._fence = fence
@@ -456,4 +466,17 @@ class SavingsAttributor:
             logger.error("Savings attribution could not persist %d accrual row(s): %s", len(rows), exc)
             return AccrualResult(slots=len(slots), errors=errors + 1, watermark=watermark)
 
+        await self._sync_ledger()
         return AccrualResult(slots=len(slots), written=written, errors=errors, watermark=new_watermark)
+
+    async def _sync_ledger(self) -> None:
+        """Project the rows just written into the savings ledger v2 (never fails the accrual)."""
+        if self._ledger is None:
+            return
+        try:
+            await self._ledger.sync()
+        except Exception as exc:
+            from ..verify.ledger.projector import LEDGER_WRITE_ERRORS
+
+            LEDGER_WRITE_ERRORS.labels(reason="dual_write_failed").inc()
+            logger.error("Savings ledger v2 dual write failed (caught up by the ledger-chain loop): %s", exc)

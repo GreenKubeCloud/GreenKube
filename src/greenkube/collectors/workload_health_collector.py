@@ -6,7 +6,8 @@ verification window. Signals come from Prometheus, evaluated at the window end
 over the window length:
 
 * OOM kills: containers whose ``kube_pod_container_status_last_terminated_reason``
-  reported ``OOMKilled`` during the window (kube-state-metrics).
+  reported ``OOMKilled`` during the window (kube-state-metrics), and the OOM
+  restarts themselves, counted like the scan's ``evidence.oom_events`` (H1).
 * Readiness: share of ``kube_pod_status_ready{condition="true"}`` samples that
   were ready over the window, across the observed pods, so each pod weighs its
   lifetime in the window (kube-state-metrics).
@@ -36,6 +37,10 @@ from greenkube.models.verification import WorkloadHealthObservation
 from greenkube.utils.time import ensure_utc
 
 logger = logging.getLogger(__name__)
+
+#: Step of the OOM restart count: the ``OOM_STEP`` of ``core.reliability_signals``, so the
+#: post-change count has the unit of the scan's ``evidence.oom_events`` (H1).
+OOM_STEP = "5m"
 
 #: Above this many pods the selector falls back to an owner-name pattern.
 MAX_EXPLICIT_PODS = 200
@@ -155,6 +160,18 @@ class WorkloadHealthCollector:
             )
             if oom is not None:
                 observation.oom_kill_count = int(_scalar(oom) or 0)
+            # OOM restarts in the unit of the scan's evidence (reliability_signals): every
+            # restart of a step whose last termination, at that step, is OOMKilled (H1).
+            oom_restarts = await self._query(
+                "sum(sum_over_time(("
+                f"(round(increase(kube_pod_container_status_restarts_total{{{selector}{container_matcher}}}"
+                f"[{OOM_STEP}])) > 0) and on (namespace, pod, container) "
+                "(kube_pod_container_status_last_terminated_reason"
+                f'{{{selector}{container_matcher}, reason="OOMKilled"}} > 0))[{window}:{OOM_STEP}]))',
+                end,
+            )
+            if oom_restarts is not None:
+                observation.oom_restart_count = int(round(_scalar(oom_restarts) or 0))
             # Ready samples over present samples across all pods: weighted by pod time, so a
             # short-lived HPA or rollout pod counts for its lifetime, not for 1/N of the ratio.
             ready = f'kube_pod_status_ready{{{selector}, condition="true"}}[{window}]'

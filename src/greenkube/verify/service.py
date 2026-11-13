@@ -30,6 +30,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.automation.actions.delete_resource import deletion_target_for
 from greenkube.impact.comparison import measurable_co2e_projection
 from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
 from greenkube.models.measurement import (
@@ -43,7 +44,14 @@ from greenkube.models.verification import HealthGateResult, HealthGateStatus, Me
 from greenkube.storage.change_repository import ChangeConflictError, ChangeRepository, change_identity
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.attribution import allocate
-from greenkube.verify.confounders import ConfounderDetector, PoolContext, PoolNode, PoolSample, confidence_score
+from greenkube.verify.confounders import (
+    ConfounderDetector,
+    PoolContext,
+    PoolNode,
+    PoolSample,
+    confidence_score,
+    pool_unit_prices,
+)
 from greenkube.verify.load_driver import CollectedLoad, LoadDriverResolver, PrometheusRangeReader
 from greenkube.verify.model import (
     Allocation,
@@ -64,7 +72,9 @@ from greenkube.verify.series import floor_hour, hourly_buckets, utc_hour
 from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
     MeasurementSettings,
+    ReliabilityOutcome,
     SavingsMeasurementStrategy,
+    increase_reliability,
     strategy_for,
 )
 
@@ -84,6 +94,8 @@ LOAD_DRIVER_RETRY = timedelta(hours=24)
 UNAVAILABLE_DRIVERS_KEY = "load_drivers_unavailable"
 #: Node pools are sampled from the node snapshots this often over each window (pool confounders, C4).
 POOL_SAMPLE_INTERVAL = timedelta(hours=6)
+#: Each pool sample also reads this much of every pod's metrics for the pool's price card (C4).
+POOL_PRICE_SLICE = timedelta(hours=1)
 #: Pod rows read after another change's rollout to see which nodes its workload ran on.
 POOL_NEIGHBOUR_LOOKUP = timedelta(hours=2)
 #: At most this many other changes in the measurement are checked for pool membership.
@@ -305,6 +317,10 @@ class ChangeMeasurementService:
 
         pre_samples, post_samples = in_pools(pre), in_pools(post)
         pool_nodes = {node.name for sample in pre_samples + post_samples for node in sample.nodes}
+        step = self._step()
+        own = change.target.key
+        prices_pre = pool_unit_prices(await self._pool_rows(plan.pre), pool_nodes, step, exclude=own)
+        prices_post = pool_unit_prices(await self._pool_rows(plan.post), pool_nodes, step, exclude=own)
         neighbours: List[ChangeEvent] = []
         try:
             landed = await self.changes.changes_landed_between(
@@ -328,7 +344,27 @@ class ChangeMeasurementService:
             other_changes=tuple(neighbours),
             # The read is capped: in a busier cluster later changes are not checked, and the measurement says so.
             truncated=len(landed) >= POOL_MAX_OTHER_CHANGES,
+            prices_pre=prices_pre,
+            prices_post=prices_post,
         )
+
+    async def _pool_rows(self, window: TimeWindow) -> List[Any]:
+        """Every pod's rows in a :data:`POOL_PRICE_SLICE` at each pool sample of ``window`` (price-card control)."""
+        rows: List[Any] = []
+        moment = ensure_utc(window.start)
+        end = ensure_utc(window.end)
+        while moment < end:
+            try:
+                rows.extend(
+                    await self.combined_repo.read_combined_metrics_smart(
+                        start_time=moment, end_time=min(end, moment + POOL_PRICE_SLICE)
+                    )
+                    or []
+                )
+            except Exception as exc:
+                raise MeasurementReadError(f"pool metrics at {moment.isoformat()} could not be read: {exc}") from exc
+            moment += POOL_SAMPLE_INTERVAL
+        return rows
 
     async def _collect_load(
         self, change: ChangeEvent, window: TimeWindow, buckets: Sequence[Any], *, retry_until: datetime, now: datetime
@@ -459,8 +495,11 @@ class ChangeMeasurementService:
         lead = records[0]
         baseline = _baseline(lead)
         plan_id = getattr(plan, "plan_id", None) or baseline.get("plan_id")
+        deleted = deletion_target_for(lead)
         if snapshot is not None:
             target = WorkloadRef(namespace=snapshot.namespace, kind=snapshot.kind, name=snapshot.name)
+        elif deleted is not None:
+            target = WorkloadRef(namespace=deleted.namespace, kind=deleted.kind, name=deleted.name)
         else:
             target = WorkloadRef(
                 namespace=lead.namespace or "",
@@ -539,7 +578,8 @@ class ChangeMeasurementService:
             rollout_completed_at=completed,
             rollout_completed_source=str(rollout.get("completion_source") or "unknown"),
             baseline_window_end=min(decision, completed),
-            action_kind="container_resources",
+            action_kind=getattr(snapshot, "action_kind", None)
+            or ("delete_resource" if deleted is not None else "container_resources"),
             application_method=_application_method(lead, plan_id),
             load_metric=getattr(snapshot, "load_metric", None),
             details={"spec_before_source": before_source, "rollout": rollout},
@@ -793,22 +833,38 @@ class ChangeMeasurementService:
         Raises :class:`MeasurementReadError` when the gates cannot be read, so
         no health check or decision is recorded from missing metrics.
         """
+        gates, _ = await self._health_and_reliability(members, start, end)
+        return gates
+
+    async def _health_and_reliability(
+        self, members: Sequence[RecommendationRecord], start: datetime, end: datetime
+    ) -> Tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
+        """Health gates per container and the reliability outcome of memory increases (H1)."""
         by_container: Dict[Optional[str], List[RecommendationRecord]] = {}
         for member in members:
             by_container.setdefault(member.container_name, []).append(member)
-        gates: List[HealthGateResult] = []
+        raw: Dict[Optional[str], List[HealthGateResult]] = {}
+        oom_restarts: Dict[Optional[str], Optional[int]] = {}
         for container, group in sorted(by_container.items(), key=lambda item: item[0] or ""):
             try:
-                results = await self.verifier.health_gates_for(group, start, end, strict=True)
+                gates, health = await self.verifier.health_check_for(group, start, end, strict=True)
             except Exception as exc:
                 raise MeasurementReadError(
                     f"health gates of {container or 'workload'} could not be evaluated: {exc}"
                 ) from exc
-            for gate in results:
+            raw[container] = list(gates)
+            oom_restarts[container] = health.oom_restart_count if health is not None else None
+        # A memory-request increase made because of OOM kills is judged on that container's kill
+        # rate (counted like its evidence), not on "any kill"; its OOM restarts leave the restart
+        # gate. Every other container keeps the strict gates (H1).
+        judged, reliability = increase_reliability(members, raw, start, end, oom_restarts)
+        gates: List[HealthGateResult] = []
+        for container in raw:
+            for gate in judged[container]:
                 if container and len(by_container) > 1:
                     gate = gate.model_copy(update={"detail": f"[{container}] {gate.detail}".strip()})
                 gates.append(gate)
-        return gates
+        return gates, reliability
 
     async def _interim_health(
         self, change: ChangeEvent, status: ChangeStatus, plan: WindowPlan, health_end: datetime, now: datetime
@@ -947,7 +1003,17 @@ class ChangeMeasurementService:
             seed_parts=(change.change_id, status.sequence),
         )
         awaiting = [member for member in in_effect if _awaiting(member)]
-        gates = await self._health(awaiting, ensure_utc(plan.post.start), ensure_utc(plan.post.end)) if awaiting else []
+        gates, reliability = (
+            await self._health_and_reliability(awaiting, ensure_utc(plan.post.start), ensure_utc(plan.post.end))
+            if awaiting
+            else ([], None)
+        )
+        counterfactual_params = dict(result.counterfactual_params)
+        reasons = list(result.reasons)
+        if reliability is not None:
+            # The outcome of a reliability increase (H1); its cost stays in the estimates, as a cost.
+            counterfactual_params["reliability"] = reliability.as_dict()
+            reasons.append(f"reliability ({reliability.outcome.value}): {reliability.reason}")
         estimates = {item.quantity: item for item in result.estimates}
         allocations = []
         for share in allocate(in_effect, result.estimates):
@@ -977,7 +1043,7 @@ class ChangeMeasurementService:
             windows=plan,
             load_driver=load.info if load is not None else None,
             counterfactual_params=_with_unavailable_drivers(
-                result.counterfactual_params, snapshot.collector_versions.get(UNAVAILABLE_DRIVERS_KEY), collected
+                counterfactual_params, snapshot.collector_versions.get(UNAVAILABLE_DRIVERS_KEY), collected
             ),
             estimates=result.estimates,
             confounders=confounders,
@@ -985,7 +1051,7 @@ class ChangeMeasurementService:
             health=gates,
             allocations=allocations,
             outcome=result.outcome,
-            reasons=result.reasons,
+            reasons=reasons,
             supersedes_measurement_id=previous[-1].measurement_id if previous else None,
             decided_at=now,
         ).with_evidence_digest()

@@ -20,6 +20,8 @@ FAILURE_REASONS = (
     "invalid_api_key",
     "csrf",
     "forbidden_scope",
+    "untrusted_proxy_header",
+    "sso",
 )
 
 

@@ -13,7 +13,7 @@ import logging
 import uuid
 import weakref
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from greenkube.auth.models import ApiKey, AuthSession, User
@@ -25,6 +25,7 @@ from greenkube.auth.passwords import (
     verify_password,
 )
 from greenkube.auth.principal import ROLE_SCOPES, Principal, Role, normalize_scopes
+from greenkube.auth.roles import NO_ROLE, role_for_groups, role_rank
 from greenkube.auth.settings import AuthSettings
 from greenkube.auth.tokens import (
     api_key_prefix,
@@ -65,6 +66,9 @@ class AuthError(Exception):
 
 
 INVALID_CREDENTIALS = "Invalid username or password."
+#: Stored as the password hash of SSO accounts: never a valid scrypt hash, so no password signs them in.
+SSO_PASSWORD_HASH = "!sso"
+SSO_SOURCES = frozenset({"proxy", "oidc"})
 
 
 @dataclass(frozen=True)
@@ -103,6 +107,7 @@ def user_principal(user: User, session: AuthSession | None = None, token: str | 
         csrf_token=csrf_token_for(token) if token else None,
         must_change_password=user.must_change_password,
         user_id=user.id,
+        auth_source=user.auth_source,
     )
 
 
@@ -196,7 +201,8 @@ class AuthService:
         if not normalized or len(normalized) > MAX_USERNAME_LENGTH or not password:
             raise AuthError("INVALID_CREDENTIALS", INVALID_CREDENTIALS, status_code=401)
         user = await self.repository.get_user_by_username(normalized)
-        if user is None or user.disabled_at is not None:
+        if user is None or user.disabled_at is not None or not user.is_local:
+            # SSO accounts have no password: they cost the same time as an unknown user.
             await _run_kdf(dummy_verify, password)
             raise AuthError("INVALID_CREDENTIALS", INVALID_CREDENTIALS, status_code=401)
         if not await _run_kdf(verify_password, password, user.password_hash):
@@ -205,6 +211,25 @@ class AuthService:
             await self.repository.set_password(
                 user.id, await _hash(password), must_change_password=user.must_change_password, now=self.now()
             )
+        if previous_token:
+            await self.repository.revoke_session(sha256_hex(previous_token), now=self.now())
+        return await self._issue(user, remember=remember, ip=ip, user_agent=user_agent)
+
+    async def issue_session(
+        self,
+        user: User,
+        *,
+        remember: bool = False,
+        ip: str | None = None,
+        user_agent: str | None = None,
+        previous_token: str | None = None,
+    ) -> IssuedSession:
+        """Issue a new session for an already authenticated user (SSO, F16).
+
+        Like :meth:`login`, a token presented beforehand is revoked, never reused.
+        """
+        if user.disabled_at is not None:
+            raise AuthError("ACCOUNT_DISABLED", "This account is disabled.", status_code=403)
         if previous_token:
             await self.repository.revoke_session(sha256_hex(previous_token), now=self.now())
         return await self._issue(user, remember=remember, ip=ip, user_agent=user_agent)
@@ -264,6 +289,12 @@ class AuthService:
         user_agent: str | None = None,
     ) -> IssuedSession:
         """Change a password, revoke every session of the user and issue a new one."""
+        if not user.is_local:
+            raise AuthError(
+                "PASSWORD_MANAGED_BY_SSO",
+                "This account signs in through single sign-on; change the password at your identity provider.",
+                status_code=409,
+            )
         if not await _run_kdf(verify_password, current_password or "", user.password_hash):
             raise AuthError("INVALID_CREDENTIALS", "The current password is incorrect.", status_code=403)
         reason = validate_new_password(new_password or "", username=user.username)
@@ -285,7 +316,100 @@ class AuthService:
 
     async def purge_expired_sessions(self) -> int:
         now = self.now()
-        return await self.repository.purge_sessions(now=now, revoked_before=now - REVOKED_RETENTION)
+        purged = await self.repository.purge_sessions(now=now, revoked_before=now - REVOKED_RETENTION)
+        await self.repository.purge_oidc_logins(now=now)
+        return purged
+
+    # --- single sign-on and roles (F16) --------------------------------------
+    def sso_role(self, groups: frozenset[str] | set[str]) -> str | None:
+        """The role the configured group mapping grants, ``None`` for no access."""
+        settings = self.settings
+        return role_for_groups(groups, settings.role_groups, settings.default_role)
+
+    async def sso_user(self, source: str, subject: str, username: str, groups: frozenset[str] | set[str]) -> User:
+        """Find or create the account of an SSO identity and apply the group mapping.
+
+        The role is recomputed from the groups at every sign-in, so removing a
+        user from an IdP group takes effect at their next session. An SSO identity
+        never takes over a local account with the same username.
+        """
+        if source not in SSO_SOURCES or not subject:
+            raise AuthError("INVALID_IDENTITY", "The identity provider sent no usable identity.", status_code=401)
+        role = self.sso_role(groups)
+        if role is None or role == NO_ROLE:
+            raise AuthError(
+                "NO_ROLE",
+                "Your account is not in any group that grants access to GreenKube. Ask an administrator.",
+                status_code=403,
+            )
+        external_id = f"{source}:{subject}"
+        user = await self.repository.get_user_by_external_id(external_id)
+        if user is None:
+            user = await self._create_sso_user(source, external_id, username, role)
+        if user.disabled_at is not None:
+            raise AuthError("ACCOUNT_DISABLED", "This account is disabled.", status_code=403)
+        if user.role != role:
+            await self.repository.set_role(user.id, role, now=self.now())
+            logger.info("Role of %s set to %s from its groups.", user.username, role)
+            user = await self.repository.get_user(user.id) or user
+        return user
+
+    async def _create_sso_user(self, source: str, external_id: str, username: str, role: str) -> User:
+        user = self._new_user(username, SSO_PASSWORD_HASH, role=role, must_change_password=False)
+        user = replace(user, auth_source=source, external_id=external_id)
+        if await self.repository.create_user(user):
+            self._users_exist = True
+            logger.info("Created %s account %s with role %s.", source, user.username, role)
+            return user
+        # A concurrent sign-in created it, or the username belongs to another account.
+        existing = await self.repository.get_user_by_external_id(external_id)
+        if existing is not None:
+            return existing
+        raise AuthError(
+            "ACCOUNT_CONFLICT",
+            "Another account already uses this username; an SSO identity never takes over an existing account.",
+            status_code=409,
+        )
+
+    async def list_users(self) -> list[User]:
+        return await self.repository.list_users()
+
+    async def _ensure_admin_remains(self, user: User) -> None:
+        """Refuse to demote or disable the last active administrator (lockout)."""
+        if user.role != Role.ADMIN.value or user.disabled_at is not None:
+            return
+        admins = [
+            other
+            for other in await self.repository.list_users()
+            if other.role == Role.ADMIN.value and other.disabled_at is None and other.id != user.id
+        ]
+        if not admins:
+            raise AuthError("LAST_ADMIN", "At least one active administrator must remain.", status_code=409)
+
+    async def set_user_role(self, user_id: str, role: str) -> User:
+        if role_rank(role) < 0:
+            raise AuthError("INVALID_ROLE", "The role must be viewer, operator or admin.", status_code=422)
+        user = await self.repository.get_user(user_id)
+        if user is None:
+            raise AuthError("USER_NOT_FOUND", "User not found.", status_code=404)
+        if role != user.role and role != Role.ADMIN.value:
+            await self._ensure_admin_remains(user)
+        await self.repository.set_role(user.id, role, now=self.now())
+        return await self.repository.get_user(user.id) or user
+
+    async def set_user_disabled(self, user_id: str, disabled: bool) -> User:
+        """Disable (revoking every session) or re-enable an account."""
+        user = await self.repository.get_user(user_id)
+        if user is None:
+            raise AuthError("USER_NOT_FOUND", "User not found.", status_code=404)
+        now = self.now()
+        if disabled:
+            await self._ensure_admin_remains(user)
+            await self.repository.set_disabled(user.id, user.disabled_at or now, now=now)
+            await self.repository.revoke_user_sessions(user.id, now=now)
+        else:
+            await self.repository.set_disabled(user.id, None, now=now)
+        return await self.repository.get_user(user.id) or user
 
     async def initial_password_pending(self) -> bool:
         return await self.repository.any_user_must_change_password()

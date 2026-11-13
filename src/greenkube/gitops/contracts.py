@@ -24,6 +24,7 @@ from pydantic import (
     WrapSerializer,
     WrapValidator,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -374,10 +375,21 @@ class TypedOperation(ContractModel):
         return None
 
 
+#: Pod-spec list a container lives in (H1): ``containers``, or ``initContainers`` for sidecars and init containers.
+ContainerKind = Literal["container", "sidecar", "init"]
+#: Container resources whose limit an operation may set or remove.
+LimitResource = Literal["cpu", "memory"]
+
+
 class SetContainerResources(TypedOperation):
     op: Literal["set_container_resources"] = "set_container_resources"
     container: str = Field(min_length=1)
     resources: ContainerResources
+    #: Limits the operation removes (H1: only ``cpu`` is ever proposed by GreenKube).
+    remove_limits: list[LimitResource] = Field(default_factory=list)
+    #: Which pod-spec list holds the container (H1): ``containers``, or ``initContainers``
+    #: for a native sidecar (``restartPolicy: Always``) or a classic init container.
+    container_kind: ContainerKind = "container"
 
     @field_validator("container")
     @classmethod
@@ -385,6 +397,25 @@ class SetContainerResources(TypedOperation):
         if not value.strip() or value != value.strip():
             raise ValueError("container must be a non-blank name without surrounding whitespace")
         return value
+
+    @model_validator(mode="after")
+    def validate_limit_removals(self) -> SetContainerResources:
+        if len(set(self.remove_limits)) != len(self.remove_limits):
+            raise ValueError("remove_limits must not repeat a resource")
+        if set(self.remove_limits) & set(self.resources.limits):
+            raise ValueError("a limit cannot be both set and removed")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _omit_v2_defaults(self, handler: SerializerFunctionWrapHandler) -> Any:
+        # Operations without H1 fields serialize exactly as before (action ids, digests, golden plans).
+        data = handler(self)
+        if isinstance(data, dict):
+            if not self.remove_limits:
+                data.pop("remove_limits", None)
+            if self.container_kind == "container":
+                data.pop("container_kind", None)
+        return data
 
     def conflict_key(self) -> str | None:
         return f"container {self.container!r}"

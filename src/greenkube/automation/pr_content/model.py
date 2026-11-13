@@ -281,6 +281,22 @@ def _finite(value: object) -> float | None:
     return float(value)
 
 
+def raises_requests(context: PullRequestContext) -> bool:
+    """Whether the plan only raises requests: a reliability increase (H1), shown as a cost, never a saving."""
+    if context.is_rollback:
+        return False
+    changes = [change for change in resource_changes(context) if change.field.startswith("requests.")]
+    return any(change.increases for change in changes) and not any(
+        change.proposed is not None and change.current is not None and change.proposed < change.current
+        for change in changes
+    )
+
+
+def edits_limits(context: PullRequestContext) -> bool:
+    """Whether the plan sets or removes a container limit (H1); such edits are reverted by reverting the PR."""
+    return any(change.field.startswith("limits.") for change in resource_changes(context))
+
+
 def plan_verb(context: PullRequestContext) -> str:
     """The action verb used in titles and summaries."""
     operations = context.plan.action.operations

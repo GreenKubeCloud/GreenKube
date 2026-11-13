@@ -4,6 +4,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from greenkube.core.optimization.eligibility import (
     load_bindings,
     load_open_pr_ids,
     load_policy,
+    proposes_no_change,
     validate_action,
 )
 from greenkube.gitops.contracts import (
@@ -184,12 +186,10 @@ class TestEligibility:
         [
             RecommendationType.ZOMBIE_POD,
             RecommendationType.IDLE_NAMESPACE,
-            RecommendationType.ORPHANED_PERSISTENT_VOLUME,
-            RecommendationType.ORPHANED_LOAD_BALANCER,
         ],
     )
     def test_deletions_always_require_review(self, rec_type):
-        """No deletion is automated: every deletion kind is blocked with an explanation and a fix."""
+        """Zombie and idle-namespace deletions stay manual: blocked with an explanation and a fix (H6)."""
         record = _record(type=rec_type, action=None, scope="cluster")
         result = assess_eligibility(record, _ctx())
         assert result["can_open_pr"] is False
@@ -444,3 +444,40 @@ class TestLiveContext:
     def test_criticality_from_binding_labels(self):
         ctx = _ctx(bindings={KEY: _binding(workload_labels={"greenkube.io/criticality": "critical"})})
         assert criticality_by_record([_record()], ctx) == {7: "critical"}
+
+
+class TestContainerResourcesV2Actions:
+    """H1: increases, limits and sidecars validate like decreases; unsafe edits stay blocked."""
+
+    @staticmethod
+    def _with(operation: SetContainerResources):
+        action = _action().model_copy(update={"operations": [operation]})
+        return _record(action=action, recommended_cpu_request_millicores=1500)
+
+    def test_an_increase_with_limit_edits_is_a_valid_action(self):
+        for operation in (
+            SetContainerResources(
+                container="api", resources=ContainerResources(requests={"cpu": "1500m"}, limits={"cpu": "2"})
+            ),
+            SetContainerResources(
+                container="api", resources=ContainerResources(requests={"cpu": "1500m"}), remove_limits=["cpu"]
+            ),
+            SetContainerResources(
+                container="api", resources=ContainerResources(requests={"cpu": "1500m"}), container_kind="sidecar"
+            ),
+        ):
+            assert validate_action(self._with(operation)) == ([7], None)
+
+    def test_a_memory_limit_removal_is_not_a_valid_action(self):
+        record = self._with(SetContainerResources(container="api", resources=ContainerResources(requests={"cpu": "1"})))
+        assert record.action is not None
+        payload = record.action.model_dump(mode="json")
+        payload["operations"][0]["remove_limits"] = ["memory"]
+        assert validate_action(SimpleNamespace(**{**record.__dict__, "action": payload})) == (
+            None,
+            "requires_container_target",
+        )
+
+    def test_an_increase_is_not_a_no_op(self):
+        operation = SetContainerResources(container="api", resources=ContainerResources(requests={"cpu": "1500m"}))
+        assert not proposes_no_change(self._with(operation))

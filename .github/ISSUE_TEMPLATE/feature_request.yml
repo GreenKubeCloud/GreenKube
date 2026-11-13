@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a new capability or an improvement.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what stops you today?
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Loop stage
+      description: Where does it fit in the GreenKube loop?
+      multiple: true
+      options:
+        - Aggregate (sources, signals)
+        - Decide (consensus, ranking, policy)
+        - Deliver (pull requests, Git providers, action kinds)
+        - Prove (sync, apply detection, measurement)
+        - Ledger (savings records, exports)
+        - Learn (source track record)
+        - Install / operations
+        - UI
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should GreenKube do? Workload changes go through Git (pull requests), never directly to the cluster.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: input
+    id: roadmap
+    attributes:
+      label: Roadmap item
+      description: The matching item in docs/roadmap.md, if any (e.g. G3, H4).

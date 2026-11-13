@@ -56,8 +56,8 @@ image:
 |-----|---------|-------------|
 | `config.logLevel` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `config.environment` | `production` | Runtime environment. Production never serves anonymous requests. |
-| `config.apiAuthMode` | `session` | `API_AUTH_MODE`. `session`: account sign-in with server-side sessions plus scoped API keys; `api_key`: Bearer API keys only; `oidc`: reserved (`503`). See [Authentication](authentication.md). |
-| `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress). |
+| `config.apiAuthMode` | `session` | `API_AUTH_MODE`. `session`: account sign-in with server-side sessions plus scoped API keys; `api_key`: Bearer API keys only; `proxy`: single sign-on through an authentication proxy whose identity headers are trusted only from `config.trustedProxyIps` (required); `oidc`: native OpenID Connect sign-in (`auth.oidc.*`). See [Authentication](authentication.md). |
+| `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress) and, with `apiAuthMode: proxy`, the only peers whose identity headers are accepted. |
 | `config.externalUrl` | `""` | `GREENKUBE_EXTERNAL_URL`. Public URL of the GreenKube UI (http(s), no query or fragment), used for deep links in pull requests, commit statuses and status comments. Empty: no links. |
 | `config.clusterName` | `""` | Cluster name used as a label in Prometheus metrics |
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |
@@ -170,7 +170,7 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.verification.maxThrottleRatio` | `VERIFICATION_MAX_THROTTLE_RATIO` | `0.05` | Maximum CPU throttling ratio (`container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total`). Reported `not_available` for containers without a CPU limit. |
 | `config.recommendations.verification.lifecycleInterval` | `RECOMMENDATION_LIFECYCLE_INTERVAL` | `5m` | Apply detection / verification / expiry job interval. |
 | `config.recommendations.changeMeasurement.enabled` | `CHANGE_MEASUREMENT_ENABLED` | `true` | Record detected changes with a baseline snapshot and measure them against a counterfactual ([method](methodology/savings-measurement.md)). `false` leaves new changes to the interim verifier above. |
-| `config.recommendations.changeMeasurement.preWindowDays` | `CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` | `7` | Baseline window, ending at the PR merge or plan approval. Must be at least 7 days so every hour of the week is matched; lower values are rejected at startup. |
+| `config.recommendations.changeMeasurement.preWindowDays` | `CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` | `7` | Baseline window, ending at the PR merge or plan approval. Must be at least 7 days so every hour of the week is matched; lower values are rejected at startup and by the values schema, unless `accelerated` is `true` (then at least 1 hour). |
 | `config.recommendations.changeMeasurement.postWindowDays` | `CHANGE_MEASUREMENT_POST_WINDOW_DAYS` | `7` | Post-change window, starting after the rollout and its warm-up. The outcome is decided once, at its end. |
 | `config.recommendations.changeMeasurement.warmupHours` | `CHANGE_MEASUREMENT_WARMUP_HOURS` | `1` | Hours after rollout completion excluded from the post-window. |
 | `config.recommendations.changeMeasurement.minCoverage` | `CHANGE_MEASUREMENT_MIN_COVERAGE` | `0.8` | Minimum share of post-window hours matched with a baseline hour of the week (and the minimum coverage of a load driver); below it the measurement is `inconclusive`. |
@@ -178,6 +178,8 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.changeMeasurement.epsilonRatio` | `CHANGE_MEASUREMENT_EPSILON_RATIO` | `0.02` | Noise floor: `not_realized` when the interval's upper bound is at most this share of the counterfactual. |
 | `config.recommendations.changeMeasurement.driftThreshold` | `CHANGE_DRIFT_THRESHOLD` | `0.5` | Drift monitor: share of a realized change's per-replica saving that must be lost for a day to count as drifted ([method](methodology/savings-measurement.md#10-drift-monitor-c8)). |
 | `config.recommendations.changeMeasurement.driftSustainedDays` | `CHANGE_DRIFT_SUSTAINED_DAYS` | `3` | Consecutive drifted days (1 to 7) after which the change is `regressed` and its accruals since the drift began are reversed. Both drift settings are read by the controller's `savings-drift` loop; the values schema rejects a threshold outside (0, 1] and a day count outside 1 to 7. |
+| `config.recommendations.changeMeasurement.accelerated` | `CHANGE_MEASUREMENT_ACCELERATED` | `false` | Demo and quickstart only: lifts the 7-day minimum of `preWindowDays` down to 1 hour so a change is decided minutes after it lands (`docs/examples/quickstart/values-change-measurement.yaml`). Short windows match few or no hours of the week, so such measurements are mostly `inconclusive`; the controller logs a warning at startup. Keep `false` in production. |
+| `config.ledger.chainVerifyInterval` | `LEDGER_CHAIN_VERIFY_INTERVAL` | `1h` | Interval of the controller's `ledger-chain` loop (1m to 24h): catches the append-only savings ledger v2 up with the accrual path (a full anti-join sweep of the v1 ledger, supersessions, restatements) and verifies each cluster's hash chain; failures increment `greenkube_ledger_chain_verification_failures_total` ([ledger](methodology/savings-measurement.md#12-savings-ledger-v2-c6)). |
 | `config.recommendations.scanInterval` | `RECOMMENDATION_SCAN_INTERVAL` | `1h` | Interval between scheduled recommendation scans, run by the leader controller only (`1m`–`24h`; units `s`, `m`, `h`). The controller also scans once right after its initial collection. On-demand scans are queued with `POST /api/v1/optimization/runs`. |
 
 ### Recommendation sources (`sources`)
@@ -198,6 +200,14 @@ Sources produce the signals recommendations are built from: one per native analy
 | `sources.krr.job.extraArgs` | — | `[]` | Extra KRR arguments (`--namespace`, `--history_duration`...). |
 | `sources.krr.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:write` API key. |
 | `sources.krr.job.resources`, `activeDeadlineSeconds` | — | `100m`/`512Mi` requests, `2Gi` limit; `3600` | KRR container resources and job deadline. |
+| `sources.polaris.job.enabled` | — | `false` | Run [Fairwinds Polaris](sources/polaris.md) as a CronJob that pushes its audit to `POST /api/v1/sources/polaris/reports`. Needs `sources.polaris.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:write`) and `config.api.enabled`. |
+| `sources.polaris.job.schedule` | — | `37 3 * * *` | Cron schedule of the Polaris job. |
+| `sources.polaris.job.image.*` | — | `quay.io/fairwinds/polaris` 10.1.8 by digest | Polaris image; `digest` is required (`sha256:<64 hex>`). |
+| `sources.polaris.job.extraArgs` | — | `[]` | Extra `polaris audit` arguments. |
+| `sources.polaris.job.complete` | — | `true` | `true`: each audit replaces every earlier Polaris finding. Set `false` when `extraArgs` narrows the audit (for example one namespace): the job posts with `?complete=false` and adds or refreshes findings. |
+| `sources.polaris.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:write` API key. |
+| `sources.polaris.job.resources`, `activeDeadlineSeconds` | — | `50m`/`128Mi` requests, `512Mi` limit; `1800` | Polaris container resources and job deadline. |
+| `sources.polaris.job.rbac.create`, `serviceAccountName` | — | `true`, `""` | Create the job's read-only ServiceAccount and ClusterRole, or bring your own. |
 | `sources.krr.job.rbac.create`, `serviceAccountName` | — | `true`, `""` | Create the job's ServiceAccount and read-only ClusterRole, or use an existing ServiceAccount. |
 
 Connector settings in `sources.settings` (all optional, validated by each source):
@@ -247,6 +257,7 @@ most important values are:
 | `automation.autoApprove.enabled` | `false` | `AUTOMATION_AUTO_APPROVE_ENABLED`. Approve a preview without the extra click when every recommendation meets the limits below ([Auto-approval](automation.md#auto-approval)). The requester still needs the `approve` scope; rollbacks are never auto-approved. |
 | `automation.autoApprove.maxRisk` | `low` | `AUTOMATION_AUTO_APPROVE_MAX_RISK`. Highest risk level approved automatically (`low`, `medium`, `high`). |
 | `automation.autoApprove.minConfidence` | `0.8` | `AUTOMATION_AUTO_APPROVE_MIN_CONFIDENCE`. Lowest confidence approved automatically (0–1). |
+| `automation.autoApprove.increases` | `false` | `AUTOMATION_AUTO_APPROVE_INCREASES`. Also auto-approve request increases (reliability fixes that cost money, roadmap H1). Off: a person approves every increase. |
 | `automation.autoApprove.contested` | `false` | Contested consensus is never auto-approved; the schema accepts only `false`. A decrease also needs GreenKube's own usage evidence or at least two independent agreeing sources. |
 | `automation.repositoryAllowlist` | `["@discovered"]` | `AUTOMATION_REPOSITORY_ALLOWLIST`. Repositories PRs may target, for inferred providers and providers without their own allowlist. `@discovered` means every repository referenced by a discovered Argo CD/Flux source; an explicit list of `owner/repo` names or segment globs narrows it. Repositories allowed from the setup checklist (`POST /api/v1/automation/repositories/allowlist`) are added. |
 | `automation.policy.pauseDelivery` | `false` | `AUTOMATION_PAUSE_DELIVERY`. The only off switch: plan approval returns `delivery_paused` (409) and no PR is opened, while discovery, previews and measurement keep running. |
@@ -259,6 +270,9 @@ most important values are:
 | `automation.webhooks.enabled` | `false` | Enable signed provider webhook ingestion. |
 | `automation.policy` | See below | Risk, confidence, sample, coverage, PR-budget, cooldown, and freeze gates. |
 | `automation.pullRequests` | See below | Draft, label, reviewer, and team-reviewer options. |
+| `automation.helm.remoteCharts.enabled` | `true` | `GITOPS_HELM_REMOTE_CHARTS`. Pre-fetch, digest-verify and render the remote chart (HTTP repository or OCI registry) a discovered Argo CD/Flux source deployed ([Helm support](automation.md#helm-support)). `false` makes remote charts fail closed (`remote-charts-disabled`). |
+| `automation.helm.remoteCharts.allowedHosts` | `[]` | `GITOPS_HELM_CHART_HOSTS` (JSON list). Hosts the controller may fetch charts from: `host`, `host:port` or `*.domain`. Empty: any public host named by a discovered chart source; loopback, link-local and metadata addresses are always refused and plain-HTTP repositories must be listed. Docker Hub charts also need `auth.docker.io` and `*.docker.com` when set. |
+| `automation.helm.chartMappings` | `[]` | `GITOPS_HELM_CHART_MAPPINGS` (JSON list). Values paths per chart and version (`chart`, `version`, `container`, `path` or `paths`; globs allowed, the path ends with `resources`), tried before the built-in registry and render-validated like any mapping. |
 | `automation.pr.titlePrefix` | `greenkube` | `GITOPS_PR_TITLE_PREFIX`: prefix of PR titles (at most 32 characters); empty drops it. |
 | `automation.pr.template` | `''` | `GITOPS_PR_TEMPLATE`: PR body template with `{{ section }}` placeholders; empty uses the built-in template. See [Pull-request content](automation.md#pull-request-content). |
 | `automation.pr.defaultLabels` | `true` | `GITOPS_PR_DEFAULT_LABELS`: add `greenkube`, `optimization/<capability>`, `risk/<level>` and `reliability` labels. |
@@ -365,7 +379,7 @@ Flux HelmRelease planning supports Git-owned release manifests and local charts 
 
 #### Isolated renderer (`renderer`)
 
-The chart always runs Helm/Kustomize rendering in a separate `<release>-renderer` Pod (raw-manifest repositories never call it). It receives only a bounded repository snapshot; it does not mount provider or database Secrets and does not receive a Kubernetes service-account token. Its root filesystem is read-only and its process/resource/output limits are bounded. The renderer NetworkPolicy denies egress and allows requests only from GreenKube Pods; at startup and then daily, the renderer checks that the policy is enforced with a canary TCP connection to the cluster DNS Service (`GET /status` of the renderer); when it is not, Kustomize and Helm previews still work, but every Kustomize and Helm plan carries the warning `renderer_egress_unenforced` in `file_plan.warnings` (bound by the plan digest the approver echoes back) and the setup checklist reports it. The plan service reads the state the controller's readiness reconciler last stored, never the renderer itself. The renderer holds no Secrets and no token, Helm runs in template mode without `lookup`, and remote Kustomize bases fail closed. For clusters that permit `NET_ADMIN` but do not enforce NetworkPolicy, `renderer.egressFirewall.enabled` can install IPv4/IPv6 output-deny rules with a one-shot init container; the renderer process itself remains non-root with all capabilities dropped. `renderer.egressFirewall.privilegedInitContainer` is an opt-in local-cluster workaround for runtimes that deny `NET_ADMIN` unless the init container is privileged. Do not enable it in production; use a NetworkPolicy-enforcing CNI instead. The API/controller fails closed when no isolated renderer answers.
+The chart always runs Helm/Kustomize rendering in a separate `<release>-renderer` Pod (raw-manifest repositories never call it). It receives only a bounded repository snapshot; it does not mount provider or database Secrets and does not receive a Kubernetes service-account token. Its root filesystem is read-only and its process/resource/output limits are bounded. The renderer NetworkPolicy denies egress and allows requests only from GreenKube Pods; at startup and then daily, the renderer checks that the policy is enforced with a canary TCP connection to the cluster DNS Service (`GET /status` of the renderer); when it is not, Kustomize and Helm previews still work, but every Kustomize and Helm plan carries the warning `renderer_egress_unenforced` in `file_plan.warnings` (bound by the plan digest the approver echoes back) and the setup checklist reports it. The plan service reads the state the controller's readiness reconciler last stored, never the renderer itself. The renderer holds no Secrets and no token, Helm runs in template mode without `lookup`, and remote Kustomize bases fail closed. Remote Helm charts never make the renderer reach the network: the controller fetches them (with the same egress it uses for Git providers; add the chart registries to `monitoring.networkPolicy.additionalEgress` when that policy is enabled), verifies their digest and stages the unpacked chart into the snapshot it sends to the renderer. For clusters that permit `NET_ADMIN` but do not enforce NetworkPolicy, `renderer.egressFirewall.enabled` can install IPv4/IPv6 output-deny rules with a one-shot init container; the renderer process itself remains non-root with all capabilities dropped. `renderer.egressFirewall.privilegedInitContainer` is an opt-in local-cluster workaround for runtimes that deny `NET_ADMIN` unless the init container is privileged. Do not enable it in production; use a NetworkPolicy-enforcing CNI instead. The API/controller fails closed when no isolated renderer answers.
 
 The default snapshot limits are 100 MiB compressed, 500 MiB extracted, 20,000 files, and 2 MiB per file. `renderer.tmpSizeLimit` bounds the renderer's temporary workspace. The service accepts only the pinned `helm` and `kustomize` commands. Kustomize `helmCharts` remain unsupported because their embedded Helm execution does not yet apply the direct Helm renderer's full safety checks.
 
@@ -468,6 +482,10 @@ monitoring:
   prometheusRule:
     enabled: false       # Optional automation backlog/stuck-state alerts; requires the PrometheusRule CRD
     controllerAlerts: true # Controller loop alerts (rendered only with the controller ServiceMonitor)
+    thresholds:          # Loop health alerts (group greenkube.loop), rendered with the controller alerts
+      collectionLagSeconds: 1800
+      recommendationScanStaleSeconds: 10800
+      measurementStaleSeconds: 1800
     namespace: monitoring
     additionalLabels: {}
   serviceMonitor:
@@ -483,9 +501,28 @@ monitoring:
 
 The controller's own metrics endpoint is configured with `controller.metricsPort` (see [Controller metrics endpoint](#controller-metrics-endpoint-controllermetricsport)); `serviceMonitor.enabled` also adds its ServiceMonitor.
 
-`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. With `prometheusRule.controllerAlerts` (default `true`) it also installs the controller loop alerts `GreenKubeControllerLoopFailing` (a loop failed 3 ticks in a row for 10 minutes), `GreenKubeAutomationLoopStale` (the automation controller loop has not succeeded for 10 minutes) and `GreenKubeNoActiveController` (no controller holds the Lease, or none is scraped, for 5 minutes); they read the controller metrics endpoint, so they render only together with the controller ServiceMonitor (`serviceMonitor.enabled` and `collector.metricsPort` > 0). The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
+`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. With `prometheusRule.controllerAlerts` (default `true`) it also installs the controller loop alerts `GreenKubeControllerLoopFailing` (a loop failed 3 ticks in a row for 10 minutes), `GreenKubeAutomationLoopStale` (the automation controller loop has not succeeded for 10 minutes) and `GreenKubeNoActiveController` (no controller holds the Lease, or none is scraped, for 5 minutes); they read the controller metrics endpoint, so they render only together with the controller ServiceMonitor (`serviceMonitor.enabled` and `collector.metricsPort` > 0). Together with the controller loop alerts it installs the loop health alerts (group `greenkube.loop`, roadmap N7): `GreenKubeCollectionLagging` (the leader's `greenkube_collection_watermark_lag_seconds{source}` above `thresholds.collectionLagSeconds` for 15 minutes), `GreenKubeRecommendationScanFailing` (every scan of the last hour failed), `GreenKubeRecommendationSourceFailing` (a source failed during scans for over an hour), `GreenKubeRecommendationScanStale` (no successful scan for `thresholds.recommendationScanStaleSeconds`), `GreenKubeMeasurementStalled` (the `recommendation-lifecycle` loop, which runs apply detection, verification and change measurement, has not succeeded for `thresholds.measurementStaleSeconds`) and, whenever a GreenKube process is scraped, the ledger alerts (group `greenkube.ledger`) `GreenKubeLedgerChainVerificationFailed` (critical: `greenkube_ledger_chain_ok{cluster_uid}` is 0) and `GreenKubeLedgerProjectionBacklog` (v1 accrual rows still missing from the ledger v2 after 3 hours). See [Observability and SLOs](observability-slos.md#chart-alerts). The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
 
 When enabled, the chart applies policies to standalone app/worker pods or production API/controller/worker pods. It allows DNS and the bundled PostgreSQL connection, plus Prometheus and the ready-check ingress paths; other external egress requires an explicit `additionalEgress` rule. No unrestricted internet egress is added.
+
+### Exposure (`ingress`, `httpRoute`)
+
+Optional, off by default (roadmap N6). Both route their hosts to the `<release>-api` Service, which serves the UI and the API, under `config.rootPath` (or `/`).
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `ingress.enabled` | `false` | Render a `networking.k8s.io/v1` Ingress. |
+| `ingress.className` | `""` | IngressClass; empty uses the cluster default. |
+| `ingress.hosts` | `[]` | Host names (required when enabled). The first one sets `GREENKUBE_EXTERNAL_URL` unless `config.externalUrl` is set. |
+| `ingress.tls` | `[]` | Standard Ingress TLS entries (`secretName`, `hosts`). The external URL uses `https` when an entry lists the first host or lists no hosts. |
+| `ingress.annotations`, `ingress.labels` | `{}` | Added to the Ingress (e.g. `cert-manager.io/cluster-issuer`). |
+| `httpRoute.enabled` | `false` | Render a Gateway API `gateway.networking.k8s.io/v1` HTTPRoute (needs the Gateway API CRDs). |
+| `httpRoute.parentRefs` | `[]` | Gateways to attach to (required when enabled), e.g. `[{name: shared-gateway, namespace: gateway-system, sectionName: https}]`. |
+| `httpRoute.hostnames` | `[]` | Host names; the first one sets `GREENKUBE_EXTERNAL_URL` when no Ingress host or `config.externalUrl` does. |
+| `httpRoute.scheme` | `https` | Scheme of the URL built from the first hostname (`http` when the listener does not terminate TLS). |
+| `httpRoute.annotations`, `httpRoute.labels` | `{}` | Added to the HTTPRoute. |
+
+`GREENKUBE_EXTERNAL_URL` (pull-request deep links) is, in order: `config.externalUrl`; the first Ingress host; the first HTTPRoute hostname; empty. A wildcard first host (`*.example.com`) builds no URL. With `monitoring.networkPolicy.enabled`, allow the ingress controller or gateway pods in `monitoring.networkPolicy.additionalIngress`.
 
 ### PostgreSQL StatefulSet (`postgres`)
 
@@ -579,6 +616,19 @@ config:
 | `auth.session.absoluteLifetime` | `7d` | `AUTH_SESSION_ABSOLUTE_LIFETIME` | Maximum session lifetime. |
 | `auth.session.rememberLifetime` | `30d` | `AUTH_SESSION_REMEMBER_LIFETIME` | Lifetime with **Keep me signed in**. |
 | `auth.login.rateLimit` | `5/minute` | `AUTH_LOGIN_RATE_LIMIT` | Failed sign-ins per username (four times as many per client IP) before an exponential lockout. |
+| `auth.localLogin` | `true` | `AUTH_LOCAL_LOGIN` | In `proxy` and `oidc` modes, local accounts (the break-glass admin) still sign in with a password. `false`: SSO only (`POST /auth/login` answers `409`). |
+| `auth.roles.groups.{admin,operator,viewer}` | `[]` | `AUTH_ROLE_GROUPS` | IdP groups granting each role (rendered as a JSON object role to groups). An SSO user gets the highest role any of its groups grants, recomputed at every sign-in. |
+| `auth.roles.defaultRole` | `viewer` | `AUTH_DEFAULT_ROLE` | Role of an SSO user in no listed group: `viewer`, `operator`, `admin`, or `none` (access refused). |
+| `auth.proxy.userHeaders` | `X-Forwarded-User` | `AUTH_PROXY_USER_HEADERS` | Identity header the authentication proxy sets and overwrites (`apiAuthMode: proxy`). Several comma-separated headers form separate families; a request carrying more than one family is refused. |
+| `auth.proxy.groupsHeaders` | `X-Forwarded-Groups` | `AUTH_PROXY_GROUPS_HEADERS` | Groups header paired with each user header (same position); never more entries than `userHeaders`. |
+| `auth.oidc.issuer` | `""` | `OIDC_ISSUER` | OpenID Connect issuer (`apiAuthMode: oidc`, required, `https`). Discovery reads `<issuer>/.well-known/openid-configuration`. |
+| `auth.oidc.clientId` | `""` | `OIDC_AUDIENCE` | OAuth client id registered at the provider (required with `oidc`). |
+| `auth.oidc.existingSecret` | `""` | `OIDC_CLIENT_SECRET` | Secret holding the client secret (key `auth.oidc.existingSecretKey`, default `clientSecret`), mounted into the API. Empty: public client protected by PKCE. |
+| `auth.oidc.scopes` | `openid profile email` | `OIDC_SCOPES` | Requested scopes (`openid` is always added). Add your provider's groups scope when groups are not in the ID token by default. |
+| `auth.oidc.usernameClaim` | `preferred_username` | `OIDC_USERNAME_CLAIM` | Claim used as the username (then `preferred_username`, `email`, `sub`). The account is keyed by the issuer's `sub`. |
+| `auth.oidc.groupsClaim` | `groups` | `OIDC_GROUPS_CLAIM` | Claim holding the groups (a list, or a comma-separated string). |
+| `auth.oidc.redirectUrl` | `""` | `OIDC_REDIRECT_URL` | Redirect URI registered at the provider. Empty: `<config.externalUrl>/api/v1/auth/oidc/callback`, or the request's origin when `externalUrl` is empty. |
+| `auth.oidc.providerName` | `SSO` | `OIDC_PROVIDER_NAME` | Label of the **Sign in with ...** button. |
 | `monitoring.serviceMonitor.bearerTokenSecret` | `{name: "", key: token}` | | Secret with a `metrics:read` API key for the Prometheus scrape. Empty uses the deprecated bootstrap key. |
 
 `SESSION_COOKIE_NAME` (default `greenkube_session`) is not exposed in values.

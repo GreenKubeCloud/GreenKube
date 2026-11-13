@@ -384,3 +384,44 @@ class TestUserDeclaredSavings:
         assert stored["baseline"]["sample_count"] == 3
         restored = user_declared_savings(updated)
         assert restored is not None and restored.cost_per_year == 12.0
+
+
+class _Projector:
+    def __init__(self, fail: bool = False) -> None:
+        self.calls = 0
+        self.fail = fail
+
+    async def sync(self):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("ledger v2 unavailable")
+
+
+@pytest.mark.asyncio
+async def test_accrual_is_dual_written_to_the_ledger_v2():
+    """C6: every run that reached the database is followed by a ledger v2 pass."""
+    projector = _Projector()
+    attributor = SavingsAttributor(FakeLedger(), "c", ledger=projector)
+    result = await attributor.accrue([_record()], now=NOW)
+    assert result.written > 0 and projector.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_ledger_v2_pass_never_fails_the_accrual():
+    from greenkube.verify.ledger.projector import LEDGER_WRITE_ERRORS
+
+    before = LEDGER_WRITE_ERRORS.labels(reason="dual_write_failed")._value.get()
+    ledger = FakeLedger()
+    attributor = SavingsAttributor(ledger, "c", ledger=_Projector(fail=True))
+    result = await attributor.accrue([_record()], now=NOW)
+    assert result.written > 0 and result.errors == 0 and ledger.rows
+    assert LEDGER_WRITE_ERRORS.labels(reason="dual_write_failed")._value.get() == before + 1
+
+
+@pytest.mark.asyncio
+async def test_no_ledger_v2_pass_when_the_v1_write_failed():
+    ledger = FakeLedger()
+    ledger.fail_append = True
+    projector = _Projector()
+    await SavingsAttributor(ledger, "c", ledger=projector).accrue([_record()], now=NOW)
+    assert projector.calls == 0

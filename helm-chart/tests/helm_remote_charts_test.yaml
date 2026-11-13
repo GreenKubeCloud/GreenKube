@@ -1,0 +1,77 @@
+suite: helm remote charts (H2)
+templates:
+  - templates/configmap.yaml
+  - templates/renderer.yaml
+
+tests:
+  - it: enables remote chart rendering with no host restriction and no mapping by default
+    template: templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.GITOPS_HELM_REMOTE_CHARTS
+          value: "true"
+      - equal:
+          path: data.GITOPS_HELM_CHART_HOSTS
+          value: "[]"
+      - equal:
+          path: data.GITOPS_HELM_CHART_MAPPINGS
+          value: "[]"
+
+  - it: passes the chart host allowlist and the per-chart mappings as JSON
+    template: templates/configmap.yaml
+    set:
+      automation.helm.remoteCharts.enabled: false
+      automation.helm.remoteCharts.allowedHosts:
+        - registry-1.docker.io
+        - auth.docker.io
+        - "*.docker.com"
+      automation.helm.chartMappings:
+        - chart: nginx
+          version: 18.3.1
+          container: nginx
+          path: resources
+    asserts:
+      - equal:
+          path: data.GITOPS_HELM_REMOTE_CHARTS
+          value: "false"
+      - equal:
+          path: data.GITOPS_HELM_CHART_HOSTS
+          value: '["registry-1.docker.io","auth.docker.io","*.docker.com"]'
+      - equal:
+          path: data.GITOPS_HELM_CHART_MAPPINGS
+          value: '[{"chart":"nginx","container":"nginx","path":"resources","version":"18.3.1"}]'
+
+  - it: rejects a chart mapping without a values path
+    template: templates/configmap.yaml
+    set:
+      automation.helm.chartMappings:
+        - chart: nginx
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects a chart mapping path that does not end with resources
+    template: templates/configmap.yaml
+    set:
+      automation.helm.chartMappings:
+        - chart: nginx
+          path: resources.requests
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects an allowed host given as a URL
+    template: templates/configmap.yaml
+    set:
+      automation.helm.remoteCharts.allowedHosts:
+        - https://ghcr.io/charts
+    asserts:
+      - failedTemplate: {}
+
+  - it: keeps the renderer sandbox without any network egress (charts are pre-fetched by the controller)
+    template: templates/renderer.yaml
+    documentSelector:
+      path: kind
+      value: NetworkPolicy
+    asserts:
+      - equal:
+          path: spec.egress
+          value: []

@@ -1,0 +1,212 @@
+suite: single sign-on and roles (F16) and the consumed initial password (N11)
+templates:
+  - templates/configmap.yaml
+  - templates/components.yaml
+  - templates/NOTES.txt
+release:
+  name: gk
+  namespace: greenkube
+
+tests:
+  - it: renders the SSO defaults in session mode
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.AUTH_LOCAL_LOGIN
+          value: "true"
+      - equal:
+          path: data.AUTH_ROLE_GROUPS
+          value: ""
+      - equal:
+          path: data.AUTH_DEFAULT_ROLE
+          value: viewer
+      - equal:
+          path: data.AUTH_PROXY_USER_HEADERS
+          value: X-Forwarded-User
+      - notExists:
+          path: data.OIDC_ISSUER
+
+  - it: proxy mode refuses to render without trusted proxy addresses
+    set:
+      config.apiAuthMode: proxy
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: config.apiAuthMode=proxy needs config.trustedProxyIps
+
+  - it: proxy mode renders the headers, the role mapping and keeps the break-glass admin
+    set:
+      config.apiAuthMode: proxy
+      config.trustedProxyIps: 10.42.0.0/16
+      auth.roles.groups.admin: ["platform-admins"]
+      auth.roles.groups.operator: ["sre", "org:team"]
+      auth.roles.defaultRole: none
+      auth.proxy.userHeaders: X-Authentik-Username
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.API_AUTH_MODE
+          value: proxy
+      - equal:
+          path: data.AUTH_ROLE_GROUPS
+          value: '{"admin":["platform-admins"],"operator":["sre","org:team"]}'
+      - equal:
+          path: data.AUTH_DEFAULT_ROLE
+          value: none
+      - equal:
+          path: data.AUTH_PROXY_USER_HEADERS
+          value: X-Authentik-Username
+      - equal:
+          path: data.AUTH_INITIAL_ADMIN_SECRET
+          value: gk-greenkube-initial-admin
+
+  - it: oidc mode needs an issuer and a client id
+    set:
+      config.apiAuthMode: oidc
+      auth.oidc.issuer: https://idp.example.com/realms/acme
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: auth.oidc.issuer and auth.oidc.clientId
+
+  - it: oidc mode renders the provider settings
+    set:
+      config.apiAuthMode: oidc
+      auth.oidc.issuer: https://idp.example.com/realms/acme
+      auth.oidc.clientId: greenkube
+      auth.oidc.providerName: Acme SSO
+      auth.localLogin: false
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.OIDC_ISSUER
+          value: https://idp.example.com/realms/acme
+      - equal:
+          path: data.OIDC_AUDIENCE
+          value: greenkube
+      - equal:
+          path: data.OIDC_PROVIDER_NAME
+          value: Acme SSO
+      - equal:
+          path: data.AUTH_LOCAL_LOGIN
+          value: "false"
+
+  - it: mounts the OIDC client secret into the API only
+    set:
+      config.apiAuthMode: oidc
+      auth.oidc.issuer: https://idp.example.com/realms/acme
+      auth.oidc.clientId: greenkube
+      auth.oidc.existingSecret: gk-oidc
+    templates:
+      - templates/components.yaml
+    asserts:
+      - documentIndex: 0
+        contains:
+          path: spec.template.spec.volumes[0].projected.sources
+          content:
+            secret:
+              name: gk-oidc
+              items:
+                - key: clientSecret
+                  path: OIDC_CLIENT_SECRET
+      - documentIndex: 1
+        notContains:
+          path: spec.template.spec.volumes[0].projected.sources
+          content:
+            secret:
+              name: gk-oidc
+              items:
+                - key: clientSecret
+                  path: OIDC_CLIENT_SECRET
+
+  - it: keeps the bootstrap API key in SSO modes
+    set:
+      config.apiAuthMode: proxy
+      config.trustedProxyIps: 10.42.0.0/16
+    templates:
+      - templates/components.yaml
+    documentSelector:
+      path: metadata.name
+      value: gk-greenkube-api
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_API_KEY
+          any: true
+
+  - it: prints the OIDC redirect URI and the break-glass admin
+    set:
+      config.apiAuthMode: oidc
+      config.externalUrl: https://greenkube.example.com
+      auth.oidc.issuer: https://idp.example.com/realms/acme
+      auth.oidc.clientId: greenkube
+    templates:
+      - templates/NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: https://greenkube.example.com/api/v1/auth/oidc/callback
+      - matchRegexRaw:
+          pattern: 'Break-glass: the local admin "admin"'
+
+  - it: points to the initial password with a reset command while it may still exist (N11)
+    templates:
+      - templates/NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: get secret gk-greenkube-initial-admin
+      - matchRegexRaw:
+          pattern: "kubectl -n greenkube exec deploy/gk-greenkube-api -- greenkube auth reset-password admin"
+
+  - it: no longer points to a consumed initial password and says how to reset (N11)
+    kubernetesProvider:
+      scheme:
+        "v1/Secret":
+          gvr:
+            version: "v1"
+            resource: "secrets"
+          namespaced: true
+      objects:
+        - kind: Secret
+          apiVersion: v1
+          metadata:
+            name: gk-greenkube-initial-admin
+            namespace: greenkube
+            annotations:
+              greenkube.cloud/initial-admin: consumed
+    templates:
+      - templates/NOTES.txt
+    asserts:
+      - notMatchRegexRaw:
+          pattern: get secret gk-greenkube-initial-admin
+      - matchRegexRaw:
+          pattern: already used and erased from Secret gk-greenkube-initial-admin
+      - matchRegexRaw:
+          pattern: "greenkube auth reset-password admin"
+
+  - it: still prints the command while the initial password is unread
+    kubernetesProvider:
+      scheme:
+        "v1/Secret":
+          gvr:
+            version: "v1"
+            resource: "secrets"
+          namespaced: true
+      objects:
+        - kind: Secret
+          apiVersion: v1
+          metadata:
+            name: gk-greenkube-initial-admin
+            namespace: greenkube
+          data:
+            password: c2VjcmV0
+    templates:
+      - templates/NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: get secret gk-greenkube-initial-admin -o jsonpath

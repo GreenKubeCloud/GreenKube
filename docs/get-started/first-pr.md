@@ -151,6 +151,17 @@ the sample repository only, and accelerate evidence:
 `minCoverage: 0` is needed because coverage is measured against the whole
 lookback window (at least one day), which a fresh install cannot fill.
 
+The quickstart decides merged changes with the 6-minute verifier, so change
+measurement (`config.recommendations.changeMeasurement.enabled`) is off and
+`/changes` stays empty. To record merged changes and measure them against a
+counterfactual on accelerated demo windows (a 6-hour baseline and a 72-minute
+post-window, decided about 80 minutes after the merge), add
+`-f docs/examples/quickstart/values-change-measurement.yaml`. A fresh cluster
+has no baseline for the same hours of the week, so the outcome is usually
+`inconclusive`; run `make e2e` with `E2E_ALLOW_REGRESSION=1` and an
+`E2E_TIMEOUT_VERDICT` above two hours with that overlay. The savings ledger
+(`/api/v2/ledger/*`) fills and is verified every 5 minutes either way.
+
 ### 2. Sample repository and GitOps controllers
 
 `hack/e2e/setup-repo.sh` creates `greenkube/greenkube-e2e-quickstart` on Gitea

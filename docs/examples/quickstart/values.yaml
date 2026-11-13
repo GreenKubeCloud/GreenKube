@@ -41,13 +41,20 @@ config:
     # still queues one on demand.
     scanInterval: 1m
     verification:
-      # Measure a merged change over 6 minutes (default 72 hours).
+      # Health gates of a merged change after 6 minutes (default 72 hours).
       windowHours: 0.1
       lifecycleInterval: 30s
     # Change measurement (counterfactual, roadmap C3) needs a 7-day baseline and
-    # a 7-day post-window; the quickstart decides with the verifier above.
+    # a 7-day post-window; the quickstart decides with the verifier above, in
+    # minutes. To record merged changes on /changes and measure them on
+    # accelerated demo windows instead (decided about 80 minutes after the merge,
+    # usually "inconclusive" on a fresh cluster), add
+    #   -f docs/examples/quickstart/values-change-measurement.yaml
     changeMeasurement:
       enabled: false
+  # Savings ledger v2: catch up and verify the hash chain every 5 minutes (default 1h).
+  ledger:
+    chainVerifyInterval: 5m
 
 # Automation is always on; delivery activates once the Gitea token Secret exists.
 automation:

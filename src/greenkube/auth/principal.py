@@ -66,6 +66,8 @@ class Principal:
     api_key_id: str | None = None
     legacy: bool = False
     actor_override: str | None = None
+    # How a user signed in: "local", "proxy" or "oidc" (F16); None for keys and anonymous.
+    auth_source: str | None = None
 
     @property
     def actor(self) -> str:
@@ -93,6 +95,8 @@ _APPROVE_PATHS = (re.compile(r"^/api/v1/automation/plans/[^/]+/approve$"),)
 # Reports that a plan was delivered outside GreenKube (``patch`` and ``ci`` modes, roadmap F4):
 # a CI job holds ``read`` + ``plans:deliver``, never ``write`` or ``approve``.
 _DELIVERY_PATHS = (re.compile(r"^/api/v1/automation/plans/[^/]+/delivery$"),)
+# Connector reports pushed like signals (KRR, Polaris: roadmap G2, G4).
+_REPORT_PATHS = frozenset({"/api/v1/sources/krr/reports", "/api/v1/sources/polaris/reports"})
 _ADMIN_PREFIXES = ("/api/v1/auth/api-keys", "/api/v1/auth/users", "/api/v1/automation/repositories/allowlist")
 # Endpoints any authenticated principal may call for itself.
 SELF_SERVICE_PATHS = frozenset({"/api/v1/auth/me"})
@@ -113,7 +117,7 @@ def required_scope(method: str, path: str) -> str | None:
         return None
     if path.startswith(_ADMIN_PREFIXES):
         return Scope.ADMIN.value
-    if (path.startswith("/api/v1/signals") or path == "/api/v1/sources/krr/reports") and method not in SAFE_METHODS:
+    if (path.startswith("/api/v1/signals") or path in _REPORT_PATHS) and method not in SAFE_METHODS:
         return Scope.SIGNALS_WRITE.value
     if method in SAFE_METHODS:
         return Scope.READ.value

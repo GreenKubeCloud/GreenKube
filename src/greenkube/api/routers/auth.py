@@ -1,29 +1,45 @@
-"""Sign-in, sessions and scoped API keys (roadmap F14, F15).
+"""Sign-in, sessions, SSO, users and scoped API keys (roadmap F14, F15, F16).
 
-``/api/v1/auth/login`` and ``/logout`` are reachable without credentials; every
-other route here goes through the global :func:`authenticate` dependency, which
-already enforced CSRF for session-authenticated mutations and the ``admin``
-scope for API-key administration.
+``/api/v1/auth/login``, ``/logout``, ``/providers`` and the OpenID Connect
+``/oidc/login`` and ``/oidc/callback`` routes are reachable without
+credentials; every other route here goes through the global
+:func:`authenticate` dependency, which already enforced CSRF for
+session-authenticated mutations and the ``admin`` scope for user and API-key
+administration.
 """
 
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from greenkube.api.dependencies import get_auth_service, get_principal
+from greenkube.auth import oidc
 from greenkube.auth.bootstrap import erase_consumed_initial_password, initial_admin_secret_from_config
-from greenkube.auth.http import clear_session_cookie, client_ip, is_same_origin, set_session_cookie
+from greenkube.auth.http import (
+    clear_session_cookie,
+    client_ip,
+    cookie_path,
+    cookie_secure,
+    from_trusted_proxy,
+    is_https,
+    is_same_origin,
+    set_session_cookie,
+)
 from greenkube.auth.metrics import record_auth_failure
-from greenkube.auth.models import ApiKey, AuthSession
+from greenkube.auth.models import ApiKey, AuthSession, OidcLogin, User
+from greenkube.auth.passwords import validate_new_password
 from greenkube.auth.principal import Principal, Scope
 from greenkube.auth.service import AuthError, AuthService, IssuedSession
 from greenkube.auth.settings import AuthSettings
 from greenkube.auth.throttle import LoginThrottle
+from greenkube.auth.tokens import constant_time_equals, sha256_hex
 from greenkube.core.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -70,6 +86,9 @@ class MeResponse(BaseModel):
     auth_mode: str
     session: SessionInfo | None = None
     deprecated_credential: bool = False
+    auth_source: str | None = Field(
+        default=None, description="How the user signed in: local (password), proxy or oidc (F16)."
+    )
 
 
 class PasswordChangeResponse(MeResponse):
@@ -163,6 +182,7 @@ def _me(principal: Principal, settings: AuthSettings, session: AuthSession | Non
         auth_mode=settings.mode,
         session=_session_info(session, session.id) if session else None,
         deprecated_credential=principal.legacy,
+        auth_source=principal.auth_source,
     )
 
 
@@ -211,6 +231,14 @@ async def login(body: LoginRequest, request: Request, response: Response):
         raise HTTPException(
             status_code=409,
             detail={"code": "SESSIONS_DISABLED", "message": "Browser sign-in is disabled (API_AUTH_MODE=api_key)."},
+        )
+    if not settings.password_login_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PASSWORD_LOGIN_DISABLED",
+                "message": "Sign in with single sign-on (AUTH_LOCAL_LOGIN=false).",
+            },
         )
     service = _service(request)
     if not is_same_origin(request, settings, require=False):
@@ -268,9 +296,37 @@ async def logout(request: Request):
 
 @router.get("/me", response_model=MeResponse)
 async def me(request: Request, response: Response, principal: Principal = Depends(get_principal)):
-    """The signed-in user or API key; browser sessions also get their CSRF token."""
+    """The signed-in user or API key; browser sessions also get their CSRF token.
+
+    Behind a trusted authentication proxy (``API_AUTH_MODE=proxy``, F16), the
+    first call for an identity starts its server-side session.
+    """
     response.headers.update(_NO_STORE)
-    return _me(principal, _settings(), _current_session(request, principal))
+    settings = _settings()
+    pending = getattr(request.state, "pending_sso_user", None)
+    if isinstance(pending, User) and settings.sessions_enabled:
+        service = _service(request)
+        try:
+            issued = await service.issue_session(
+                pending,
+                ip=client_ip(request, settings),
+                user_agent=request.headers.get("user-agent"),
+                previous_token=request.cookies.get(settings.cookie_name),
+            )
+        except AuthError as error:
+            raise _error(error) from None
+        set_session_cookie(
+            response,
+            request,
+            settings,
+            issued.token,
+            remember=False,
+            expires_at=issued.session.absolute_expires_at,
+            now=service.now(),
+        )
+        logger.info("Started a %s session for %s.", pending.auth_source, pending.username)
+        return _issued_me(issued, settings)
+    return _me(principal, settings, _current_session(request, principal))
 
 
 @router.post("/password", response_model=PasswordChangeResponse)
@@ -391,3 +447,277 @@ async def revoke_api_key(key_id: str, request: Request, principal: Principal = D
         raise HTTPException(status_code=404, detail="API key not found or already revoked.")
     logger.info("API key gk_%s revoked by %s.", key_id, principal.actor)
     return Response(status_code=204)
+
+
+# --------------------------------------------------------------------------- #
+# Sign-in options and single sign-on (F16)                                     #
+# --------------------------------------------------------------------------- #
+
+
+class SsoProvider(BaseModel):
+    kind: Literal["oidc", "proxy"]
+    name: str
+    login_path: str | None = Field(
+        default=None, description="Path, relative to the API base, that starts the sign-in (OIDC only)."
+    )
+
+
+class AuthProviders(BaseModel):
+    """What the sign-in page offers. Public: it reveals no account."""
+
+    mode: str
+    password: bool
+    sso: SsoProvider | None = None
+
+
+@router.get("/providers", response_model=AuthProviders)
+async def providers(response: Response):
+    """Sign-in options of this instance: password form, SSO button, or both."""
+    settings = _settings()
+    response.headers.update(_NO_STORE)
+    sso: SsoProvider | None = None
+    if settings.oidc_enabled:
+        sso = SsoProvider(kind="oidc", name=settings.oidc_provider_name, login_path="/auth/oidc/login")
+    elif settings.proxy_enabled:
+        sso = SsoProvider(kind="proxy", name="your authentication proxy")
+    return AuthProviders(mode=settings.mode, password=settings.password_login_enabled, sso=sso)
+
+
+def _oidc_cookie_name(settings: AuthSettings) -> str:
+    return f"{settings.cookie_name}_oidc"
+
+
+def _app_root(request: Request) -> str:
+    """The UI root path (``ROOT_PATH`` aware), ending with ``/``."""
+    return cookie_path(request)
+
+
+def _oidc_cookie_path(request: Request) -> str:
+    return f"{_app_root(request)}api/v1/auth/oidc/"
+
+
+def _redirect_uri(request: Request, settings: AuthSettings) -> str:
+    """``OIDC_REDIRECT_URL``, else ``GREENKUBE_EXTERNAL_URL`` + callback, else the request's own origin."""
+    if settings.oidc_redirect_url:
+        return settings.oidc_redirect_url
+    if settings.external_url:
+        return f"{settings.external_url}/{oidc.CALLBACK_PATH}"
+    scheme = "https" if is_https(request, settings) else request.url.scheme
+    host = request.headers.get("host", request.url.netloc)
+    if from_trusted_proxy(request, settings):
+        host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip() or host
+    return f"{scheme}://{host}{_app_root(request)}{oidc.CALLBACK_PATH}"
+
+
+def _sso_failure(request: Request, settings: AuthSettings, code: str, detail: str = "") -> RedirectResponse:
+    """Back to the sign-in page with a stable error code; the detail goes to the log only."""
+    record_auth_failure("sso")
+    logger.warning("Single sign-on failed: %s (%s).", code, detail or code)
+    response = RedirectResponse(f"{_app_root(request)}?sso_error={code}", status_code=303)
+    response.headers.update(_NO_STORE)
+    response.delete_cookie(_oidc_cookie_name(settings), path=_oidc_cookie_path(request))
+    return response
+
+
+def _oidc_disabled() -> HTTPException:
+    return HTTPException(
+        status_code=404, detail={"code": "OIDC_DISABLED", "message": "OpenID Connect is not configured."}
+    )
+
+
+@router.get("/oidc/login")
+async def oidc_login(request: Request, return_to: str = Query(default="/", max_length=512)):
+    """Start an OpenID Connect sign-in: redirect to the provider (authorization code + PKCE)."""
+    settings = _settings()
+    if not settings.oidc_enabled:
+        raise _oidc_disabled()
+    service = _service(request)
+    client = oidc.get_oidc_client(request.app.state, settings)
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    verifier = oidc.new_code_verifier()
+    redirect_uri = _redirect_uri(request, settings)
+    try:
+        location = await client.authorization_url(
+            state=state, nonce=nonce, verifier=verifier, redirect_uri=redirect_uri
+        )
+    except oidc.OidcError as error:
+        return _sso_failure(request, settings, error.code, error.detail)
+    now = service.now()
+    await service.repository.create_oidc_login(
+        OidcLogin(
+            state_sha256=sha256_hex(state),
+            nonce=nonce,
+            code_verifier=verifier,
+            redirect_uri=redirect_uri,
+            return_to=oidc.safe_return_to(return_to),
+            created_at=now,
+            expires_at=now + oidc.LOGIN_TTL,
+        )
+    )
+    response = RedirectResponse(location, status_code=302)
+    response.headers.update(_NO_STORE)
+    # Binds the state to this browser. SameSite=Lax: the provider's redirect back is a
+    # cross-site top-level navigation, on which Strict cookies are not sent.
+    response.set_cookie(
+        _oidc_cookie_name(settings),
+        state,
+        max_age=int(oidc.LOGIN_TTL.total_seconds()),
+        path=_oidc_cookie_path(request),
+        secure=cookie_secure(request, settings),
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@router.get("/oidc/callback")
+async def oidc_callback(
+    request: Request,
+    code: str | None = Query(default=None, max_length=4096),
+    state: str | None = Query(default=None, max_length=512),
+    error: str | None = Query(default=None, max_length=256),
+):
+    """Finish an OpenID Connect sign-in and start a session (single use, ten-minute window)."""
+    settings = _settings()
+    if not settings.oidc_enabled:
+        raise _oidc_disabled()
+    service = _service(request)
+    if error:
+        return _sso_failure(request, settings, "denied", f"the provider answered {error[:64]!r}")
+    if not code or not state:
+        return _sso_failure(request, settings, "invalid_request", "code or state missing")
+    if not constant_time_equals(request.cookies.get(_oidc_cookie_name(settings)), state):
+        return _sso_failure(request, settings, "state_mismatch", "the state does not belong to this browser")
+    pending = await service.repository.consume_oidc_login(sha256_hex(state))
+    if pending is None or pending.expires_at <= service.now():
+        return _sso_failure(request, settings, "state_expired", "unknown, used or expired state")
+    client = oidc.get_oidc_client(request.app.state, settings)
+    try:
+        tokens = await client.exchange_code(
+            code=code, verifier=pending.code_verifier, redirect_uri=pending.redirect_uri
+        )
+        claims = await client.verify_id_token(tokens["id_token"], nonce=pending.nonce)
+    except oidc.OidcError as failure:
+        return _sso_failure(request, settings, failure.code, failure.detail)
+    identity = oidc.identity_from_claims(claims, settings)
+    try:
+        user = await service.sso_user("oidc", identity.subject, identity.username, identity.groups)
+        issued = await service.issue_session(
+            user,
+            ip=client_ip(request, settings),
+            user_agent=request.headers.get("user-agent"),
+            previous_token=request.cookies.get(settings.cookie_name),
+        )
+    except AuthError as refused:
+        return _sso_failure(request, settings, refused.code.lower(), refused.message)
+    target = f"{_app_root(request).rstrip('/')}{oidc.safe_return_to(pending.return_to)}"
+    response = RedirectResponse(target, status_code=303)
+    response.headers.update(_NO_STORE)
+    response.delete_cookie(_oidc_cookie_name(settings), path=_oidc_cookie_path(request))
+    set_session_cookie(
+        response,
+        request,
+        settings,
+        issued.token,
+        remember=False,
+        expires_at=issued.session.absolute_expires_at,
+        now=service.now(),
+    )
+    logger.info("Signed in %s through OpenID Connect (role %s).", user.username, user.role)
+    return response
+
+
+# --------------------------------------------------------------------------- #
+# Users and roles (admin, F16)                                                 #
+# --------------------------------------------------------------------------- #
+
+
+RoleName = Literal["viewer", "operator", "admin"]
+
+
+class UserInfo(BaseModel):
+    id: str
+    username: str
+    role: str
+    auth_source: str
+    disabled: bool
+    must_change_password: bool
+    created_at: datetime
+    updated_at: datetime
+    role_managed_by_groups: bool = Field(description="SSO accounts get their role from the group mapping at sign-in.")
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=128)
+    password: str = Field(..., min_length=1, max_length=1024, description="Initial password, changed at first sign-in.")
+    role: RoleName = "viewer"
+
+
+class UserUpdateRequest(BaseModel):
+    role: RoleName | None = None
+    disabled: bool | None = None
+
+
+def _user_info(user: User) -> UserInfo:
+    return UserInfo(
+        id=user.id,
+        username=user.username,
+        role=user.role,
+        auth_source=user.auth_source,
+        disabled=user.disabled_at is not None,
+        must_change_password=user.must_change_password,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        role_managed_by_groups=not user.is_local,
+    )
+
+
+@router.get("/users", response_model=list[UserInfo])
+async def list_users(request: Request, principal: Principal = Depends(get_principal)):
+    """Every account with its role and sign-in source (``admin``)."""
+    _require_admin(principal)
+    return [_user_info(user) for user in await _service(request).list_users()]
+
+
+@router.post("/users", response_model=UserInfo, status_code=201)
+async def create_user(body: UserCreateRequest, request: Request, principal: Principal = Depends(get_principal)):
+    """Create a local account; it chooses a new password at its first sign-in (``admin``)."""
+    _require_admin(principal)
+    reason = validate_new_password(body.password, username=body.username)
+    if reason:
+        raise HTTPException(status_code=422, detail={"code": "WEAK_PASSWORD", "message": reason})
+    try:
+        user = await _service(request).create_user(
+            body.username, body.password, role=body.role, must_change_password=True
+        )
+    except AuthError as error:
+        raise _error(error) from None
+    logger.info("User %s (%s) created by %s.", user.username, user.role, principal.actor)
+    return _user_info(user)
+
+
+@router.patch("/users/{user_id}", response_model=UserInfo)
+async def update_user(
+    user_id: str, body: UserUpdateRequest, request: Request, principal: Principal = Depends(get_principal)
+):
+    """Change a role or disable an account (``admin``); the last active admin cannot be demoted or disabled.
+
+    The role of an SSO account is recomputed from its groups at its next sign-in.
+    """
+    _require_admin(principal)
+    service = _service(request)
+    try:
+        user = await service.repository.get_user(user_id)
+        if user is None:
+            raise AuthError("USER_NOT_FOUND", "User not found.", status_code=404)
+        if body.role is not None:
+            user = await service.set_user_role(user_id, body.role)
+        if body.disabled is not None:
+            user = await service.set_user_disabled(user_id, body.disabled)
+    except AuthError as error:
+        raise _error(error) from None
+    logger.info(
+        "User %s updated by %s (role=%s, disabled=%s).", user.username, principal.actor, body.role, body.disabled
+    )
+    return _user_info(user)

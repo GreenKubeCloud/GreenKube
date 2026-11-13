@@ -29,6 +29,7 @@ from greenkube.gitops.contracts import (
     ValidationResult,
     WorkloadSource,
 )
+from greenkube.models.evidence import RollbackCondition
 from greenkube.models.metrics import RecommendationRecord, RecommendationType
 
 RENDERED_AT = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
@@ -259,3 +260,98 @@ def hpa_plan() -> Plan:
 
 def rollback_plan() -> Plan:
     return plan(plan_id="rbk-1", rollback_of_plan_id="pln-1")
+
+
+def increase_plan() -> Plan:
+    """H1: a memory increase (1Gi -> 2Gi) that raises the memory limit (1.5Gi -> 3Gi)."""
+    return plan(
+        [
+            SetContainerResources(
+                container="api",
+                resources=ContainerResources(requests={"memory": "2Gi"}, limits={"memory": "3Gi"}),
+            )
+        ],
+        plan_id="pln-inc",
+        recommendation_ids=(43,),
+        diff="--- a/apps/payments/deployment.yaml\n+++ b/apps/payments/deployment.yaml\n-memory: 1Gi\n+memory: 2Gi",
+        rendered_diff="-        memory: 1Gi\n+        memory: 2Gi",
+    )
+
+
+def cpu_limit_removal_plan() -> Plan:
+    """H1: a CPU increase (500m -> 800m) under ``remove_cpu``: the CPU limit is removed."""
+    return plan(
+        [
+            SetContainerResources(
+                container="api", resources=ContainerResources(requests={"cpu": "800m"}), remove_limits=["cpu"]
+            )
+        ],
+        plan_id="pln-lim",
+        recommendation_ids=(44,),
+        diff="--- a/apps/payments/deployment.yaml\n+++ b/apps/payments/deployment.yaml\n-cpu: 500m\n+cpu: 800m",
+        rendered_diff="-        cpu: 500m\n+        cpu: 800m",
+    )
+
+
+def increase_recommendation(
+    recommendation_id: int = 43, *, rec_type: RecommendationType = RecommendationType.RIGHTSIZING_MEMORY
+) -> RecommendationRecord:
+    """A reliability increase: negative projected savings (a cost), OOM history and limit changes."""
+    memory = rec_type is RecommendationType.RIGHTSIZING_MEMORY
+    base = recommendation(recommendation_id, rec_type=rec_type, cost=-150.0, co2e_g=-4_000.0)
+    assert base.evidence is not None
+    evidence = base.evidence.model_copy(
+        update={
+            "current": base.evidence.current.model_copy(
+                update={"memory_limit_bytes": 1536 * MIB} if memory else {"cpu_limit_millicores": 1000}
+            ),
+            "proposed": base.evidence.proposed.model_copy(
+                update={"memory_request_bytes": 2 * GIB, "memory_limit_bytes": 3 * GIB}
+                if memory
+                else {"cpu_request_millicores": 800}
+            ),
+            "oom_events": 3 if memory else 0,
+            "cpu_throttling_ratio": None if memory else 0.12,
+            # What core.optimization.evidence builds: thresholds follow the proposed (raised) request.
+            "rollback_conditions": [
+                RollbackCondition(
+                    metric="memory_p95_usage" if memory else "cpu_p95_usage",
+                    comparator="gt",
+                    threshold=2 * GIB * 1.1 if memory else 880.0,
+                    description="p95 memory usage exceeds 110% of the proposed request"
+                    if memory
+                    else "p95 CPU usage exceeds 110% of the proposed request",
+                ),
+                RollbackCondition(
+                    metric="oom_events" if memory else "restart_rate",
+                    comparator="gt",
+                    threshold=0.0,
+                    description="any OOM kill after apply" if memory else "any new restart after apply",
+                ),
+            ],
+            "cpu_usage": base.evidence.cpu_usage.model_copy(update={"p95": 470, "p99": 520, "max": 610})
+            if base.evidence.cpu_usage is not None and not memory
+            else base.evidence.cpu_usage,
+            "memory_usage": base.evidence.memory_usage.model_copy(
+                update={"p95": 900 * MIB, "p99": 980 * MIB, "max": 1100 * MIB}
+            )
+            if base.evidence.memory_usage is not None and memory
+            else base.evidence.memory_usage,
+        }
+    )
+    request = (
+        {"current_memory_request_bytes": GIB, "recommended_memory_request_bytes": 2 * GIB}
+        if memory
+        else {"current_cpu_request_millicores": 500, "recommended_cpu_request_millicores": 800}
+    )
+    return base.model_copy(
+        update={
+            "evidence": evidence,
+            "reason": "Reliability: containers were OOM-killed."
+            if memory
+            else "Reliability: p99 CPU is above the request.",
+            "risk_factors": ["oom_history"] if memory else ["cpu_throttling"],
+            "value": {"lane": "reliability"},
+            **request,
+        }
+    )
