@@ -182,8 +182,9 @@ requests, per-installation rate limits, and tokens that expire after an hour. Gr
    select repositories") is the allowlist of the inferred GitHub provider: the readiness reconciler lists it every
    5 minutes (`GET /app/installations`, then `GET /installation/repositories` with a short-lived installation
    token) and allows exactly those repositories. With the default `["@discovered"]`, every selected repository is
-   allowed; explicit `automation.repositoryAllowlist` patterns narrow the selection. A discovered repository the App
-   is not installed on stays dormant with `github_app_not_installed`. If the selection cannot be read, the last
+   allowed; explicit `automation.repositoryAllowlist` patterns narrow the selection, and repositories an
+   administrator allowed from the UI (`POST /api/v1/automation/repositories`) stay allowed when they are in the
+   selection. A discovered repository the App is not installed on stays dormant with `github_app_not_installed`. If the selection cannot be read, the last
    known one is kept (before the first read, the discovered repositories apply; installation tokens still fail
    closed for repositories the App cannot reach).
 3. Put its id and private key in the default Secret:
