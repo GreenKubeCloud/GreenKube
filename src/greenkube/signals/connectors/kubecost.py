@@ -503,7 +503,7 @@ class KubecostSource(Source):
             target = TargetRef.for_kind(ctx.cluster_uid, kind, name, namespace=namespace, container=container)
             for resource, rec_kind in _KIND_BY_RESOURCE.items():
                 proposed = _quantity(resource, recommended.get(resource))
-                if proposed is None:
+                if proposed is None or proposed <= 0:
                     continue
                 current = _quantity(resource, latest.get(resource))
                 if current is not None and current == proposed:

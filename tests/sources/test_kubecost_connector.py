@@ -109,6 +109,15 @@ class TestKubecost2:
         codes = {d.code for d in report.run.diagnostics}
         assert {"no_controller", "unchanged"} <= codes
 
+    async def test_zero_recommended_requests_are_dropped(self):
+        server = FakeKubecost("v2")
+        server.answers["requestSizingV2"][0]["recommendedRequest"] = {"cpu": "0", "memory": "0"}
+        report = await _run(_source(server))
+
+        assert not [
+            s for s in report.signals if s.capability == Capability.CONTAINER_REQUESTS and s.target.name == "api"
+        ]
+
     async def test_abandoned_workloads_are_deletions_for_review(self):
         report = await _run(_source(FakeKubecost("v2")))
 
