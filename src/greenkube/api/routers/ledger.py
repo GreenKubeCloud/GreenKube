@@ -8,8 +8,8 @@ Endpoints (prefix ``/api/v2``):
 
 Filters: ``namespace``, ``method``, ``quantity``, ``entry_kind``, ``book``,
 ``reason``, ``recommendation_id``, ``change_id``, ``measurement_id`` and a
-window (``last=7d`` or ``start``/``end``, ISO-8601; an entry is included when
-its period overlaps the window).
+window (``last=7d`` or both ``start`` and ``end``, ISO-8601; an entry is
+included when its period overlaps the window).
 
 The ledger is append-only and hash-chained per cluster (``cluster_uid``, the
 ``kube-system`` namespace UID). Methods are never summed together: every total
@@ -185,6 +185,9 @@ def _window(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     begin, finish = _time(start, "start"), _time(end, "end")
+    if (begin is None) != (finish is None):
+        # One bound alone would be prorated by the ledger but ignored by the savings report.
+        raise HTTPException(status_code=400, detail="start and end must be given together.")
     if begin is not None and finish is not None and finish <= begin:
         raise HTTPException(status_code=400, detail="end must be after start.")
     return begin, finish
@@ -259,11 +262,16 @@ def window_share(entry: LedgerEntry, start: Optional[datetime], end: Optional[da
     return max(0.0, (finish - begin).total_seconds()) / length
 
 
-def _entry_payload(entry: LedgerEntry) -> Dict[str, Any]:
-    payload = entry.as_dict()
+def _external_pr_url(url: Optional[str]) -> Optional[str]:
+    """The pull request URL as users open it (a Gitea API origin rewritten to its web base URL)."""
     from greenkube.api.routers.automation import external_pull_request_url
 
-    payload["pr_url"] = external_pull_request_url(entry.pr_url)
+    return external_pull_request_url(url)
+
+
+def _entry_payload(entry: LedgerEntry) -> Dict[str, Any]:
+    payload = entry.as_dict()
+    payload["pr_url"] = _external_pr_url(entry.pr_url)
     return payload
 
 
@@ -373,6 +381,39 @@ async def _entries(repo: LedgerRepository, cluster_uid: str, filters: LedgerFilt
         after = page[-1].seq
 
 
+#: Export columns written as numbers; every other string cell is guarded against formula injection.
+NUMERIC_COLUMNS = frozenset(
+    {
+        "seq",
+        "value",
+        "window_share",
+        "window_value",
+        "recommendation_id",
+        "confidence",
+        "intensity_g_per_kwh",
+        "source_id",
+        "BilledCost",
+        "EffectiveCost",
+        "x-greenkube-saving",
+        "x-greenkube-co2e-g",
+        "x-greenkube-window-share",
+    }
+)
+
+
+def _guarded(columns: Tuple[str, ...], values: Dict[str, Any]) -> List[Any]:
+    """The row of ``columns``, string cells sanitized as the v1 CSV report does (``_sanitize_cell``)."""
+    from greenkube.api.routers.report import _sanitize_cell
+
+    row: List[Any] = []
+    for column in columns:
+        value = values.get(column)
+        if isinstance(value, str) and column not in NUMERIC_COLUMNS:
+            value = _sanitize_cell(value)
+        row.append(value)
+    return row
+
+
 def _csv_line(values: List[Any]) -> str:
     buffer = io.StringIO()
     csv.writer(buffer, lineterminator="\n").writerow(["" if value is None else value for value in values])
@@ -385,7 +426,8 @@ def _csv_row(entry: LedgerEntry, share: float) -> List[Any]:
     data["window_value"] = repr(entry.value * share)
     data["value"] = repr(entry.value)
     data["recommendation_ids"] = json.dumps(data["recommendation_ids"], separators=(",", ":"))
-    return [data.get(column) for column in CSV_COLUMNS]
+    data["pr_url"] = _external_pr_url(entry.pr_url)
+    return _guarded(CSV_COLUMNS, data)
 
 
 def _billing_period(moment: datetime) -> Tuple[str, str]:
@@ -438,12 +480,12 @@ def _focus_row(cost: Optional[LedgerEntry], co2e: Optional[LedgerEntry], share: 
         "x-greenkube-measurement-id": entry.measurement_id,
         "x-greenkube-change-id": entry.change_id,
         "x-greenkube-recommendation-ids": json.dumps(entry.recommendation_ids, separators=(",", ":")),
-        "x-greenkube-pr-url": entry.pr_url,
+        "x-greenkube-pr-url": _external_pr_url(entry.pr_url),
         "x-greenkube-reverses-entry-id": entry.reverses_entry_id,
         "x-greenkube-restates-entry-id": entry.restates_entry_id,
         "x-greenkube-hash": ";".join(item.hash for item in (cost, co2e) if item is not None),
     }
-    return [values.get(column) for column in FOCUS_COLUMNS]
+    return _guarded(FOCUS_COLUMNS, values)
 
 
 async def _focus_lines(entries: AsyncIterator[LedgerEntry], filters: LedgerFilters) -> AsyncIterator[str]:

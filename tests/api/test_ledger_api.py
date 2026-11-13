@@ -229,3 +229,61 @@ async def test_an_unresolved_cluster_returns_an_empty_ledger(tmp_path):
             assert _rows(client.get("/api/v2/ledger/export").text) == []
     finally:
         await manager.close()
+
+
+async def test_a_single_window_bound_is_rejected_everywhere(ledger):
+    v1, repo = ledger
+    start = _hour(-10).isoformat()
+    with _client(v1, repo) as client:
+        for path in ("/api/v2/ledger/entries", "/api/v2/ledger/summary", "/api/v2/ledger/export"):
+            assert client.get(path, params={"start": start}).status_code == 400
+            assert client.get(path, params={"end": start}).status_code == 400
+
+
+async def test_exports_guard_formula_cells_and_rewrite_pull_request_urls(ledger, monkeypatch):
+    from greenkube.verify.ledger.model import LedgerEntryDraft
+
+    v1, repo = ledger
+    start = _hour(-3)
+    await repo.append(
+        UID,
+        CLUSTER,
+        [
+            LedgerEntryDraft(
+                entry_key=f"injection:{quantity}",
+                group_key="injection",
+                entry_kind="accrual",
+                book="accrued",
+                reason="accrual",
+                method="user_declared",
+                quantity=quantity,
+                value=-1.5,
+                unit="USD" if quantity == "cost" else "gCO2e",
+                currency="USD" if quantity == "cost" else None,
+                method_version='=HYPERLINK("http://example.invalid")',
+                period_start=start,
+                period_end=start + timedelta(hours=1),
+                created_by="test",
+                recommendation_id=99,
+                recommendation_ids=[99],
+                pr_url="https://gitea.internal/api/v1/repos/o/r/pulls/7",
+            )
+            for quantity in ("cost", "co2e_g")
+        ],
+    )
+    monkeypatch.setattr(
+        "greenkube.api.routers.automation.external_pull_request_url",
+        lambda url: url.replace("/api/v1/repos/", "/") if url else url,
+    )
+    with _client(v1, repo) as client:
+        rows = [row for row in _rows(client.get("/api/v2/ledger/export").text) if row["recommendation_id"] == "99"]
+        assert len(rows) == 2
+        assert all(row["method_version"].startswith("'=") for row in rows)
+        assert all(row["pr_url"] == "https://gitea.internal/o/r/pulls/7" for row in rows)
+        assert all(float(row["value"]) == -1.5 for row in rows)  # signed numbers stay numeric
+        focus = _rows(client.get("/api/v2/ledger/export", params={"format": "focus"}).text)
+        injected = [row for row in focus if row["ResourceId"] == "recommendation/99"]
+        assert len(injected) == 1
+        assert injected[0]["x-greenkube-method-version"].startswith("'=")
+        assert injected[0]["x-greenkube-pr-url"] == "https://gitea.internal/o/r/pulls/7"
+        assert float(injected[0]["EffectiveCost"]) == 1.5
