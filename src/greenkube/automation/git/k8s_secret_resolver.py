@@ -93,9 +93,17 @@ class MountedSecretFileResolver(KubernetesSecretResolver):
             reference = SecretReference.from_provider_config(provider)
         except (ValueError, RuntimeError):
             raise SecretResolverError("Git provider Secret reference is missing or invalid.") from None
-        if self.api_key_present(reference.namespace, reference.name, reference.key):
+        api_present = self.api_key_present(reference.namespace, reference.name, reference.key)
+        if api_present:
             return
         path = self.path_for_reference(reference.namespace, reference.name, reference.key)
+        if api_present is False:
+            # The API answered: the Secret or the key is gone, whatever a stale mounted copy holds
+            # (resolve_secret returns None in that case too).
+            namespace = f"{reference.namespace}/" if reference.namespace else ""
+            raise SecretResolverError(
+                f"Git provider Secret {namespace}{reference.name!s} key {reference.key!r} does not exist."
+            )
         try:
             with path.open("rb") as secret_file:
                 secret_file.read(0)

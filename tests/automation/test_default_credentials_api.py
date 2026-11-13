@@ -182,3 +182,23 @@ def test_secret_values_never_appear_in_repr():
         }
     )
     assert "s3cr3t" not in repr(store._snapshot)
+
+
+@pytest.mark.asyncio
+async def test_validate_agrees_with_resolve_when_the_api_says_the_secret_was_deleted(tmp_path):
+    from greenkube.automation.git.credentials import SecretResolverError
+    from greenkube.storage.base_gitops_repository import GitOpsProviderConfig
+
+    api = FakeCoreV1()
+    store = _store(api)
+    resolver = MountedSecretFileResolver(tmp_path, api_secret=store)
+    provider = GitOpsProviderConfig(
+        id="inferred-github.com", provider_type="github", secret_name=SECRET, secret_key="token"
+    )
+    # A stale mounted copy outlives the deleted Secret until the kubelet refresh.
+    _write_token(tmp_path, value="stale")
+
+    assert await resolver.resolve_secret(namespace=None, name=SECRET, key="token") is None
+    assert store.state == STATE_ABSENT
+    with pytest.raises(SecretResolverError, match="does not exist"):
+        resolver.validate_provider_mount(provider)
