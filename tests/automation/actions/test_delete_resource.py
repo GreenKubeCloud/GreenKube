@@ -66,7 +66,7 @@ def test_the_kind_is_high_risk_never_auto_approved_and_resource_bound() -> None:
     assert DELETE_RESOURCE.binding_scope == "resource"
     assert not DELETE_RESOURCE.requires_workload_baseline
     assert ("", "PersistentVolume") in DELETE_RESOURCE.resource_kinds
-    assert DELETE_RESOURCE.measurement_strategy == "resource_deletion"
+    assert DELETE_RESOURCE.measurement_strategy == "delete_resource"
 
 
 def test_helm_renderers_are_refused_with_an_explanation() -> None:

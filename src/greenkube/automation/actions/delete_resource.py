@@ -106,7 +106,7 @@ class DeleteResourceSpec(ActionKindSpec):
     operation_model: ClassVar[type[TypedOperation]] = DeleteResource
     capability: ClassVar[str] = "cleanup"
     risk_class: ClassVar[RiskClass] = "high"
-    measurement_strategy: ClassVar[str] = "resource_deletion"
+    measurement_strategy: ClassVar[str] = "delete_resource"
     pr_label: ClassVar[str] = "cleanup"
     pr_subject: ClassVar[str] = "resource"
     title: ClassVar[str] = "resource deletion"

@@ -364,6 +364,9 @@ def _reason(
 
 #: Strategies by the ``action_kind`` of the change (H0 registry keys).
 STRATEGIES: Dict[str, SavingsMeasurementStrategy] = {"container_resources": RequestRightsizingStrategy()}
+from greenkube.verify.deletion import ResourceDeletionStrategy  # noqa: E402  (registry line, H6)
+
+STRATEGIES["delete_resource"] = ResourceDeletionStrategy()
 
 
 def strategy_for(action_kind: str) -> Optional[SavingsMeasurementStrategy]:

@@ -30,6 +30,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.automation.actions.delete_resource import deletion_target_for
 from greenkube.impact.comparison import measurable_co2e_projection
 from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
 from greenkube.models.measurement import (
@@ -459,8 +460,11 @@ class ChangeMeasurementService:
         lead = records[0]
         baseline = _baseline(lead)
         plan_id = getattr(plan, "plan_id", None) or baseline.get("plan_id")
+        deleted = deletion_target_for(lead)
         if snapshot is not None:
             target = WorkloadRef(namespace=snapshot.namespace, kind=snapshot.kind, name=snapshot.name)
+        elif deleted is not None:
+            target = WorkloadRef(namespace=deleted.namespace, kind=deleted.kind, name=deleted.name)
         else:
             target = WorkloadRef(
                 namespace=lead.namespace or "",
@@ -539,7 +543,8 @@ class ChangeMeasurementService:
             rollout_completed_at=completed,
             rollout_completed_source=str(rollout.get("completion_source") or "unknown"),
             baseline_window_end=min(decision, completed),
-            action_kind="container_resources",
+            action_kind=getattr(snapshot, "action_kind", None)
+            or ("delete_resource" if deleted is not None else "container_resources"),
             application_method=_application_method(lead, plan_id),
             load_metric=getattr(snapshot, "load_metric", None),
             details={"spec_before_source": before_source, "rollout": rollout},
