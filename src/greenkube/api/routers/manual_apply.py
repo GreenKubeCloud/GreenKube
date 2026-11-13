@@ -21,16 +21,30 @@ from typing import Any, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from greenkube.api.dependencies import get_authenticated_actor, get_recommendation_repository
+from greenkube.api.dependencies import (
+    get_authenticated_actor,
+    get_gitops_binding_repository,
+    get_recommendation_repository,
+)
 from greenkube.automation.actions import ACTION_KINDS, ActionKindError, PrimitiveApplyError, action_kind_of
 from greenkube.automation.actions.delete_resource import deletion_target_for, describe_target
 from greenkube.automation.actions.primitives import strategic_merge_patch
 from greenkube.automation.actions.workloads import ACTION_API_VERSIONS, POD_SPEC_PATHS
 from greenkube.core.optimization.applied_detector import K8sResourceReader, ResourceReader, ResourceReadError
+from greenkube.gitops.contracts import ActionStatus, PlanStatus
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.base_repository import RecommendationRepository
 
 router = APIRouter()
+
+#: Action statuses with no pull request in flight (a preview plan may exist).
+_NO_PR_IN_FLIGHT = frozenset(
+    {None, ActionStatus.NONE, ActionStatus.GROUPED, ActionStatus.PLAN_READY, ActionStatus.FAILED, ActionStatus.CLOSED}
+)
+#: Plan statuses the automation delivers or is delivering: "Mark as applied" would race it.
+_DELIVERING_PLAN_STATUSES = frozenset(
+    {PlanStatus.APPROVED, PlanStatus.APPLYING, PlanStatus.PR_OPEN, PlanStatus.MERGED, PlanStatus.SYNCED}
+)
 
 
 def get_manual_resource_reader() -> ResourceReader:
@@ -243,6 +257,7 @@ async def mark_applied_manually(
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
     actor: str = Depends(get_authenticated_actor),
     resource_reader: ResourceReader = Depends(get_manual_resource_reader),
+    gitops_repo: Any = Depends(get_gitops_binding_repository),
 ) -> Any:
     """Mark an active recommendation as applied by hand ("Mark as applied", H9).
 
@@ -253,7 +268,8 @@ async def mark_applied_manually(
     A deletion is only marked applied once the live cluster says the resource is absent
     (409 while it still exists, 503 when it cannot be read: an unreadable resource is
     never taken for an absent one), so no saving is ever claimed for a resource that is
-    still there.
+    still there. A recommendation with a plan in flight (approved, pull request open,
+    merged or syncing) is refused: the automation applies it.
     """
     from greenkube.core.optimization.lifecycle import RecommendationLifecycle, RecommendationTransitionError
 
@@ -264,6 +280,30 @@ async def mark_applied_manually(
         raise HTTPException(
             status_code=409,
             detail=f"Recommendation {rec_id} is {_status(record)}; only active recommendations can be marked applied.",
+        )
+    try:
+        action_status = await gitops_repo.get_recommendation_action_status(rec_id)
+        delivering = (
+            []
+            if action_status not in _NO_PR_IN_FLIGHT
+            else [
+                plan
+                for plan in await gitops_repo.list_plans_for_recommendation(rec_id)
+                if plan.status in _DELIVERING_PLAN_STATUSES
+            ]
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="Could not check whether a plan is in flight for this recommendation."
+        ) from exc
+    if action_status not in _NO_PR_IN_FLIGHT or delivering:
+        state = getattr(action_status, "value", action_status) if not delivering else delivering[0].status.value
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Recommendation {rec_id} has a plan in flight ({state}); close the plan or its pull request "
+                "before applying it by hand."
+            ),
         )
     rollout: Optional[dict] = None
     deletion = deletion_target_for(record)

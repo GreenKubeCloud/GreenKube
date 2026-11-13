@@ -204,3 +204,41 @@ async def test_a_manual_rightsizing_never_reads_the_cluster(manual_client, reade
     cpu = records[RecommendationType.RIGHTSIZING_CPU]
     assert client.post(f"/api/v1/recommendations/{cpu.id}/manual/applied").status_code == 200
     assert reader.reads == []
+
+
+async def test_a_recommendation_with_a_plan_in_flight_cannot_be_marked_applied(manual_client) -> None:
+    from types import SimpleNamespace
+
+    from greenkube.api.dependencies import get_gitops_binding_repository
+    from greenkube.gitops.contracts import ActionStatus, PlanStatus
+
+    client, repo, records = manual_client
+    cpu = records[RecommendationType.RIGHTSIZING_CPU]
+    assert cpu.id is not None
+
+    class _Plans:
+        def __init__(self, status, plans) -> None:
+            self.status, self.plans = status, plans
+
+        async def get_recommendation_action_status(self, rec_id):
+            return self.status
+
+        async def list_plans_for_recommendation(self, rec_id):
+            return self.plans
+
+    overrides = client.app.dependency_overrides
+    # An approved plan whose pull request is not open yet: the worker could still open it.
+    overrides[get_gitops_binding_repository] = lambda: _Plans(
+        ActionStatus.PLAN_READY, [SimpleNamespace(status=PlanStatus.APPROVED)]
+    )
+    refused = client.post(f"/api/v1/recommendations/{cpu.id}/manual/applied")
+    assert refused.status_code == 409
+    assert "plan in flight (approved)" in refused.json()["detail"]
+    stored = await repo.get_recommendation_by_id(cpu.id)
+    assert stored is not None and stored.status == RecommendationStatus.ACTIVE
+
+    # A preview that nobody approved does not block applying by hand.
+    overrides[get_gitops_binding_repository] = lambda: _Plans(
+        ActionStatus.PLAN_READY, [SimpleNamespace(status=PlanStatus.VALIDATED)]
+    )
+    assert client.post(f"/api/v1/recommendations/{cpu.id}/manual/applied").status_code == 200
