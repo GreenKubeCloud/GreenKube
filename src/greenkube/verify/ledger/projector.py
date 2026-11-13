@@ -14,9 +14,15 @@ that are each idempotent (every entry has a deterministic ``entry_key``):
    reason ``drift`` linked to the first measured accrual it cancels. Legacy
    compressed hourly rows are projected too, so the ledger reconciles with
    ``GET /recommendations/savings``. The watermark advances in the same
-   transaction as the inserts. Each pass re-reads the last
-   :data:`WATERMARK_LOOKBACK` ids, so a row whose id was allocated before
-   but committed after a projected one is never missed.
+   transaction as the inserts. Rows are found with an anti-join (v1 rows
+   that have no entry yet), never by id alone: a v1 id can be allocated by a
+   long transaction and committed after higher ids were projected (the
+   attribution job and the drift monitor write in separate transactions).
+   An incremental pass starts :data:`WATERMARK_LOOKBACK` ids below the
+   watermark; a full sweep (every :data:`FULL_SWEEP_INTERVAL` per projector,
+   and on every ``ledger-chain`` tick) starts at the first id, so no row is
+   ever skipped, and ``greenkube_ledger_unprojected_rows`` reports what is
+   still missing after it.
 2. **Supersession.** A v1 row flagged ``superseded`` (rollback review,
    reverted, phantom repair) is cancelled by a ``reversal`` entry (reason
    ``supersession``), as are the restatement entries attached to it.
@@ -34,10 +40,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Gauge
 
 from greenkube.core.observability import REGISTRY as OBSERVABILITY_REGISTRY
 from greenkube.storage.ledger_repository import V1_RAW_TABLE, V1_TABLES, LedgerRepository, Provenance
@@ -70,8 +76,10 @@ SECONDS_PER_YEAR = 365.25 * 24 * 3600
 #: v1 rows read per batch, and at most this many batches per pass (the rest catches up next pass).
 BATCH_SIZE = 2000
 MAX_BATCHES_PER_SYNC = 50
-#: Ids re-read below the watermark on every pass (out-of-order commits of the v1 sequence).
+#: Ids re-read below the watermark by an incremental pass (out-of-order commits of the v1 sequence).
 WATERMARK_LOOKBACK = 1000
+#: A projector sweeps the whole v1 ledger (anti-join from the first id) at least this often.
+FULL_SWEEP_INTERVAL = timedelta(hours=1)
 #: Statuses whose projected accruals are restated by their measurement.
 RESTATED_STATUSES = ("verified", "regressed")
 
@@ -79,6 +87,19 @@ LEDGER_WRITE_ERRORS = Counter(
     "greenkube_ledger_write_errors_total",
     "Savings ledger v2 passes that could not write, by reason (the v1 ledger is not affected).",
     ["reason"],
+    registry=OBSERVABILITY_REGISTRY,
+)
+
+LEDGER_LATE_ROWS = Counter(
+    "greenkube_ledger_late_rows_projected_total",
+    "v1 ledger rows found by a full sweep below the incremental window (committed out of order), by table.",
+    ["source_table"],
+    registry=OBSERVABILITY_REGISTRY,
+)
+LEDGER_UNPROJECTED_ROWS = Gauge(
+    "greenkube_ledger_unprojected_rows",
+    "v1 ledger rows with a non-zero saving that have no savings ledger v2 entry after the last full sweep.",
+    ["source_table"],
     registry=OBSERVABILITY_REGISTRY,
 )
 
@@ -133,20 +154,35 @@ class LedgerProjector:
         self.currency = currency
         self.batch_size = max(1, int(batch_size))
         self._clock = clock
+        self._last_full_sweep: Optional[datetime] = None
 
     def _now(self) -> datetime:
         return ensure_utc(self._clock()) if self._clock is not None else datetime.now(timezone.utc)
 
-    async def sync(self) -> SyncResult:
-        """One pass: accruals, then supersessions, then restatements."""
+    async def sync(self, *, full: Optional[bool] = None) -> SyncResult:
+        """One pass: accruals, then supersessions, then restatements.
+
+        ``full`` forces (True) or skips (False) the full sweep of the v1
+        ledger; by default it runs when the last one is older than
+        :data:`FULL_SWEEP_INTERVAL`.
+        """
+        now = self._now()
+        if full is None:
+            full = self._last_full_sweep is None or now - self._last_full_sweep >= FULL_SWEEP_INTERVAL
         try:
             identity = await self.resolver.resolve()
         except ClusterIdentityUnavailable as exc:
             logger.info("Savings ledger v2 pass skipped: %s", exc)
             return SyncResult(skipped="cluster_identity_unavailable")
         result = SyncResult(cluster_uid=identity.cluster_uid)
+
+        async def project(identity: ClusterIdentity, result: SyncResult) -> None:
+            await self._project(identity, result, full=bool(full))
+            if full:
+                self._last_full_sweep = now
+
         for step, run in (
-            ("projection", self._project),
+            ("projection", project),
             ("supersession", self._supersede),
             ("restatement", self._restate),
         ):
@@ -163,15 +199,27 @@ class LedgerProjector:
     # 1. Accruals from the v1 ledger
     # ------------------------------------------------------------------
 
-    async def _project(self, identity: ClusterIdentity, result: SyncResult) -> None:
+    async def _project(self, identity: ClusterIdentity, result: SyncResult, *, full: bool = False) -> None:
         watermarks = await self.repo.get_watermarks(identity.cluster_uid)
         for table in V1_TABLES:
             position = watermarks.get(table, 0)
-            after = max(0, position - WATERMARK_LOOKBACK)
+            window_floor = max(0, position - WATERMARK_LOOKBACK)
+            after = 0 if full else window_floor
             for _ in range(MAX_BATCHES_PER_SYNC):
-                rows = await self.repo.read_v1_rows(table, identity.cluster_name, after, self.batch_size)
+                rows = await self.repo.read_v1_rows(
+                    table, identity.cluster_name, after, self.batch_size, unprojected_for=identity.cluster_uid
+                )
                 if not rows:
                     break
+                late = sum(1 for row in rows if int(row["id"]) <= window_floor)
+                if late:
+                    LEDGER_LATE_ROWS.labels(source_table=table).inc(late)
+                    logger.warning(
+                        "Savings ledger v2 projected %d %s row(s) committed after higher ids (below id %d).",
+                        late,
+                        table,
+                        window_floor,
+                    )
                 drafts = await self._accrual_drafts(identity, table, rows)
                 last = max(int(row["id"]) for row in rows)
                 inserted = await self.repo.append(
@@ -182,10 +230,15 @@ class LedgerProjector:
                     now=self._now(),
                 )
                 result.projected += len(inserted)
-                result.watermarks[table] = max(last, position)
+                position = max(last, position)
+                result.watermarks[table] = position
                 after = last
                 if len(rows) < self.batch_size:
                     break
+            if full:
+                # Rows skipped as invalid, or left for the next pass by the batch cap, stay unprojected.
+                backlog = await self.repo.count_unprojected_v1_rows(table, identity.cluster_name, identity.cluster_uid)
+                LEDGER_UNPROJECTED_ROWS.labels(source_table=table).set(backlog)
 
     async def _accrual_drafts(
         self, identity: ClusterIdentity, table: str, rows: Sequence[dict]
@@ -427,6 +480,8 @@ def build_projector(
 
 
 __all__ = [
+    "LEDGER_LATE_ROWS",
+    "LEDGER_UNPROJECTED_ROWS",
     "LEDGER_WRITE_ERRORS",
     "LedgerProjector",
     "SyncResult",

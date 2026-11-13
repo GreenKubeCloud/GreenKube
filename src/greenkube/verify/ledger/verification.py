@@ -209,7 +209,7 @@ async def run_ledger_chain() -> None:
     from greenkube.storage.ledger_repository import get_ledger_repository
     from greenkube.verify.ledger.projector import build_projector
 
-    result = await build_projector().sync()
+    result = await build_projector().sync(full=True)
     if result.written:
         logger.info(
             "Savings ledger v2: %d accrual(s), %d supersession reversal(s), %d restatement entries written.",

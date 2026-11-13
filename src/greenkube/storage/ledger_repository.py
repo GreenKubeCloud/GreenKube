@@ -336,23 +336,62 @@ class LedgerRepository:
     # v1 ledger reads (projection)
     # ------------------------------------------------------------------
 
-    async def read_v1_rows(self, table: str, cluster_name: str, after_id: int, limit: int) -> List[dict]:
-        """v1 rows of ``cluster_name`` after ``after_id`` (legacy hourly rows only when flagged compressed)."""
+    def _v1_scope(self, table: str, cluster_uid: Optional[str]) -> str:
+        """WHERE fragment of the v1 rows to project (alias ``l``); ``cluster_uid`` keeps only unprojected ones."""
         if table not in V1_TABLES:
             raise ValueError(f"unknown v1 ledger table {table!r}")
-        slot = "slot_start" if table == V1_RAW_TABLE else "NULL AS slot_start"
-        legacy = f" AND {self._true('legacy_compressed')}" if table == V1_HOURLY_TABLE else ""
+        clauses = ["l.cluster_name = ?", "l.id > ?"]
+        if table == V1_HOURLY_TABLE:
+            clauses.append(self._true("l.legacy_compressed"))
+        if cluster_uid is not None:
+            # Rows with no non-zero quantity never produce an entry: they are not a backlog.
+            clauses.append("(COALESCE(l.co2e_saved_grams, 0) <> 0 OR COALESCE(l.cost_saved_dollars, 0) <> 0)")
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM savings_ledger_entries e "
+                f"WHERE e.source_table = '{table}' AND e.source_id = l.id AND e.cluster_uid = ?)"
+            )
+        return " AND ".join(clauses)
+
+    async def read_v1_rows(
+        self,
+        table: str,
+        cluster_name: str,
+        after_id: int,
+        limit: int,
+        *,
+        unprojected_for: Optional[str] = None,
+    ) -> List[dict]:
+        """v1 rows of ``cluster_name`` after ``after_id`` (legacy hourly rows only when flagged compressed).
+
+        With ``unprojected_for`` (a cluster uid), only the rows that have no
+        entry in that cluster's chain yet: an anti-join, so a row committed
+        after rows with higher ids (out-of-order sequence commits) is still
+        found, however late it becomes visible.
+        """
+        slot = "l.slot_start" if table == V1_RAW_TABLE else "NULL AS slot_start"
+        where = self._v1_scope(table, unprojected_for)
+        params: List[Any] = [cluster_name, int(after_id)]
+        if unprojected_for is not None:
+            params.append(unprojected_for)
         rows = await self._select(
-            f"SELECT id, recommendation_id, cluster_name, namespace, recommendation_type, measurement_method, "
-            f"co2e_saved_grams, cost_saved_dollars, period_start, period_end, {slot}, confidence, superseded "
-            f"FROM {table} WHERE cluster_name = ? AND id > ?{legacy} ORDER BY id LIMIT ?",
-            [cluster_name, int(after_id), int(limit)],
+            "SELECT l.id, l.recommendation_id, l.cluster_name, l.namespace, l.recommendation_type, "
+            "l.measurement_method, l.co2e_saved_grams, l.cost_saved_dollars, l.period_start, l.period_end, "
+            f"{slot}, l.confidence, l.superseded FROM {table} l WHERE {where} ORDER BY l.id LIMIT ?",
+            [*params, int(limit)],
         )
         for row in rows:
             for column in ("period_start", "period_end", "slot_start"):
                 row[column] = parse_time(row.get(column))
             row["superseded"] = bool(row.get("superseded"))
         return rows
+
+    async def count_unprojected_v1_rows(self, table: str, cluster_name: str, cluster_uid: str) -> int:
+        """v1 rows of ``cluster_name`` with a non-zero quantity and no entry in ``cluster_uid``'s chain."""
+        rows = await self._select(
+            f"SELECT COUNT(*) AS n FROM {table} l WHERE {self._v1_scope(table, cluster_uid)}",
+            [cluster_name, 0, cluster_uid],
+        )
+        return int(rows[0]["n"]) if rows else 0
 
     async def superseded_unreversed(self, cluster_uid: str, limit: int = 5000) -> List[LedgerEntry]:
         """Entries whose v1 source row is superseded and that no supersession reversal cancels yet.

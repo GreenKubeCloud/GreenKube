@@ -487,6 +487,107 @@ async def test_drift_reversal_becomes_a_linked_reversal_entry(ledger: LedgerDb):
 
 
 # ----------------------------------------------------------------------
+# Gap-free projection (v1 ids committed out of order)
+# ----------------------------------------------------------------------
+
+
+def _hourly_rows(count: int, *, rec_id: int = 1, cost: float = 0.01, co2e: float = 0.5) -> List[SavingsLedgerRecord]:
+    first = _hour(-count - 1)
+    return [
+        SavingsLedgerRecord(
+            recommendation_id=rec_id,
+            cluster_name=CLUSTER,
+            namespace="prod",
+            recommendation_type="RIGHTSIZING_CPU",
+            cost_saved_dollars=cost,
+            co2e_saved_grams=co2e,
+            period_seconds=3600,
+            timestamp=first + timedelta(hours=index + 1),
+            period_start=first + timedelta(hours=index),
+            period_end=first + timedelta(hours=index + 1),
+            slot_start=first + timedelta(hours=index),
+        )
+        for index in range(count)
+    ]
+
+
+async def _assert_reconciles(db: LedgerDb) -> None:
+    v1 = await _v1_totals(db)
+    assert await _net(db, method=METHOD_PROJECTED, quantity=QUANTITY_COST) == pytest.approx(
+        v1["projected"]["cost"], rel=1e-12
+    )
+    assert await _net(db, method=METHOD_PROJECTED, quantity=QUANTITY_CO2E) == pytest.approx(
+        v1["projected"]["co2e"], rel=1e-12
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_v1_row_visible_after_higher_ids_were_projected_is_never_lost(ledger: LedgerDb, monkeypatch):
+    """A row that becomes visible far below the watermark is found by the anti-join sweep."""
+    from greenkube.verify.ledger import projector as projector_module
+
+    monkeypatch.setattr(projector_module, "WATERMARK_LOOKBACK", 5)
+    await ledger.v1.save_records(_hourly_rows(30))
+    # The first row is not visible to the projector yet (as if its transaction had not committed).
+    await ledger.execute(
+        "UPDATE recommendation_savings_ledger SET cluster_name = 'not-yet' "
+        "WHERE id = (SELECT MIN(id) FROM recommendation_savings_ledger)"
+    )
+    projector = _projector(ledger)
+    assert (await projector.sync()).projected == 29 * 2
+    await ledger.execute(
+        "UPDATE recommendation_savings_ledger SET cluster_name = '" + CLUSTER + "' WHERE cluster_name = 'not-yet'"
+    )
+    assert await ledger.repo.count_unprojected_v1_rows("recommendation_savings_ledger", CLUSTER, CLUSTER_UID) == 1
+
+    late = projector_module.LEDGER_LATE_ROWS.labels(source_table="recommendation_savings_ledger")
+    before = late._value.get()
+    result = await projector.sync(full=True)
+    assert result.projected == 2
+    assert late._value.get() == before + 1
+    gauge = projector_module.LEDGER_UNPROJECTED_ROWS.labels(source_table="recommendation_savings_ledger")
+    assert gauge._value.get() == 0
+    await _assert_reconciles(ledger)
+    assert (await projector.sync(full=True)).written == 0
+    assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_postgres_out_of_order_commit_of_a_large_batch_is_fully_projected(ledger: LedgerDb):
+    """An uncommitted batch of more than WATERMARK_LOOKBACK ids, and a later id committed and projected first."""
+    if ledger.backend != "postgres":
+        pytest.skip("Concurrent transactions on the v1 sequence only exist on PostgreSQL.")
+    from greenkube.verify.ledger.projector import WATERMARK_LOOKBACK
+
+    batch = _hourly_rows(WATERMARK_LOOKBACK + 440, rec_id=1)
+    straggler = _hourly_rows(1, rec_id=2, cost=0.25, co2e=3.0)
+    projector = _projector(ledger)
+    async with ledger.manager.connection_scope() as conn:
+        transaction = conn.transaction()  # type: ignore[union-attr]
+        await transaction.start()
+        try:
+            await ledger.v1._insert(conn, batch)  # type: ignore[union-attr]
+            # Another writer (the drift monitor) commits a higher id; a pass projects it.
+            await ledger.v1.save_records(straggler)
+            assert (await projector.sync()).projected == 2
+        except BaseException:
+            await transaction.rollback()
+            raise
+        await transaction.commit()
+    # Incremental passes (the attribution job's) and the ledger-chain loop's full pass.
+    await projector.sync()
+    await projector.sync()
+    await projector.sync(full=True)
+    total = await ledger.scalar("SELECT COUNT(*) FROM savings_ledger_entries")
+    assert total == 2 * (len(batch) + 1)
+    assert await ledger.repo.count_unprojected_v1_rows("recommendation_savings_ledger", CLUSTER, CLUSTER_UID) == 0
+    await _assert_reconciles(ledger)
+    assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok
+
+
+# ----------------------------------------------------------------------
 # Cluster identity (N9)
 # ----------------------------------------------------------------------
 
