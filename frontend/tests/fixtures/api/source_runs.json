@@ -1,0 +1,49 @@
+[
+  {
+    "complete": false,
+    "consecutive_failures": 0,
+    "diagnostics": [
+      {
+        "code": "skipped",
+        "count": 12,
+        "level": "warning",
+        "message": "12 VPAs skipped: updateMode=Auto"
+      }
+    ],
+    "duration_seconds": 1.25,
+    "error": null,
+    "error_code": "incomplete",
+    "finished_at": "2026-01-05T10:30:01.250000Z",
+    "health_reason": null,
+    "health_status": null,
+    "namespace": null,
+    "optimization_run_id": null,
+    "recommendation_count": 3,
+    "run_id": 7,
+    "signal_count": 3,
+    "source_id": "greenkube.rightsizing_cpu",
+    "source_version": null,
+    "started_at": "2026-01-05T10:30:00Z",
+    "status": "incomplete"
+  },
+  {
+    "complete": true,
+    "consecutive_failures": 0,
+    "diagnostics": [],
+    "duration_seconds": 1.25,
+    "error": null,
+    "error_code": null,
+    "finished_at": "2026-01-05T10:00:01.250000Z",
+    "health_reason": null,
+    "health_status": null,
+    "namespace": null,
+    "optimization_run_id": null,
+    "recommendation_count": 4,
+    "run_id": 5,
+    "signal_count": 12,
+    "source_id": "greenkube.rightsizing_cpu",
+    "source_version": null,
+    "started_at": "2026-01-05T10:00:00Z",
+    "status": "succeeded"
+  }
+]

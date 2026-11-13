@@ -76,7 +76,7 @@
 
 <div class="p-4 sm:p-6 lg:p-8 space-y-6 max-w-[1200px] mx-auto">
 	<nav aria-label="Breadcrumb" class="text-xs text-dark-500">
-		<a href="/ledger" class="hover:text-dark-200">Changes and ledger</a>
+		<a href="/changes" class="hover:text-dark-200">Changes</a>
 		<span aria-hidden="true"> / </span>
 		<span aria-current="page" class="break-all">{data?.planId}</span>
 	</nav>

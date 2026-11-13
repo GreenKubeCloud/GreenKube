@@ -57,16 +57,23 @@ describe('DashboardPage', () => {
 		api.listChanges.mockResolvedValue({ items: [], next_cursor: null });
 	});
 
-	it('aborts the active dashboard request when the page is unmounted', async () => {
-		const { unmount } = render(DashboardPage);
-		await waitFor(() => expect(api.getDashboardSummary).toHaveBeenCalled());
+	it('leaves the footprint charts to /footprint and links there (K7)', async () => {
+		const { findByTestId, container, queryByLabelText } = render(DashboardPage);
 
-		const signal = api.getDashboardSummary.mock.calls.at(-1)[0].signal;
-		expect(signal).toBeTruthy();
+		const footprint = await findByTestId('footprint-link');
+		expect(footprint.querySelector('a')).toHaveAttribute('href', '/footprint');
+		await waitFor(() => expect(api.getActiveRecommendations).toHaveBeenCalled());
+		expect(api.getDashboardSummary).not.toHaveBeenCalled();
+		expect(api.getTopPods).not.toHaveBeenCalled();
+		expect(container.textContent).not.toContain('CO₂ Emissions Over Time');
+		// The period only filters footprint charts: the Overview shows the namespace alone.
+		expect(queryByLabelText('Period')).toBeNull();
+	});
 
-		unmount();
-
-		expect(signal.aborted).toBe(true);
+	it('links the changes in flight to the changes board (K4)', async () => {
+		const { findByTestId } = render(DashboardPage);
+		const strip = await findByTestId('pipeline-strip');
+		expect(strip.querySelector('a')).toHaveAttribute('href', '/changes');
 	});
 
 	it('reads recommendations without scheduling a scan and aborts them on unmount (BUG-25)', async () => {
