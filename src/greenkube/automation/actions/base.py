@@ -159,6 +159,18 @@ class ActionKindSpec:
         del recommendations
         return {}
 
+    def may_express(self, recommendation: Any) -> bool:
+        """Cheap pre-check: whether ``ops_for`` may build an action for this recommendation.
+
+        Scans only look up persisted recommendation ids (to build actions) when some kind
+        may express a recommendation; the default asks ``ops_for`` with a placeholder id.
+        """
+        try:
+            probe = recommendation.model_copy(update={"id": 1}) if hasattr(recommendation, "model_copy") else None
+        except Exception:
+            return False
+        return probe is not None and bool(self.ops_for([probe]))
+
     def matches_recommendation(self, record: Any, target: ResourceTarget) -> bool:
         """Whether a persisted recommendation is one this kind built ``target`` from.
 

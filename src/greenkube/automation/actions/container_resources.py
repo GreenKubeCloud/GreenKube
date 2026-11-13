@@ -94,6 +94,16 @@ class ContainerResourcesSpec(ActionKindSpec):
     def ops_for(self, recommendations: Sequence[Recommendation]) -> dict[int, ActionPlanV3]:
         return build_container_resource_actions(recommendations)
 
+    def may_express(self, recommendation: Any) -> bool:
+        from greenkube.models.metrics import RecommendationType
+
+        return (
+            recommendation.type in (RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY)
+            and bool(recommendation.container_name)
+            and recommendation.evidence is not None
+            and recommendation.evidence.proposed_patch is not None
+        )
+
     # -- validation and compilation ------------------------------------------------------
     def validate_operations(self, target: ResourceTarget, operations: Sequence[TypedOperation]) -> None:
         supported_versions = WORKLOAD_API_VERSIONS.get(target.kind)

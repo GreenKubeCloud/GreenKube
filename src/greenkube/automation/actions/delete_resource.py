@@ -138,6 +138,9 @@ class DeleteResourceSpec(ActionKindSpec):
             )
         return actions
 
+    def may_express(self, recommendation: Any) -> bool:
+        return deletion_target_for(recommendation) is not None
+
     def matches_recommendation(self, record: Any, target: ResourceTarget) -> bool:
         return deletion_target_for(record) == target
 

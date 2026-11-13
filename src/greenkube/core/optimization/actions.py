@@ -16,3 +16,8 @@ def build_action_plans(recommendations: Sequence[Recommendation]) -> dict[int, A
     workload change set with an explicit operation per container.
     """
     return ACTION_KINDS.build_action_plans(recommendations)
+
+
+def may_build_action_plans(recommendations: Sequence[Recommendation]) -> bool:
+    """Whether a registered action kind may express one of ``recommendations`` (cheap pre-check)."""
+    return ACTION_KINDS.may_express_any(recommendations)

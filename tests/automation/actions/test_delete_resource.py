@@ -101,3 +101,10 @@ def test_pr_section_names_the_resource() -> None:
     section = DELETE_RESOURCE.pr_section([DeleteResource()], _pv())
     assert section.label == "cleanup"
     assert section.lines == ("Delete PersistentVolume pv-orphan from the repository",)
+
+
+def test_scans_look_up_ids_when_a_deletion_may_become_an_action() -> None:
+    from greenkube.core.optimization.actions import may_build_action_plans
+
+    assert may_build_action_plans([_lb(id=None)])
+    assert not may_build_action_plans([_lb(id=None, type=RecommendationType.IDLE_NAMESPACE)])

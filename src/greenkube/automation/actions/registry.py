@@ -96,6 +96,10 @@ class ActionKindRegistry:
         """Whether any registered kind writes this field into a GreenKube-managed patch."""
         return any(spec.owns_patch_field(kind, segments, value) for spec in self)
 
+    def may_express_any(self, recommendations: Sequence[Recommendation]) -> bool:
+        """Whether a registered kind may build an action for one of ``recommendations``."""
+        return any(spec.may_express(recommendation) for recommendation in recommendations for spec in self)
+
     def build_action_plans(self, recommendations: Sequence[Recommendation]) -> dict[int, ActionPlanV3]:
         """Each recommendation id -> the action of the first registered kind that expresses it."""
         actions: dict[int, ActionPlanV3] = {}
