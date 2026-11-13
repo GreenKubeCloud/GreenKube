@@ -698,6 +698,38 @@ async def test_explicit_allowlist_narrows_the_github_app_selection(tmp_path, mon
     assert repository.allowlists["inferred-github.com"] == {"acme/payments"}
 
 
+async def test_administrator_allowed_repositories_inside_the_github_app_selection_stay_allowlisted(
+    tmp_path, monkeypatch
+):
+    """A repository an administrator allowed joins a narrowed App allowlist only if the App is installed on it."""
+    _write_github_app(tmp_path)
+    monkeypatch.setattr(
+        "greenkube.automation.git.credentials.GitProviderCredentialResolver.resolve_credentials",
+        _fake_app_credentials,
+    )
+    other = "https://github.com/acme/other.git"
+    allowed_at = datetime.now(timezone.utc)
+    allowed = [
+        AllowedRepository(other, "github.com", "acme/other", "user:admin", allowed_at),
+        AllowedRepository(OTHER_GITHUB_REPO, "github.com", "acme/legacy", "user:admin", allowed_at),
+    ]
+    repository = FakeGitOpsRepository([GITHUB_REPO, other, OTHER_GITHUB_REPO])
+    readiness = _readiness(
+        repository,
+        tmp_path,
+        store=FakeStore(allowed),
+        config=_config(automation_repository_allowlist=("acme/gitops",)),
+    )
+    readiness._app_repositories = _app_selection("acme/gitops", "Acme/Other")
+
+    snapshot = await readiness.run_once()
+
+    assert repository.allowlists["inferred-github.com"] == {"acme/gitops", "acme/other"}
+    states = {repo.repository: repo for repo in snapshot.repositories}
+    assert states["acme/other"].allowlisted is True
+    assert states["acme/legacy"].allowlisted is False
+
+
 async def test_an_unreadable_github_app_selection_keeps_the_last_known_one(tmp_path, monkeypatch):
     _write_github_app(tmp_path)
     monkeypatch.setattr(

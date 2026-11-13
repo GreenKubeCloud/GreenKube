@@ -56,7 +56,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -684,7 +684,7 @@ class AutomationReadiness:
                 await self._repository.save_provider_config(desired)
                 changed = True
             if bound and plan.app_selection is not None:
-                names = _app_allowlist(plan, patterns)
+                names = _app_allowlist(plan, patterns, allowed_by_url)
             else:
                 names = {
                     ref.repository
@@ -921,25 +921,30 @@ def _bind_default_credentials(
             plan.credentials_bound, plan.credentials_reason = False, CREDENTIALS_HOST_AMBIGUOUS
 
 
-def _app_allowlist(plan: _HostPlan, patterns: Sequence[str]) -> set[str]:
+def _app_allowlist(plan: _HostPlan, patterns: Sequence[str], allowed_by_url: Set[str] = frozenset()) -> set[str]:
     """Allowlist of an inferred GitHub provider authenticated as a GitHub App.
 
     The installation's repository selection is the allowlist. ``@discovered``
     keeps every selected repository; explicit ``owner/repo`` patterns narrow it.
+    Repositories an administrator allowed (``allowed_by_url``) are kept when the
+    App is installed on them: the App cannot write anywhere else.
     Discovered repositories are added under the spelling discovery uses, since
     GitHub names are case-insensitive but the allowlist match is not.
     """
     selection = plan.app_selection or frozenset()
     explicit = [pattern for pattern in patterns if pattern != DISCOVERED_REPOSITORIES]
+    selected_refs = [ref for ref in plan.refs.values() if ref.repository.lower() in selection]
     candidates = set(selection)
-    candidates.update(ref.repository for ref in plan.refs.values() if ref.repository.lower() in selection)
+    candidates.update(ref.repository for ref in selected_refs)
     if DISCOVERED_REPOSITORIES in patterns:
         return candidates
-    return {
+    names = {
         name
         for name in candidates
         if allowlist_matches(name, explicit) or allowlist_matches(name.lower(), [p.lower() for p in explicit])
     }
+    names.update(ref.repository for ref in selected_refs if ref.repo_url in allowed_by_url)
+    return names
 
 
 async def _list_app_repositories(credentials: Any, api_base_url: str | None) -> set[str]:
