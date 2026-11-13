@@ -308,3 +308,51 @@ async def test_token_commits_keep_the_configured_author():
     from greenkube.automation.git.github import GitHubProvider
 
     assert GitHubProvider("ghp_x").platform_signed_commits is False
+
+
+@pytest.mark.asyncio
+async def test_installation_repositories_lists_the_selection_of_every_installation():
+    from greenkube.automation.git.github_app import installation_repositories
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        path = request.url.path
+        if path == "/app/installations":
+            return httpx.Response(200, json=[{"id": 77}, {"id": 78}])
+        if path.startswith("/app/installations/") and request.method == "POST":
+            installation = path.split("/")[3]
+            return httpx.Response(201, json={"token": f"ghs_{installation}", "expires_at": "2099-01-01T00:00:00Z"})
+        if path == "/installation/repositories":
+            token = request.headers["Authorization"].removeprefix("Bearer ")
+            names = {"ghs_77": ["acme/gitops", "acme/payments"], "ghs_78": ["globex/platform"]}[token]
+            return httpx.Response(
+                200, json={"total_count": len(names), "repositories": [{"full_name": name} for name in names]}
+            )
+        return httpx.Response(404, json={})
+
+    names = await installation_repositories(
+        GitHubAppCredentials(APP_ID, PRIVATE_KEY), transport=httpx.MockTransport(handler)
+    )
+
+    assert names == {"acme/gitops", "acme/payments", "globex/platform"}
+    issue = [request for request in requests if request.method == "POST"]
+    assert [json.loads(request.content) for request in issue] == [{}, {}]  # all selected repositories
+    assert requests[0].headers["Authorization"].startswith("Bearer ey")  # the App JWT
+
+
+@pytest.mark.asyncio
+async def test_installation_repositories_fail_closed_without_partial_results():
+    from greenkube.automation.git.github_app import installation_repositories
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app/installations":
+            return httpx.Response(401, json={"message": "bad"})
+        return httpx.Response(404, json={})
+
+    with pytest.raises(GitHubAppError) as error:
+        await installation_repositories(
+            GitHubAppCredentials(APP_ID, PRIVATE_KEY), transport=httpx.MockTransport(handler)
+        )
+    assert "PRIVATE KEY" not in str(error.value)

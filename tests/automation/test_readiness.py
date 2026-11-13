@@ -643,3 +643,82 @@ async def test_discovery_reports_controller_families(tmp_path):
     details = snapshot.capabilities["discovery"].details
     assert details["controllers"] == ["argocd", "flux"]
     assert details["source_kinds"] == ["argocd", "flux_kustomization", "flux_helm_release"]
+
+
+OTHER_GITHUB_REPO = "https://github.com/acme/legacy.git"
+
+
+def _app_selection(*names: str, calls: list | None = None, fail: list | None = None):
+    async def list_repositories(credentials, api_base_url):
+        if calls is not None:
+            calls.append((credentials.app_id, api_base_url))
+        if fail:
+            raise RuntimeError("github down")
+        return set(names)
+
+    return list_repositories
+
+
+async def test_github_app_installation_selection_is_the_inferred_github_allowlist(tmp_path, monkeypatch):
+    """The repositories the App was installed on are the allowlist of the inferred github.com provider."""
+    _write_github_app(tmp_path)
+    monkeypatch.setattr(
+        "greenkube.automation.git.credentials.GitProviderCredentialResolver.resolve_credentials",
+        _fake_app_credentials,
+    )
+    repository = FakeGitOpsRepository([GITHUB_REPO, OTHER_GITHUB_REPO])
+    readiness = _readiness(repository, tmp_path)
+    calls: list = []
+    readiness._app_repositories = _app_selection("Acme/GitOps", "acme/payments", calls=calls)
+
+    await readiness.run_once()
+    snapshot = await readiness.run_once()
+
+    assert repository.allowlists["inferred-github.com"] == {"acme/gitops", "acme/payments"}
+    states = {repo.repository: repo for repo in snapshot.repositories}
+    assert states["acme/gitops"].preview.active
+    assert states["acme/legacy"].preview.reason == "github_app_not_installed"
+    assert states["acme/legacy"].allowlisted is False
+    # The selection is cached between ticks (rate limits).
+    assert calls == [("123", None)]
+
+
+async def test_explicit_allowlist_narrows_the_github_app_selection(tmp_path, monkeypatch):
+    _write_github_app(tmp_path)
+    monkeypatch.setattr(
+        "greenkube.automation.git.credentials.GitProviderCredentialResolver.resolve_credentials",
+        _fake_app_credentials,
+    )
+    repository = FakeGitOpsRepository([GITHUB_REPO])
+    readiness = _readiness(repository, tmp_path, config=_config(automation_repository_allowlist=("acme/pay*",)))
+    readiness._app_repositories = _app_selection("acme/gitops", "acme/payments")
+
+    await readiness.run_once()
+
+    assert repository.allowlists["inferred-github.com"] == {"acme/payments"}
+
+
+async def test_an_unreadable_github_app_selection_keeps_the_last_known_one(tmp_path, monkeypatch):
+    _write_github_app(tmp_path)
+    monkeypatch.setattr(
+        "greenkube.automation.git.credentials.GitProviderCredentialResolver.resolve_credentials",
+        _fake_app_credentials,
+    )
+    clock = [0.0]
+    repository = FakeGitOpsRepository([GITHUB_REPO])
+    readiness = _readiness(repository, tmp_path)
+    readiness._monotonic = lambda: clock[0]
+    fail: list = []
+    readiness._app_repositories = _app_selection("acme/payments", fail=fail)
+
+    await readiness.run_once()
+    assert repository.allowlists["inferred-github.com"] == {"acme/payments"}
+
+    clock[0] = 10_000.0
+    fail.append(True)
+    await readiness.run_once()
+    assert repository.allowlists["inferred-github.com"] == {"acme/payments"}
+
+
+async def _fake_app_credentials(self, provider):
+    return SimpleNamespace(app_id="123", private_key="pem")

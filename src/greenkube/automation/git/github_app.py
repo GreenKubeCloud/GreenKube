@@ -232,6 +232,100 @@ class GitHubAppTokenIssuer:
 #: One issuer per process: tokens are cached across plan operations until they expire.
 DEFAULT_TOKEN_ISSUER = GitHubAppTokenIssuer()
 
+#: Bounds of the installation repository listing (100 per page).
+_MAX_INSTALLATIONS = 100
+_MAX_REPOSITORY_PAGES = 50
+
+
+async def installation_repositories(
+    credentials: GitHubAppCredentials,
+    *,
+    api_base_url: str | None = None,
+    now: datetime | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> set[str]:
+    """``owner/name`` of every repository the App's installations were granted.
+
+    The repository selection made when installing the App ("All repositories" or
+    "Only select repositories") is the administrator's allowlist; GreenKube uses
+    it for the inferred github.com provider. For each installation
+    (``GET /app/installations``) an installation token is requested without a
+    repository restriction and ``GET /installation/repositories`` is paged. The
+    tokens are used for this listing only and dropped. Raises
+    :class:`GitHubAppError` or :class:`GitProviderTransientError`; never returns
+    a partial selection.
+    """
+    base = (api_base_url or DEFAULT_GITHUB_API).rstrip("/")
+    jwt = app_jwt(credentials, now=now or datetime.now(timezone.utc))
+    app_headers = _headers(jwt)
+    names: set[str] = set()
+    async with httpx.AsyncClient(
+        base_url=base, timeout=_TIMEOUT_SECONDS, transport=transport, follow_redirects=False
+    ) as client:
+        installations = await _json_list(
+            client, "/app/installations", app_headers, params={"per_page": str(_MAX_INSTALLATIONS)}
+        )
+        for installation in installations[:_MAX_INSTALLATIONS]:
+            installation_id = installation.get("id") if isinstance(installation, dict) else None
+            if isinstance(installation_id, bool) or not isinstance(installation_id, int) or installation_id <= 0:
+                raise GitHubAppError("GitHub returned an invalid App installation.")
+            issued = await _json(
+                client,
+                "POST",
+                f"/app/installations/{installation_id}/access_tokens",
+                app_headers,
+                body={},
+                missing="the App installation was not found",
+            )
+            token = issued.get("token")
+            if not isinstance(token, str) or not token:
+                raise GitHubAppError("GitHub returned an invalid installation token.")
+            for page in range(1, _MAX_REPOSITORY_PAGES + 1):
+                listing = await _json(
+                    client,
+                    "GET",
+                    f"/installation/repositories?per_page=100&page={page}",
+                    _headers(token),
+                    missing="the installation repositories were not found",
+                )
+                repositories = listing.get("repositories")
+                if not isinstance(repositories, list):
+                    raise GitHubAppError("GitHub returned an invalid installation repository list.")
+                for repository in repositories:
+                    full_name = repository.get("full_name") if isinstance(repository, dict) else None
+                    if isinstance(full_name, str) and full_name.count("/") == 1:
+                        names.add(full_name)
+                total = listing.get("total_count")
+                if len(repositories) < 100 or (isinstance(total, int) and page * 100 >= total):
+                    break
+            else:
+                raise GitHubAppError("The App installation lists more repositories than GreenKube reads.")
+    return names
+
+
+async def _json_list(
+    client: httpx.AsyncClient, path: str, headers: dict[str, str], *, params: dict[str, str]
+) -> list[Any]:
+    try:
+        response = await client.request("GET", path, headers=headers, params=params)
+    except httpx.HTTPError as exc:
+        raise GitProviderTransientError(f"GitHub App request failed ({type(exc).__name__}).") from None
+    if response.status_code in (429, 502, 503, 504):
+        raise GitProviderTransientError(
+            f"GitHub App request answered {response.status_code}; retry later.", status_code=response.status_code
+        )
+    if response.status_code == 401:
+        raise GitHubAppError("GitHub rejected the App credentials (check appId and privateKey).", status_code=401)
+    if response.status_code >= 400:
+        raise GitHubAppError(f"GitHub App request answered {response.status_code}.", status_code=response.status_code)
+    try:
+        payload = response.json()
+    except ValueError:
+        raise GitHubAppError("GitHub returned an invalid App response.") from None
+    if not isinstance(payload, list):
+        raise GitHubAppError("GitHub returned an invalid App response.")
+    return payload
+
 
 def _headers(bearer: str) -> dict[str, str]:
     return {
