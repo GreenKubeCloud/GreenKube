@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Any, ClassVar, Dict, FrozenSet, List, Mapping, Optional, Tuple
+from typing import Any, ClassVar, Dict, FrozenSet, List, Literal, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -73,6 +73,11 @@ MAX_PAGES = 50
 _NODE_POOL_WORDS = ("autoscal", "node pool", "nodepool", "spot", "scale down", "scale-down", "vm size", "sku")
 
 
+AdvisorCategory = Literal["Cost", "HighAvailability", "OperationalExcellence", "Performance", "Security"]
+
+DEFAULT_CATEGORIES: Tuple[AdvisorCategory, ...] = ("Cost", "HighAvailability", "OperationalExcellence", "Performance")
+
+
 class AzureAdvisorSettings(SourceSettings):
     """``SOURCES_CONFIG["azure_advisor"]``."""
 
@@ -83,9 +88,8 @@ class AzureAdvisorSettings(SourceSettings):
     resource_group: Optional[str] = Field(None, min_length=1, max_length=90)
     #: Advisor categories to read (``Cost``, ``HighAvailability``, ``OperationalExcellence``, ``Performance``,
     #: ``Security``).
-    categories: List[str] = Field(
-        default_factory=lambda: ["Cost", "HighAvailability", "OperationalExcellence", "Performance"]
-    )
+    #: An enum: the names are interpolated into the OData $filter.
+    categories: List[AdvisorCategory] = Field(default_factory=lambda: list(DEFAULT_CATEGORIES))
     timeout_seconds: float = Field(30.0, gt=0, le=300)
 
 

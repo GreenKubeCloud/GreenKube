@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from urllib.parse import parse_qs
 
 import httpx
+import pytest
 
 from greenkube.core.config import Config
 from greenkube.signals.connectors.azure_advisor import (
@@ -141,6 +142,14 @@ async def test_next_link_to_another_host_is_not_followed(tmp_path):
     assert not [r for r in server.requests if r.url.host == "elsewhere.test"]
     assert report.run.status == SourceRunStatus.INCOMPLETE
     assert "foreign_next_link" in {d.code for d in report.run.diagnostics}
+
+
+def test_categories_are_an_enum_since_they_enter_the_odata_filter():
+    from pydantic import ValidationError
+
+    assert AzureAdvisorSettings(categories=["Security"]).categories == ["Security"]
+    with pytest.raises(ValidationError):
+        AzureAdvisorSettings.model_validate({"categories": ["Cost' or Category eq 'x"]})
 
 
 def test_capability_keywords():

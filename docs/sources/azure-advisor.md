@@ -37,7 +37,7 @@ sources:
       subscription_id: 00000000-0000-0000-0000-000000000000   # required
       cluster_name: aks-prod                                  # required: the AKS resource name
       resource_group: rg-prod                                 # optional, narrows the match
-      categories: [Cost, HighAvailability, OperationalExcellence, Performance]   # default
+      categories: [Cost, HighAvailability, OperationalExcellence, Performance]   # default; Security is the only other accepted name
 ```
 
 The source is `unavailable` (never failing) until the subscription, the cluster name and the Workload Identity variables are present. It collects at most once per hour.
