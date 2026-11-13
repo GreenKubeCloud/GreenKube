@@ -204,7 +204,8 @@ def test_controller_prune_settings_are_recorded_per_controller() -> None:
     no_prune = {**APPLICATION, "spec": {**APPLICATION["spec"], "syncPolicy": {"automated": {}}}}
     index = ResourceBindingIndex()
     index.add_argo_application(no_prune)
-    assert index.resolve(PV) is not None and index.resolve(PV).prune is False
+    resolved = index.resolve(PV)
+    assert resolved is not None and resolved.prune is False
 
 
 def test_flux_prune_is_read_from_the_kustomization_spec() -> None:

@@ -26,6 +26,7 @@ from greenkube.automation.actions import (
     SetField,
     Support,
 )
+from greenkube.automation.actions import DeleteResource as DeletePrimitive
 from greenkube.automation.actions.container_resources import (
     container_operations,
     find_container,
@@ -47,6 +48,7 @@ from greenkube.gitops.contracts import (
     ValidationResult,
     WorkloadSource,
 )
+from greenkube.gitops.discovery.inventory import source_matches_target, target_namespace
 from greenkube.gitops.planning.digest import plan_digest
 from greenkube.gitops.renderers import RawRenderError, RawRenderResult, RenderedResource, render_raw
 
@@ -118,8 +120,8 @@ class RawManifestPlanner:
     renderer_kind = RendererKind.RAW
 
     def supports(self, op: PrimitiveOp, binding: WorkloadSource) -> Support:
-        """Raw manifests express every field edit of the bound resource (H6/H3 add create and delete)."""
-        if not isinstance(op, (SetField, RemoveField)):
+        """Raw manifests express every field edit of the bound resource and its deletion (H6)."""
+        if not isinstance(op, (SetField, RemoveField, DeletePrimitive)):
             return Support.unsupported(f"raw manifest planning does not support {op.op!r} primitives yet")
         if op.ref != _binding_target(op.ref, binding):
             return Support.unsupported("raw manifest planning edits the bound resource only")
@@ -148,6 +150,10 @@ class RawManifestPlanner:
             )
 
         target_resource = target_resources[0]
+        if _deletes_target(spec, action.target, operations):
+            return _plan_deletion(
+                action, source, snapshot, base_revision, spec, operations, scope_sources, before, target_resource
+            )
         target_path = target_resource.source_path
         original_sha = snapshot.original_blob_shas.get(target_path)
         if original_sha is None:
@@ -240,13 +246,12 @@ class RawManifestPlanner:
             raise RawManifestPlanError("source must use the raw renderer")
         if source.status is not BindingStatus.RESOLVED:
             raise RawManifestPlanError("workload source binding must be resolved")
-        if (
-            action.target.kind != source.workload_kind
-            or action.target.namespace != source.namespace
-            or action.target.name != source.workload_name
-        ):
+        if not source_matches_target(source, action.target):
             raise RawManifestPlanError("action target must match the resolved workload binding")
         spec, operations = _action_kind(action, RawManifestPlanError)
+        renderer_support = spec.renderer_support(RendererKind.RAW, operations)
+        if not renderer_support.ok:
+            raise RawManifestPlanError(renderer_support.reason or "the action cannot be expressed in a raw manifest")
         try:
             primitives = spec.compile(action.target, operations)
         except ActionKindError as exc:
@@ -459,7 +464,7 @@ def _binding_target(ref: ResourceTarget, binding: WorkloadSource) -> ResourceTar
     return ResourceTarget(
         api_version=ref.api_version,
         kind=binding.workload_kind,
-        namespace=binding.namespace,
+        namespace=target_namespace(binding.namespace),
         name=binding.workload_name,
     )
 
@@ -663,3 +668,160 @@ def _plan_identifier(action: ActionPlanV3, source: WorkloadSource, base_revision
     }
     encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return f"pln-{hashlib.sha256(encoded).hexdigest()[:24]}"
+
+
+# -- resource deletion (H6) -------------------------------------------------------------------
+def _deletes_target(spec: ActionKindSpec, target: ResourceTarget, operations: Sequence[TypedOperation]) -> bool:
+    try:
+        primitives = spec.compile(target, operations)
+    except ActionKindError as exc:
+        raise RawManifestPlanError(str(exc)) from exc
+    return any(isinstance(primitive, DeletePrimitive) and primitive.ref == target for primitive in primitives)
+
+
+def _plan_deletion(
+    action: ActionPlanV3,
+    source: WorkloadSource,
+    snapshot: RepositorySnapshot,
+    base_revision: str,
+    spec: ActionKindSpec,
+    operations: Sequence[TypedOperation],
+    scope_sources: Mapping[str, str | bytes],
+    before: RawRenderResult,
+    target_resource: RenderedResource,
+) -> FilePlan:
+    """Remove the target's manifest: the whole file, one document of it, or one ``List`` item."""
+    target_path = target_resource.source_path
+    original_sha = snapshot.original_blob_shas.get(target_path)
+    if original_sha is None:
+        raise RawManifestPlanError(f"{target_path}: original blob SHA is required for a deletion")
+    original_content = _decode_content(target_path, snapshot.contents[target_path])
+    updated_content = remove_resource_document(target_path, original_content, target_resource, action.target)
+
+    updated_sources = dict(scope_sources)
+    if updated_content is None:
+        del updated_sources[target_path]
+    else:
+        updated_sources[target_path] = updated_content
+    if updated_sources:
+        after = _render(updated_sources)
+    else:
+        after = RawRenderResult(
+            renderer=RendererKind.RAW,
+            resources=(),
+            warnings=(),
+            output_digest=f"sha256:{hashlib.sha256(b'[]').hexdigest()}",
+        )
+    _validate_rendered_change(before, after, action.target, action.target.kind, operations)
+
+    if updated_content is None:
+        file_edit = FileEdit(path=target_path, operation="delete", original_sha=original_sha)
+        diff = _unified_diff(original_content, "", f"a/{target_path}", "/dev/null")
+    else:
+        file_edit = FileEdit(path=target_path, operation="update", original_sha=original_sha, content=updated_content)
+        diff = _unified_diff(original_content, updated_content, f"a/{target_path}", f"b/{target_path}")
+    rendered_diff = _unified_diff(_rendered_json(before), _rendered_json(after), "rendered-before", "rendered-after")
+    kind_warnings = spec.planning_warnings(target_resource.manifest, action.target, source.evidence)
+    warnings = sorted(set(before.warnings) | set(after.warnings) | set(kind_warnings))
+    source_revision = source.source_revision or source.revision
+    validation = ValidationResult(
+        target_changed=True,
+        unrelated_changes=False,
+        requests_within_limits=True,
+        renderer=RendererKind.RAW,
+        output_digest=after.output_digest,
+        warnings=warnings,
+    )
+    plan_id = _plan_identifier(action, source, base_revision)
+    digest = plan_digest(
+        plan_id=plan_id,
+        action=action,
+        source=source,
+        files=[file_edit],
+        diff=diff,
+        rendered_diff=rendered_diff,
+        base_revision=base_revision,
+        source_revision=source_revision,
+        validation=validation,
+        warnings=warnings,
+        renderer=RendererKind.RAW,
+        error_type=RawManifestPlanError,
+    )
+    return FilePlan(
+        plan_id=plan_id,
+        files=[file_edit],
+        diff=diff,
+        rendered_diff=rendered_diff,
+        base_revision=base_revision,
+        source_revision=source_revision,
+        renderer=RendererKind.RAW,
+        validation=validation,
+        warnings=warnings,
+        digest=digest,
+    )
+
+
+def remove_resource_document(
+    path: str,
+    content: str,
+    target_resource: RenderedResource,
+    target: ResourceTarget,
+) -> str | None:
+    """``content`` without the target resource; ``None`` when nothing else is left (delete the file).
+
+    A ``kind: List`` loses one item, a multi-document YAML file loses one document and a
+    file holding only the target is deleted.
+    """
+    if PurePosixPath(path).suffix.lower() == ".json":
+        document = _load_json(path, content)
+        if _remove_list_item(document, target):
+            return _dump_json(content, document)
+        _matching_manifest(document, target)
+        return None
+
+    yaml = YAML(typ="rt")
+    yaml.allow_duplicate_keys = False
+    yaml.preserve_quotes = True
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    yaml.width = 4_096
+    if "\r\n" in content and "\n" not in content.replace("\r\n", ""):
+        yaml.line_break = "\r\n"
+    try:
+        documents = list(yaml.load_all(content))
+    except (YAMLError, RecursionError, ValueError, TypeError) as exc:
+        raise RawManifestPlanError(f"{path}: round-trip YAML parsing failed") from exc
+    index = target_resource.document_index
+    if index >= len(documents):
+        raise RawManifestPlanError(f"{path}: rendered document index is absent from the round-trip source")
+    if not _remove_list_item(documents[index], target):
+        _matching_manifest(documents[index], target)
+        del documents[index]
+    remaining = [document for document in documents if document is not None]
+    if not remaining:
+        return None
+    stream = io.StringIO()
+    try:
+        yaml.dump_all(remaining, stream)
+    except (YAMLError, RecursionError, ValueError, TypeError) as exc:
+        raise RawManifestPlanError(f"{path}: round-trip YAML serialization failed") from exc
+    updated = stream.getvalue()
+    if content.endswith(("\n", "\r")):
+        if not updated.endswith("\n"):
+            updated += "\n"
+    else:
+        updated = updated.rstrip("\r\n")
+    return updated
+
+
+def _remove_list_item(document: Any, target: ResourceTarget) -> bool:
+    """Remove the target from a ``kind: List`` document; ``False`` when ``document`` is not a List."""
+    if not isinstance(document, MutableMapping) or document.get("kind") != "List":
+        return False
+    items = document.get("items")
+    if not isinstance(items, list):
+        raise RawManifestPlanError("kind: List requires an items list")
+    matches = [index for index, item in enumerate(items) if isinstance(item, Mapping) and _matches_target(item, target)]
+    if len(matches) != 1:
+        raise RawManifestPlanError(f"document must contain exactly one resource matching {_target_description(target)}")
+    del items[matches[0]]
+    return True
