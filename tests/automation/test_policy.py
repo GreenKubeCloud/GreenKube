@@ -459,3 +459,33 @@ async def test_cooldown_reads_workload_history_with_one_batched_record_query():
     assert AutomationErrorCode.WORKLOAD_COOLDOWN_ACTIVE in _codes(result)
     cooldown = next(check for check in result.checks if check.gate == "cooldown")
     assert cooldown.state is PolicyCheckState.REJECTED
+
+
+@pytest.mark.asyncio
+async def test_min_coverage_is_evaluated_against_the_history_since_install():
+    """F7: a one-day-old install collecting every step passes minCoverage over a week lookback."""
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    recommendation = _recommendation().model_copy(
+        update={
+            "evidence": RecommendationEvidence(
+                sample_count=288,
+                coverage_ratio=288 / 2016,
+                observation_window_start=now - timedelta(days=7),
+                observation_window_end=now,
+                observation_window_seconds=7 * 86400,
+            )
+        }
+    )
+    strict = await _evaluator().evaluate([recommendation], _source())
+    assert next(c for c in strict.checks if c.gate == "sample_count_coverage").state is PolicyCheckState.REJECTED
+
+    evaluator = _evaluator()
+    evaluator.history_start = now - timedelta(days=1)
+    evaluator.step_seconds = 300
+    result = await evaluator.evaluate([recommendation], _source())
+
+    sample_check = next(check for check in result.checks if check.gate == "sample_count_coverage")
+    assert sample_check.state is PolicyCheckState.PASSED
+    assert sample_check.observed[0]["coverage_since_install"] == pytest.approx(1.0)

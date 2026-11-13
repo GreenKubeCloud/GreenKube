@@ -888,3 +888,40 @@ def test_create_does_not_read_recommendations_when_auto_approve_is_off(plan_api)
     assert response.status_code == 201
     assert response.json()["auto_approved"] is False and response.json()["auto_approve_blockers"] == []
     assert queue.operations == {}
+
+
+@pytest.mark.parametrize("status", ["dismissed", "applied", "expired"])
+def test_create_reports_not_active_for_a_recommendation_that_is_no_longer_active(plan_api, status):
+    """Planning a non-active recommendation is a lifecycle problem, not a container-target one."""
+    from greenkube.api.dependencies import get_recommendation_repository
+
+    client, app, _, service, _ = plan_api
+    app.dependency_overrides[get_recommendation_repository] = lambda: _Recommendations(status=status)
+
+    response = client.post("/api/v1/automation/plans", json={"recommendation_ids": [42]})
+
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "not_active"
+    assert service.preparation.calls == []
+
+
+def test_create_reports_not_active_when_a_grouped_recommendation_is_no_longer_active(plan_api):
+    from types import SimpleNamespace
+
+    from greenkube.api.dependencies import get_recommendation_repository
+
+    class _Grouped:
+        async def get_recommendation_by_id(self, recommendation_id: int):
+            if recommendation_id == 42:
+                return SimpleNamespace(status="active", action=SimpleNamespace(recommendation_ids=[42, 43]))
+            if recommendation_id == 43:
+                return SimpleNamespace(status="dismissed", action=None)
+            return None
+
+    client, app, _, _, _ = plan_api
+    app.dependency_overrides[get_recommendation_repository] = lambda: _Grouped()
+
+    response = client.post("/api/v1/automation/plans", json={"recommendation_ids": [42]})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "not_active"

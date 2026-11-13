@@ -363,6 +363,70 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             )
         return bool(updated)
 
+    async def record_provider_feature_note(
+        self,
+        provider_id: str,
+        feature: str,
+        error_code: str | None,
+        *,
+        observed_at: datetime | None = None,
+    ) -> None:
+        """Record (``error_code``) or clear (``None``) a degraded best-effort feature of a provider.
+
+        A refused label, reviewer, comment or commit-status call keeps the provider
+        ``verified``; the feature is noted here until a call of it succeeds again.
+        """
+        if not feature.strip():
+            raise ValueError("feature must not be blank")
+        async with self._transaction() as connection:
+            if error_code is None:
+                await self._execute(
+                    connection,
+                    "DELETE FROM gitops_provider_feature_notes WHERE provider_id = ? AND feature = ?",
+                    (provider_id, feature),
+                )
+                return
+            exists = await self._fetchrow(connection, "SELECT id FROM gitops_providers WHERE id = ?", (provider_id,))
+            if exists is None:
+                return
+            observed = ensure_utc(observed_at) if observed_at is not None else datetime.now(timezone.utc)
+            await self._execute(
+                connection,
+                """
+                INSERT INTO gitops_provider_feature_notes (provider_id, feature, error_code, observed_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (provider_id, feature) DO UPDATE SET
+                    error_code = excluded.error_code,
+                    observed_at = excluded.observed_at
+                """,
+                (provider_id, feature, error_code, self._db_datetime(observed)),
+            )
+
+    async def list_provider_feature_notes(self, provider_id: str | None = None) -> list[dict[str, Any]]:
+        """Degraded best-effort features, as ``{provider_id, feature, error_code, observed_at}``."""
+        query = "SELECT provider_id, feature, error_code, observed_at FROM gitops_provider_feature_notes"
+        params: tuple[Any, ...] = ()
+        if provider_id is not None:
+            query += " WHERE provider_id = ?"
+            params = (provider_id,)
+        query += " ORDER BY provider_id, feature"
+        async with self.db_manager.connection_scope() as connection:
+            rows = await self._fetch(connection, query, params)
+        notes = []
+        for row in rows:
+            observed = row["observed_at"]
+            if isinstance(observed, str):
+                observed = datetime.fromisoformat(observed)
+            notes.append(
+                {
+                    "provider_id": str(row["provider_id"]),
+                    "feature": str(row["feature"]),
+                    "error_code": str(row["error_code"]),
+                    "observed_at": ensure_utc(observed) if isinstance(observed, datetime) else None,
+                }
+            )
+        return notes
+
     async def get_provider_config(self, provider_id: str) -> GitOpsProviderConfig | None:
         async with self.db_manager.connection_scope() as connection:
             row = await self._fetchrow(connection, "SELECT * FROM gitops_providers WHERE id = ?", (provider_id,))

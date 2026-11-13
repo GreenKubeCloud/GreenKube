@@ -1856,3 +1856,33 @@ async def test_delivery_mode_is_recorded_on_approved_plans_and_survives_resaves(
         await repository.set_plan_delivery_mode(
             plan.plan_id, "push", expected_digest=plan.digest, expected_statuses=approved_only
         )
+
+
+@pytest.mark.asyncio
+async def test_provider_feature_notes_keep_the_provider_verified(gitops_store):
+    """A refused best-effort feature is a note next to a verified provider, cleared on success."""
+    repository, _, _ = gitops_store
+    await repository.save_provider_config(
+        GitOpsProviderConfig(
+            id="github-main", provider_type="github", secret_name="git-token", secret_key="token", enabled=True
+        )
+    )
+    assert await repository.record_provider_check("github-main", "verified") is True
+
+    await repository.record_provider_feature_note("github-main", "pull_request_metadata", "permission_denied")
+    await repository.record_provider_feature_note("github-main", "comments", "permission_denied")
+    await repository.record_provider_feature_note("github-main", "comments", "permission_denied")
+    await repository.record_provider_feature_note("missing-provider", "comments", "permission_denied")
+
+    notes = await repository.list_provider_feature_notes()
+    assert [(note["provider_id"], note["feature"], note["error_code"]) for note in notes] == [
+        ("github-main", "comments", "permission_denied"),
+        ("github-main", "pull_request_metadata", "permission_denied"),
+    ]
+    assert all(note["observed_at"] is not None for note in notes)
+    provider = await repository.get_provider_config("github-main")
+    assert provider is not None and (provider.status, provider.last_error_code) == ("verified", None)
+
+    await repository.record_provider_feature_note("github-main", "comments", None)
+    remaining = await repository.list_provider_feature_notes("github-main")
+    assert [note["feature"] for note in remaining] == ["pull_request_metadata"]

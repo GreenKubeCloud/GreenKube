@@ -56,7 +56,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +94,10 @@ GITHUB_APP_PRIVATE_KEY = "privateKey"
 _MAX_HOST_VALUE_BYTES = 512
 #: A failed self-hosted probe is retried after this delay; a success is kept.
 PROBE_RETRY_SECONDS = 600.0
+#: The GitHub App installation repository selection is read again after this delay.
+APP_SELECTION_REFRESH_SECONDS = 300.0
+#: A discovered repository the GitHub App installation does not cover.
+GITHUB_APP_NOT_INSTALLED = "github_app_not_installed"
 PROBE_TIMEOUT_SECONDS = 5.0
 
 STATE_ACTIVE = "active"
@@ -104,6 +108,25 @@ CAPABILITIES = ("discovery", "preview", "delivery", "sync_tracking", "webhooks",
 
 #: Discovery capability keys of the GitOps controllers themselves (not their sources).
 _CONTROLLER_CAPABILITIES = ("argocd", "flux_kustomization", "flux_helm_release")
+#: Controller family of each discovery capability key: the setup checklist names
+#: the GitOps controllers people install (Argo CD, Flux), not their CRD kinds.
+CONTROLLER_FAMILIES: Mapping[str, str] = {
+    "argocd": "argocd",
+    "flux_kustomization": "flux",
+    "flux_helm_release": "flux",
+}
+
+
+def controller_families(kinds: Iterable[Any]) -> list[str]:
+    """Distinct controller families (``argocd``, ``flux``) of discovery capability keys, in order."""
+    families: list[str] = []
+    for kind in kinds:
+        family = CONTROLLER_FAMILIES.get(str(kind), str(kind))
+        if family and family not in families:
+            families.append(family)
+    return families
+
+
 _WELL_KNOWN_HOSTS: Mapping[str, str] = {"github.com": "github", "gitlab.com": "gitlab"}
 _PROVIDER_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -247,12 +270,35 @@ def allowlist_matches(repository: str, patterns: Iterable[str]) -> bool:
 class CredentialsInspector:
     """Checks which mounted Secret keys exist, without reading their values into memory."""
 
-    def __init__(self, mount_path: str | Path | None = None) -> None:
-        from greenkube.automation.git.k8s_secret_resolver import MountedSecretFileResolver
+    def __init__(self, mount_path: str | Path | None = None, *, api_secret: Any = None) -> None:
+        from greenkube.automation.git.k8s_secret_resolver import _PROCESS_WIDE, MountedSecretFileResolver
 
-        self._resolver = MountedSecretFileResolver(mount_path)
+        # Without a mount path (production), the default Secret is also read through the
+        # Kubernetes API (get/watch on its one name): creating it activates delivery on the
+        # next tick instead of after the kubelet's volume refresh.
+        selected = api_secret if api_secret is not None else (_PROCESS_WIDE if mount_path is None else None)
+        self._resolver = MountedSecretFileResolver(mount_path, api_secret=selected)
+        #: Only the process-wide reader is watched (one watch per process, controller).
+        self._watch = selected is _PROCESS_WIDE
+
+    async def refresh(self, secret_name: str) -> None:
+        """Read the default Secret through the API now and keep watching it (controller)."""
+        try:
+            await self._resolver.refresh_api_secret(secret_name)
+            if self._watch:
+                self._resolver.start_api_watch(secret_name)
+        except Exception as error:  # the mounted files remain the fallback
+            logger.debug("Default credentials API read failed (%s).", type(error).__name__)
+
+    @property
+    def resolver(self) -> Any:
+        """The Secret resolver (mounted files, and the API view of the default Secret)."""
+        return self._resolver
 
     def _present(self, namespace: str | None, name: str, key: str) -> bool:
+        from_api = self._resolver.api_key_present(namespace, name, key)
+        if from_api is not None:
+            return from_api
         try:
             path = self._resolver.path_for_reference(namespace, name, key)
             return path.is_file() and path.stat().st_size > 0
@@ -270,6 +316,12 @@ class CredentialsInspector:
     def default_credentials_host(self, secret_name: str) -> str | None:
         """Host the default token is bound to (``host`` key, else ``apiBaseUrl``); not a secret."""
         for key in DEFAULT_CREDENTIALS_HOST_KEYS:
+            if self._resolver.api_key_present(None, secret_name, key) is not None:
+                value = self._resolver.api_value(None, secret_name, key)
+                host = normalize_credentials_host((value or b"")[:_MAX_HOST_VALUE_BYTES].decode("utf-8", "replace"))
+                if host:
+                    return host
+                continue
             try:
                 path = self._resolver.path_for_reference(None, secret_name, key)
                 if not path.is_file():
@@ -394,6 +446,9 @@ class _HostPlan:
     #: The default credentials may be sent to this host (see ``_bind_default_credentials``).
     credentials_bound: bool = False
     credentials_reason: str | None = None
+    #: ``owner/name`` (lowercase) of the repositories the GitHub App installation covers, when
+    #: the default credentials are a GitHub App bound to this host; None otherwise or unknown.
+    app_selection: frozenset[str] | None = None
 
 
 class AutomationReadiness:
@@ -412,6 +467,7 @@ class AutomationReadiness:
         request_discovery: Callable[[], Awaitable[Any]] | None = None,
         renderer_status: Callable[[], Awaitable[Mapping[str, Any] | None]] | None = None,
         webhooks_configured: Callable[[], bool] | None = None,
+        app_repositories: Callable[[Any, str | None], Awaitable[set[str]]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -430,6 +486,9 @@ class AutomationReadiness:
         self._clock = clock
         self._monotonic = monotonic
         self._probes: dict[str, tuple[ProviderInference | None, float]] = {}
+        self._app_repositories = app_repositories or _list_app_repositories
+        #: Last GitHub App selection by host: (repositories, monotonic read time).
+        self._app_selections: dict[str, tuple[frozenset[str], float]] = {}
         self._snapshot: ReadinessSnapshot | None = None
 
     # -- state read by the controller loops ------------------------------------------
@@ -454,6 +513,8 @@ class AutomationReadiness:
 
     async def run_once(self) -> ReadinessSnapshot:
         default_secret = str(getattr(self._config, "GITOPS_DEFAULT_CREDENTIALS_SECRET", "") or "")
+        if default_secret:
+            await self._credentials.refresh(default_secret)
         default_kind = self._credentials.default_credentials(default_secret) if default_secret else None
         patterns = tuple(getattr(self._config, "automation_repository_allowlist", (DISCOVERED_REPOSITORIES,)))
         allowed = await self._store.list_allowed_repositories()
@@ -465,6 +526,8 @@ class AutomationReadiness:
             self._credentials.default_credentials_host(default_secret) if default_secret and default_kind else None
         )
         _bind_default_credentials(hosts, credentials_host, default_kind)
+        if default_kind == "github_app":
+            await self._read_app_selections(hosts, default_secret)
 
         changed = await self._apply_inferred_providers(
             hosts, providers, default_secret, default_kind, patterns, allowed
@@ -534,6 +597,49 @@ class AutomationReadiness:
         self._probes[base_url] = (result, now)
         return result
 
+    async def _read_app_selections(self, hosts: Mapping[str, _HostPlan], default_secret: str) -> None:
+        """Read the GitHub App installation repository selection of each bound GitHub host.
+
+        The repositories the App was installed on are the administrator's choice of
+        where GreenKube may open pull requests: they become the inferred provider's
+        allowlist. A failed read keeps the last known selection; without one, the
+        ``@discovered`` expansion applies (installation tokens still fail closed for
+        repositories the App cannot access).
+        """
+        for plan in hosts.values():
+            if plan.explicit or not plan.credentials_bound or plan.inference is None:
+                continue
+            if plan.inference.provider_type != "github":
+                continue
+            cached = self._app_selections.get(plan.host)
+            now = self._monotonic()
+            if cached is not None and now - cached[1] < APP_SELECTION_REFRESH_SECONDS:
+                plan.app_selection = cached[0]
+                continue
+            try:
+                credentials = await self._app_credentials(default_secret)
+                api_base_url = plan.inference.api_base_url or (
+                    None if plan.host == "github.com" else f"{plan.base_url}/api/v3"
+                )
+                names = await self._app_repositories(credentials, api_base_url)
+                selection = frozenset(name.lower() for name in names)
+                self._app_selections[plan.host] = (selection, now)
+                plan.app_selection = selection
+            except Exception as error:
+                logger.info("GitHub App repository selection of %s unavailable (%s).", plan.host, type(error).__name__)
+                plan.app_selection = cached[0] if cached is not None else None
+
+    async def _app_credentials(self, default_secret: str) -> Any:
+        from greenkube.automation.git.credentials import GitProviderCredentialResolver
+
+        config = GitOpsProviderConfig(
+            id="default-credentials",
+            provider_type="github",
+            secret_name=default_secret,
+            secret_key=GITHUB_APP_PRIVATE_KEY,
+        )
+        return await GitProviderCredentialResolver(self._credentials.resolver).resolve_credentials(config)
+
     async def _apply_inferred_providers(
         self,
         hosts: Mapping[str, _HostPlan],
@@ -577,14 +683,17 @@ class AutomationReadiness:
                     )
                 await self._repository.save_provider_config(desired)
                 changed = True
-            names = {
-                ref.repository
-                for ref in plan.refs.values()
-                if DISCOVERED_REPOSITORIES in patterns
-                or allowlist_matches(ref.repository, patterns)
-                or ref.repo_url in allowed_by_url
-            }
-            names.update(pattern for pattern in patterns if pattern != DISCOVERED_REPOSITORIES)
+            if bound and plan.app_selection is not None:
+                names = _app_allowlist(plan, patterns, allowed_by_url)
+            else:
+                names = {
+                    ref.repository
+                    for ref in plan.refs.values()
+                    if DISCOVERED_REPOSITORIES in patterns
+                    or allowlist_matches(ref.repository, patterns)
+                    or ref.repo_url in allowed_by_url
+                }
+                names.update(pattern for pattern in patterns if pattern != DISCOVERED_REPOSITORIES)
             changed = await self._reconcile_allowlist(provider_id, names, exact=True) or changed
         for provider_id, previous in existing.items():
             if provider_id in wanted:
@@ -671,6 +780,11 @@ class AutomationReadiness:
                 credentials = bool(
                     provider and provider.enabled and self._credentials.provider_has_credentials(provider)
                 )
+                not_installed = (
+                    not plan.explicit
+                    and plan.app_selection is not None
+                    and ref.repository.lower() not in plan.app_selection
+                )
                 preview = _preview_state(
                     provider=provider,
                     known=bool(plan.explicit or plan.inference),
@@ -680,6 +794,8 @@ class AutomationReadiness:
                     resolved=ref.repo_url in resolved_urls,
                     credentials_reason=None if plan.explicit else plan.credentials_reason,
                 )
+                if not_installed:
+                    preview = CapabilityState(STATE_DORMANT, GITHUB_APP_NOT_INSTALLED)
                 # patch and ci modes (F4) deliver with read access only: a person or a CI job
                 # writes to Git, so delivery is exactly as available as previews.
                 if paused:
@@ -734,7 +850,10 @@ class AutomationReadiness:
         if status:
             controllers = [name for name in _CONTROLLER_CAPABILITIES if _available(status.get(name))]
         if controllers or bindings:
-            return CapabilityState(STATE_ACTIVE, details={"controllers": controllers})
+            return CapabilityState(
+                STATE_ACTIVE,
+                details={"controllers": controller_families(controllers), "source_kinds": controllers},
+            )
         if status is None:
             return CapabilityState(STATE_PENDING, "discovery_not_run")
         return CapabilityState(STATE_DORMANT, "no_gitops_controller")
@@ -800,6 +919,38 @@ def _bind_default_credentials(
             plan.credentials_bound, plan.credentials_reason = True, None
         else:
             plan.credentials_bound, plan.credentials_reason = False, CREDENTIALS_HOST_AMBIGUOUS
+
+
+def _app_allowlist(plan: _HostPlan, patterns: Sequence[str], allowed_by_url: Set[str] = frozenset()) -> set[str]:
+    """Allowlist of an inferred GitHub provider authenticated as a GitHub App.
+
+    The installation's repository selection is the allowlist. ``@discovered``
+    keeps every selected repository; explicit ``owner/repo`` patterns narrow it.
+    Repositories an administrator allowed (``allowed_by_url``) are kept when the
+    App is installed on them: the App cannot write anywhere else.
+    Discovered repositories are added under the spelling discovery uses, since
+    GitHub names are case-insensitive but the allowlist match is not.
+    """
+    selection = plan.app_selection or frozenset()
+    explicit = [pattern for pattern in patterns if pattern != DISCOVERED_REPOSITORIES]
+    selected_refs = [ref for ref in plan.refs.values() if ref.repository.lower() in selection]
+    candidates = set(selection)
+    candidates.update(ref.repository for ref in selected_refs)
+    if DISCOVERED_REPOSITORIES in patterns:
+        return candidates
+    names = {
+        name
+        for name in candidates
+        if allowlist_matches(name, explicit) or allowlist_matches(name.lower(), [p.lower() for p in explicit])
+    }
+    names.update(ref.repository for ref in selected_refs if ref.repo_url in allowed_by_url)
+    return names
+
+
+async def _list_app_repositories(credentials: Any, api_base_url: str | None) -> set[str]:
+    from greenkube.automation.git.github_app import installation_repositories
+
+    return await installation_repositories(credentials, api_base_url=api_base_url)
 
 
 def _connection(config: GitOpsProviderConfig) -> tuple[Any, ...]:

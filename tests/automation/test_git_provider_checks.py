@@ -109,3 +109,65 @@ async def test_a_failed_state_write_never_fails_the_call():
             raise RuntimeError("database down")
 
     await ProviderCheckRecorder(Broken()).bind("github-main").succeeded()
+
+
+class NotingRepository(RecordingRepository):
+    def __init__(self):
+        super().__init__()
+        self.notes: list[tuple[str, str, str | None]] = []
+
+    async def record_provider_feature_note(self, provider_id: str, feature: str, error_code: str | None) -> None:
+        self.notes.append((provider_id, feature, error_code))
+
+
+@pytest.mark.asyncio
+async def test_refused_labels_and_comments_keep_the_provider_verified_with_a_feature_note():
+    """A token without issues permission (labels, comments) is still a working credential."""
+    from greenkube.automation.git.base import PullRequestInfo
+
+    repository = NotingRepository()
+    registry = GitProviderRegistry(cast(GitOpsProviderRepository, repository), StubSecretResolver())
+    provider = await registry.get_provider("github-main", _repository())
+    pull_request = PullRequestInfo(number=7, url=_PULL["html_url"], status="open", raw=_PULL)
+    with respx.mock:
+        respx.get("https://api.github.test/repos/acme/manifests/pulls/7").mock(return_value=Response(200, json=_PULL))
+        respx.post("https://api.github.test/repos/acme/manifests/issues/7/labels").mock(
+            return_value=Response(403, json={"message": "Resource not accessible by personal access token"})
+        )
+        respx.get("https://api.github.test/user").mock(return_value=Response(200, json={"id": 1}))
+        respx.get(url__startswith="https://api.github.test/repos/acme/manifests/issues/7/comments").mock(
+            return_value=Response(403, json={"message": "Resource not accessible by personal access token"})
+        )
+        await provider.get_pull_request(_repository(), 7)
+        with pytest.raises(GitProviderError):
+            await provider.add_pull_request_metadata(_repository(), pull_request, labels=["greenkube"])
+        with pytest.raises(GitProviderError):
+            await provider.upsert_pull_request_comment(
+                _repository(), 7, marker="<!-- gk -->", body="<!-- gk -->\nhello"
+            )
+    await provider.close()
+
+    assert repository.checks == [("github-main", "verified", None)]
+    assert repository.notes == [
+        ("github-main", "pull_request_metadata", "permission_denied"),
+        ("github-main", "comments", "permission_denied"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_feature_note_is_cleared_after_the_feature_works_again():
+    now = [0.0]
+    repository = NotingRepository()
+    checks = ProviderCheckRecorder(repository, clock=lambda: now[0]).bind("github-main")
+
+    await checks.failed(GitProviderError("refused", status_code=403), feature="commit_status")
+    await checks.failed(GitProviderError("refused", status_code=403), feature="commit_status")
+    await checks.succeeded(feature="commit_status")
+    # A 403 on a required call still marks the provider in error.
+    await checks.failed(GitProviderError("refused", status_code=403))
+
+    assert repository.notes == [
+        ("github-main", "commit_status", "permission_denied"),
+        ("github-main", "commit_status", None),
+    ]
+    assert repository.checks == [("github-main", "verified", None), ("github-main", "error", "permission_denied")]

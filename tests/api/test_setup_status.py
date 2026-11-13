@@ -279,3 +279,22 @@ def test_allowlisting_requires_the_admin_scope():
     assert required_scope("POST", "/api/v1/automation/repositories/allowlist") == "admin"
     assert required_scope("GET", "/api/v1/automation/repositories/suggestions") == "read"
     assert required_scope("GET", "/api/v1/setup/status") == "read"
+
+
+def test_controllers_check_lists_families_not_crd_kinds(client, inputs):
+    rows = [row for row in _globals() if row.subject != "discovery"]
+    rows.append(
+        CapabilityRow(
+            "global",
+            "discovery",
+            "active",
+            {"reason": None, "controllers": ["argocd", "flux_kustomization", "flux_helm_release"]},
+            _now(),
+        )
+    )
+    inputs.rows = [*rows, _repo_row()]
+
+    check = _checks(client.get("/api/v1/setup/status").json())["gitops_controllers"]
+
+    assert check["status"] == "ok"
+    assert check["reason"] == "Discovered: argocd, flux."

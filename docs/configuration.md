@@ -244,7 +244,8 @@ On-premises clusters should set both `cpuCoreHour` and `ramGiBHour`; every proje
 ### GitOps automation (`automation`)
 
 Automation is always on (roadmap F12): discovery runs whenever Argo CD or Flux is present, and pull-request
-delivery activates within one to two minutes of creating the credentials Secret, without upgrade or restart. The
+delivery activates within 60 seconds of creating the credentials Secret (read by name through the Kubernetes
+API), without upgrade or restart. The
 controller's `automation-readiness` loop infers the provider of each discovered repository, enables it while the
 Secret is mounted, expands `@discovered` and reports every capability in `GET /api/v1/setup/status`. The full
 workflow, supported source layouts, and security model are documented in [GitOps automation](automation.md). The

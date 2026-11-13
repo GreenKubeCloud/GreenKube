@@ -25,7 +25,7 @@ from greenkube.api.schemas import (
     AutomationPlanValidationResponse,
 )
 from greenkube.auth.principal import Scope
-from greenkube.automation.plans import AutomationPlanError, maybe_auto_approve
+from greenkube.automation.plans import AutomationPlanError, ensure_recommendations_active, maybe_auto_approve
 from greenkube.core.config import get_config
 from greenkube.core.optimization.eligibility import AutoApprovePolicy
 from greenkube.gitops.contracts import AutomationErrorCode, Operation, Plan, PlanStatus, public_repository_url
@@ -56,6 +56,7 @@ _DOMAIN_ERRORS: dict[AutomationErrorCode, tuple[int, str]] = {
         "The source already declares the proposed requests; a pull request would change nothing.",
     ),
     AutomationErrorCode.REQUIRES_CONTAINER_TARGET: (422, "The action requires a supported container target."),
+    AutomationErrorCode.NOT_ACTIVE: (409, "Only active recommendations can be planned."),
     AutomationErrorCode.UNSAFE_PATH: (422, "The plan contains an unsafe repository path."),
     AutomationErrorCode.PROVIDER_NOT_READY: (424, "A required Git provider dependency is not ready."),
     AutomationErrorCode.PROVIDER_CAPABILITY_MISSING: (424, "The configured Git provider lacks a required capability."),
@@ -123,6 +124,8 @@ async def create_automation_plan(
     if service is None:
         return _service_unavailable("plan_preparation_unavailable", "Server-side plan preparation is not configured.")
     try:
+        # A dismissed, applied or expired recommendation is "not_active", not a targeting problem.
+        await ensure_recommendations_active(recommendations, request.recommendation_ids)
         if request.values_mapping is None:
             plan = await service.prepare_plan(
                 request.recommendation_ids,

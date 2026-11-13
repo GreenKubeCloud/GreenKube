@@ -454,6 +454,12 @@ class GitCommitRequest:
                 raise GitProviderError(f"Git commit request requires a valid {field_name}.")
 
 
+#: Open pull requests read per repository and base branch by the plan trailer linkage.
+OPEN_PULL_REQUEST_SCAN_LIMIT = 50
+#: Commit messages read per pull request by the plan trailer linkage.
+PULL_REQUEST_COMMIT_SCAN_LIMIT = 50
+
+
 @dataclass
 class GitCommitResult:
     """Result of a single atomic commit containing multiple file edits."""
@@ -461,6 +467,10 @@ class GitCommitResult:
     commit_sha: str
     branch: str
     files_changed: List[str]
+    #: The platform's signature verification of the new commit (J8): True when it shows as
+    #: Verified (GitHub App commits), False when unsigned or unverified, None when unknown.
+    verified: Optional[bool] = None
+    verification_reason: Optional[str] = None
 
 
 def repository_matches_allowlist(repository_name: str, pattern: str) -> bool:
@@ -526,6 +536,10 @@ class GitProvider(ABC):
     """Adapter contract for a Git platform."""
 
     name: str = "git"
+    #: The platform signs the commits this adapter creates through its API (J8). A GitHub App
+    #: installation commit shows as Verified only when it names no author or committer, so
+    #: the adapter omits both and GitHub attributes the commit to the App's bot.
+    platform_signed_commits: bool = False
 
     def __init__(
         self,
@@ -1091,6 +1105,69 @@ class GitProvider(ABC):
         if not isinstance(context, str) or not context.strip() or len(context) > 255:
             raise GitProviderError("Commit status context must be 1-255 characters.")
         return _validate_full_commit_sha(sha, provider=self.name, ref=str(sha))
+
+    # -- plan trailer linkage (F4 patch mode) -------------------------------------------
+
+    def _open_pull_requests_query(self, repo: GitRepository, base: str, limit: int) -> tuple[str, dict[str, str]]:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.FIND_PULL_REQUEST)
+
+    def _pull_request_commits_path(self, repo: GitRepository, number: int) -> str:
+        raise GitProviderCapabilityError(self.name, GitProviderCapability.FIND_PULL_REQUEST)
+
+    async def list_open_pull_requests(
+        self, repo: GitRepository, base: str, *, limit: int = OPEN_PULL_REQUEST_SCAN_LIMIT
+    ) -> List[PullRequestInfo]:
+        """The most recent open pull requests targeting ``base`` (one page, at most ``limit``).
+
+        Used to link a ``patch``-mode pull request opened from any branch to its plan by
+        the ``GreenKube-Plan`` trailer. Items that do not validate are skipped.
+        """
+        base = validate_git_ref(base, field="base branch")
+        limit = max(1, min(int(limit), 100))
+        path, params = self._open_pull_requests_query(repo, base, limit)
+        response = await self._request("GET", path, params=params)
+        if response.status_code == 404:
+            raise GitProviderError(f"Could not list pull requests in {repo.full_name}: repository not found.")
+        result: List[PullRequestInfo] = []
+        for item in parse_pull_request_list(response, repo=repo)[:limit]:
+            base_data = item.get("base")
+            target = base_data.get("ref") if isinstance(base_data, dict) else item.get("target_branch")
+            if target != base:
+                continue
+            try:
+                result.append(normalize_pull_request(item, repo=repo))
+            except GitProviderError:
+                continue
+        return result
+
+    async def list_pull_request_commit_messages(
+        self, repo: GitRepository, number: int, *, limit: int = PULL_REQUEST_COMMIT_SCAN_LIMIT
+    ) -> List[str]:
+        """Commit messages of a pull request (first page, at most ``limit``)."""
+        number = self._validate_pull_request_number(repo, number)
+        limit = max(1, min(int(limit), 100))
+        response = await self._request(
+            "GET",
+            self._pull_request_commits_path(repo, number),
+            params={"per_page": str(limit), "limit": str(limit)},
+        )
+        if response.status_code == 404:
+            raise GitProviderError(f"Could not list the commits of pull request {number} in {repo.full_name}.")
+        try:
+            data = response.json()
+        except ValueError:
+            raise GitProviderError(f"{self.name} returned an invalid pull-request commit list.") from None
+        if not isinstance(data, list):
+            raise GitProviderError(f"{self.name} returned an invalid pull-request commit list.")
+        messages: List[str] = []
+        for item in data[:limit]:
+            if not isinstance(item, dict):
+                continue
+            commit = item.get("commit")
+            message = commit.get("message") if isinstance(commit, dict) else item.get("message")
+            if isinstance(message, str):
+                messages.append(message)
+        return messages
 
     async def upsert_pull_request_comment(
         self,

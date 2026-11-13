@@ -302,7 +302,10 @@ def _gitops_check(row: Optional[CapabilityRow], snapshot_fresh: bool) -> SetupCh
             docs,
         )
     if row.state == "active":
-        controllers = ", ".join(row.payload.get("controllers") or []) or "workload sources"
+        from greenkube.automation.readiness import controller_families
+
+        # Rows written before families were recorded hold CRD kinds: map them too.
+        controllers = ", ".join(controller_families(row.payload.get("controllers") or [])) or "workload sources"
         return _check(
             "gitops_controllers", "gitops", title, "ok", f"Discovered: {controllers}.", "Nothing to do.", docs
         )
@@ -595,6 +598,11 @@ async def setup_status() -> SetupStatus:
     capability_rows, _ = await _safe(_capabilities, "automation capabilities")
     heartbeat, _ = await _safe(_executor_heartbeat, "the plan executor heartbeat")
     earliest, earliest_ok = await _safe(_earliest_sample, "collected metrics")
+    if earliest_ok:
+        from greenkube.automation.policy import set_history_start
+
+        # Shared with the recommendation warm-up gates (F7).
+        set_history_start(earliest)
 
     rows = capability_rows or []
     globals_ = {row.subject: row for row in rows if row.scope == SCOPE_GLOBAL}

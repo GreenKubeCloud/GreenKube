@@ -696,6 +696,13 @@ class GiteaProvider(GitProvider):
             )
         return normalize_pull_request(response.json(), repo=repo)
 
+    def _open_pull_requests_query(self, repo: GitRepository, base: str, limit: int) -> tuple[str, dict[str, str]]:
+        # Gitea has no base-branch filter: the base is checked on every item.
+        return (f"/repos/{repo.owner}/{repo.name}/pulls", {"state": "open", "sort": "newest", "limit": str(limit)})
+
+    def _pull_request_commits_path(self, repo: GitRepository, number: int) -> str:
+        return f"/repos/{repo.owner}/{repo.name}/pulls/{number}/commits"
+
     async def get_pull_request(self, repo: GitRepository, number: int) -> PullRequestInfo:
         if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
             raise GitProviderError("Pull-request number must be a positive integer.")

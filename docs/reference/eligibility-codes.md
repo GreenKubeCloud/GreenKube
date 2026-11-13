@@ -39,7 +39,7 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 
 | Code | Meaning | Fix |
 |---|---|---|
-| `not_active` | The recommendation is ignored, applied, stale, expired or being verified. | Un-ignore it, or wait for the next scan to refresh it. |
+| `not_active` | The recommendation is ignored, applied, stale, expired or being verified. Plan creation (`POST /api/v1/automation/plans`) answers `409 not_active` too when a requested recommendation, or one grouped with it, is no longer active. | Un-ignore it, or wait for the next scan to refresh it. |
 | `pull_request_open` | A pull request is already open for this recommendation (its status is `pr_open` until the merged change is observed in the cluster). | Review and merge or close it. |
 | `pull_requests_unavailable` | The open pull requests could not be read, so a duplicate cannot be ruled out. Reported for active recommendations GreenKube could otherwise deliver (fail closed). | Check the database connection, then retry. |
 

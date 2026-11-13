@@ -473,14 +473,24 @@ def _binding_ttl() -> timedelta:
     return configured_binding_ttl()
 
 
-def warm_up(record: Any, policy: AutomationPolicyConfig, step_seconds: int, now: datetime) -> tuple:
+def warm_up(
+    record: Any,
+    policy: AutomationPolicyConfig,
+    step_seconds: int,
+    now: datetime,
+    history_start: Optional[datetime] = None,
+) -> tuple:
     """Warm-up state from the evidence against the policy minimums (F7).
 
-    Returns ``(blocker or None, eligible_at or None)``. Samples accrue at one
-    per query step (a conservative estimate for multi-replica workloads), so
-    the minimum sample count and the minimum coverage of the observation
-    window are reached after a computable delay from the end of the window.
+    Returns ``(blocker or None, eligible_at or None)``. ``minCoverage`` is
+    evaluated against the data available since install (the first collected
+    sample, ``history_start``, by default the process-wide cached value), capped
+    at the lookback, and ``eligible_at = first sample + minSamples query steps``
+    (samples accrue at one per step, a conservative estimate for multi-replica
+    workloads).
     """
+    from greenkube.automation.policy import coverage_since_history, evidence_eligible_at, known_history_start
+
     evidence = getattr(record, "evidence", None)
     if evidence is None:
         return (
@@ -492,20 +502,19 @@ def warm_up(record: Any, policy: AutomationPolicyConfig, step_seconds: int, now:
             None,
         )
     samples = int(getattr(evidence, "sample_count", 0) or 0)
-    coverage = float(getattr(evidence, "coverage_ratio", 0.0) or 0.0)
+    step = max(int(step_seconds or 300), 1)
+    start = history_start if history_start is not None else known_history_start()
+    coverage = coverage_since_history(evidence, start, step)
     if samples >= policy.min_samples and coverage >= policy.min_coverage:
         return None, None
 
-    step = max(int(step_seconds or 300), 1)
-    window = getattr(evidence, "observation_window_seconds", None)
-    end = getattr(evidence, "observation_window_end", None)
-    remaining = max(policy.min_samples - samples, 0) * step
-    if coverage < policy.min_coverage and window and math.isfinite(float(window)):
-        remaining = max(remaining, (policy.min_coverage - coverage) * float(window))
-    eligible_at: Optional[datetime] = None
-    if isinstance(end, datetime):
-        end = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
-        eligible_at = end + timedelta(seconds=remaining)
+    eligible_at: Optional[datetime] = evidence_eligible_at(
+        evidence,
+        min_samples=policy.min_samples,
+        min_coverage=policy.min_coverage,
+        step_seconds=step,
+        history_start=start,
+    )
 
     detail = (
         f"Collecting evidence: {samples}/{policy.min_samples} samples, "

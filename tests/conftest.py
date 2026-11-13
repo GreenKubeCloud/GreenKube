@@ -121,3 +121,13 @@ def reset_savings_metrics_refresh_cache():
     if module is not None:
         module.reset_savings_refresh_cache()
     yield
+
+
+@pytest.fixture(autouse=True)
+def reset_evidence_history_start():
+    """Warm-up gates (F7) start without a known install time: no database read, legacy window."""
+    from greenkube.automation.policy import set_history_start
+
+    set_history_start(None)
+    yield
+    set_history_start(None)

@@ -481,3 +481,75 @@ class TestContainerResourcesV2Actions:
     def test_an_increase_is_not_a_no_op(self):
         operation = SetContainerResources(container="api", resources=ContainerResources(requests={"cpu": "1500m"}))
         assert not proposes_no_change(self._with(operation))
+
+
+class TestWarmUpSinceInstall:
+    """F7: minCoverage is evaluated against the data available since install, capped at the lookback."""
+
+    def test_a_day_old_install_with_full_collection_is_not_blocked_by_the_week_lookback(self):
+        # One day of 5-minute samples in a 7-day window: 1/7 coverage of the window,
+        # but every step since install was collected.
+        evidence = RecommendationEvidence(
+            sample_count=288,
+            coverage_ratio=288 / 2016,
+            observation_window_start=NOW - timedelta(days=7),
+            observation_window_end=NOW,
+            observation_window_seconds=7 * 86400,
+        )
+        result = assess_eligibility(
+            _record(evidence=evidence), _ctx(step_seconds=300)
+        )  # no install time known: the legacy full-window coverage blocks
+        assert _codes(result) == ["warming_up"]
+
+        from greenkube.automation.policy import set_history_start
+
+        set_history_start(NOW - timedelta(days=1))
+        result = assess_eligibility(_record(evidence=evidence), _ctx(step_seconds=300))
+        assert "warming_up" not in _codes(result)
+        assert result["eligible_at"] is None
+
+    def test_eligible_at_is_first_sample_plus_the_required_history(self):
+        from greenkube.core.optimization.eligibility import warm_up
+
+        install = NOW - timedelta(hours=1)
+        evidence = RecommendationEvidence(
+            sample_count=12,
+            coverage_ratio=12 / 2016,
+            observation_window_start=NOW - timedelta(days=7),
+            observation_window_end=NOW,
+            observation_window_seconds=7 * 86400,
+        )
+        blocker, eligible_at = warm_up(
+            _record(evidence=evidence), AutomationPolicyConfig(), 300, NOW, history_start=install
+        )
+        assert blocker["code"] == "warming_up"
+        assert eligible_at == install + timedelta(seconds=36 * 300)
+        assert "Eligible in ~2h" in blocker["fix"]
+
+    def test_the_lookback_caps_the_history_considered(self):
+        from greenkube.automation.policy import coverage_since_history
+
+        evidence = RecommendationEvidence(
+            sample_count=1000,
+            coverage_ratio=0.2,
+            observation_window_start=NOW - timedelta(days=7),
+            observation_window_end=NOW,
+            observation_window_seconds=7 * 86400,
+        )
+        # Installed a month ago: the whole lookback is available, nothing changes.
+        assert coverage_since_history(evidence, NOW - timedelta(days=30)) == pytest.approx(0.2)
+        # Installed two days ago: 0.2 of the week is 1.4 days of the 2 available.
+        assert coverage_since_history(evidence, NOW - timedelta(days=2)) == pytest.approx(0.7)
+
+    def test_a_history_start_after_the_evidence_window_is_treated_as_unknown(self):
+        """Stale evidence, or retention moving the first stored sample forward, must not inflate coverage."""
+        from greenkube.automation.policy import coverage_since_history
+
+        evidence = RecommendationEvidence(
+            sample_count=200,
+            coverage_ratio=0.1,
+            observation_window_start=NOW - timedelta(days=7),
+            observation_window_end=NOW - timedelta(days=1),
+            observation_window_seconds=6 * 86400,
+        )
+        assert coverage_since_history(evidence, NOW - timedelta(hours=1)) == pytest.approx(0.1)

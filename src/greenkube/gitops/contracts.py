@@ -156,6 +156,8 @@ class AutomationErrorCode(StrEnum):
     ROLLBACK_CONFLICT = "rollback_conflict"
     DELIVERY_MODE_MISMATCH = "delivery_mode_mismatch"
     DELIVERY_NOT_VERIFIED = "delivery_not_verified"
+    #: A requested recommendation is no longer active (dismissed, applied, expired, superseded).
+    NOT_ACTIVE = "not_active"
 
 
 def _nonblank(value: str) -> str:

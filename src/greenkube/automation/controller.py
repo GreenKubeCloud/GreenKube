@@ -192,6 +192,7 @@ class AutomationController:
         self._monotonic = monotonic
         self._last_run: dict[str, float] = {}
         self._recovered = False
+        self._trailer_linker: Any | None = None
 
     async def tick(self) -> AutomationControllerSummary:
         summary = AutomationControllerSummary()
@@ -298,6 +299,15 @@ class AutomationController:
         linked = await cast(Any, self.plan_worker).link_external_deliveries()
         if linked:
             logger.info("Linked %d externally delivered pull requests by their plan branch.", linked)
+        # patch mode (F4): pull requests opened from any branch, by the GreenKube-Plan trailer.
+        if self._trailer_linker is None:
+            from greenkube.automation.delivery import PlanTrailerLinker
+
+            self._trailer_linker = PlanTrailerLinker(self.plan_worker)
+        try:
+            await self._trailer_linker.link_once()
+        except Exception as error:  # best effort: the branch linkage above already ran
+            logger.info("Trailer linkage pass failed (%s).", type(error).__name__)
         return True
 
     async def _recover_pending_pull_requests(self, _lease: PullRequestPollingLease) -> bool:

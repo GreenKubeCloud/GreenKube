@@ -340,17 +340,21 @@ class GitHubProvider(GitProvider):
         if not isinstance(new_tree_sha, str) or not new_tree_sha:
             raise GitProviderError("GitHub returned an invalid tree after creating the atomic commit plan.")
 
-        author = {"name": request.author_name, "email": request.author_email}
+        commit_body: dict[str, object] = {
+            "message": request.message,
+            "tree": new_tree_sha,
+            "parents": [base_revision],
+        }
+        if not self.platform_signed_commits:
+            author = {"name": request.author_name, "email": request.author_email}
+            commit_body["author"] = author
+            commit_body["committer"] = author
+        # A GitHub App commit without author and committer is created and signed by GitHub
+        # as the App's bot, so it shows as Verified (J8).
         commit_response = await self._request(
             "POST",
             f"/repos/{repo.owner}/{repo.name}/git/commits",
-            json_body={
-                "message": request.message,
-                "tree": new_tree_sha,
-                "parents": [base_revision],
-                "author": author,
-                "committer": author,
-            },
+            json_body=commit_body,
             retryable=False,
         )
         new_commit = commit_response.json()
@@ -368,10 +372,15 @@ class GitHubProvider(GitProvider):
             conflict_statuses=(404, 409, 422),
             retryable=False,
         )
+        verification = new_commit.get("verification") if isinstance(new_commit, dict) else None
+        verified = verification.get("verified") if isinstance(verification, dict) else None
+        reason = verification.get("reason") if isinstance(verification, dict) else None
         return GitCommitResult(
             commit_sha=commit_sha,
             branch=branch,
             files_changed=[edit.path for edit in request.files],
+            verified=verified if isinstance(verified, bool) else None,
+            verification_reason=reason if isinstance(reason, str) else None,
         )
 
     async def create_pull_request(
@@ -517,6 +526,15 @@ class GitHubProvider(GitProvider):
         )
         if response.status_code == 404:
             raise GitProviderError("GitHub could not request configured pull-request reviewers.")
+
+    def _open_pull_requests_query(self, repo: GitRepository, base: str, limit: int) -> tuple[str, dict[str, str]]:
+        return (
+            f"/repos/{repo.owner}/{repo.name}/pulls",
+            {"state": "open", "base": base, "sort": "created", "direction": "desc", "per_page": str(limit)},
+        )
+
+    def _pull_request_commits_path(self, repo: GitRepository, number: int) -> str:
+        return f"/repos/{repo.owner}/{repo.name}/pulls/{number}/commits"
 
     async def add_pull_request_metadata(
         self,
