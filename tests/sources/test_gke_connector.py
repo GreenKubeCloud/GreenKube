@@ -12,6 +12,8 @@ import pytest
 
 from greenkube.core.config import Config
 from greenkube.signals.connectors.gke import (
+    QUOTA_PROJECT_PERMISSION,
+    REQUIRED_ROLES,
     GkeRecommenderSource,
     GkeSettings,
     container_proposals,
@@ -23,6 +25,7 @@ from greenkube.signals.sdk import SourceDeps, SourceHealthStatus
 from tests.sources.contract import CLUSTER, SourceContract, collect_context  # pyrefly: ignore[missing-import]
 
 FIXTURE = Path(__file__).parent / "fixtures" / "gke_insights.json"
+GKE_DOC = Path(__file__).resolve().parents[2] / "docs" / "sources" / "gke.md"
 METADATA = "http://metadata.test"
 API = "https://recommender.test"
 MIB = 1024 * 1024
@@ -194,6 +197,23 @@ class TestGke:
         report = await _run(_source(server))
         assert not [s for s in report.signals if isinstance(s.proposal, ContainerResourcesProposal)]
 
+    async def test_every_recommender_call_names_the_project_as_quota_project(self):
+        server = FakeGoogle()
+        await _run(_source(server))
+
+        calls = [r for r in server.requests if str(r.url).startswith(API)]
+        assert calls and calls[0].url.path == "/v1beta1/insightTypes"
+        assert {r.headers.get("X-Goog-User-Project") for r in calls} == {"acme-prod"}
+
+    def test_documented_permissions_cover_the_quota_project_header(self):
+        # The header above needs serviceusage.services.use: the documented IAM
+        # setup must grant it, or the first discovery call answers 403.
+        doc = GKE_DOC.read_text()
+        for role in REQUIRED_ROLES:
+            assert role in doc
+        assert "roles/serviceusage.serviceUsageConsumer" in REQUIRED_ROLES
+        assert QUOTA_PROJECT_PERMISSION in doc
+
     def test_fixture_is_labelled_synthetic(self):
         assert json.loads(FIXTURE.read_text())["_provenance"]["kind"] == "synthetic"
 
@@ -229,6 +249,11 @@ def test_container_content_is_read_defensively():
     assert container_proposals({"recommendation": {"containerRecommendations": [{"containerName": "b"}]}}) == []
     assert container_proposals({"containers": [{"recommended": {"cpu": "1"}}]}) == []
     assert container_proposals(None) == []
+
+
+def test_zero_recommended_requests_are_dropped():
+    content = {"containers": [{"name": "a", "current": {"cpu": "500m"}, "recommended": {"cpu": "0", "memory": 0}}]}
+    assert container_proposals(content) == []
 
 
 class TestGkeSourceContract(SourceContract):

@@ -86,6 +86,12 @@ RECOMMENDER_URL = "https://recommender.googleapis.com"
 WORKLOAD_SUBTYPES = frozenset({"WORKLOAD_OVERPROVISIONED", "WORKLOAD_UNDERPROVISIONED"})
 #: Prefix of the GKE insight types read after discovery.
 GKE_INSIGHT_PREFIX = "google.container."
+#: IAM roles docs/sources/gke.md grants. Every Recommender call names the project as its
+#: quota project (X-Goog-User-Project), which Google only accepts from a caller holding
+#: serviceusage.services.use on it: Recommender Viewer alone answers 403.
+REQUIRED_ROLES = ("roles/recommender.viewer", "roles/serviceusage.serviceUsageConsumer")
+#: The permission a custom role needs besides the insight types' ``list`` permissions.
+QUOTA_PROJECT_PERMISSION = "serviceusage.services.use"
 #: Pages read per insight type and location (the API returns up to 1,000 per page).
 MAX_PAGES = 20
 _KIND_BY_RESOURCE = {"cpu": "RIGHTSIZING_CPU", "memory": "RIGHTSIZING_MEMORY"}
@@ -141,6 +147,16 @@ def parse_target(resource: str) -> Optional[Dict[str, str]]:
     return fields
 
 
+def request_headers(identity: Mapping[str, Any]) -> Dict[str, str]:
+    """Headers of every Recommender call (discovery and insights.list alike).
+
+    The project is the quota project: a direct Workload Identity Federation principal has
+    no project of its own to bill the call to. It needs ``serviceusage.services.use``
+    on that project (see REQUIRED_ROLES).
+    """
+    return {"Authorization": f"Bearer {identity['token']}", "X-Goog-User-Project": str(identity["project"])}
+
+
 def _quantity(resource: str, value: Any) -> Optional[int]:
     if isinstance(value, Mapping):
         value = value.get("value", value.get("amount"))
@@ -186,7 +202,8 @@ def container_proposals(content: Any) -> List[Tuple[str, str, Optional[int], int
         current = _first(item, _CURRENT_KEYS)
         for resource in ("cpu", "memory"):
             value = _quantity(resource, recommended.get(resource))
-            if value is None:
+            if value is None or value <= 0:
+                # A zero recommendation is never a request to apply.
                 continue
             result.append((name, resource, _quantity(resource, current.get(resource)), value))
     return result
@@ -398,7 +415,7 @@ class GkeRecommenderSource(Source):
             locations.append(region)
         signals: List[SourceSignal] = []
         counts: Dict[str, int] = {}
-        headers = {"Authorization": f"Bearer {identity['token']}", "X-Goog-User-Project": identity["project"]}
+        headers = request_headers(identity)
         async with self._client(headers=headers) as client:
             types = await self.insight_types(client, identity["project"], diagnostics)
             seen: set[str] = set()

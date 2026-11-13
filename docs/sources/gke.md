@@ -32,17 +32,22 @@ The source runs in the controller's scans when it is discovered: GreenKube runs 
 No cluster permission is needed beyond GreenKube's own. On Google Cloud:
 
 1. Enable the Recommender API (`recommender.googleapis.com`) in the project.
-2. Bind the ServiceAccount of GreenKube's controller (it runs the scans; `<release>-controller` by default, in the release namespace) to Google IAM. With Workload Identity Federation for GKE, grant the role to the KSA principal directly (no annotation needed):
+2. Bind the ServiceAccount of GreenKube's controller (it runs the scans; `<release>-controller` by default, in the release namespace) to Google IAM. It needs **two roles** on the project:
+   - `roles/recommender.viewer` reads the insights;
+   - `roles/serviceusage.serviceUsageConsumer` lets the source name the project as its quota project. Every Recommender call (insight type discovery and `insights.list`) sends `X-Goog-User-Project: <project>`, and Google answers `403 PERMISSION_DENIED` ("Caller does not have required permission to use project") to a caller without `serviceusage.services.use` on that project.
+
+   With Workload Identity Federation for GKE, grant both roles to the KSA principal directly (no annotation needed):
 
 ```bash
 PROJECT_ID=my-project
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --role=roles/recommender.viewer \
-  --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/greenkube/sa/greenkube-controller"
+MEMBER="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/greenkube/sa/greenkube-controller"
+for ROLE in roles/recommender.viewer roles/serviceusage.serviceUsageConsumer; do
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" --role="$ROLE" --member="$MEMBER"
+done
 ```
 
-   Or bind a Google service account (`roles/iam.workloadIdentityUser` on it for the KSA, `roles/recommender.viewer` on the project for it) and annotate the KSA with `iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com`. The chart does not template ServiceAccount annotations yet: create the ServiceAccount yourself and set `serviceAccount.create: false` and `serviceAccount.name`, or prefer the direct principal binding above. The Recommender Viewer role reads insights only; a custom role with the insight type's `list` permission works too.
+   Or bind a Google service account (`roles/iam.workloadIdentityUser` on it for the KSA; `roles/recommender.viewer` and `roles/serviceusage.serviceUsageConsumer` on the project for it) and annotate the KSA with `iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com`. The chart does not template ServiceAccount annotations yet: create the ServiceAccount yourself and set `serviceAccount.create: false` and `serviceAccount.name`, or prefer the direct principal binding above. Both roles are read-only. A custom role works too: it needs the insight type's `list` permission and `serviceusage.services.use`.
 
 The source reads its project id, cluster name and location from the metadata server; the access token comes from the same server, so no key file is ever stored.
 
