@@ -151,6 +151,38 @@ async def test_no_pods_and_no_owner_pattern_reads_nothing():
     assert observation.readiness_ratio is None
 
 
+async def test_oom_restarts_are_counted_like_the_scan_evidence():
+    """H1: one pod OOM-killed 20 times is 20 OOM restarts (the unit of ``evidence.oom_events``), not 1 pod."""
+    observation, prometheus = await _collect(
+        {
+            "count(max_over_time(kube_pod_status_ready": _vector(2),
+            "kube_pod_container_status_restarts_total": _vector(20),
+            "last_terminated_reason": _vector(1),
+            READINESS: _vector(1),
+        }
+    )
+
+    assert observation.oom_kill_count == 1
+    assert observation.oom_restart_count == 20
+    query = next(query for query in prometheus.queries if "kube_pod_container_status_restarts_total" in query)
+    assert query.startswith("sum(sum_over_time((")
+    assert "round(increase(kube_pod_container_status_restarts_total{" in query
+    assert "[5m])) > 0) and on (namespace, pod, container)" in query
+    assert 'container="app", reason="OOMKilled"} > 0))[259200s:5m]))' in query
+
+
+async def test_oom_restarts_follow_the_oom_signal_availability():
+    ready = "count(max_over_time(kube_pod_status_ready"
+    restarts = "kube_pod_container_status_restarts_total"
+    empty, _ = await _collect({ready: _vector(2), restarts: []})
+    failed, _ = await _collect({ready: _vector(2), restarts: None})
+    missing, _ = await _collect({ready: []})
+
+    assert empty.oom_restart_count == 0
+    assert failed.oom_restart_count is None
+    assert missing.oom_restart_count is None
+
+
 def test_selector_falls_back_to_the_owner_pattern_for_many_pods():
     pods = [f"api-app-{index:05d}" for index in range(500)]
     selector = pod_selector("prod", pods, owner_kind="StatefulSet", owner_name="db")

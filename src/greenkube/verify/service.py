@@ -806,16 +806,20 @@ class ChangeMeasurementService:
         for member in members:
             by_container.setdefault(member.container_name, []).append(member)
         raw: Dict[Optional[str], List[HealthGateResult]] = {}
+        oom_restarts: Dict[Optional[str], Optional[int]] = {}
         for container, group in sorted(by_container.items(), key=lambda item: item[0] or ""):
             try:
-                raw[container] = list(await self.verifier.health_gates_for(group, start, end, strict=True))
+                gates, health = await self.verifier.health_check_for(group, start, end, strict=True)
             except Exception as exc:
                 raise MeasurementReadError(
                     f"health gates of {container or 'workload'} could not be evaluated: {exc}"
                 ) from exc
+            raw[container] = list(gates)
+            oom_restarts[container] = health.oom_restart_count if health is not None else None
         # A memory-request increase made because of OOM kills is judged on that container's kill
-        # rate, not on "any kill"; every other container keeps the strict gate (H1).
-        judged, reliability = increase_reliability(members, raw, start, end)
+        # rate (counted like its evidence), not on "any kill"; its OOM restarts leave the restart
+        # gate. Every other container keeps the strict gates (H1).
+        judged, reliability = increase_reliability(members, raw, start, end, oom_restarts)
         gates: List[HealthGateResult] = []
         for container in raw:
             for gate in judged[container]:

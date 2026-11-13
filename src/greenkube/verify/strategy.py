@@ -383,6 +383,8 @@ def strategy_for(action_kind: str) -> Optional[SavingsMeasurementStrategy]:
 RELIABILITY_ALPHA = 0.10
 #: Health gate replaced by the rate comparison for increases.
 OOM_GATE = "oom_kills"
+#: Restart gate: OOM restarts judged by the rate comparison are left out of it.
+RESTART_GATE = "restarts"
 
 
 @dataclass(frozen=True)
@@ -390,8 +392,10 @@ class ReliabilityOutcome:
     """OOM-kill rate before and after a request increase (H1): the outcome of a reliability fix.
 
     ``baseline_events`` are the OOM kills the recommendation observed over its
-    evidence window (``evidence.oom_events``); ``post_events`` the kills the health
-    gates read over the post-change window. If the rate had not changed, the
+    evidence window (``evidence.oom_events``: container restarts whose termination
+    was ``OOMKilled``, summed over pods); ``post_events`` the same count over the
+    post-change window (``WorkloadHealthObservation.oom_restart_count``), never the
+    number of pods that saw a kill. If the rate had not changed, the
     post-window share of all kills would be binomial with the post-window share of
     the observed time: a drop is ``realized`` when the post count is improbably low
     (one-sided p <= ``RELIABILITY_ALPHA``), ``not_realized`` when the rate did not
@@ -578,32 +582,23 @@ def _oom_baseline(group: Sequence[Any]) -> tuple[Optional[int], Optional[float]]
     return events, seconds
 
 
-def _post_oom_events(gates: Sequence[HealthGateResult]) -> Optional[int]:
-    values = [gate.value for gate in gates if gate.gate == OOM_GATE]
-    if not values or any(value is None for value in values):
-        return None
-    return int(math.fsum(value for value in values if value is not None))
+def _judge_container(
+    group: Sequence[Any],
+    gates: Sequence[HealthGateResult],
+    post_start: datetime,
+    post_end: datetime,
+    oom_restarts: Optional[int],
+) -> tuple[List[HealthGateResult], Optional[ReliabilityOutcome], bool]:
+    """Replace the ``oom_kills`` gate of one container by the rate comparison when allowed.
 
-
-def container_reliability(
-    group: Sequence[Any], gates: Sequence[HealthGateResult], post_start: datetime, post_end: datetime
-) -> tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
-    """Health gates and reliability outcome of **one container** of a change (H1).
-
-    ``group`` holds the change members of that container and ``gates`` the health
-    gates read for that container only. For a memory-request increase made because
-    of OOM kills, a kill after the rollout does not mean the change hurt: the
-    question is whether the kill **rate** dropped. That container's ``oom_kills``
-    gate is then replaced by one rate comparison, which fails only when the rate did
-    not drop (a person reviews it). Everything else keeps the strict "any kill
-    fails" gate: containers without a memory increase (CPU-only increases cannot
-    cure OOM kills, and decreases must never hide one), containers with a memory
-    decrease, and memory increases without OOM history.
+    Returns the gates, the outcome and whether the gate was replaced (the
+    container's post-window OOM restarts are then judged by the rate, not by the
+    "any kill" or restart gates).
     """
     if not any(raises_memory_request(member) for member in group):
-        return list(gates), None
+        return list(gates), None, False
     baseline_events, baseline_seconds = _oom_baseline(group)
-    post_events = _post_oom_events(gates)
+    post_events = oom_restarts if isinstance(oom_restarts, int) and not isinstance(oom_restarts, bool) else None
     outcome = oom_rate_outcome(
         baseline_events,
         baseline_seconds,
@@ -611,9 +606,12 @@ def container_reliability(
         (ensure_utc(post_end) - ensure_utc(post_start)).total_seconds(),
     )
     if any(_lowers_memory_request(member) for member in group):
-        return list(gates), outcome
+        return list(gates), outcome, False
     if not outcome.baseline_events or post_events is None:
-        return list(gates), outcome
+        return list(gates), outcome, False
+    if not any(gate.gate == OOM_GATE and gate.value is not None for gate in gates):
+        # The health gate could not read OOM kills: keep it not_available, never a pass.
+        return list(gates), outcome, False
     failed = outcome.outcome is ChangeOutcome.NOT_REALIZED and post_events > 0
     rate_gate = HealthGateResult(
         gate=OOM_GATE,
@@ -622,7 +620,66 @@ def container_reliability(
         threshold=outcome.baseline_events,
         detail=f"reliability increase: {outcome.reason}",
     )
-    return [*(gate for gate in gates if gate.gate != OOM_GATE), rate_gate], outcome
+    return [*(gate for gate in gates if gate.gate != OOM_GATE), rate_gate], outcome, True
+
+
+def _excuse_oom_restarts(gates: Sequence[HealthGateResult], excused: int) -> List[HealthGateResult]:
+    """Re-judge the ``restarts`` gate without ``excused`` OOM restarts already judged by a rate gate.
+
+    Every OOM kill also restarts its container: once the kill rate of an
+    OOM-driven increase is judged, the same kills must not fail the restart gate.
+    Any other restart still counts against ``VERIFICATION_MAX_RESTART_DELTA``.
+    """
+    if excused <= 0:
+        return list(gates)
+    judged: List[HealthGateResult] = []
+    for gate in gates:
+        if gate.gate != RESTART_GATE or gate.value is None or gate.threshold is None:
+            judged.append(gate)
+            continue
+        total = int(gate.value)
+        other = max(total - excused, 0)
+        judged.append(
+            HealthGateResult(
+                gate=RESTART_GATE,
+                status=HealthGateStatus.FAILED if other > gate.threshold else HealthGateStatus.PASSED,
+                value=other,
+                threshold=gate.threshold,
+                detail=(
+                    f"reliability increase: {other} restart(s) besides {min(excused, total)} OOM kill(s) "
+                    f"judged by the OOM-kill rate (restart delta {total}, threshold {gate.threshold:g})"
+                ),
+            )
+        )
+    return judged
+
+
+def container_reliability(
+    group: Sequence[Any],
+    gates: Sequence[HealthGateResult],
+    post_start: datetime,
+    post_end: datetime,
+    oom_restarts: Optional[int] = None,
+) -> tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
+    """Health gates and reliability outcome of **one container** of a change (H1).
+
+    ``group`` holds the change members of that container, ``gates`` the health
+    gates read for that container only and ``oom_restarts`` the container's OOM
+    restarts after the change, counted like ``evidence.oom_events`` (restarts whose
+    termination was ``OOMKilled``, summed over pods). For a memory-request increase
+    made because of OOM kills, a kill after the rollout does not mean the change
+    hurt: the question is whether the kill **rate** dropped. That container's
+    ``oom_kills`` gate is then replaced by one rate comparison, which fails only
+    when the rate did not drop (a person reviews it), and its ``restarts`` gate no
+    longer counts those OOM restarts. Everything else keeps the strict gates:
+    containers without a memory increase (CPU-only increases cannot cure OOM kills,
+    and decreases must never hide one), containers with a memory decrease, memory
+    increases without OOM history, and an unknown OOM restart count (fail closed).
+    """
+    judged, outcome, relaxed = _judge_container(group, gates, post_start, post_end, oom_restarts)
+    if relaxed and outcome is not None and outcome.post_events:
+        judged = _excuse_oom_restarts(judged, outcome.post_events)
+    return judged, outcome
 
 
 def increase_reliability(
@@ -630,28 +687,40 @@ def increase_reliability(
     gates_by_container: Mapping[Optional[str], Sequence[HealthGateResult]],
     post_start: datetime,
     post_end: datetime,
+    oom_restarts_by_container: Optional[Mapping[Optional[str], Optional[int]]] = None,
 ) -> tuple[Dict[Optional[str], List[HealthGateResult]], Optional[ReliabilityOutcome]]:
     """Apply :func:`container_reliability` to every container of a change.
 
-    ``gates_by_container`` maps each container to the gates read for it. Returns the
+    ``gates_by_container`` maps each container to the gates read for it and
+    ``oom_restarts_by_container`` to its OOM restarts after the change. Returns the
     gates per container (OOM gates replaced only where :func:`container_reliability`
     allows it) and the change-level reliability outcome: the OOM-kill rate summed
     over the containers whose memory request was raised (``None`` without any).
+    Restart counters are read per pod, so the OOM restarts judged by a rate gate are
+    left out of the ``restarts`` gate of every container of the change.
     """
+    oom_restarts = dict(oom_restarts_by_container or {})
     by_container: Dict[Optional[str], List[Any]] = {}
     for member in members:
         by_container.setdefault(getattr(member, "container_name", None), []).append(member)
     result: Dict[Optional[str], List[HealthGateResult]] = {}
     outcomes: Dict[Optional[str], ReliabilityOutcome] = {}
+    excused = 0
     for container, gates in gates_by_container.items():
-        result[container], outcome = container_reliability(by_container.get(container, []), gates, post_start, post_end)
+        result[container], outcome, relaxed = _judge_container(
+            by_container.get(container, []), gates, post_start, post_end, oom_restarts.get(container)
+        )
         if outcome is not None:
             outcomes[container] = outcome
+            if relaxed:
+                excused += outcome.post_events or 0
     for container, group in by_container.items():
         if container not in gates_by_container:
-            _, outcome = container_reliability(group, [], post_start, post_end)
+            _, outcome, _ = _judge_container(group, [], post_start, post_end, oom_restarts.get(container))
             if outcome is not None:
                 outcomes[container] = outcome
+    if excused:
+        result = {container: _excuse_oom_restarts(gates, excused) for container, gates in result.items()}
     if not outcomes:
         return result, None
     if len(outcomes) == 1:

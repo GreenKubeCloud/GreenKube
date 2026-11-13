@@ -387,7 +387,8 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
 - **Rollback.** Request-only changes (containers and native sidecars) roll back automatically; a change that edits
   limits is reverted by reverting its pull request, and the PR says so.
 - **Measurement.** A memory increase is measured on reliability: the OOM-kill rate of that container after the
-  rollout is compared with the rate the recommendation observed before it; other containers and CPU-only increases
+  rollout (OOM restarts, in the unit of the scan's evidence) is compared with the rate the recommendation observed
+  before it, and those OOM restarts no longer fail the restart gate; other containers and CPU-only increases
   keep the strict "any OOM kill fails" gate (see [Savings measurement: reliability
   increases](methodology/savings-measurement.md#reliability-increases-h1)).
 
