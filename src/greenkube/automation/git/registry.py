@@ -169,6 +169,9 @@ class GitProviderRegistry:
             author_name=author_name,
             author_email=author_email,
         )
+        if isinstance(credentials, GitHubAppCredentials):
+            # GitHub signs App commits that name no author or committer: they show as Verified (J8).
+            provider.platform_signed_commits = True
 
         async def authorize(target: GitRepository) -> None:
             current_config, current_type, _ = await self._load_provider_config(provider_id)

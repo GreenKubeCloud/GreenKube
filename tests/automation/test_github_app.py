@@ -230,3 +230,81 @@ async def test_registry_uses_a_repository_scoped_installation_token_and_the_bot_
         )
     finally:
         await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_app_commits_omit_author_and_committer_so_github_signs_them_verified():
+    """J8: GitHub signs App commits created through the API only without author/committer."""
+    from pathlib import Path
+
+    from greenkube.automation.git.base import GitCommitRequest, GitFileEdit
+    from greenkube.automation.git.github import GitHubProvider
+
+    BASE = "a" * 40
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "github" / "app_commit_created.json").read_text())
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/repos/acme/gitops/git/ref/heads/greenkube/plan":
+            return httpx.Response(200, json={"object": {"sha": BASE}})
+        if path == "/repos/acme/gitops/git/trees/" + BASE + "":
+            return httpx.Response(
+                200,
+                json={
+                    "sha": "base-tree",
+                    "truncated": False,
+                    "tree": [{"path": "app.yaml", "mode": "100644", "type": "blob", "sha": "b" * 40}],
+                },
+            )
+        if path == "/repos/acme/gitops/git/trees" and request.method == "POST":
+            return httpx.Response(201, json={"sha": "new-tree"})
+        if path == "/repos/acme/gitops/git/commits" and request.method == "POST":
+            seen["commit"] = json.loads(request.content)
+            return httpx.Response(201, json=fixture)
+        if path == "/repos/acme/gitops/git/refs/heads/greenkube/plan" and request.method == "PATCH":
+            return httpx.Response(200, json={"object": {"sha": fixture["sha"]}})
+        return httpx.Response(404, json={})
+
+    fake = FakeGitHub(clock=_now)
+    registry = GitProviderRegistry(
+        cast(GitOpsProviderRepository, _Providers(_APP_PROVIDER)),
+        _Secrets({"privateKey": PRIVATE_KEY, "appId": APP_ID}),
+        app_tokens=_issuer(fake, _now),
+    )
+    repository = GitRepository(provider="github", owner="acme", name="gitops", default_branch="main")
+    authorized = await registry.get_provider("inferred-github.com", repository)
+    inner: Any = authorized._provider
+    assert inner.platform_signed_commits is True
+    await authorized.close()
+
+    provider = GitHubProvider(
+        inner.token,
+        author_name=inner.author_name,
+        author_email=inner.author_email,
+        client=httpx.AsyncClient(base_url="https://api.github.com", transport=httpx.MockTransport(handler)),
+    )
+    provider.platform_signed_commits = True
+    result = await provider.create_commit(
+        GitCommitRequest(
+            repo=repository,
+            branch="greenkube/plan",
+            base_revision=BASE,
+            message=fixture["message"],
+            files=[GitFileEdit(path="app.yaml", action="update", content="x")],
+            author_name=inner.author_name,
+            author_email=inner.author_email,
+        )
+    )
+    await provider.close()
+
+    assert "author" not in seen["commit"] and "committer" not in seen["commit"]
+    assert result.commit_sha == fixture["sha"]
+    assert (result.verified, result.verification_reason) == (True, "valid")
+
+
+@pytest.mark.asyncio
+async def test_token_commits_keep_the_configured_author():
+    from greenkube.automation.git.github import GitHubProvider
+
+    assert GitHubProvider("ghp_x").platform_signed_commits is False

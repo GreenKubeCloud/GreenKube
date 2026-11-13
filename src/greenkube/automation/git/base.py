@@ -461,6 +461,10 @@ class GitCommitResult:
     commit_sha: str
     branch: str
     files_changed: List[str]
+    #: The platform's signature verification of the new commit (J8): True when it shows as
+    #: Verified (GitHub App commits), False when unsigned or unverified, None when unknown.
+    verified: Optional[bool] = None
+    verification_reason: Optional[str] = None
 
 
 def repository_matches_allowlist(repository_name: str, pattern: str) -> bool:
@@ -526,6 +530,10 @@ class GitProvider(ABC):
     """Adapter contract for a Git platform."""
 
     name: str = "git"
+    #: The platform signs the commits this adapter creates through its API (J8). A GitHub App
+    #: installation commit shows as Verified only when it names no author or committer, so
+    #: the adapter omits both and GitHub attributes the commit to the App's bot.
+    platform_signed_commits: bool = False
 
     def __init__(
         self,

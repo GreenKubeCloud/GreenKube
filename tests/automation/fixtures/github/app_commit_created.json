@@ -1,0 +1,35 @@
+{
+  "sha": "7638417db6d59f3c431d3e1f261cc637155684cd",
+  "node_id": "C_kwDOAJy2KtoAKDc2Mzg0MTdkYjZkNTlmM2M0MzFkM2UxZjI2MWNjNjM3MTU1Njg0Y2Q",
+  "url": "https://api.github.com/repos/acme/gitops/git/commits/7638417db6d59f3c431d3e1f261cc637155684cd",
+  "html_url": "https://github.com/acme/gitops/commit/7638417db6d59f3c431d3e1f261cc637155684cd",
+  "author": {
+    "name": "greenkube-acme[bot]",
+    "email": "4242+greenkube-acme[bot]@users.noreply.github.com",
+    "date": "2026-11-13T09:00:00Z"
+  },
+  "committer": {
+    "name": "GitHub",
+    "email": "noreply@github.com",
+    "date": "2026-11-13T09:00:00Z"
+  },
+  "tree": {
+    "sha": "new-tree",
+    "url": "https://api.github.com/repos/acme/gitops/git/trees/new-tree"
+  },
+  "message": "greenkube: rightsize payments/api\n\nGreenKube-Plan: pln-1",
+  "parents": [
+    {
+      "sha": "base-sha",
+      "url": "https://api.github.com/repos/acme/gitops/git/commits/base-sha",
+      "html_url": "https://github.com/acme/gitops/commit/base-sha"
+    }
+  ],
+  "verification": {
+    "verified": true,
+    "reason": "valid",
+    "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsBcBAABCAAQBQJnNGYgCRC1aQ7uu5UhlAAAexample\n-----END PGP SIGNATURE-----\n",
+    "payload": "tree new-tree\nparent base-sha\nauthor greenkube-acme[bot] <4242+greenkube-acme[bot]@users.noreply.github.com> 1763024400 +0000\ncommitter GitHub <noreply@github.com> 1763024400 +0000\n\ngreenkube: rightsize payments/api\n\nGreenKube-Plan: pln-1\n",
+    "verified_at": "2026-11-13T09:00:00Z"
+  }
+}
