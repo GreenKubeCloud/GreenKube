@@ -29,6 +29,8 @@ NOW = datetime.now(timezone.utc)
 PV = ResourceTarget(api_version="v1", kind="PersistentVolume", namespace="", name="pv-orphan")
 ARGO = (ControllerKind.ARGOCD, "argocd", "payments-prod")
 POLICY = AutomationPolicyConfig(missing_evidence="warn", max_risk_level="high")
+#: Controller evidence discovery copies from the controller's workload binding.
+HEALTHY = {"controller_suspended": False, "controller_healthy": True}
 
 
 def _record(**overrides: Any) -> RecommendationRecord:
@@ -108,7 +110,7 @@ def _stored(
         ref=PV,
         status=cast(Any, status),
         controllers=(ARGO,),
-        location=_source() if location == "default" else location,
+        location=_source(evidence=HEALTHY) if location == "default" else location,
         prune=True,
     )
     return StoredResourceBinding(binding=binding, observed_at=observed_at)
@@ -126,6 +128,7 @@ async def test_a_cluster_scoped_deletion_resolves_its_source_from_the_resource_b
     )
     assert source.evidence[CONTROLLER_PRUNE_EVIDENCE] is True
     assert source.repo_url == _source().repo_url
+    assert source.evidence["controller_healthy"] is True
 
 
 @pytest.mark.asyncio
@@ -151,3 +154,39 @@ async def test_a_recommendation_for_another_resource_is_refused() -> None:
     with pytest.raises(AutomationPlanError) as error:
         await _service(_stored(), record)._resolve_request([9])
     assert error.value.code is AutomationErrorCode.AMBIGUOUS_BINDING
+
+
+@pytest.mark.asyncio
+async def test_the_policy_evaluates_a_deletion_with_the_production_defaults() -> None:
+    """Only the risk limit is raised: no workload-only gate rejects a resource deletion."""
+    from greenkube.automation.policy import AutomationPolicyEvaluator
+
+    service = _service(_stored())
+    action, source = await service._resolve_request([9])
+    evaluator = AutomationPolicyEvaluator(
+        config=AutomationPolicyConfig(max_risk_level="high"),
+        plan_repository=cast(Any, _Policies()),
+        clock=lambda: NOW,
+    )
+
+    result = await evaluator.evaluate([_record()], source)
+
+    assert result.allowed, [(item.code, item.detail) for item in result.rejections]
+
+
+@pytest.mark.asyncio
+async def test_an_unhealthy_controller_still_blocks_a_deletion() -> None:
+    from greenkube.automation.policy import AutomationPolicyEvaluator
+
+    unhealthy = _stored(location=_source(evidence={"controller_suspended": True, "controller_healthy": True}))
+    _, source = await _service(unhealthy)._resolve_request([9])
+    evaluator = AutomationPolicyEvaluator(
+        config=AutomationPolicyConfig(max_risk_level="high"),
+        plan_repository=cast(Any, _Policies()),
+        clock=lambda: NOW,
+    )
+
+    result = await evaluator.evaluate([_record()], source)
+
+    assert not result.allowed
+    assert [item.code for item in result.rejections] == [AutomationErrorCode.CONTROLLER_UNHEALTHY]

@@ -567,41 +567,7 @@ class AutomationPolicyEvaluator:
                 limit=list(configured_labels),
             )
 
-    def _evaluate_optional_live_gates(
-        self,
-        source: WorkloadSource,
-        records: Sequence[RecommendationRecord],
-        add_check,
-        add_missing_evidence,
-        add_warning,
-    ) -> None:
-        evidence = source.evidence
-        rollout = _optional_bool(evidence, "rollout_in_progress")
-        if rollout is True:
-            add_check(
-                "rollout_state",
-                PolicyCheckState.REJECTED,
-                "The workload has an in-progress rollout.",
-                observed=True,
-                limit=False,
-                code=AutomationErrorCode.ROLLOUT_IN_PROGRESS,
-                detail="Wait for the workload rollout to complete before creating or approving a plan.",
-            )
-        elif rollout is False:
-            add_check(
-                "rollout_state",
-                PolicyCheckState.PASSED,
-                "No workload rollout is in progress.",
-                observed=False,
-                limit=False,
-            )
-        else:
-            add_missing_evidence(
-                "rollout_state",
-                "Live rollout status is not present in the current workload binding evidence.",
-                "Refresh GitOps discovery so the workload rollout state can be checked before planning or approval.",
-            )
-
+    def _evaluate_controller_health(self, evidence: Mapping[str, Any], add_check, add_missing_evidence) -> None:
         suspended = _optional_bool(evidence, "controller_suspended")
         healthy = _optional_bool(evidence, "controller_healthy")
         if suspended is True or healthy is False:
@@ -628,6 +594,54 @@ class AutomationPolicyEvaluator:
                 "Controller health and suspend state are not present in the current workload binding evidence.",
                 "Refresh GitOps discovery so the owning controller's health can be checked before planning.",
             )
+
+    def _evaluate_optional_live_gates(
+        self,
+        source: WorkloadSource,
+        records: Sequence[RecommendationRecord],
+        add_check,
+        add_missing_evidence,
+        add_warning,
+    ) -> None:
+        evidence = source.evidence
+        if _resource_bound(records):
+            # A kind bound by GVK and name (a resource to delete, H6) has no rollout, no
+            # autoscaler or disruption budget and no usage samples: its evidence is the
+            # deletion evidence its analyzer required. Controller health still applies.
+            self._evaluate_controller_health(evidence, add_check, add_missing_evidence)
+            add_check(
+                "sample_count_coverage",
+                PolicyCheckState.PASSED,
+                "Not applicable: the target is not a workload; the deletion evidence was required by its analyzer.",
+            )
+            return
+        rollout = _optional_bool(evidence, "rollout_in_progress")
+        if rollout is True:
+            add_check(
+                "rollout_state",
+                PolicyCheckState.REJECTED,
+                "The workload has an in-progress rollout.",
+                observed=True,
+                limit=False,
+                code=AutomationErrorCode.ROLLOUT_IN_PROGRESS,
+                detail="Wait for the workload rollout to complete before creating or approving a plan.",
+            )
+        elif rollout is False:
+            add_check(
+                "rollout_state",
+                PolicyCheckState.PASSED,
+                "No workload rollout is in progress.",
+                observed=False,
+                limit=False,
+            )
+        else:
+            add_missing_evidence(
+                "rollout_state",
+                "Live rollout status is not present in the current workload binding evidence.",
+                "Refresh GitOps discovery so the workload rollout state can be checked before planning or approval.",
+            )
+
+        self._evaluate_controller_health(evidence, add_check, add_missing_evidence)
 
         if "hpa_targets" in evidence or "pdb_conflict" in evidence or "vpa_targets" in evidence:
             changes, adds_hpa = _planned_resource_changes(records)
@@ -1071,3 +1085,11 @@ def _same_workload(left: WorkloadSource, right: WorkloadSource) -> bool:
         right.workload_kind,
         right.workload_name,
     )
+
+
+def _resource_bound(records: Sequence[RecommendationRecord]) -> bool:
+    """Whether the records' action kind binds its target by GVK and name (not a workload, H0d)."""
+    from greenkube.automation.actions import action_kind_of
+
+    specs = [action_kind_of(record.action) if record.action is not None else None for record in records]
+    return bool(specs) and all(spec is not None and spec.binding_scope == "resource" for spec in specs)
