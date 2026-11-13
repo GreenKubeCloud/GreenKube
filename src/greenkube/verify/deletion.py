@@ -12,9 +12,11 @@ resource was charged before the change:
   (``allocated_rate_at_decision``: the OpenCost per-asset cost or the configured rate,
   as the recommendation's ``cost_source`` says).
 
-A resource still observed after the change is ``not_realized``; a missing rate is
-``inconclusive``; a severe confounder is ``contaminated``. The interval is degenerate:
-absence is a fact, not a sample, so there is no counterfactual noise to bootstrap.
+A resource still observed after the change is ``not_realized``; a change whose absence
+was never verified against the live cluster (``rollout_completed_source`` other than
+``resource_absent``) or a missing rate is ``inconclusive``; a severe confounder is
+``contaminated``. The interval is degenerate: absence is a fact, not a sample, so there
+is no counterfactual noise to bootstrap.
 """
 
 from __future__ import annotations
@@ -43,6 +45,8 @@ if TYPE_CHECKING:
 HOURS_PER_YEAR = 365.25 * 24
 METHOD_PRE_WINDOW = "pre_window_mean"
 METHOD_ALLOCATED_RATE = "allocated_rate_at_decision"
+#: The rollout completion source apply detection (and manual mode) records once it read the resource as absent.
+COMPLETION_RESOURCE_ABSENT = "resource_absent"
 
 
 class ResourceDeletionStrategy:
@@ -77,7 +81,8 @@ class ResourceDeletionStrategy:
     ) -> StrategyResult:
         from greenkube.verify.strategy import StrategyResult
 
-        del change, plan, load, settings, seed_parts
+        del plan, load, settings, seed_parts
+        absence_verified = change.rollout_completed_source == COMPLETION_RESOURCE_ABSENT
         projected = projections.get("allocated_cost")
         base: Dict[str, Any] = {
             "quantity": "allocated_cost",
@@ -101,6 +106,13 @@ class ResourceDeletionStrategy:
                 method=method,
                 outcome=ChangeOutcome.NOT_REALIZED,
                 reason=f"the resource is still observed in {len(observed_after)} post-change hour(s)",
+            )
+        elif not absence_verified:
+            estimate = SavingsEstimate(
+                **base,
+                method=method,
+                outcome=ChangeOutcome.INCONCLUSIVE,
+                reason="the absence of the resource was never verified in the cluster, so no saving is claimed",
             )
         elif rate is None:
             estimate = SavingsEstimate(

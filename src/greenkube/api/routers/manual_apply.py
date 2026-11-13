@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import shlex
 import uuid
+from datetime import datetime, timezone
 from typing import Any, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -25,10 +26,17 @@ from greenkube.automation.actions import ACTION_KINDS, ActionKindError, Primitiv
 from greenkube.automation.actions.delete_resource import deletion_target_for, describe_target
 from greenkube.automation.actions.primitives import strategic_merge_patch
 from greenkube.automation.actions.workloads import ACTION_API_VERSIONS, POD_SPEC_PATHS
+from greenkube.core.optimization.applied_detector import K8sResourceReader, ResourceReader, ResourceReadError
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.base_repository import RecommendationRepository
 
 router = APIRouter()
+
+
+def get_manual_resource_reader() -> ResourceReader:
+    """Reads the live resource a manual deletion targets (overridable in tests)."""
+    return K8sResourceReader()
+
 
 #: ``kubectl`` resource names of the kinds manual mode addresses.
 _KUBECTL_RESOURCES = {
@@ -234,12 +242,18 @@ async def mark_applied_manually(
     rec_id: int,
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
     actor: str = Depends(get_authenticated_actor),
+    resource_reader: ResourceReader = Depends(get_manual_resource_reader),
 ) -> Any:
     """Mark an active recommendation as applied by hand ("Mark as applied", H9).
 
     The record gets a change id, so the change-measurement pipeline records the change
     and measures it like a merged pull request. Only ``active`` recommendations: one with
     an open pull request is applied by its merge.
+
+    A deletion is only marked applied once the live cluster says the resource is absent
+    (409 while it still exists, 503 when it cannot be read: an unreadable resource is
+    never taken for an absent one), so no saving is ever claimed for a resource that is
+    still there.
     """
     from greenkube.core.optimization.lifecycle import RecommendationLifecycle, RecommendationTransitionError
 
@@ -251,6 +265,28 @@ async def mark_applied_manually(
             status_code=409,
             detail=f"Recommendation {rec_id} is {_status(record)}; only active recommendations can be marked applied.",
         )
+    rollout: Optional[dict] = None
+    deletion = deletion_target_for(record)
+    if deletion is not None:
+        try:
+            live = await resource_reader.read_resource(deletion)
+        except ResourceReadError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Could not check that {describe_target(deletion)} is gone: {exc}. Try again later.",
+            ) from exc
+        if live is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{describe_target(deletion)} still exists. Delete it first: the recommendation is marked "
+                    "applied once the resource is absent."
+                ),
+            )
+        rollout = {
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "completion_source": "resource_absent",
+        }
     actual_cpu = (
         record.recommended_cpu_request_millicores if record.type == RecommendationType.RIGHTSIZING_CPU else None
     )
@@ -265,6 +301,7 @@ async def mark_applied_manually(
             application_method="manual",
             actor=actor,
             change_id=uuid.uuid4().hex,
+            rollout=rollout,
         )
     except RecommendationTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

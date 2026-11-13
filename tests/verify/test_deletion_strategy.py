@@ -15,8 +15,10 @@ SETTINGS = MeasurementSettings()
 STRATEGY = ResourceDeletionStrategy()
 
 
-def _estimate(pre=(), post=(), *, projected=None, confounders=()):
-    change = change_event(hour_now() - timedelta(days=9))
+def _estimate(pre=(), post=(), *, projected=None, confounders=(), completion_source="resource_absent"):
+    change = change_event(hour_now() - timedelta(days=9)).model_copy(
+        update={"rollout_completed_source": completion_source}
+    )
     plan = STRATEGY.required_windows(change, SETTINGS)
     return STRATEGY.estimate(
         change,
@@ -65,6 +67,15 @@ def test_a_resource_still_observed_after_the_change_is_not_realized() -> None:
     result = _estimate(post=post, projected=100.0)
     assert result.outcome is ChangeOutcome.NOT_REALIZED
     assert "still observed" in result.reasons[0]
+
+
+def test_a_deletion_whose_absence_was_never_verified_claims_no_saving() -> None:
+    result = _estimate(projected=219.15, completion_source="unknown")
+
+    (estimate,) = result.estimates
+    assert result.outcome is ChangeOutcome.INCONCLUSIVE
+    assert estimate.annualized is None
+    assert "never verified" in result.reasons[0]
 
 
 def test_no_rate_is_inconclusive_and_a_severe_confounder_contaminates() -> None:
