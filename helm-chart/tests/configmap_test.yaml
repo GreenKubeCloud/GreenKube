@@ -593,6 +593,51 @@ tests:
     asserts:
       - failedTemplate: {}
 
+  - it: should keep change measurement unaccelerated by default and verify the ledger chain hourly (C6)
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_ACCELERATED
+          value: "false"
+      - equal:
+          path: data.LEDGER_CHAIN_VERIFY_INTERVAL
+          value: "1h"
+
+  - it: should accept accelerated demo windows only when acceleration is explicit
+    set:
+      config.recommendations.changeMeasurement.accelerated: true
+      config.recommendations.changeMeasurement.preWindowDays: 0.25
+      config.recommendations.changeMeasurement.postWindowDays: 0.05
+      config.ledger.chainVerifyInterval: 15m
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_ACCELERATED
+          value: "true"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS
+          value: "0.25"
+      - equal:
+          path: data.LEDGER_CHAIN_VERIFY_INTERVAL
+          value: "15m"
+
+  - it: should reject a baseline shorter than a week without acceleration
+    set:
+      config.recommendations.changeMeasurement.preWindowDays: 0.25
+    asserts:
+      - failedTemplate: {}
+
+  - it: should reject an accelerated baseline shorter than an hour
+    set:
+      config.recommendations.changeMeasurement.accelerated: true
+      config.recommendations.changeMeasurement.preWindowDays: 0.01
+    asserts:
+      - failedTemplate: {}
+
+  - it: should reject an invalid ledger chain verification interval
+    set:
+      config.ledger.chainVerifyInterval: 1d
+    asserts:
+      - failedTemplate: {}
+
   - it: should fail closed on missing policy evidence even without automation.policy values (D13)
     set:
       automation.policy: null

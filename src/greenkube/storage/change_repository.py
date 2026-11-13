@@ -83,6 +83,13 @@ def dedupe_key(change: ChangeEvent) -> str:
     )
 
 
+def _cluster_name() -> str:
+    """The cluster name the ledger identity is stored under (``CLUSTER_NAME``, roadmap N9)."""
+    from greenkube.core.savings_attributor import savings_cluster_name
+
+    return savings_cluster_name()
+
+
 def _loads(value: Any) -> Any:
     if isinstance(value, (bytes, bytearray)):
         value = value.decode("utf-8")
@@ -195,8 +202,10 @@ class ChangeRepository:
                     "synced_at, namespace, workload_kind, workload_name, containers, workload_uid, generation_before, "
                     "generation_after, spec_digest_before, spec_digest_after, rollout_started_at, "
                     "rollout_started_source, rollout_completed_at, rollout_completed_source, baseline_window_end, "
-                    "action_kind, application_method, load_metric, details, created_at, created_by) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?j, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?j, ?, ?)",
+                    "action_kind, application_method, load_metric, details, created_at, created_by, cluster_uid) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?j, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?j, ?, ?, "
+                    # N9: the cluster UID stored next to CLUSTER_NAME, once the controller resolved it.
+                    "(SELECT cluster_uid FROM cluster_identities WHERE cluster_name = ?))",
                     [
                         change.change_id,
                         key,
@@ -225,6 +234,7 @@ class ChangeRepository:
                         _dumps(change.details),
                         self._ts(now),
                         change.created_by,
+                        _cluster_name(),
                     ],
                 )
                 await self._execute(

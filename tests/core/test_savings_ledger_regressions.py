@@ -79,9 +79,18 @@ async def _run_compression_job(repo) -> None:
 async def _run_attribution_job(repo, applied) -> None:
     reco_repo = MagicMock()
     reco_repo.get_applied_recommendations = AsyncMock(return_value=applied)
+    from greenkube.verify.ledger import projector as projector_module
+
+    build = projector_module.build_projector
+
+    async def no_records():
+        return []
+
     with (
         patch("greenkube.core.factory.get_recommendation_repository", return_value=reco_repo),
         patch("greenkube.core.factory.get_savings_ledger_repository", return_value=repo),
+        # The dual write goes to the test database, never to the process-wide one (left open otherwise).
+        patch.object(projector_module, "build_projector", lambda: build(db_manager=repo._db, records=no_records)),
     ):
         await start_module.attribute_recommendation_savings()
 

@@ -552,6 +552,16 @@ config:
       driftThreshold: 0.5
       # Consecutive drifted days (1 to 7) after which the change is regressed.
       driftSustainedDays: 3
+      # Demo and quickstart only: lifts the 7-day minimum of preWindowDays (down to
+      # 1 hour) so a change is measured minutes after it lands. Measurements on such
+      # windows match few or no hours of the week and are mostly inconclusive. Keep
+      # false in production: the defaults above are the safe minimum.
+      accelerated: false
+  # Savings ledger v2 (roadmap C6): append-only, hash-chained entries.
+  ledger:
+    # How often the controller catches the ledger up and verifies its hash chain
+    # (greenkube_ledger_chain_verification_failures_total counts failures).
+    chainVerifyInterval: 1h
 
 # ---------------------------------------------------------------------------
 # Recommendation sources (Source SDK, docs/sources.md)

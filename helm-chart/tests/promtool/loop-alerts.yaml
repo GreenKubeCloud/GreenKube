@@ -156,12 +156,14 @@ tests:
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
-  # Ledger hash chain
+  # Ledger hash chain (greenkube_ledger_chain_ok gauge, sticky per cluster)
   # ---------------------------------------------------------------------------
   - interval: 1m
     input_series:
-      - series: 'greenkube_ledger_chain_verification_failures_total{job="c",instance="leader:9102"}'
-        values: '0 0 0 1 1 1 1 1 1 1'
+      - series: 'greenkube_ledger_chain_ok{job="c",instance="leader:9102",cluster_uid="u1"}'
+        values: '1 1 1 0 0 0 0 0 0 0'
+      - series: 'greenkube_ledger_chain_ok{job="c",instance="leader:9102",cluster_uid="u2"}'
+        values: '1x9'
     alert_rule_test:
       - eval_time: 2m
         alertname: GreenKubeLedgerChainVerificationFailed
@@ -171,50 +173,26 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              cluster_uid: u1
             exp_annotations:
-              summary: The GreenKube savings ledger failed its hash-chain verification
-              description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
+              summary: The GreenKube savings ledger hash chain failed verification
+              description: An entry of the append-only savings ledger of cluster u1 was modified, removed or reordered; greenkube_ledger_chain_verification_failures_total gives the reason, GET /api/v2/ledger/summary (chain) and the controller logs the position.
 
-  # A counter series that first appears already at 1 (created on its first
-  # failure, or right after a restart) is invisible to increase(); the
-  # "unless ... offset 1h" clause still fires, and resolves after an hour.
+  # Unprojected v1 rows alert only after 3 hours.
   - interval: 1m
     input_series:
-      - series: 'greenkube_ledger_chain_verification_failures_total{job="api",instance="api:8000"}'
-        values: '_x3 1x80'
+      - series: 'greenkube_ledger_unprojected_rows{job="c",instance="leader:9102",source_table="recommendation_savings_ledger"}'
+        values: '2x300'
     alert_rule_test:
-      - eval_time: 2m
-        alertname: GreenKubeLedgerChainVerificationFailed
+      - eval_time: 2h
+        alertname: GreenKubeLedgerProjectionBacklog
         exp_alerts: []
-      - eval_time: 4m
-        alertname: GreenKubeLedgerChainVerificationFailed
+      - eval_time: 4h
+        alertname: GreenKubeLedgerProjectionBacklog
         exp_alerts:
           - exp_labels:
-              severity: critical
+              severity: warning
+              source_table: recommendation_savings_ledger
             exp_annotations:
-              summary: The GreenKube savings ledger failed its hash-chain verification
-              description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
-      - eval_time: 30m
-        alertname: GreenKubeLedgerChainVerificationFailed
-        exp_alerts:
-          - exp_labels:
-              severity: critical
-            exp_annotations:
-              summary: The GreenKube savings ledger failed its hash-chain verification
-              description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
-      - eval_time: 75m
-        alertname: GreenKubeLedgerChainVerificationFailed
-        exp_alerts: []
-
-  # A healthy counter that appears at 0 never alerts.
-  - interval: 1m
-    input_series:
-      - series: 'greenkube_ledger_chain_verification_failures_total{job="api",instance="api:8000"}'
-        values: '_x3 0x80'
-    alert_rule_test:
-      - eval_time: 4m
-        alertname: GreenKubeLedgerChainVerificationFailed
-        exp_alerts: []
-      - eval_time: 75m
-        alertname: GreenKubeLedgerChainVerificationFailed
-        exp_alerts: []
+              summary: Savings accruals are missing from the GreenKube savings ledger v2
+              description: 2 row(s) of recommendation_savings_ledger have no savings ledger v2 entry after full sweeps for 3 hours; the v2 totals do not reconcile with GET /api/v1/recommendations/savings. See greenkube_ledger_write_errors_total and the controller logs.

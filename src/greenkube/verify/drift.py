@@ -27,7 +27,14 @@ watches it after the measurement and acts when the saving is lost:
   template change is acted on only :data:`SPEC_DRIFT_GRACE` after it was
   observed, and a newer recorded change on the workload closes the change as
   ``superseded`` instead (each change keeps accruing its own measured step).
-* **Reversal.** Both paths store where the measured saving ended on the
+* **Deletion.** A realized change whose workload the Kubernetes API reports
+  as gone (HTTP 404 on the Deployment, StatefulSet or DaemonSet) gets a
+  ``workload_absent`` event; still absent :data:`SPEC_DRIFT_GRACE` later, the
+  change is closed (``realized → closed``, event ``workload_deleted``) and its
+  verified recommendations stop accruing from the first absent observation. A
+  workload seen again in between records ``workload_present`` and nothing
+  closes. Any other API answer decides nothing (fail closed).
+* **Reversal.** All three paths store where the measured saving ended on the
   change (``details.accrual_end``: the drift onset, the first day of the
   sustained run, or the first differing observation). The measured accruals
   written after it are reversed by one signed ``measured`` ledger row per
@@ -36,7 +43,9 @@ watches it after the measurement and acts when the saving is lost:
   the change as a ``savings_reversed`` event. A later pass reverses only what
   no earlier ``savings_reversed`` entry covers, so a late accrual gets an
   adjacent entry, never an overlapping one. The savings counters report it as
-  reversed. The whole measured rate is reversed, not only the lost share.
+  reversed. The whole measured rate is reversed, not only the lost share. The reversal rows are projected into the
+  append-only savings ledger v2 as ``reversal`` entries with reason ``drift``
+  (roadmap C6), right after they are written when a ledger projector is given.
 
 Fail closed: a day with fewer than :data:`MIN_DAY_HOURS` hours of trusted cost
 does not count either way, a change whose post-window shows no per-replica
@@ -50,7 +59,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.model import (
@@ -88,6 +97,13 @@ _SECONDS_PER_YEAR = 365.25 * 24 * 3600
 _ASSESSED: Dict[tuple, datetime] = {}
 _SLOT = timedelta(hours=1)
 _MIN_COVERAGE = 0.5
+#: Events of the deletion check (C8): the workload was found absent, then present again.
+WORKLOAD_ABSENT = "workload_absent"
+WORKLOAD_PRESENT = "workload_present"
+WORKLOAD_DELETED = "workload_deleted"
+
+#: ``(namespace, kind, name) -> True`` (exists), ``False`` (deleted) or ``None`` (unknown).
+WorkloadProbe = Callable[[str, str, str], Awaitable[Optional[bool]]]
 
 
 @dataclass(frozen=True)
@@ -272,8 +288,14 @@ class DriftMonitor:
         settings: Optional[DriftSettings] = None,
         cluster_name: str = "default",
         assessed: Optional[Dict[tuple, datetime]] = None,
+        workload_probe: Optional[WorkloadProbe] = None,
+        ledger: Any = None,
     ):
         self.service = service
+        #: Existence check of a realized change's workload (deletion closes its accrual).
+        self.workload_probe = workload_probe
+        #: Optional savings ledger v2 projector, run after reversal rows are written (C6).
+        self.ledger = ledger
         self.changes = service.changes
         self.lifecycle = service.lifecycle
         self.savings_repo = savings_repo
@@ -321,6 +343,8 @@ class DriftMonitor:
         # A sustained usage drift is a regression even when the template moved too (a revert in git).
         if await self._assess(change, status, now):
             return "regressed"
+        if await self._deleted(change, status, now):
+            return "closed"
         if drift is None or now - ensure_utc(drift.latest.observed_at) < SPEC_DRIFT_GRACE:
             return None
         return await self._close_on_spec_drift(change, status, drift, now)
@@ -369,6 +393,60 @@ class DriftMonitor:
         )
         await self._end_members(change, assessment.reason)
         logger.info("Change %s regressed: %s", change.change_id, assessment.reason)
+        return True
+
+    async def _deleted(self, change: ChangeEvent, status: ChangeStatus, now: datetime) -> bool:
+        """Close the change once its workload has been absent for :data:`SPEC_DRIFT_GRACE`."""
+        if self.workload_probe is None:
+            return False
+        present = await self.workload_probe(*change.target.key)
+        if present is None:
+            return False
+        marks = [
+            event
+            for event in await self.changes.list_events(change.change_id)
+            if event.event_type in (WORKLOAD_ABSENT, WORKLOAD_PRESENT)
+        ]
+        latest = marks[-1] if marks else None
+        if present:
+            if latest is not None and latest.event_type == WORKLOAD_ABSENT:
+                await self.changes.record_event(
+                    change.change_id,
+                    WORKLOAD_PRESENT,
+                    actor="drift-monitor",
+                    reason="the workload exists again",
+                    now=now,
+                )
+            return False
+        if latest is None or latest.event_type != WORKLOAD_ABSENT:
+            await self.changes.record_event(
+                change.change_id,
+                WORKLOAD_ABSENT,
+                actor="drift-monitor",
+                reason=f"{'/'.join(change.target.key)} was not found in the cluster",
+                payload={"observed_at": now.isoformat()},
+                now=now,
+            )
+            return False
+        absent_since = ensure_utc(latest.created_at)
+        if now - absent_since < SPEC_DRIFT_GRACE:
+            return False
+        reason = (
+            f"the workload {'/'.join(change.target.key)} was deleted: the measured saving stops accruing "
+            f"from {absent_since.isoformat()}, when it was first found absent"
+        )
+        await self.changes.transition(
+            status,
+            MeasurementState.CLOSED,
+            event_type=WORKLOAD_DELETED,
+            actor="drift-monitor",
+            reason=reason,
+            payload={"absent_since": absent_since.isoformat(), "accrual_end": absent_since.isoformat()},
+            details=_ending(status, absent_since, reason),
+            now=now,
+        )
+        await self._end_members(change, reason)
+        logger.info("Change %s closed: %s", change.change_id, reason)
         return True
 
     async def _close_on_spec_drift(
@@ -492,7 +570,17 @@ class DriftMonitor:
             payload={"entries": entries},
             now=now,
         )
+        await self._sync_ledger()
         return True
+
+    async def _sync_ledger(self) -> None:
+        """Project the reversal rows into the savings ledger v2 now (the ledger-chain loop catches up otherwise)."""
+        if self.ledger is None:
+            return
+        try:
+            await self.ledger.sync()
+        except Exception as exc:
+            logger.warning("Savings ledger v2 pass after a drift reversal failed: %s", exc)
 
     def _reversal(self, record: Any, start: datetime, floor: Optional[datetime]):
         from greenkube.models.savings import METHOD_MEASURED, SavingsLedgerRecord, floor_to_slot
@@ -540,6 +628,35 @@ _ACCRUAL_END = "accrual_end"
 _ACCRUAL_END_REASON = "accrual_end_reason"
 
 
+async def kubernetes_workload_probe(namespace: str, kind: str, name: str) -> Optional[bool]:
+    """Whether a Deployment, StatefulSet or DaemonSet exists: ``False`` only on HTTP 404, ``None`` when unknown."""
+    try:
+        from greenkube.core.k8s_client import get_apps_v1_api
+
+        api = await get_apps_v1_api()
+    except Exception as exc:  # pragma: no cover - configuration errors depend on the host
+        logger.debug("No Kubernetes client for the workload deletion check: %s", exc)
+        return None
+    if api is None:
+        return None
+    readers = {
+        "Deployment": api.read_namespaced_deployment,
+        "StatefulSet": api.read_namespaced_stateful_set,
+        "DaemonSet": api.read_namespaced_daemon_set,
+    }
+    reader = readers.get(kind)
+    if reader is None:
+        return None
+    try:
+        await reader(name, namespace)
+    except Exception as exc:
+        if getattr(exc, "status", None) == 404:
+            return False
+        logger.debug("Workload %s/%s/%s could not be read: %s", namespace, kind, name, exc)
+        return None
+    return True
+
+
 def _day(moment: datetime) -> datetime:
     return moment.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -582,11 +699,15 @@ async def run_drift_monitor() -> None:
     service = ChangeMeasurementService(
         lifecycle, get_combined_metrics_repository(), get_change_repository(), config=config
     )
+    from greenkube.verify.ledger.projector import build_projector
+
     monitor = DriftMonitor(
         service,
         savings_repo=get_savings_ledger_repository(),
         settings=DriftSettings.from_config(config),
         cluster_name=savings_cluster_name(),
+        workload_probe=kubernetes_workload_probe,
+        ledger=build_projector(),
     )
     result = await monitor.run()
     if any(result.values()):
@@ -605,5 +726,6 @@ __all__ = [
     "SpecDrift",
     "assess_drift",
     "detect_spec_drift",
+    "kubernetes_workload_probe",
     "run_drift_monitor",
 ]

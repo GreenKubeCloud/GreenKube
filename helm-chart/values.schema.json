@@ -261,6 +261,12 @@
         "corsOrigins": {"type": "string"},
         "trustedProxyIps": {"type": "string"},
         "rootPath": {"type": "string", "pattern": "^$|^/"},
+        "ledger": {
+          "type": "object",
+          "properties": {
+            "chainVerifyInterval": {"type": "string", "pattern": "^[0-9]+(s|m|h)$"}
+          }
+        },
         "recommendations": {
           "type": "object",
           "properties": {
@@ -274,8 +280,15 @@
               "type": "object",
               "properties": {
                 "driftThreshold": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-                "driftSustainedDays": {"type": "integer", "minimum": 1, "maximum": 7}
-              }
+                "driftSustainedDays": {"type": "integer", "minimum": 1, "maximum": 7},
+                "accelerated": {"type": "boolean"},
+                "preWindowDays": {"type": "number", "exclusiveMinimum": 0},
+                "postWindowDays": {"type": "number", "exclusiveMinimum": 0},
+                "warmupHours": {"type": "number", "minimum": 0}
+              },
+              "if": {"not": {"properties": {"accelerated": {"const": true}}, "required": ["accelerated"]}},
+              "then": {"properties": {"preWindowDays": {"minimum": 7}}},
+              "else": {"properties": {"preWindowDays": {"minimum": 0.041666}}}
             },
             "verification": {
               "type": "object",

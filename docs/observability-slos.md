@@ -118,7 +118,18 @@ Every periodic job of the controller is a registered loop (`src/greenkube/core/l
 | `greenkube_loop_consecutive_failures{loop}` | Failed or timed-out ticks since the last success. |
 | `greenkube_controller_leader` | `1` on the replica that runs leader-only loops (the Lease holder, or any controller without leader election). |
 
-`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `savings-drift`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`, `session-purge` and `controller-heartbeat`.
+`loop` takes one of these values: `collection`, `carbon-intensity`, `node-analysis`, `savings-attribution`, `recommendation-lifecycle`, `savings-drift`, `ledger-chain`, `recommendation-scan`, `metrics-compression`, `dashboard-summary`, `gitops-discovery`, `gitops-sync`, `automation-controller`, `plan-executor`, `session-purge` and `controller-heartbeat`.
+
+The `ledger-chain` loop also exports the integrity of the savings ledger v2 ([methodology](methodology/savings-measurement.md#12-savings-ledger-v2-c6)):
+
+| Metric | Meaning |
+| --- | --- |
+| `greenkube_ledger_chain_verification_failures_total{reason}` | Verifications that found a modified, missing or reordered entry (`hash_mismatch`, `broken_link`, `missing_entry`, `identity_mismatch`, `truncated`, `head_rewritten`). |
+| `greenkube_ledger_chain_ok{cluster_uid}` | 1 when the last verification of the cluster's chain passed, 0 when it failed (failures are sticky until the anchor is reset). Alerted by `GreenKubeLedgerChainVerificationFailed` (critical, `== 0`) with the controller alerts. |
+| `greenkube_ledger_unprojected_rows{source_table}` | v1 ledger rows with a non-zero saving that have no ledger v2 entry after the last full sweep. Alerted by `GreenKubeLedgerProjectionBacklog` (warning, `> 0` for 3 hours): the v2 totals do not reconcile with the savings report. |
+| `greenkube_ledger_late_rows_projected_total{source_table}` | v1 rows found by a full sweep below the incremental window (committed out of id order) and projected late. |
+| `greenkube_ledger_chain_verified_entries` | Entries verified by the last pass, all clusters. |
+| `greenkube_ledger_write_errors_total{reason}` | Ledger passes that could not write (`projection_failed`, `supersession_failed`, `restatement_failed`, `dual_write_failed`, `invalid_v1_row`); the next pass catches up. |
 
 The same listener serves three more endpoints:
 
@@ -143,7 +154,7 @@ With the controller loop alerts, the PrometheusRule installs the loop health gro
 | `GreenKubeRecommendationSourceFailing` (warning, 1 h) | `increase(greenkube_optimization_analyzer_failures_total[2h])` by `source` > 0 | One source keeps failing; its signals miss the consensus. |
 | `GreenKubeRecommendationScanStale` (warning, 15 min) | `time() - greenkube_last_successful_optimization_run_timestamp_seconds` > `recommendationScanStaleSeconds` (10800) | No successful scan for 3 hours; silent before the first success. |
 | `GreenKubeMeasurementStalled` (warning, 10 min) | `time() - greenkube_loop_last_success_timestamp_seconds{loop="recommendation-lifecycle"}` > `measurementStaleSeconds` (1800) | Apply detection, verification and change measurement are not advancing, so the measurement backlog grows. |
-| `GreenKubeLedgerChainVerificationFailed` (critical, group `greenkube.ledger`) | `increase(greenkube_ledger_chain_verification_failures_total[1h])` > 0, or a counter series that first appears above zero | A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted, export it and compare it with your last export before anything else writes to it. |
+| `GreenKubeLedgerChainVerificationFailed` (critical, group `greenkube.ledger`) | `min by (cluster_uid) (greenkube_ledger_chain_ok) == 0` | A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted, export it and compare it with your last export before anything else writes to it. |
 
 The code exports no gauge of pending measurements yet, so the measurement backlog is alerted through the loop that drains it.
 

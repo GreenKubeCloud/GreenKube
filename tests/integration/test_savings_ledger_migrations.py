@@ -112,8 +112,9 @@ async def test_sqlite_upgrade_flags_legacy_rows_and_keeps_totals(tmp_path, monke
         ).fetchall() == [("2026-10-02T10:30:00Z",), ("2026-10-02T10:35:00Z",), ("2026-10-02T10:35:00Z",)]
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
         assert {"accrual_watermarks", "savings_accruals_v1", "savings_accruals_v1_hourly_rollup"} <= tables
-        # savings_ledger_entries is reserved for the roadmap C6 ledger table.
-        assert "savings_ledger_entries" not in tables
+        # savings_ledger_entries is the roadmap C6 ledger table (migration 0079), never a v1 view.
+        kinds = dict(connection.execute("SELECT name, type FROM sqlite_master WHERE name = 'savings_ledger_entries'"))
+        assert kinds == {"savings_ledger_entries": "table"}
 
 
 @pytest.mark.asyncio

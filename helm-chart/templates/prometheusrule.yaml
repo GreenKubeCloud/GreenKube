@@ -166,17 +166,19 @@ spec:
     - name: greenkube.ledger
       rules:
         - alert: GreenKubeLedgerChainVerificationFailed
-          expr: |
-            sum(increase(greenkube_ledger_chain_verification_failures_total[1h])) > 0
-            or
-            sum(
-              greenkube_ledger_chain_verification_failures_total
-                unless greenkube_ledger_chain_verification_failures_total offset 1h
-            ) > 0
+          expr: min by (cluster_uid) (greenkube_ledger_chain_ok) == 0
           labels:
             severity: critical
           annotations:
-            summary: The GreenKube savings ledger failed its hash-chain verification
-            description: A ledger entry no longer matches the hash chain (edited, deleted or reordered rows). Treat the ledger as untrusted until it is investigated; see docs/observability-slos.md.
+            summary: The GreenKube savings ledger hash chain failed verification
+            description: {{ `An entry of the append-only savings ledger of cluster {{ $labels.cluster_uid }} was modified, removed or reordered; greenkube_ledger_chain_verification_failures_total gives the reason, GET /api/v2/ledger/summary (chain) and the controller logs the position.` | quote }}
+        - alert: GreenKubeLedgerProjectionBacklog
+          expr: max by (source_table) (greenkube_ledger_unprojected_rows) > 0
+          for: 3h
+          labels:
+            severity: warning
+          annotations:
+            summary: Savings accruals are missing from the GreenKube savings ledger v2
+            description: {{ `{{ $value }} row(s) of {{ $labels.source_table }} have no savings ledger v2 entry after full sweeps for 3 hours; the v2 totals do not reconcile with GET /api/v1/recommendations/savings. See greenkube_ledger_write_errors_total and the controller logs.` | quote }}
     {{- end }}
 {{- end }}

@@ -66,7 +66,7 @@ tests:
           pattern: greenkube_loop_last_success_timestamp_seconds\{loop="recommendation-lifecycle"\}
       - matchRegex:
           path: spec.groups[3].rules[0].expr
-          pattern: greenkube_ledger_chain_verification_failures_total
+          pattern: greenkube_ledger_chain_ok
       - equal:
           path: spec.groups[3].rules[0].labels.severity
           value: critical
