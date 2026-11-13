@@ -75,23 +75,38 @@ def validate_expected_delta(
     ``target_identity`` is the rendered identity of ``target`` (a controller may supply the
     namespace of a namespace-less rendered workload).
     """
-    if target_identity not in before or target_identity not in after:
-        raise ExpectedDeltaError("render validation did not preserve the exact target resource")
     primitives = spec.compile(target, operations)
     created = {
         resource_identity(primitive.ref): primitive.manifest
         for primitive in primitives
         if isinstance(primitive, CreateResource)
     }
-    deleted = {resource_identity(primitive.ref) for primitive in primitives if isinstance(primitive, DeleteResource)}
+    deleted = {
+        target_identity if primitive.ref == target else resource_identity(primitive.ref)
+        for primitive in primitives
+        if isinstance(primitive, DeleteResource)
+    }
+    target_deleted = target_identity in deleted
+    if target_identity not in before or (target_identity not in after and not target_deleted):
+        raise ExpectedDeltaError("render validation did not preserve the exact target resource")
+    if not deleted <= set(before):
+        raise ExpectedDeltaError("render validation cannot delete a resource the source does not render")
     if set(after) != (set(before) - deleted) | set(created) or set(created) & set(before):
         raise ExpectedDeltaError("render validation found added or removed resources")
+    if target_deleted:
+        # The kind's target checks (for example "never delete an opted-out resource") run
+        # on the rendered resource it deletes; nothing of it is left to change.
+        before_target = before[target_identity]
+        if not isinstance(before_target, Mapping):
+            raise ExpectedDeltaError("rendered target is not a resource mapping")
+        spec.validate_target(before_target, target)
 
     expected_changes: dict[ResourceIdentity, list[FieldOp]] = {}
     for primitive in field_operations(primitives):
         identity = target_identity if primitive.ref == target else resource_identity(primitive.ref)
         expected_changes.setdefault(identity, []).append(primitive)
-    expected_changes.setdefault(target_identity, [])
+    if not target_deleted:
+        expected_changes.setdefault(target_identity, [])
 
     for identity, manifest in before.items():
         if identity not in expected_changes and identity not in deleted and manifest != after[identity]:
@@ -115,6 +130,8 @@ def validate_expected_delta(
         actual_comparison, actual_checksums = normalize_checksum_annotations(after[identity], identity[1])
         if expected_checksums != actual_checksums or expected_comparison != actual_comparison:
             raise ExpectedDeltaError(f"render validation found changes outside the requested {spec.description}")
+    if target_deleted:
+        return
     actual_target = after[target_identity]
     if not isinstance(actual_target, MutableMapping):
         raise ExpectedDeltaError("rendered target is not a mutable resource mapping")

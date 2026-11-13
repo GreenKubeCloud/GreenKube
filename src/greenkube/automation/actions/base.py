@@ -29,6 +29,10 @@ if TYPE_CHECKING:
     from greenkube.models.metrics import Recommendation
 
 RiskClass = Literal["low", "medium", "high"]
+#: How an action target is bound to its Git source: through the workload bindings of
+#: pod-template workloads, or through the resource bindings of the Argo CD and Flux
+#: inventories (H0d) for any other kind.
+BindingScope = Literal["workload", "resource"]
 
 #: The pre-apply baseline a kind captures before its change is delivered. Container
 #: resources persist ``PreApplyWorkloadBaseline`` (workload identity + per-container
@@ -133,6 +137,13 @@ class ActionKindSpec:
     title: ClassVar[str] = "change"
     #: What the kind changes, used in validation messages ("container resources").
     description: ClassVar[str] = "action fields"
+    #: Where the target's Git source comes from (``workload`` or ``resource`` bindings).
+    binding_scope: ClassVar[BindingScope] = "workload"
+    #: ``(group, kind)`` of the non-workload resources the kind targets; discovery persists
+    #: the inventory bindings of these kinds so plans can resolve them (H0d).
+    resource_kinds: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+    #: Whether policy-based auto-approval may approve the kind's plans (F5). Deletions never.
+    auto_approvable: ClassVar[bool] = True
 
     @property
     def op(self) -> str:
@@ -147,6 +158,19 @@ class ActionKindSpec:
         """Build this kind's actions for the recommendations it can express (recommendation id -> action)."""
         del recommendations
         return {}
+
+    def matches_recommendation(self, record: Any, target: ResourceTarget) -> bool:
+        """Whether a persisted recommendation is one this kind built ``target`` from.
+
+        The default describes workload kinds: a ``workload``-scoped recommendation whose
+        owner is the target.
+        """
+        return (
+            getattr(record, "scope", None) == "workload"
+            and getattr(record, "namespace", None) == target.namespace
+            and getattr(record, "owner_kind", None) == target.kind
+            and getattr(record, "owner_name", None) == target.name
+        )
 
     # -- targets and validation ------------------------------------------------------------
     def targets(self, action: ActionPlanV3) -> list[ResourceTarget]:
@@ -194,12 +218,45 @@ class ActionKindSpec:
         del kind, segments, value
         return False
 
+    def planning_warnings(
+        self, manifest: Mapping[str, Any], target: ResourceTarget, evidence: Mapping[str, Any]
+    ) -> list[str]:
+        """Warnings a plan of this kind carries, from the rendered target and the binding evidence."""
+        del manifest, target, evidence
+        return []
+
     def renderer_support(self, renderer: RendererKind, operations: Sequence[TypedOperation]) -> Support:
         """Kind-level limits of a renderer (for example Kustomize v1 writes requests only)."""
         del renderer, operations
         return Support.supported()
 
     # -- baseline, apply detection, inverse ------------------------------------------------
+    @property
+    def requires_workload_baseline(self) -> bool:
+        """Whether the kind needs the per-container ``PreApplyWorkloadBaseline`` of its target.
+
+        Kinds bound through resource bindings capture their baseline with
+        :meth:`capture_baseline` from the live resource instead.
+        """
+        return self.binding_scope == "workload"
+
+    def capture_baseline(self, live: Mapping[str, Any] | None, target: ResourceTarget) -> ActionBaseline | None:
+        """Pre-apply baseline of a non-workload target from its live object (``None`` when absent).
+
+        Raise ``ActionKindError`` when the live state makes the change pointless or unsafe
+        (for example the resource to delete is already gone). Kinds with nothing to restore
+        return ``None``: no baseline is persisted.
+        """
+        del target
+        if live is None:
+            raise ActionKindError("the action target does not exist in the cluster")
+        return None
+
+    def is_resource_applied(self, live: Mapping[str, Any] | None, target: ResourceTarget) -> AppliedVerdict:
+        """Apply detection of a non-workload target from its live object (``None`` when absent)."""
+        del target
+        return AppliedVerdict(applied=False, observed=live is not None, reason="no resource-level apply detection")
+
     def baseline_covers(self, operations: Sequence[TypedOperation], baseline: ActionBaseline) -> bool:
         """Whether a captured or persisted baseline holds everything the kind needs for these operations."""
         return self.subjects(operations).issubset(baseline.container_requests)

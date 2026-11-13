@@ -266,3 +266,71 @@ def _describe(segments: tuple[PathSegment, ...], index: int) -> str:
         rest = [segment for segment in segments[selector_index + 1 : index + 1] if isinstance(segment, str)]
         return f"{owner} {'.'.join(rest)}" if rest else owner
     return ".".join(segment for segment in segments[: index + 1] if isinstance(segment, str))
+
+
+def primitive_identity(ref: ResourceRef) -> tuple[str, str, str, str]:
+    """``(apiVersion, kind, namespace, name)`` of a primitive's resource."""
+    return ref.api_version, ref.kind, ref.namespace, ref.name
+
+
+def primitive_ref(primitive: Any) -> ResourceRef:
+    """The resource a primitive edits, creates or deletes."""
+    return primitive.ref
+
+
+def primitive_applied(primitive: Any, live: Mapping[str, Any] | None) -> bool:
+    """Whether the live object (``None`` when absent) shows one primitive applied (H0c).
+
+    ``SetField``: the field holds the value; ``RemoveField``: the field is absent;
+    ``CreateResource``: the resource exists; ``DeleteResource``: it is absent.
+    """
+    if isinstance(primitive, DeleteResource):
+        return live is None
+    if isinstance(primitive, CreateResource):
+        return live is not None
+    if live is None:
+        return False
+    present, value = read_field(live, primitive.path)
+    if isinstance(primitive, RemoveField):
+        return not present
+    return present and value == primitive.value
+
+
+def invert_primitives(
+    primitives: Sequence[Any],
+    before: Mapping[tuple[str, str, str, str], Mapping[str, Any]],
+) -> list[PrimitiveOp]:
+    """Primitives restoring ``before`` (the resources as they were), in reverse order (H0c).
+
+    A created resource is deleted, a deleted one is created again from its manifest in
+    ``before``, a set field gets its previous value back (or is removed when it was
+    absent) and a removed field is set again. A resource or field missing from
+    ``before`` cannot be restored: ``PrimitiveApplyError`` is raised rather than guessing.
+    """
+    inverse: list[PrimitiveOp] = []
+    for primitive in reversed(list(primitives)):
+        identity = primitive_identity(primitive.ref)
+        if isinstance(primitive, CreateResource):
+            inverse.append(DeleteResource(ref=primitive.ref))
+            continue
+        manifest = before.get(identity)
+        if manifest is None:
+            raise PrimitiveApplyError(f"{primitive.ref.kind} {primitive.ref.name!r} has no recorded state to restore")
+        if isinstance(primitive, DeleteResource):
+            inverse.append(CreateResource(manifest=_plain(manifest), placement=PlacementHint(near=primitive.ref)))
+            continue
+        present, value = read_field(manifest, primitive.path)
+        if present:
+            inverse.append(SetField(ref=primitive.ref, path=primitive.path, value=_plain(value)))
+        elif isinstance(primitive, SetField):
+            inverse.append(RemoveField(ref=primitive.ref, path=primitive.path))
+    return inverse
+
+
+def _plain(value: Any) -> Any:
+    """A plain-Python deep copy (round-trip YAML nodes become dicts and lists)."""
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
