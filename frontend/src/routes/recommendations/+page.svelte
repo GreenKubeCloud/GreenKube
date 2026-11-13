@@ -2368,6 +2368,13 @@
 														disabled
 													>PR created</button>
 												{/if}
+												<a
+													class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
+													       hover:border-green-600/50 hover:text-green-400 transition-colors"
+													title="kubectl steps for clusters without GitOps, then mark the recommendation as applied"
+													href="/recommendations/{rec.id}#manual"
+													data-testid="apply-manually"
+												>Apply manually</a>
 												<button
 													class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
 													       hover:border-yellow-600/50 hover:text-yellow-400 transition-colors"

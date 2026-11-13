@@ -30,6 +30,35 @@ from greenkube.gitops.discovery.flux import parse_flux_inventory_id
 
 ControllerIdentity = tuple[ControllerKind, str, str]
 
+#: ``WorkloadSource.namespace`` of a cluster-scoped resource binding (a PersistentVolume).
+#: Workload sources require a namespace; a Kubernetes namespace name is a DNS label and can
+#: never start with ``_``, so this sentinel never collides with a real namespace.
+CLUSTER_SCOPE_NAMESPACE = "_cluster"
+#: Evidence key of a resource binding source: whether the managing controller prunes
+#: resources removed from Git (Argo CD ``syncPolicy.automated.prune``, Flux ``spec.prune``).
+CONTROLLER_PRUNE_EVIDENCE = "controller_prune"
+#: Evidence key marking a source derived from a resource binding (not a workload binding).
+RESOURCE_BINDING_EVIDENCE = "resource_binding"
+
+
+def source_namespace(namespace: str) -> str:
+    """The ``WorkloadSource.namespace`` of a resource namespace ("" is cluster scope)."""
+    return namespace or CLUSTER_SCOPE_NAMESPACE
+
+
+def target_namespace(source_namespace_value: str) -> str:
+    """The resource namespace a ``WorkloadSource.namespace`` stands for."""
+    return "" if source_namespace_value == CLUSTER_SCOPE_NAMESPACE else source_namespace_value
+
+
+def source_matches_target(source: WorkloadSource, target: ResourceTarget) -> bool:
+    """Whether a (workload or resource) binding source addresses the action target."""
+    return (target_namespace(source.namespace), source.workload_kind, source.workload_name) == (
+        target.namespace,
+        target.kind,
+        target.name,
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class GroupVersionKind:
@@ -72,6 +101,8 @@ class ResourceBinding:
     controllers: tuple[ControllerIdentity, ...]
     location: WorkloadSource | None = None
     reason: str | None = None
+    #: Whether the managing controller prunes removed resources (``None`` when unknown).
+    prune: bool | None = None
 
     @property
     def resolved(self) -> bool:
@@ -83,22 +114,53 @@ class ResourceBinding:
         Planners take a ``WorkloadSource`` whose identity matches the action target; the
         Git location, renderer and controller evidence are the controller's own.
         """
-        if not self.resolved or self.location is None or not self.ref.namespace:
+        if not self.resolved or self.location is None:
             return None
-        if (self.ref.namespace, self.ref.kind, self.ref.name) == (
-            self.location.namespace,
-            self.location.workload_kind,
-            self.location.workload_name,
-        ):
-            return self.location
+        evidence = {
+            **self.location.evidence,
+            CONTROLLER_PRUNE_EVIDENCE: self.prune,
+            RESOURCE_BINDING_EVIDENCE: True,
+        }
+        if source_matches_target(self.location, self.ref):
+            return self.location.model_copy(update={"evidence": evidence})
         identity = "\0".join((self.location.id, self.ref.api_version, self.ref.kind, self.ref.namespace, self.ref.name))
         return self.location.model_copy(
             update={
                 "id": f"{self.location.controller_kind.value}-{hashlib.sha256(identity.encode()).hexdigest()[:24]}",
-                "namespace": self.ref.namespace,
+                "namespace": source_namespace(self.ref.namespace),
                 "workload_kind": self.ref.kind,
                 "workload_name": self.ref.name,
+                "evidence": evidence,
             }
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        """JSON form persisted in ``resource_bindings`` (migration 0087)."""
+        return {
+            "ref": self.ref.model_dump(mode="json"),
+            "status": self.status,
+            "controllers": [[kind.value, namespace, name] for kind, namespace, name in self.controllers],
+            "location": self.location.model_dump(mode="json") if self.location is not None else None,
+            "reason": self.reason,
+            "prune": self.prune,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> ResourceBinding:
+        location = payload.get("location")
+        status = payload.get("status")
+        if status not in ("resolved", "ambiguous"):
+            raise ValueError("resource binding status must be resolved or ambiguous")
+        prune = payload.get("prune")
+        return cls(
+            ref=ResourceTarget.model_validate(payload["ref"]),
+            status=status,
+            controllers=tuple(
+                (ControllerKind(str(item[0])), str(item[1]), str(item[2])) for item in payload.get("controllers") or ()
+            ),
+            location=WorkloadSource.model_validate(location) if isinstance(location, Mapping) else None,
+            reason=str(payload["reason"]) if payload.get("reason") is not None else None,
+            prune=prune if isinstance(prune, bool) else None,
         )
 
 
@@ -176,6 +238,26 @@ def argo_application_inventory(application: Mapping[str, Any]) -> list[ManagedRe
     return _unique(resources)
 
 
+def argo_application_prunes(application: Mapping[str, Any]) -> bool | None:
+    """Whether an Argo CD Application prunes resources removed from Git.
+
+    ``True`` with ``syncPolicy.automated.prune: true``; ``False`` with automated sync
+    without prune; ``None`` for manual sync (a person decides when syncing).
+    """
+    spec = as_mapping(application.get("spec")) or {}
+    policy = as_mapping(spec.get("syncPolicy")) or {}
+    automated = as_mapping(policy.get("automated"))
+    if automated is None:
+        return None
+    return automated.get("prune") is True
+
+
+def flux_kustomization_prunes(kustomization: Mapping[str, Any]) -> bool:
+    """Whether a Flux Kustomization garbage-collects resources removed from Git (``spec.prune``)."""
+    spec = as_mapping(kustomization.get("spec")) or {}
+    return spec.get("prune") is True
+
+
 def flux_kustomization_inventory(kustomization: Mapping[str, Any]) -> list[ManagedResource]:
     """Every resource a Flux Kustomization lists in ``status.inventory.entries``."""
     metadata = as_mapping(kustomization.get("metadata")) or {}
@@ -213,6 +295,7 @@ class ResourceBindingIndex:
 
     _resources: dict[tuple[str, str, str, str], list[ManagedResource]] = field(default_factory=dict)
     _locations: dict[ControllerIdentity, WorkloadSource] = field(default_factory=dict)
+    _prune: dict[ControllerIdentity, bool | None] = field(default_factory=dict)
 
     def add_inventory(self, resources: Iterable[ManagedResource]) -> None:
         for resource in resources:
@@ -222,10 +305,37 @@ class ResourceBindingIndex:
                 entries.append(resource)
 
     def add_argo_application(self, application: Mapping[str, Any]) -> None:
-        self.add_inventory(argo_application_inventory(application))
+        resources = argo_application_inventory(application)
+        self.add_inventory(resources)
+        for controller in {resource.controller for resource in resources}:
+            self._prune[controller] = argo_application_prunes(application)
 
     def add_flux_kustomization(self, kustomization: Mapping[str, Any]) -> None:
-        self.add_inventory(flux_kustomization_inventory(kustomization))
+        resources = flux_kustomization_inventory(kustomization)
+        self.add_inventory(resources)
+        for controller in {resource.controller for resource in resources}:
+            self._prune[controller] = flux_kustomization_prunes(kustomization)
+
+    def managed(self, kinds: Iterable[tuple[str, str]] | None = None) -> list[ManagedResource]:
+        """Every inventory entry, optionally only of the ``(group, kind)`` pairs in ``kinds``."""
+        selected = set(kinds) if kinds is not None else None
+        return [
+            entry
+            for (group, kind, _namespace, _name), entries in sorted(self._resources.items())
+            if selected is None or (group, kind) in selected
+            for entry in entries
+        ]
+
+    def bindings(self, kinds: Iterable[tuple[str, str]] | None = None) -> list[ResourceBinding]:
+        """The binding of every listed resource of ``kinds`` (one per resource)."""
+        bindings: dict[tuple[str, str, str, str], ResourceBinding] = {}
+        for entry in self.managed(kinds):
+            key = (entry.gvk.group, entry.gvk.kind, entry.namespace, entry.name)
+            if key not in bindings:
+                binding = self.resolve(entry.ref)
+                if binding is not None:
+                    bindings[key] = binding
+        return [bindings[key] for key in sorted(bindings)]
 
     def add_sources(self, sources: Iterable[WorkloadSource]) -> None:
         """Record each controller's resolved Git location from its discovered workload bindings.
@@ -270,6 +380,7 @@ class ResourceBindingIndex:
             controllers=controllers,
             location=location,
             reason=None if location is not None else "controller-source-unresolved",
+            prune=self._prune.get(controllers[0]),
         )
 
 

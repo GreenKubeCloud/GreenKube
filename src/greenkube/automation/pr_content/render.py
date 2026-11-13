@@ -485,7 +485,8 @@ def _changes(context: PullRequestContext) -> str:
             )
     for operation in plan.action.operations:
         if isinstance(operation, DeleteResource):
-            lines.append(f"- Delete `{target.kind}` `{target.namespace}/{target.name}` from the repository.")
+            scoped = f"{target.namespace}/{target.name}" if target.namespace else target.name
+            lines.append(f"- Delete `{target.kind}` `{scoped}` from the repository.")
         elif isinstance(operation, AddHorizontalPodAutoscaler):
             utilization = (
                 f", target CPU utilization {operation.target_cpu_utilization}%"

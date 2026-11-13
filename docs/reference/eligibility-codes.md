@@ -28,7 +28,7 @@ Every recommendation returned by `GET /api/v1/recommendations`, `/recommendation
 | `blockers` | Why a pull request cannot be opened, each with a `code`, a `message` and a `fix`. |
 | `warnings` | Non-blocking findings with the same shape. |
 | `eligible_at` | When a warming-up recommendation is expected to have enough evidence (F7), otherwise `null`. |
-| `action_kind` | The change GreenKube would write (`container_resources`), or `null` when the kind is not supported yet. |
+| `action_kind` | The change GreenKube would write (`container_resources`, `delete_resource`), or `null` when the kind is not supported yet. |
 | `recommendation_ids` | The change set a plan must be created for (several containers of one workload are one pull request); `null` when not eligible. |
 
 Eligibility depends on live state (GitOps bindings, freeze windows, open pull requests, the clock), so it is computed when the recommendation is read and never stored. The checks run in this order: lifecycle status, action kind and container target, automation configuration, the workload's GitOps binding, evidence warm-up, then the automation policy. The policy part uses the same `AutomationPolicyEvaluator` that guards plan creation (read-only), so a recommendation shown as eligible passes the same gates when its plan is prepared. A read that fails (bindings, open pull requests, the policy evaluation) blocks instead of being skipped; the plan itself can still fail on repository content (for example `needs_chart_mapping`).
@@ -48,8 +48,8 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 | Code | Meaning | Fix |
 |---|---|---|
 | `action_kind_unsupported` | GreenKube cannot write this kind of change yet. The message names the planned kind: `hpa` (H3), `schedule` (H4), `node_pool` (H7) or `advisory`. | Apply the change manually, then mark it applied so it is measured. |
-| `deletion_requires_review` | A deletion (`ZOMBIE_POD`, `IDLE_NAMESPACE`, `ORPHANED_PERSISTENT_VOLUME`, `ORPHANED_LOAD_BALANCER`) is never automated: GreenKube shows why the resource appears unused, it cannot prove that nothing depends on it. See [Why GreenKube thinks a resource is unused](../recommendation.md#why-greenkube-thinks-a-resource-is-unused). | Check the evidence, confirm with the owners, delete the resource from Git (or with `kubectl` outside GitOps) and mark the recommendation applied. Annotate the resource with `greenkube.io/ignore="true"` if it is still needed. |
-| `action_unavailable` | A container rightsizing recommendation has no typed action: the workload owner or container is unknown, or the proposal does not lower the current request. | The next scan rebuilds the action once these are known; otherwise apply manually. |
+| `deletion_requires_review` | A zombie workload (`ZOMBIE_POD`) or idle namespace (`IDLE_NAMESPACE`) deletion is never automated: deleting a Namespace manifest removes everything in it, and a zombie's owner may be recreated by its own controller. GreenKube shows why the resource appears unused, it cannot prove that nothing depends on it. See [Why GreenKube thinks a resource is unused](../recommendation.md#why-greenkube-thinks-a-resource-is-unused). Orphaned LoadBalancers and PersistentVolumes can become a reviewed deletion pull request instead (`delete_resource`, see [Deleting orphaned resources](../automation.md#deleting-orphaned-resources)). | Check the evidence, confirm with the owners, delete the resource from Git (or with `kubectl` outside GitOps) and mark the recommendation applied. Annotate the resource with `greenkube.io/ignore="true"` if it is still needed. |
+| `action_unavailable` | A container rightsizing recommendation has no typed action: the workload owner or container is unknown, or the proposal does not lower the current request. For a deletion, the stored `delete_resource` action does not delete this recommendation's resource. | The next scan rebuilds the action once these are known; otherwise apply manually. |
 | `requires_container_target` | The action does not target exactly one named container of the workload. | Rescan once container metrics are collected; GreenKube never patches a whole pod spec. |
 | `no_effective_change` | The proposed request equals the current one after unit normalization (`1Gi` = `1024Mi`, `0.5` = `500m`), so a pull request would change nothing. Plan creation fails with the same code when the Git source already declares the proposal, and the plan worker fails the plan before any Git write when the cluster already runs it (the recommendation is then recorded as applied by apply detection). | No action is needed; the next scan resolves the recommendation. |
 
@@ -65,6 +65,8 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 | `binding_unresolved` | Discovery could not find the source. | Check the Application/Kustomization/HelmRelease is synced, refresh, or resolve manually. |
 | `binding_blocked` | The source is unsupported or not allowed. | Read the reason in `GET /api/v1/gitops/bindings`; adjust the allowlist or source. |
 | `binding_stale` | The binding expired (`automation.bindingTtl`). | `POST /api/v1/gitops/refresh`. |
+| `resource_binding_unavailable` | Deletions (`delete_resource`): the resource bindings of the Argo CD and Flux inventories could not be read. | Check the database and `GET /api/v1/gitops/status`. |
+| `resource_binding_missing` | Deletions: no Argo CD Application or Flux Kustomization lists the resource, so it is not in Git. | Delete it with the manual snippet (`GET /api/v1/recommendations/{id}/manual`), then mark it applied; or manage it with GitOps and refresh discovery. |
 
 ### Evidence and policy
 
@@ -87,6 +89,8 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 
 | Code | Meaning | Fix |
 |---|---|---|
+| `deletion_reviewed_in_pr` | A deletion pull request (`delete_resource`) is offered but never approved automatically (`automation.autoApprove` refuses it with `deletion_requires_review`). | Check the evidence and the owners before approving and merging. |
+| `deletion_prune_disabled` | The controller managing the resource does not prune (Argo CD `syncPolicy.automated.prune` or Flux `spec.prune` is off): removing the manifest will not delete the live object. The plan carries the same warning. | Enable prune, or delete the live object by hand after the merge. |
 | `singleton_workload` | One replica: the rollout restarts the only pod. | Merge in a maintenance window or add a replica first. |
 | `memory_decrease_best_effort` | Memory decreases take effect when the pod restarts. | Expect the saving after the next rollout. |
 | `reliability_change` | The change increases resources (reliability lane) and costs money. | Weigh the incident risk it avoids against its cost. |

@@ -8,12 +8,17 @@ import pytest
 
 from greenkube.gitops.contracts import BindingStatus, ControllerKind, ResourceTarget
 from greenkube.gitops.discovery.inventory import (
+    CLUSTER_SCOPE_NAMESPACE,
+    CONTROLLER_PRUNE_EVIDENCE,
     GroupVersionKind,
+    ResourceBinding,
     ResourceBindingIndex,
     UnboundResourceError,
     argo_application_inventory,
     bind_resources,
     flux_kustomization_inventory,
+    source_matches_target,
+    target_namespace,
 )
 from tests.gitops.planning.test_raw_manifest import _source  # pyrefly: ignore[missing-import]
 
@@ -104,13 +109,24 @@ def test_a_resource_listed_by_one_controller_binds_to_its_resolved_location() ->
     assert binding is not None and binding.resolved
     assert binding.controllers == ((ControllerKind.ARGOCD, "argocd", "payments-prod"),)
     assert binding.location == source
-    # Cluster-scoped resources have no workload-shaped source; namespaced ones do.
-    assert binding.workload_source() is None
+    # Cluster-scoped resources get the reserved cluster-scope namespace (never a real namespace).
+    pv_source = binding.workload_source()
+    assert pv_source is not None
+    assert (pv_source.namespace, pv_source.workload_kind, pv_source.workload_name) == (
+        CLUSTER_SCOPE_NAMESPACE,
+        "PersistentVolume",
+        "pv-orphan",
+    )
+    assert source_matches_target(pv_source, PV)
+    assert pv_source.evidence[CONTROLLER_PRUNE_EVIDENCE] is None
 
     deployment = index.resolve(
         ResourceTarget(api_version="apps/v1", kind="Deployment", namespace="payments", name="api")
     )
-    assert deployment is not None and deployment.workload_source() == source
+    assert deployment is not None
+    deployment_source = deployment.workload_source()
+    assert deployment_source is not None
+    assert deployment_source.model_copy(update={"evidence": source.evidence}) == source
 
     hpa_binding = index.resolve(HPA)
     assert hpa_binding is not None
@@ -173,3 +189,49 @@ def test_controllers_with_disagreeing_workload_locations_get_no_location() -> No
     binding = index.resolve(PV)
     assert binding is not None and not binding.resolved
     assert binding.reason == "controller-source-unresolved"
+
+
+def test_controller_prune_settings_are_recorded_per_controller() -> None:
+    automated = {**APPLICATION, "spec": {**APPLICATION["spec"], "syncPolicy": {"automated": {"prune": True}}}}
+    index = ResourceBindingIndex()
+    index.add_argo_application(automated)
+    index.add_sources([_source()])
+    binding = index.resolve(PV)
+    assert binding is not None and binding.prune is True
+    source = binding.workload_source()
+    assert source is not None and source.evidence[CONTROLLER_PRUNE_EVIDENCE] is True
+
+    no_prune = {**APPLICATION, "spec": {**APPLICATION["spec"], "syncPolicy": {"automated": {}}}}
+    index = ResourceBindingIndex()
+    index.add_argo_application(no_prune)
+    resolved = index.resolve(PV)
+    assert resolved is not None and resolved.prune is False
+
+
+def test_flux_prune_is_read_from_the_kustomization_spec() -> None:
+    kustomization = {
+        "metadata": {"name": "apps", "namespace": "flux-system"},
+        "spec": {"prune": True},
+        "status": {"inventory": {"entries": [{"id": "shop_web-lb__Service", "v": "v1"}]}},
+    }
+    index = ResourceBindingIndex()
+    index.add_flux_kustomization(kustomization)
+    binding = index.resolve(ResourceTarget(api_version="v1", kind="Service", namespace="shop", name="web-lb"))
+    assert binding is not None and binding.prune is True
+
+
+def test_bindings_are_listed_by_kind_and_round_trip_through_their_payload() -> None:
+    index = ResourceBindingIndex()
+    index.add_argo_application(APPLICATION)
+    index.add_sources([_source()])
+
+    bindings = index.bindings({("", "PersistentVolume")})
+    assert [binding.ref for binding in bindings] == [PV]
+    restored = ResourceBinding.from_payload(bindings[0].to_payload())
+    assert restored == bindings[0]
+    assert index.bindings({("", "ConfigMap")}) == []
+
+
+def test_cluster_scope_sentinel_maps_back_to_an_empty_namespace() -> None:
+    assert target_namespace(CLUSTER_SCOPE_NAMESPACE) == ""
+    assert target_namespace("payments") == "payments"

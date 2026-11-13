@@ -50,6 +50,7 @@ from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import gitops as gitops_router
 from greenkube.api.routers import health as health_router
 from greenkube.api.routers import ledger as ledger_router
+from greenkube.api.routers import manual_apply as manual_apply_router
 from greenkube.api.routers import metrics, namespaces, nodes, recommendations, report, repository_bindings
 from greenkube.api.routers import optimization as optimization_router
 from greenkube.api.routers import plan_delivery as plan_delivery_router
@@ -380,6 +381,8 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(recommendations_v2_router.router, prefix="/api/v2", tags=["Recommendations v2"])
     app.include_router(ledger_router.router, prefix="/api/v2", tags=["Savings ledger"])
     app.include_router(auth_router.router, prefix="/api/v1", tags=["Authentication"])
+    # Manual mode (H9): kubectl snippets and "Mark as applied".
+    app.include_router(manual_apply_router.router, prefix="/api/v1", tags=["Recommendations"])
 
     @app.get("/api/v1/health/heartbeat", include_in_schema=False)
     async def heartbeat():

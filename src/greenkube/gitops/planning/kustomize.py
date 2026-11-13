@@ -21,6 +21,7 @@ from ruamel.yaml.representer import RoundTripRepresenter
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from greenkube.automation.actions import ACTION_KINDS, ActionKindError, ActionKindSpec, Support
+from greenkube.automation.actions.primitives import DeleteResource as DeletePrimitive
 from greenkube.automation.actions.primitives import (
     ListSelector,
     PathSegment,
@@ -44,6 +45,7 @@ from greenkube.gitops.contracts import (
     ValidationResult,
     WorkloadSource,
 )
+from greenkube.gitops.discovery.inventory import source_matches_target
 from greenkube.gitops.planning.digest import plan_digest
 from greenkube.gitops.planning.raw_manifest import (
     RawManifestPlanError,
@@ -55,6 +57,7 @@ from greenkube.gitops.planning.raw_manifest import (
     _target_identity,
     _unified_diff,
     _validate_rendered_change,
+    remove_document,
 )
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult
@@ -168,6 +171,26 @@ class KustomizePlanner:
         )
         allow_namespace_less = controller_supplies_namespace(source)
         rendered_target = _require_target(before, action.target, allow_namespace_less=allow_namespace_less)
+        if _deletes_target(spec, action.target, operations):
+            return _plan_resource_deletion(
+                self,
+                action,
+                source,
+                snapshot,
+                base_revision,
+                spec,
+                operations,
+                root=root,
+                snapshot_files=snapshot_files,
+                kustomizations=kustomizations,
+                configs=configs,
+                overlay_path=overlay_path,
+                kustomization_path=kustomization_path,
+                original_kustomization=original_kustomization,
+                overrides=overrides,
+                before=before,
+                rendered_target=rendered_target,
+            )
         _reject_post_build_variables(before, rendered_target, overrides, _patch_fields(spec, action.target, operations))
         selector = _target_selector(
             _patch_selector_target(
@@ -386,11 +409,7 @@ def _validate_request(
         raise KustomizePlanError("workload source must use the Kustomize renderer")
     if source.status is not BindingStatus.RESOLVED:
         raise KustomizePlanError("workload source binding must be resolved")
-    if (
-        action.target.kind != source.workload_kind
-        or action.target.namespace != source.namespace
-        or action.target.name != source.workload_name
-    ):
+    if not source_matches_target(source, action.target):
         raise KustomizePlanError("action target must match the resolved workload binding")
     spec, operations = _action_kind(action, KustomizePlanError)
     try:
@@ -410,7 +429,10 @@ def _validate_request(
 
 def _primitive_support(op: PrimitiveOp) -> Support:
     """Kustomize writes ``SetField`` edits (and ``RemoveField`` as a ``null`` strategic-merge
-    deletion, H1) under ``spec`` addressed by ``name`` list keys."""
+    deletion, H1) under ``spec`` addressed by ``name`` list keys, and deletes a resource by
+    removing its ``resources:`` entry or document (H6)."""
+    if isinstance(op, DeletePrimitive):
+        return Support.supported()
     if not isinstance(op, (SetField, RemoveField)):
         return Support.unsupported(f"Kustomize planning does not support {op.op!r} primitives yet")
     segments = op.segments
@@ -1631,3 +1653,246 @@ def _file_diff(edits: Sequence[FileEdit], originals: Mapping[str, str]) -> str:
         fromfile = "/dev/null" if edit.operation == "create" else f"a/{edit.path}"
         chunks.append(_unified_diff(old_content, new_content, fromfile, f"b/{edit.path}"))
     return "".join(chunks)
+
+
+# -- resource deletion: remove a resources: entry or one document (H6) ------------------------
+@dataclass(frozen=True, slots=True)
+class _DeletionSource:
+    """Where the deleted resource is declared: one document of a file listed in ``resources:``."""
+
+    directory: str
+    kustomization_path: str
+    reference: str
+    file_path: str
+    document_index: int
+    documents: int
+    namespace: str
+
+
+def _deletes_target(spec: ActionKindSpec, target: ResourceTarget, operations: Sequence[TypedOperation]) -> bool:
+    try:
+        primitives = spec.compile(target, operations)
+    except ActionKindError as exc:
+        raise KustomizePlanError(str(exc)) from exc
+    return any(isinstance(primitive, DeletePrimitive) and primitive.ref == target for primitive in primitives)
+
+
+def _locate_deletion_source(
+    root: Path,
+    files: Mapping[str, Any],
+    kustomizations: Mapping[str, str],
+    configs: Mapping[str, Mapping[str, Any]],
+    target: ResourceTarget,
+) -> _DeletionSource:
+    """The single source document declaring ``target`` in the overlay's render graph."""
+    matches: list[_DeletionSource] = []
+    for directory, config in sorted(configs.items()):
+        path = kustomizations[directory]
+        for reference in _string_list(config, "resources", path):
+            resolved = _resolve_reference(directory, reference)
+            if resolved in kustomizations:
+                continue
+            content = _read_snapshot_file(root, files, resolved)
+            try:
+                documents = list(YAML(typ="safe", pure=True).load_all(content))
+            except (YAMLError, RecursionError, ValueError, TypeError) as exc:
+                raise KustomizePlanError(f"{resolved}: resource YAML is invalid") from exc
+            present = [document for document in documents if document is not None]
+            for index, document in enumerate(documents):
+                if not isinstance(document, Mapping):
+                    continue
+                metadata = document.get("metadata")
+                metadata = metadata if isinstance(metadata, Mapping) else {}
+                namespace = metadata.get("namespace") or ""
+                if (
+                    document.get("apiVersion") == target.api_version
+                    and document.get("kind") == target.kind
+                    and metadata.get("name") == target.name
+                    and namespace in {"", target.namespace}
+                ):
+                    matches.append(
+                        _DeletionSource(directory, path, reference, resolved, index, len(present), str(namespace))
+                    )
+    if not matches:
+        raise KustomizePlanError(
+            "the deleted resource is not declared by a file in the overlay's resources (generated or renamed "
+            "resources are not deleted automatically)"
+        )
+    if len(matches) != 1:
+        raise KustomizePlanError("the deleted resource is declared by several files of the Kustomize overlay")
+    return matches[0]
+
+
+def _file_consumers(
+    root: Path, files: Mapping[str, Any], kustomizations: Mapping[str, str], file_path: str
+) -> set[str]:
+    """Every Kustomization of the snapshot that lists ``file_path`` in ``resources:``."""
+    consumers: set[str] = set()
+    for directory, path in kustomizations.items():
+        config = _load_kustomization(root, files, path)
+        for reference in _string_list(config, "resources", path):
+            if not _is_remote_reference(reference) and _resolve_reference(directory, reference) == file_path:
+                consumers.add(directory)
+    return consumers
+
+
+def remove_resources_entry(content: str, path: str, reference: str) -> str:
+    """The Kustomization ``content`` without the ``resources:`` entry ``reference`` (comments kept)."""
+    yaml = _roundtrip_yaml(content)
+    try:
+        documents = list(yaml.load_all(content))
+    except (YAMLError, RecursionError, ValueError, TypeError) as exc:
+        raise KustomizePlanError(f"{path}: Kustomization YAML is invalid") from exc
+    if len(documents) != 1 or not isinstance(documents[0], MutableMapping):
+        raise KustomizePlanError(f"{path}: Kustomization must contain exactly one mapping document")
+    config = documents[0]
+    resources = config.get("resources")
+    if not isinstance(resources, list) or resources.count(reference) != 1:
+        raise KustomizePlanError(f"{path}: resources must list {reference!r} exactly once")
+    del resources[resources.index(reference)]
+    stream = io.StringIO()
+    try:
+        yaml.dump(config, stream)
+    except (YAMLError, RecursionError, ValueError, TypeError) as exc:
+        raise KustomizePlanError(f"{path}: Kustomization could not be serialized") from exc
+    return stream.getvalue()
+
+
+def _plan_resource_deletion(
+    planner: KustomizePlanner,
+    action: ActionPlanV3,
+    source: WorkloadSource,
+    snapshot: RepositorySnapshot,
+    base_revision: str,
+    spec: ActionKindSpec,
+    operations: Sequence[TypedOperation],
+    *,
+    root: Path,
+    snapshot_files: Mapping[str, Any],
+    kustomizations: Mapping[str, str],
+    configs: Mapping[str, Mapping[str, Any]],
+    overlay_path: str,
+    kustomization_path: str,
+    original_kustomization: str,
+    overrides: _FluxBuildOverrides,
+    before: RawRenderResult,
+    rendered_target: ResourceTarget,
+) -> FilePlan:
+    """Delete the target: drop its file and ``resources:`` entry, or remove its document."""
+    location = _locate_deletion_source(root, snapshot_files, kustomizations, configs, action.target)
+    if location.directory != overlay_path and _find_overlay_consumers(
+        root, snapshot_files, kustomizations, location.directory, configs
+    ) - {overlay_path}:
+        raise KustomizePlanError("refusing to delete a resource of a shared base referenced by another consumer")
+    if _file_consumers(root, snapshot_files, kustomizations, location.file_path) != {location.directory}:
+        raise KustomizePlanError("refusing to delete a resource file listed by several Kustomizations")
+
+    original_file = _read_snapshot_file(root, snapshot_files, location.file_path)
+    originals: dict[str, str] = {}
+    edits: list[FileEdit] = []
+    staged: dict[str, str] = {}
+    root_content = original_kustomization
+    if location.documents == 1:
+        owner_content = _read_snapshot_file(root, snapshot_files, location.kustomization_path)
+        updated_owner = remove_resources_entry(owner_content, location.kustomization_path, location.reference)
+        if location.kustomization_path == kustomization_path:
+            root_content = updated_owner
+        else:
+            staged[location.kustomization_path] = updated_owner
+        edits.append(
+            FileEdit(
+                path=location.kustomization_path,
+                operation="update",
+                original_sha=_git_blob_sha(owner_content.encode("utf-8"), base_revision),
+                content=updated_owner,
+            )
+        )
+        originals[location.kustomization_path] = owner_content
+        edits.append(
+            FileEdit(
+                path=location.file_path,
+                operation="delete",
+                original_sha=_git_blob_sha(original_file.encode("utf-8"), base_revision),
+            )
+        )
+        originals[location.file_path] = original_file
+    else:
+        document_target = action.target.model_copy(update={"namespace": location.namespace})
+        try:
+            updated_file = remove_document(location.file_path, original_file, location.document_index, document_target)
+        except RawManifestPlanError as exc:
+            raise KustomizePlanError(str(exc)) from exc
+        if updated_file is None:
+            raise KustomizePlanError(f"{location.file_path}: removing the document left no resource")
+        staged[location.file_path] = updated_file
+        edits.append(
+            FileEdit(
+                path=location.file_path,
+                operation="update",
+                original_sha=_git_blob_sha(original_file.encode("utf-8"), base_revision),
+                content=updated_file,
+            )
+        )
+        originals[location.file_path] = original_file
+
+    after = _render_as_deployed(
+        planner.renderer,
+        snapshot,
+        root,
+        snapshot_files,
+        overlay_path,
+        kustomization_path,
+        root_content,
+        overrides,
+        extra_files=staged,
+    )
+    _validate_render_diff(before, after, action.target, action.target.kind, operations)
+
+    edits.sort(key=lambda edit: edit.path)
+    chunks: list[str] = []
+    for edit in edits:
+        old_content = originals.get(edit.path, "")
+        new_content = edit.content or ""
+        tofile = "/dev/null" if edit.operation == "delete" else f"b/{edit.path}"
+        chunks.append(_unified_diff(old_content, new_content, f"a/{edit.path}", tofile))
+    diff = "".join(chunks)
+    rendered_diff = _unified_diff(_rendered_json(before), _rendered_json(after), "rendered-before", "rendered-after")
+    target_manifest = _rendered_manifest(before, rendered_target)
+    kind_warnings = spec.planning_warnings(target_manifest, action.target, source.evidence)
+    warnings = sorted(set(before.warnings) | set(after.warnings) | set(kind_warnings))
+    plan_id = _plan_identifier(action, source, base_revision)
+    validation = ValidationResult(
+        target_changed=True,
+        unrelated_changes=False,
+        requests_within_limits=True,
+        renderer=RendererKind.KUSTOMIZE,
+        output_digest=after.output_digest,
+        warnings=warnings,
+    )
+    source_revision = source.source_revision or source.revision
+    digest = plan_digest(
+        plan_id=plan_id,
+        action=action,
+        source=source,
+        files=edits,
+        diff=diff,
+        rendered_diff=rendered_diff,
+        base_revision=base_revision,
+        source_revision=source_revision,
+        validation=validation,
+        warnings=warnings,
+        renderer=RendererKind.KUSTOMIZE,
+        error_type=KustomizePlanError,
+    )
+    return FilePlan(
+        plan_id=plan_id,
+        files=edits,
+        diff=diff,
+        rendered_diff=rendered_diff,
+        base_revision=base_revision,
+        source_revision=source_revision,
+        renderer=RendererKind.KUSTOMIZE,
+        validation=validation,
+        warnings=warnings,
+        digest=digest,
+    )

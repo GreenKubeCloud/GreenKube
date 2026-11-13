@@ -40,11 +40,16 @@ from greenkube.storage.base_gitops_repository import WorkloadBinding, freshen_wo
 logger = logging.getLogger(__name__)
 
 ACTION_CONTAINER_RESOURCES = "container_resources"
+ACTION_DELETE_RESOURCE = "delete_resource"
 
 #: Recommendation types GreenKube can turn into a pull request, by action kind.
 SUPPORTED_ACTION_KINDS: Dict[str, str] = {
     "RIGHTSIZING_CPU": ACTION_CONTAINER_RESOURCES,
     "RIGHTSIZING_MEMORY": ACTION_CONTAINER_RESOURCES,
+    # Orphaned LoadBalancers and PersistentVolumes become reviewed deletion PRs (H6);
+    # zombie workloads and idle namespaces stay manual (deletion_requires_review).
+    "ORPHANED_LOAD_BALANCER": ACTION_DELETE_RESOURCE,
+    "ORPHANED_PERSISTENT_VOLUME": ACTION_DELETE_RESOURCE,
 }
 
 #: Action kinds planned for the other types (roadmap H), named in the blocker.
@@ -53,8 +58,6 @@ PLANNED_ACTION_KINDS: Dict[str, Tuple[str, str]] = {
     "OFF_PEAK_SCALING": ("schedule", "H4"),
     "ZOMBIE_POD": ("deletion", "H6"),
     "IDLE_NAMESPACE": ("deletion", "H6"),
-    "ORPHANED_PERSISTENT_VOLUME": ("deletion", "H6"),
-    "ORPHANED_LOAD_BALANCER": ("deletion", "H6"),
     "OVERPROVISIONED_NODE": ("node_pool", "H7"),
     "UNDERUTILIZED_NODE": ("node_pool", "H7"),
     "CARBON_AWARE_SCHEDULING": ("advisory", "E4"),
@@ -85,6 +88,26 @@ CODES: Dict[str, Tuple[str, str]] = {
         "Check the evidence in the recommendation, confirm with the owners, then delete the resource from Git "
         "(or with kubectl for resources outside GitOps) and mark the recommendation as applied. Annotate the "
         'resource with greenkube.io/ignore="true" if it is still needed.',
+    ),
+    "deletion_reviewed_in_pr": (
+        "A deletion pull request is never approved automatically: GreenKube shows why the resource appears "
+        "unused, a person confirms it.",
+        "Check the evidence in the recommendation and with the owners before approving and merging the pull "
+        'request. Annotate the resource with greenkube.io/ignore="true" if it is still needed.',
+    ),
+    "deletion_prune_disabled": (
+        "The GitOps controller managing this resource does not prune, so removing it from Git will not delete it.",
+        "Enable Argo CD syncPolicy.automated.prune or Flux spec.prune, or delete the live object by hand after "
+        "the merge.",
+    ),
+    "resource_binding_missing": (
+        "No Argo CD Application or Flux Kustomization lists this resource, so GreenKube cannot find it in Git.",
+        "Delete it by hand (kubectl delete, see the manual snippet) and mark the recommendation as applied, or "
+        "manage it with GitOps and refresh discovery.",
+    ),
+    "resource_binding_unavailable": (
+        "The resource bindings of the GitOps controllers could not be read.",
+        "Check the database connection and GET /api/v1/gitops/status, then retry.",
     ),
     "no_effective_change": (
         "The proposed request equals the current one, so a pull request would change nothing.",
@@ -253,6 +276,8 @@ class EligibilityContext:
     step_seconds: int = 300
     #: Delivery mode of new approvals (F4): ``direct``, ``patch`` or ``ci``.
     delivery_mode: str = field(default_factory=lambda: _configured_delivery_mode())
+    #: Resource bindings (H0d) by (kind, namespace, name); None when they were not read.
+    resource_bindings: Optional[Mapping[Tuple[str, str, str], Any]] = None
 
 
 def workload_key(record: Any) -> Optional[Tuple[str, str, str]]:
@@ -386,6 +411,66 @@ def _valid_limit_edits(op: Mapping[str, Any], limits: Any) -> bool:
     if any(resource != "cpu" for resource in removals) or set(removals) & set(limits):
         return False
     return op.get("container_kind", "container") in ("container", "sidecar", "init")
+
+
+def validate_deletion_action(record: Any) -> Tuple[Optional[List[int]], Optional[str]]:
+    """Server-side check of a typed ``delete_resource`` action: it deletes this recommendation's resource."""
+    from greenkube.automation.actions.delete_resource import deletion_target_for
+
+    action = getattr(record, "action", None)
+    data = action.model_dump(mode="json") if hasattr(action, "model_dump") else action
+    target = deletion_target_for(record)
+    rec_id = getattr(record, "id", None)
+    if not isinstance(data, Mapping) or target is None or not isinstance(rec_id, int):
+        return None, "action_unavailable"
+    ids = data.get("recommendation_ids")
+    operations = data.get("operations")
+    if (
+        data.get("version") != 3
+        or not isinstance(ids, list)
+        or rec_id not in ids
+        or not isinstance(operations, list)
+        or [op.get("op") if isinstance(op, Mapping) else None for op in operations] != ["delete_resource"]
+        or data.get("target") != target.model_dump(mode="json")
+    ):
+        return None, "action_unavailable"
+    return list(ids), None
+
+
+def resource_key(record: Any) -> Optional[Tuple[str, str, str]]:
+    """``(kind, namespace, name)`` of the resource a deletion recommendation targets."""
+    from greenkube.automation.actions.delete_resource import deletion_target_for
+
+    target = deletion_target_for(record)
+    return (target.kind, target.namespace, target.name) if target is not None else None
+
+
+def _resource_binding_entries(
+    record: Any, ctx: "EligibilityContext"
+) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    """Blockers and warnings from the resource binding of a deletion (H0d, H6)."""
+    if ctx.resource_bindings is None:
+        return [_entry("resource_binding_unavailable")], []
+    key = resource_key(record)
+    stored = ctx.resource_bindings.get(key) if key else None
+    binding = getattr(stored, "binding", stored)
+    if binding is None:
+        return [_entry("resource_binding_missing")], []
+    if getattr(binding, "status", None) == "ambiguous":
+        return [_entry("ambiguous_binding")], []
+    observed_at = getattr(stored, "observed_at", None)
+    if not getattr(binding, "resolved", False):
+        return [_entry("binding_unresolved", f"{CODES['binding_unresolved'][0]} ({binding.reason})")], []
+    if isinstance(observed_at, datetime) and ctx.now - observed_at >= _binding_ttl():
+        return [_entry("binding_stale")], []
+    warnings = [] if getattr(binding, "prune", None) is True else [_entry("deletion_prune_disabled")]
+    return [], warnings
+
+
+def _binding_ttl() -> timedelta:
+    from greenkube.gitops.contracts import configured_binding_ttl
+
+    return configured_binding_ttl()
 
 
 def warm_up(record: Any, policy: AutomationPolicyConfig, step_seconds: int, now: datetime) -> tuple:
@@ -539,7 +624,14 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
 
     action_kind = SUPPORTED_ACTION_KINDS.get(rec_type)
     recommendation_ids: Optional[List[int]] = None
-    if action_kind is None and rec_type in DELETION_TYPES:
+    deletion = action_kind == ACTION_DELETE_RESOURCE
+    if deletion:
+        recommendation_ids, action_code = validate_deletion_action(record)
+        if action_code:
+            blockers.append(_entry(action_code))
+        # A person always reviews a deletion: the PR is offered, never auto-approved.
+        warnings.append(_entry("deletion_reviewed_in_pr"))
+    elif action_kind is None and rec_type in DELETION_TYPES:
         # Deletions stay manual (no deletion PR is automated in this release, roadmap H6).
         blockers.append(_entry("deletion_requires_review"))
     elif action_kind is None:
@@ -560,6 +652,12 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
         blockers.append(_entry("automation_not_configured"))
     elif not ctx.automation_enabled:
         blockers.append(_entry("automation_disabled"))
+    elif workload_ready and deletion:
+        if open_prs is None and active:
+            blockers.append(_entry("pull_requests_unavailable"))
+        binding_blockers, binding_warnings = _resource_binding_entries(record, ctx)
+        blockers.extend(binding_blockers)
+        warnings.extend(binding_warnings)
     elif workload_ready:
         key = workload_key(record)
         if open_prs is None and active:
@@ -575,7 +673,10 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
         if ctx.policy_error:
             blockers.append(_entry("policy_invalid", f"Invalid automation policy: {ctx.policy_error}"))
         else:
-            warm_blocker, eligible_at = warm_up(record, ctx.policy, ctx.step_seconds, ctx.now)
+            # A deletion's evidence is the minimum unused period, already required by its analyzer.
+            warm_blocker, eligible_at = (
+                (None, None) if deletion else warm_up(record, ctx.policy, ctx.step_seconds, ctx.now)
+            )
             if warm_blocker:
                 blockers.append(warm_blocker)
             blockers.extend(_local_policy_blockers(record, ctx.policy, ctx.now))
@@ -647,6 +748,21 @@ async def load_bindings(
         fresh = freshen_workload_binding(binding, now=now)
         result[(fresh.namespace, fresh.workload_kind, fresh.workload_name)] = fresh
     return result
+
+
+async def load_resource_bindings(gitops_repo: Any, cluster: str) -> Optional[Dict[Tuple[str, str, str], Any]]:
+    """Persisted resource bindings (H0d) by (kind, namespace, name); None when unreadable (fail closed)."""
+    db_manager = getattr(gitops_repo, "db_manager", None)
+    if db_manager is None:
+        return None
+    from greenkube.storage.resource_binding_repository import ResourceBindingRepository
+
+    try:
+        stored = await ResourceBindingRepository(db_manager).list_cluster(cluster)
+    except Exception as exc:
+        logger.warning("Could not read GitOps resource bindings for eligibility: %s", exc)
+        return None
+    return {(item.binding.ref.kind, item.binding.ref.namespace, item.binding.ref.name): item for item in stored}
 
 
 async def load_open_pr_ids(pr_repo: Any) -> Optional[FrozenSet[int]]:
@@ -737,6 +853,7 @@ AUTO_APPROVE_CODES: Dict[str, str] = {
     "risk_above_auto_approve": "A recommendation's risk is above automation.autoApprove.maxRisk.",
     "confidence_below_auto_approve": "A recommendation's confidence is below automation.autoApprove.minConfidence.",
     "consensus_contested": "Sources disagree on a recommendation: contested advice is never approved automatically.",
+    "deletion_requires_review": "A deletion is always approved by a person.",
     "decrease_without_native_evidence": (
         "A decrease needs GreenKube's own usage evidence or at least two independent agreeing sources."
     ),
@@ -850,6 +967,15 @@ def independent_votes(record: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
 
+def _auto_approvable(record: Any) -> bool:
+    """Whether the record's action kind allows policy-based auto-approval (``ActionKindSpec.auto_approvable``)."""
+    from greenkube.automation.actions import action_kind_of
+
+    action = getattr(record, "action", None)
+    spec = action_kind_of(action) if action is not None and hasattr(action, "operations") else None
+    return spec is None or spec.auto_approvable
+
+
 def auto_approve_blockers(records: Sequence[Any], policy: AutoApprovePolicy, *, expected: int) -> List[str]:
     """Why ``policy`` does not approve a preview of ``records`` automatically (empty: approve it).
 
@@ -859,6 +985,11 @@ def auto_approve_blockers(records: Sequence[Any], policy: AutoApprovePolicy, *, 
     if not policy.enabled:
         return ["auto_approve_disabled"]
     blockers: List[str] = []
+    if any(
+        _text(getattr(record, "type", None)) in DELETION_TYPES or not _auto_approvable(record) for record in records
+    ):
+        # Deletions are never approved automatically, whatever the limits (H6).
+        blockers.append("deletion_requires_review")
     if expected <= 0 or len(records) != expected:
         blockers.append("recommendation_missing")
     limit = _RISK_ORDER.get(policy.max_risk, 0)

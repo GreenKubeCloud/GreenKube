@@ -87,7 +87,9 @@ from greenkube.gitops.contracts import (
     Plan,
     PlanStatus,
     RendererKind,
+    ResourceTarget,
     WorkloadSource,
+    configured_binding_ttl,
 )
 from greenkube.gitops.discovery.common import safe_repo_path
 from greenkube.gitops.planning.helm import FluxHelmReleasePlanner, HelmValuesPlanner
@@ -176,6 +178,12 @@ class PlanRecommendationReader(Protocol):
     """Read persisted actionable recommendation records for API plan creation."""
 
     async def get_recommendation_by_id(self, rec_id: int) -> RecommendationRecord | None: ...
+
+
+class PlanResourceBindingReader(Protocol):
+    """Resource bindings persisted by discovery (H0d), for kinds bound by GVK and name."""
+
+    async def get(self, cluster: str, ref: ResourceTarget) -> Any: ...
 
 
 class PlanBindingReader(Protocol):
@@ -363,9 +371,11 @@ class RuntimePlanService:
         policy_config: AutomationPolicyConfig | None = None,
         policy_repository: PolicyPlanRepository | None = None,
         policy_clock=None,
+        resource_binding_repository: PlanResourceBindingReader | None = None,
     ) -> None:
         self._recommendation_repository = recommendation_repository
         self._binding_repository = binding_repository
+        self._resource_binding_repository = resource_binding_repository
         self._cluster = cluster or "default"
         self._snapshot_resolver = snapshot_resolver
         self._plan_service = plan_service
@@ -534,7 +544,9 @@ class RuntimePlanService:
                     AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
                     "one or more persisted recommendations were not found",
                 )
-            if record.status is not RecommendationStatus.ACTIVE or record.scope != "workload":
+            record_spec = action_kind_of(record.action)
+            workload_scoped = record_spec is None or record_spec.binding_scope == "workload"
+            if record.status is not RecommendationStatus.ACTIVE or (workload_scoped and record.scope != "workload"):
                 raise AutomationPlanError(
                     AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
                     "only active workload recommendations can be planned",
@@ -552,6 +564,7 @@ class RuntimePlanService:
                 "recommendations do not share a persisted actionable plan",
             )
         action_data = action.model_dump(mode="json")
+        spec = action_kind_of(action)
         records: list[RecommendationRecord] = []
         for recommendation_id in action.recommendation_ids:
             record = requested_records.get(recommendation_id)
@@ -562,7 +575,9 @@ class RuntimePlanService:
                     AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
                     "one or more persisted recommendations for the grouped action were not found",
                 )
-            if record.status is not RecommendationStatus.ACTIVE or record.scope != "workload":
+            if record.status is not RecommendationStatus.ACTIVE or (
+                (spec is None or spec.binding_scope == "workload") and record.scope != "workload"
+            ):
                 raise AutomationPlanError(
                     AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
                     "all recommendations in the grouped action must remain active workload recommendations",
@@ -576,15 +591,22 @@ class RuntimePlanService:
 
         target = action.target
         for record in records:
-            if (
-                record.namespace != target.namespace
-                or record.owner_kind != target.kind
-                or record.owner_name != target.name
-            ):
+            if spec is not None and spec.binding_scope == "resource":
+                matches = spec.matches_recommendation(record, target)
+            else:
+                matches = (
+                    record.namespace == target.namespace
+                    and record.owner_kind == target.kind
+                    and record.owner_name == target.name
+                )
+            if not matches:
                 raise AutomationPlanError(
                     AutomationErrorCode.AMBIGUOUS_BINDING,
                     "persisted recommendation target does not match its stored action",
                 )
+
+        if spec is not None and spec.binding_scope == "resource":
+            return action, await self._resolve_resource_source(target)
 
         binding = await self._binding_repository.get_workload_binding(
             self._cluster,
@@ -618,6 +640,44 @@ class RuntimePlanService:
                 "the resolved workload binding expired; refresh GitOps discovery before retrying",
             )
         return action, source
+
+    async def _resolve_resource_source(self, target: ResourceTarget) -> WorkloadSource:
+        """The Git source of a non-workload target from the persisted resource bindings (H0d).
+
+        Fails closed when no single resolved controller manages the resource, or when the
+        binding is older than the binding TTL (discovery stopped refreshing it).
+        """
+        described = f"{target.kind} {target.namespace + '/' if target.namespace else ''}{target.name}"
+        if self._resource_binding_repository is None:
+            raise AutomationPlanError(
+                AutomationErrorCode.AMBIGUOUS_BINDING,
+                f"resource bindings are not available, so the Git source of {described} cannot be resolved",
+            )
+        stored = await self._resource_binding_repository.get(self._cluster, target)
+        binding = getattr(stored, "binding", None)
+        if binding is None:
+            raise AutomationPlanError(
+                AutomationErrorCode.AMBIGUOUS_BINDING,
+                f"{described} is not managed by an Argo CD Application or Flux Kustomization; apply it manually",
+            )
+        if binding.status == "ambiguous":
+            raise AutomationPlanError(
+                AutomationErrorCode.AMBIGUOUS_BINDING, f"{described} is managed by several GitOps controllers"
+            )
+        source = binding.workload_source()
+        if source is None or source.status is not BindingStatus.RESOLVED or source.cluster != self._cluster:
+            raise AutomationPlanError(
+                AutomationErrorCode.AMBIGUOUS_BINDING,
+                f"the Git source of the controller managing {described} is unresolved",
+            )
+        now = ensure_utc(self._policy_evaluator.clock())
+        observed_at = getattr(stored, "observed_at", None)
+        if not isinstance(observed_at, datetime) or now - ensure_utc(observed_at) >= configured_binding_ttl():
+            raise AutomationPlanError(
+                AutomationErrorCode.SOURCE_CHANGED,
+                f"the resource binding of {described} is stale; refresh GitOps discovery before retrying",
+            )
+        return source
 
     async def _supersedable_preview_plan_ids(self, source: WorkloadSource) -> tuple[str, ...]:
         """Unapproved previews of this workload that a new request supersedes (D6, BUG-48).
@@ -1669,6 +1729,10 @@ async def create_plan_runtime(
         # Kustomize and Helm previews say when the renderer's egress is not enforced (F6).
         renderer_egress_unenforced=renderer_egress_probe(db_manager),
     )
+    from greenkube.core.optimization.applied_detector import K8sResourceReader
+    from greenkube.storage.resource_binding_repository import ResourceBindingRepository
+
+    resource_bindings = ResourceBindingRepository(db_manager)
     worker = PlanWorker(
         operations=plan_operation_repository,
         plans=gitops_repository,
@@ -1679,6 +1743,8 @@ async def create_plan_runtime(
         workload_reader=K8sWorkloadReader(),
         pull_request_options=selected_pull_request_options,
         binding_reader=gitops_repository,
+        resource_reader=K8sResourceReader(),
+        resource_binding_reader=resource_bindings,
     )
     api_plan_service = RuntimePlanService(
         recommendation_repository=recommendation_repository,
@@ -1693,6 +1759,7 @@ async def create_plan_runtime(
         snapshot_limits=snapshot_limits,
         policy_config=selected_policy_config,
         policy_repository=gitops_repository,
+        resource_binding_repository=resource_bindings,
     )
     return PlanRuntime(
         providers=providers,

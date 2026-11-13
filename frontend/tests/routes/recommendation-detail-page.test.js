@@ -23,7 +23,9 @@ vi.mock('$lib/api.js', () => {
 		getRecommendation: vi.fn(),
 		getRecommendationEvents: vi.fn(),
 		getRecommendationPullRequests: vi.fn(),
-		getRecommendationV2: vi.fn()
+		getRecommendationV2: vi.fn(),
+		getManualGuide: vi.fn(),
+		markAppliedManually: vi.fn()
 	};
 });
 
@@ -129,6 +131,14 @@ describe('recommendation detail page', () => {
 		const timeline = screen.getByTestId('timeline');
 		expect(within(timeline).getAllByRole('listitem')).toHaveLength(2);
 		expect(timeline).toHaveTextContent('×2');
+	});
+
+	it('offers the manual steps of an active recommendation without loading them (H9)', async () => {
+		render(DetailPage, { props: { data: { id: '12' } } });
+
+		const manual = await screen.findByTestId('manual-apply');
+		expect(within(manual).getByRole('button', { name: 'Show manual steps' })).toBeInTheDocument();
+		expect(api.getManualGuide).not.toHaveBeenCalled();
 	});
 
 	it('links the pull request, its change and the ledger (J1 deep links)', async () => {

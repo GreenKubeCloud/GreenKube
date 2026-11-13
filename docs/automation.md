@@ -355,6 +355,7 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
 | Kind | Operation | What it changes | Renderers | Rollback | Apply detection |
 |---|---|---|---|---|---|
 | `container_resources` | `set_container_resources` | CPU/memory requests (decreases and reliability increases) and limits (set, raise, remove the CPU limit) of named containers and native sidecars of a `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, Argo `Rollout`, `ReplicaSet`, `ReplicationController` or `Pod` | Raw, Kustomize, Helm values and Flux HelmRelease post-renderer (requests and limit values; no limit removal or sidecars) | Restores the recorded pre-apply requests (request-only changes) | Live per-container request within tolerance of the planned value |
+| `delete_resource` | `delete_resource` | Removes an orphaned `LoadBalancer` Service or `PersistentVolume` from Git (see [Deleting orphaned resources](#deleting-orphaned-resources)) | Raw, Kustomize | None: a revert recreates the manifest, not the data or the address | The resource is absent from the cluster |
 
 ### Container resources v2: increases, limits, sidecars (H1)
 
@@ -394,9 +395,84 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
 
 Every other recommendation type remains visible but shows "Manual change required" and cannot open a PR. Every plan, whatever its kind, is render-validated the same way: the rendered resources after the edit must differ from the rendered resources before it by exactly the kind's expected change (the fields it sets, plus the resources it creates or deletes), and the kind's invariants must hold (for container resources, every request stays within its limit). Anything else fails closed.
 
+## Deleting orphaned resources
+
+Orphaned `LoadBalancer` Services (`ORPHANED_LOAD_BALANCER`) and `PersistentVolume`s (`ORPHANED_PERSISTENT_VOLUME`)
+can become a deletion pull request (roadmap H6). Zombie workloads and idle namespaces stay manual
+(`deletion_requires_review`): deleting a Namespace manifest removes everything in it, and a zombie's owner may be
+recreated by its own controller.
+
+**Evidence first.** A deletion action is only built for a recommendation that passed the deletion evidence model
+(selector-less, owned and gateway/mesh/ingress Services are never reported; EndpointSlices, route references and the
+`DELETION_MIN_UNUSED_DAYS` persistence are required; `greenkube.io/ignore`/`greenkube.io/keep` opt out). Planning
+checks the manifest in Git again (an opted-out resource, a Service that is not a `LoadBalancer` or an infrastructure
+namespace is refused), and the plan worker reads the live object before any Git write: a resource already gone fails
+the plan with `no_effective_change`; an opted-out one, a `PersistentVolume` that is `Bound` again or a Service that is
+no longer of type `LoadBalancer` fails it.
+
+**Where the resource lives in Git.** Discovery persists the Argo CD `status.resources` and Flux `status.inventory`
+entries of the kinds registered action kinds target (table `resource_bindings`, migration 0087) with the managing
+controller's resolved Git location (from its workload bindings) and whether it prunes. A resource listed by no
+controller (`resource_binding_missing`), by several (`ambiguous_binding`), by a controller without a resolved source
+(`binding_unresolved`) or refreshed more than `automation.bindingTtl` ago (`binding_stale`) cannot become a pull
+request. A cluster-scoped binding is stored with the empty namespace; its plan source uses the reserved namespace
+`_cluster`, which no real namespace can match.
+At delivery, the plan worker reads the binding again and marks the plan `stale` when it moved, is no longer resolved,
+is older than `automation.bindingTtl`, or when the controller stopped pruning since approval; without a binding reader
+the delivery is retried, never skipped.
+
+**The edit.**
+
+| Layout | What the pull request removes |
+|---|---|
+| Raw | The whole file when it holds only the resource; otherwise its document of a multi-document file, or its item of a `kind: List`. |
+| Kustomize | The file and its `resources:` entry when the file holds only the resource; otherwise its document. A file listed by several Kustomizations, a shared base, and a generated or renamed resource are refused. |
+| Helm | Unsupported: a chart-rendered resource can only be removed through a values toggle. |
+
+The rendered result must differ from the rendered source by exactly the deleted resource (generic expected-delta
+validation).
+
+**Gates and warnings.**
+
+- Argo CD `syncPolicy.automated.prune` or Flux `spec.prune` disabled: the plan and the eligibility carry
+  `deletion_prune_disabled`, since removing the manifest will not delete the live object.
+- A `PersistentVolume` with `reclaimPolicy: Retain` (or none): the plan carries `persistent_volume_retained`; the
+  cloud disk must be released by hand to stop its cost.
+- Deletions are `medium` (LoadBalancer) or `high` (volume) risk, so `automation.policy.maxRiskLevel` decides whether
+  they can be planned (`policy_risk_exceeded` otherwise).
+- A deletion is **never auto-approved** (`deletion_requires_review` in `auto_approve_blockers`); eligibility shows
+  `deletion_reviewed_in_pr`.
+
+**Applied and measured.** Apply detection marks the recommendation applied once its plan synced and the resource is
+absent (a read error is never taken for absence); a resource deleted by hand while no plan is in flight is detected the
+same way (`detected`). The change is measured by `ResourceDeletionStrategy`: the realized saving is the rate the
+resource was charged before the change (its trusted cost in the baseline window, otherwise the allocated rate frozen
+with the recommendation: the OpenCost per-asset cost or the configured rate), `not_realized` if the resource is still
+observed after the change. The strategy only claims a saving for a change whose absence was read from the cluster
+(rollout completion source `resource_absent`); any other deletion change is `inconclusive`.
+
+## Manual mode
+
+Clusters without GitOps (or resources outside it) use the manual mode (roadmap H9). The recommendation detail page
+shows **Apply manually**, and every active card on the recommendations page links to it:
+
+- `GET /api/v1/recommendations/{id}/manual` (`read`) returns the steps: for a typed change, a `kubectl patch` built
+  from the same primitives a pull request would write (strategic merge for pod-template workloads), a server-side dry
+  run and `kubectl rollout status`; for an orphaned LoadBalancer or volume, `kubectl delete` with a dry run first; for
+  other kinds, an advisory note. It also returns the patch, a readable diff and notes (irreversible deletion, retained
+  disks, a GitOps controller reverting a manual patch).
+- `POST /api/v1/recommendations/{id}/manual/applied` (`write`, "Mark as applied") records an active recommendation as
+  applied by hand with a change id: the change-measurement pipeline records the change and measures it like a merged
+  pull request (application method `manual`). A recommendation with an open pull request is applied by its merge
+  (`409`), and so is one whose plan is approved or being delivered. For a deletion, GreenKube first reads the
+  resource: it is marked applied only once the cluster answers that it is absent (`409` while it still exists, `503`
+  when it cannot be read), so no saving is claimed for a resource that is still there.
+
+GreenKube never runs these commands: Git, or the operator, stays the only write path.
+
 ## Supported source layouts
 
-Only CPU and memory rightsizing recommendations (the `container_resources` kind) currently have GitOps action planners. Other recommendation types remain visible but show "Manual change required" and cannot open a PR.
+CPU and memory rightsizing recommendations (the `container_resources` kind) and orphaned LoadBalancer and volume deletions (`delete_resource`, raw and Kustomize only) have GitOps action planners. Other recommendation types remain visible but show "Manual change required" and cannot open a PR.
 
 | Source | Supported | Notes |
 |---|---|---|
@@ -722,7 +798,10 @@ SLOs and example alert rules are documented in [Observability and SLOs](observab
 
 ## Limitations
 
-- Only CPU and memory rightsizing recommendations have GitOps planners.
+- Only CPU and memory rightsizing recommendations and orphaned LoadBalancer/PersistentVolume deletions have GitOps planners; a deletion has no automated rollback.
+- A resource's Git location comes from its controller's resolved workload bindings. An Argo CD Application or Flux Kustomization that manages only PersistentVolumes or Services, and no workload, leaves them unresolved (`binding_unresolved`), so their deletions stay manual.
+- Resource bindings are replaced on every discovery refresh: when one controller API fails during a refresh, its resources temporarily report `resource_binding_missing` until the next successful refresh.
+- The `greenkube.io/source` annotation binding for unmanaged resources is not implemented; manual mode (snippets and "Mark as applied") covers them.
 - Remote Kustomize artifacts, Argo CD inline Helm values, Flux `valuesFrom.targetPath`, cross-repository/revision values, dependencies of local charts, remote charts that need registry credentials or whose dependencies are not vendored, chart `valuesFiles` of remote Flux charts, and unmanaged post-renderers fail closed. Remote Helm charts from HTTP repositories and OCI registries are supported ([Helm support](#helm-support)); Flux remote charts are edited through the managed post-renderer, not `spec.values`.
 - Argo CD Applications that are not stored in Git have no PR target.
 - Provider archive downloads must be available at the resolved full commit SHA. GreenKube does not fall back to a mutable branch or per-file reads.

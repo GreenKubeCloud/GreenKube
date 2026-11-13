@@ -24,13 +24,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
-from greenkube.automation.actions import action_kind_of
+from greenkube.automation.actions import ACTION_KINDS, action_kind_of
+from greenkube.automation.actions.delete_resource import DELETABLE_TARGETS, deletion_target_for
 from greenkube.core.recommendation_realization import RECORDED_CHANGE_STATUSES
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     ActionStatus,
     PlanStatus,
     PreApplyWorkloadBaseline,
+    ResourceTarget,
 )
 from greenkube.models.metrics import (
     ApplicationMethod,
@@ -136,7 +138,7 @@ class ChangeRecorder(Protocol):
     ) -> int: ...
 
     async def change_id_for(
-        self, plan_id: str | None, snapshot: WorkloadSnapshot, completed_at: datetime
+        self, plan_id: str | None, snapshot: "WorkloadSnapshot | ResourceChangeSnapshot", completed_at: datetime
     ) -> str | None: ...
 
     async def record_change(
@@ -144,7 +146,7 @@ class ChangeRecorder(Protocol):
         change_id: str,
         records: Sequence[RecommendationRecord],
         *,
-        snapshot: WorkloadSnapshot | None = None,
+        snapshot: "WorkloadSnapshot | ResourceChangeSnapshot | None" = None,
         plan: Any = None,
         now: datetime | None = None,
     ) -> Any: ...
@@ -480,6 +482,89 @@ class K8sWorkloadReader:
         return snapshots
 
 
+class ResourceReadError(RuntimeError):
+    """The live state of a resource could not be read (never mistaken for "absent")."""
+
+
+class ResourceReader(Protocol):
+    """Reads one live resource; ``None`` when the API answers that it does not exist."""
+
+    async def read_resource(self, ref: ResourceTarget) -> Optional[Mapping[str, Any]]: ...
+
+
+class K8sResourceReader:
+    """Reads the non-workload resources action kinds target (Services, PersistentVolumes).
+
+    Only a ``404`` means "absent"; any other failure raises ``ResourceReadError`` so apply
+    detection and baselines fail closed instead of recording a deletion that did not happen.
+    """
+
+    def __init__(self, core_v1_api: Any = None) -> None:
+        self._api = core_v1_api
+
+    async def _core(self) -> Any:
+        if self._api is None:
+            from greenkube.core.k8s_client import get_core_v1_api
+
+            self._api = await get_core_v1_api()
+            if self._api is None:
+                raise ResourceReadError("no Kubernetes configuration is available")
+        return self._api
+
+    async def read_resource(self, ref: ResourceTarget) -> Optional[Mapping[str, Any]]:
+        if (ref.api_version, ref.kind) == ("v1", "Service") and ref.namespace:
+            reader = "read_namespaced_service"
+            kwargs: Dict[str, Any] = {"name": ref.name, "namespace": ref.namespace}
+        elif (ref.api_version, ref.kind) == ("v1", "PersistentVolume") and not ref.namespace:
+            reader = "read_persistent_volume"
+            kwargs = {"name": ref.name}
+        else:
+            raise ResourceReadError(f"reading {ref.api_version}/{ref.kind} resources is not supported")
+        api = await self._core()
+        try:
+            item = await getattr(api, reader)(**kwargs)
+        except Exception as exc:
+            if getattr(exc, "status", None) == 404:
+                return None
+            raise ResourceReadError(f"could not read {ref.kind} {ref.name!r}: {type(exc).__name__}") from exc
+        return _plain_object(api, item)
+
+
+def _plain_object(api: Any, item: Any) -> Mapping[str, Any]:
+    if isinstance(item, Mapping):
+        return item
+    api_client = getattr(api, "api_client", None)
+    sanitize = getattr(api_client, "sanitize_for_serialization", None)
+    if callable(sanitize):
+        plain = sanitize(item)
+        if isinstance(plain, Mapping):
+            return plain
+    to_dict = getattr(item, "to_dict", None)
+    if callable(to_dict):
+        plain = to_dict()
+        if isinstance(plain, Mapping):
+            return plain
+    return {"metadata": {}}
+
+
+@dataclass(frozen=True)
+class ResourceChangeSnapshot:
+    """The identity of a non-workload change target, as the change recorder reads a snapshot."""
+
+    namespace: str
+    kind: str
+    name: str
+    action_kind: str
+    uid: str | None = None
+    generation: int | None = None
+    spec_digest: str | None = None
+    load_metric: str | None = None
+
+
+#: Recommendation types whose application is the absence of a resource (H6).
+DELETION_APPLY_TYPES = frozenset(DELETABLE_TARGETS)
+
+
 class AppliedDetector:
     """Transitions recommendations to ``applied`` when the change has landed."""
 
@@ -490,10 +575,16 @@ class AppliedDetector:
         config: Optional["Config"] = None,
         action_status_repository: Optional[ActionStatusRepository] = None,
         change_recorder: Optional[ChangeRecorder] = None,
+        resource_reader: Optional[ResourceReader] = None,
     ):
         from greenkube.core.config import get_config
 
         self.lifecycle = lifecycle
+        # The production readers read the cluster; an injected workload reader (tests) never
+        # brings a live resource reader along implicitly.
+        self.resource_reader = (
+            resource_reader if resource_reader is not None else (K8sResourceReader() if reader is None else None)
+        )
         self.reader = reader if reader is not None else K8sWorkloadReader()
         self.config = config if config is not None else get_config()
         self.action_status_repository = action_status_repository
@@ -532,10 +623,118 @@ class AppliedDetector:
         return distance <= recommended * tolerance and distance < abs(current - recommended)
 
     async def detect(self) -> List[RecommendationRecord]:
-        """Detects and records applied rightsizing recommendations."""
+        """Detects and records applied rightsizing recommendations and resource deletions."""
         records = await self.lifecycle.repo.get_recommendations_by_statuses(
             ["active", "pr_open", RecommendationStatus.ROLLBACK_REVIEW.value]
         )
+        applied = await self._detect_rightsizing(records)
+        applied.extend(await self._detect_deletions(records))
+        return applied
+
+    async def _detect_deletions(self, records: Sequence[RecommendationRecord]) -> List[RecommendationRecord]:
+        """Deletions are applied once the resource is absent from the cluster (H6).
+
+        A deletion merged through a pull request counts once its plan synced; a resource
+        deleted by hand (manual mode, H9) counts when no plan is in flight. An unreadable
+        resource is never taken for an absent one.
+        """
+        reader = self.resource_reader
+        candidates = [
+            record
+            for record in records
+            if _type_value(record) in DELETION_APPLY_TYPES
+            and record.id is not None
+            and record.status in (RecommendationStatus.ACTIVE, RecommendationStatus.PR_OPEN)
+        ]
+        if reader is None or not candidates:
+            return []
+        applied: List[RecommendationRecord] = []
+        recorder = self.change_recorder
+        for record in candidates:
+            assert record.id is not None
+            target = deletion_target_for(record)
+            if target is None:
+                continue
+            spec = action_kind_of(record.action) or ACTION_KINDS.get("delete_resource")
+            if spec is None:
+                continue
+            action_status: ActionStatus | None = None
+            synced_plan: SyncPlanStatus | None = None
+            if self.action_status_repository is not None:
+                try:
+                    raw_status = await self.action_status_repository.get_recommendation_action_status(record.id)
+                    action_status = ActionStatus(raw_status) if raw_status is not None else None
+                except Exception as exc:
+                    logger.warning("Deletion detection skipped recommendation %s: %s", record.id, exc)
+                    continue
+                if action_status is ActionStatus.SYNC_PENDING:
+                    synced_plan = await self._synced_forward_plan(record.id)
+                    if synced_plan is None:
+                        continue
+                elif action_status in _NO_PLAN_IN_FLIGHT and record.status is RecommendationStatus.ACTIVE:
+                    action_status = None
+                else:
+                    continue
+            elif record.status is not RecommendationStatus.ACTIVE:
+                continue
+            try:
+                live = await reader.read_resource(target)
+            except Exception as exc:
+                logger.info("Deletion detection could not read %s %s: %s", target.kind, target.name, exc)
+                continue
+            if not spec.is_resource_applied(live, target).applied:
+                continue
+            detected_at = datetime.now(timezone.utc)
+            plan_id = synced_plan.plan_id if synced_plan is not None else None
+            snapshot = ResourceChangeSnapshot(
+                namespace=target.namespace, kind=target.kind, name=target.name, action_kind=spec.kind
+            )
+            change_id: Optional[str] = None
+            if recorder is not None:
+                change_id = await recorder.change_id_for(plan_id, snapshot, detected_at)
+            try:
+                updated = await self.lifecycle.apply(
+                    record.id,
+                    application_method=(
+                        ApplicationMethod.PR_MERGE.value
+                        if synced_plan is not None
+                        else ApplicationMethod.DETECTED.value
+                    ),
+                    actor="detector",
+                    applied_at=detected_at,
+                    plan_id=plan_id,
+                    rollout={"completed_at": detected_at.isoformat(), "completion_source": "resource_absent"},
+                    change_id=change_id,
+                )
+                if synced_plan is not None and self.action_status_repository is not None:
+                    updated_count = await self.action_status_repository.set_recommendation_action_status(
+                        [record.id],
+                        ActionStatus.APPLIED,
+                        expected_statuses=(ActionStatus.SYNC_PENDING,),
+                        actor="apply-detector",
+                        plan_id=plan_id,
+                    )
+                    if updated_count != 1:
+                        raise RuntimeError("GitOps action state did not transition to applied.")
+                    await self._mark_completed_plans(record.id)
+            except Exception as exc:
+                logger.warning("Deletion detection failed for recommendation %s: %s", record.id, exc)
+                continue
+            applied.append(updated)
+            logger.info(
+                "Deletion detected for recommendation %d: %s %s is absent.", record.id, target.kind, target.name
+            )
+            if recorder is not None and change_id is not None:
+                try:
+                    await recorder.record_change(
+                        change_id, [updated], snapshot=snapshot, plan=synced_plan, now=detected_at
+                    )
+                except Exception as exc:
+                    logger.warning("Could not record change %s: %s", change_id, exc)
+        return applied
+
+    async def _detect_rightsizing(self, records: Sequence[RecommendationRecord]) -> List[RecommendationRecord]:
+        """Detects and records applied rightsizing recommendations."""
         candidates = [r for r in records if r.type in RIGHTSIZING_TYPES]
         recorder = self.change_recorder
         if not candidates and (recorder is None or not await recorder.needs_observations()):
@@ -1151,3 +1350,8 @@ def _matches_pre_apply_requests(
         elif current_value != baseline_value:
             return False
     return True
+
+
+def _type_value(record: RecommendationRecord) -> str:
+    value = record.type
+    return str(getattr(value, "value", value) or "")

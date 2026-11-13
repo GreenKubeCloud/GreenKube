@@ -123,6 +123,15 @@ describe('page load (K9, BUG-25)', () => {
 		expect(api.requestOptimizationRun).not.toHaveBeenCalled();
 	});
 
+	it('links each active card to its manual steps (H9)', async () => {
+		render(RecommendationsPage);
+		await screen.findByText('Reason 1');
+
+		const link = screen.getByTestId('apply-manually');
+		expect(link).toHaveAttribute('href', '/recommendations/1#manual');
+		expect(link).toHaveTextContent('Apply manually');
+	});
+
 	it('aborts in-flight reads when the page is left', async () => {
 		api.getActiveRecommendations.mockReturnValue(new Promise(() => {}));
 		const { unmount } = render(RecommendationsPage);
