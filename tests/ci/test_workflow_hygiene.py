@@ -53,7 +53,7 @@ def test_ci_checks_that_helm_renders_are_stable():
 def test_release_is_gated_on_frontend_tests():
     jobs = _workflow("release.yml")["jobs"]
 
-    assert set(jobs["build-and-push"]["needs"]) == {"test", "frontend-test"}
+    assert set(jobs["build-and-push"]["needs"]) == {"test", "frontend-test", "e2e", "upgrade"}
     scripts = _run_scripts(jobs["frontend-test"])
     assert "npm ci" in scripts
     assert "npm test" in scripts

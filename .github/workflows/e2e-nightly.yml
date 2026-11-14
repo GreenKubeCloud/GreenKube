@@ -8,7 +8,13 @@ name: E2E — Loop on Minikube
 # step (steps.jsonl, API responses) and cluster diagnostics are uploaded as
 # the "e2e-evidence" artifact, whatever the outcome.
 #
-# Nightly, on demand, and on pull requests that touch delivery or verification.
+# Nightly, on demand, on pull requests that touch the application or the chart,
+# and from the release workflow (a release tag cannot publish without it).
+#
+# GitHub only fires "schedule" for the workflow file of the default branch
+# (main), on the main commit. The nightly run therefore checks out the
+# integration branch (dev, E2E_NIGHTLY_REF): this file must be on main for the
+# nightly to run at all, and the release workflow re-runs the loop on the tag.
 
 on:
   schedule:
@@ -19,12 +25,19 @@ on:
         description: Also run the Flux variant
         type: boolean
         default: true
+  workflow_call:
+    inputs:
+      flux:
+        description: Also run the Flux variant
+        type: boolean
+        default: true
   pull_request:
     branches: [main, dev]
     paths:
-      - 'src/greenkube/automation/**'
-      - 'src/greenkube/gitops/**'
-      - 'src/greenkube/verify/**'
+      - 'src/greenkube/**'
+      - 'helm-chart/**'
+      - 'frontend/**'
+      - 'Dockerfile'
       - 'hack/e2e/**'
       - 'docs/examples/quickstart/**'
       - '.github/e2e/**'
@@ -39,6 +52,8 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Branch the scheduled (nightly) run tests; other events test their own commit.
+  E2E_NIGHTLY_REF: dev
 
 jobs:
   loop:
@@ -50,6 +65,8 @@ jobs:
       E2E_FLUX: ${{ (github.event_name != 'workflow_dispatch' || inputs.flux) && '1' || '0' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event_name == 'schedule' && env.E2E_NIGHTLY_REF || '' }}
 
       # Outside the checkout, so the evidence never enters the image build context.
       - name: Choose the evidence directory
