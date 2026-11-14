@@ -397,3 +397,33 @@ async def test_recompute_survives_malformed_legacy_reasons(db):
     (row,) = await repo.read_combined_metrics(T0, T0 + timedelta(hours=1))
     assert row.intensity_source == "realtime"
     assert row.is_estimated is True
+
+
+@pytest.mark.parametrize(
+    ("sources", "expected", "trusted"),
+    [
+        (["opencost", "opencost"], "opencost", True),
+        (["opencost_derived", "opencost_derived"], "opencost_derived", True),
+        (["opencost", "opencost_derived"], "opencost_derived", True),
+        (["opencost", "pricing_catalog"], "mixed", False),
+        (["opencost_derived", "none"], "mixed", False),
+        (["opencost_derived", "custom_rate"], "mixed", False),
+        (["opencost_derived", "mixed"], "mixed", False),
+        (["opencost", "opencost_derived", None], "mixed", False),
+    ],
+)
+async def test_hourly_cost_source_keeps_opencost_and_derived_rows_trusted(db, sources, expected, trusted):
+    """OpenCost rounds small pods below its precision; an hour mixing both OpenCost labels stays trusted."""
+    repo, _ = _repos(db)
+    stamps = [T0 + timedelta(minutes=5 * index) for index in range(len(sources))]
+    rows = [_container_row(ts, cost_source=source) for ts, source in zip(stamps, sources, strict=True)]
+    rows += [_pod_row(ts, cost_source=source) for ts, source in zip(stamps, sources, strict=True)]
+    await repo.write_combined_metrics(rows)
+
+    await MetricsCompressor(db, Config()).run(now=T0 + timedelta(days=2))
+
+    (pod,) = await repo.read_hourly_metrics(T0, T0 + timedelta(hours=1))
+    (container,) = await repo.read_hourly_container_metrics(T0, T0 + timedelta(hours=1))
+    for row in (pod, container):
+        assert row.cost_source == expected
+        assert is_cost_trusted(row) is trusted

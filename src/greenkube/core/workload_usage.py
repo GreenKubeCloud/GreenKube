@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from greenkube.core.optimization.targeting import resolve_target
-from greenkube.models.provenance import MIXED
+from greenkube.models.provenance import combine_cost_sources
 from greenkube.models.workload_usage import (
     POD_LEVEL,
     USAGE_PERCENTILES,
@@ -116,13 +116,12 @@ def _weight(row: Any) -> int:
 
 
 def _source_aggregate(values: List[Optional[str]]) -> Optional[str]:
-    """One provenance value for a group: shared value, ``mixed``, or None."""
-    present = [value for value in values if value]
-    if not present:
-        return None
-    if len(present) == len(values) and len(set(present)) == 1:
-        return present[0]
-    return MIXED
+    """One cost provenance value for a group: shared value, ``mixed``, or None.
+
+    ``opencost`` mixed only with ``opencost_derived`` stays trusted
+    (:func:`~greenkube.models.provenance.combine_cost_sources`).
+    """
+    return combine_cost_sources(values)
 
 
 def _mode(values: List[Optional[str]]) -> Optional[str]:

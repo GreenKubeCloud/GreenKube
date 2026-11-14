@@ -151,6 +151,8 @@ OpenCost prices CPU and RAM as `cpuCoreHours × node CPU price` and `ramByteHour
 
 When all three hold, the row stores the rebuilt costs with `cost_source: opencost_derived`, which measurement trusts like `opencost`. Every allocation below the floor goes through the same rule, zero or not, so before and after a change are measured with the same precision and rounding neither creates nor erases a saving.
 
+Rollups (the hourly tables written by the metrics compressor, `workload_usage_hourly` and the baseline rows read from it) label an aggregate of rows that are all `opencost` or `opencost_derived` as `opencost_derived`, which stays trusted. A pod near the floor, or a missed node price query, can mix both labels within one hour, and both are OpenCost's own allocation. The aggregate takes the derived label, not `opencost`, so provenance never hides that part of its cost was rebuilt. Any other mix (with `none`, `custom_rate`, `pricing_catalog`, `kubecost`, `mixed`, or rows with no source) is still `mixed` and untrusted.
+
 The rule fails closed: a NaN, infinite, missing or negative OpenCost cost is never rebuilt; a zero that rounding cannot explain (a priced pod of 2 cores reported at 0, a node without an OpenCost price, an allocation without a node, a failed node price query) stays `cost_source: none` with the default placeholder; and an allocation at or above the floor keeps OpenCost's figures unchanged. A rebuilt cost is not "a price derived from other pods": it is only used for a pod OpenCost itself costed, and only when OpenCost's own figures agree with it.
 
 ## Unit prices: the cost fallback chain

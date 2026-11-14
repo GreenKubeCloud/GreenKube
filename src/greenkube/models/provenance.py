@@ -179,6 +179,49 @@ def combine_sources(values: Iterable[Optional[str]]) -> Optional[str]:
     return MIXED
 
 
+#: Cost sources that may share an aggregate without making it ``mixed``: both are
+#: OpenCost's own allocation, at its JSON precision or rebuilt below it.
+OPENCOST_COST_FAMILY: frozenset[str] = frozenset({CostSource.OPENCOST.value, CostSource.OPENCOST_DERIVED.value})
+
+
+def combine_cost_sources(values: Iterable[Optional[str]]) -> Optional[str]:
+    """Collapse the ``cost_source`` of several rows into one (hourly and workload rollups).
+
+    Like the other dimensions, a shared value is kept, no value gives
+    ``None`` and anything else gives ``mixed`` (untrusted), including a group
+    where some rows carry no source. The one exception: rows that are all
+    ``opencost`` or ``opencost_derived`` give ``opencost_derived``. Both are
+    trusted OpenCost costs; the aggregate names the derived label because part
+    of its cost was rebuilt below OpenCost's precision, which provenance must
+    not hide. :func:`cost_source_aggregate_sql` is the SQL form.
+    """
+    items = list(values)
+    present = [_normalized(value) for value in items if value]
+    if not present:
+        return None
+    if len(present) != len(items):
+        return MIXED
+    distinct = set(present)
+    if len(distinct) == 1:
+        return present[0]
+    if distinct <= OPENCOST_COST_FAMILY:
+        return CostSource.OPENCOST_DERIVED.value
+    return MIXED
+
+
+def cost_source_aggregate_sql(column: str = "cost_source") -> str:
+    """SQL expression of :func:`combine_cost_sources` over a ``GROUP BY`` (SQLite and PostgreSQL)."""
+    family = ", ".join(f"'{value}'" for value in sorted(OPENCOST_COST_FAMILY))
+    return (
+        f"CASE WHEN COUNT({column}) = 0 THEN NULL "
+        f"WHEN COUNT({column}) <> COUNT(*) THEN '{MIXED}' "
+        f"WHEN MIN({column}) = MAX({column}) THEN MIN({column}) "
+        f"WHEN SUM(CASE WHEN {column} IN ({family}) THEN 0 ELSE 1 END) = 0 "
+        f"THEN '{CostSource.OPENCOST_DERIVED.value}' "
+        f"ELSE '{MIXED}' END"
+    )
+
+
 def cost_source_for(cost_found: bool) -> CostSource:
     """Provenance of an OpenCost-or-default cost lookup.
 
@@ -196,6 +239,7 @@ __all__ = [
     "MEASURED_POWER_SOURCES",
     "MEASURED_USAGE_SOURCES",
     "MIXED",
+    "OPENCOST_COST_FAMILY",
     "PROVENANCE_FIELDS",
     "TRUSTED_COST_SOURCES",
     "TRUSTED_USAGE_SOURCES",
@@ -203,7 +247,9 @@ __all__ = [
     "IntensitySource",
     "PowerSource",
     "UsageSource",
+    "combine_cost_sources",
     "combine_sources",
+    "cost_source_aggregate_sql",
     "cost_source_for",
     "drop_intensity_fallback_reasons",
     "is_cost_trusted",
