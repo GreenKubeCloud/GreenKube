@@ -131,4 +131,72 @@ spec:
             - name: tmp
               emptyDir:
                 sizeLimit: 64Mi
+{{- if not $persistence.existingClaim }}
+---
+# A claim on a WaitForFirstConsumer StorageClass (kind/k3s local-path, EBS gp3,
+# GKE standard-rwo, AKS managed-csi) stays Pending until a pod mounts it, and
+# `helm install --wait` waits for every claim to be Bound: the first backup is
+# hours away, so this one-shot Job mounts the claim and exits. It carries the
+# release revision in its name (a Job's pod template is immutable): each upgrade
+# replaces it, and it is removed 10 minutes after it finishes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-postgres-backup-bind-%d" (include "greenkube.fullname" . | trunc 40 | trimSuffix "-") (int .Release.Revision) }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-backup
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "greenkube.podLabels" (dict "context" . "cfg" $backup "component" "postgres-backup") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with include "greenkube.imagePullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with include "greenkube.podScheduling" (dict "context" . "cfg" $backup "component" "postgres-backup" "replicas" 1) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bind
+          image: {{ include "greenkube.helperImage" .Values.postgres.image | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            capabilities:
+              drop:
+                - ALL
+          command: ["/bin/sh", "-c", "test -d /backups"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+      volumes:
+        - name: backups
+          persistentVolumeClaim:
+            claimName: {{ $claim }}
+{{- end }}
 {{- end }}
