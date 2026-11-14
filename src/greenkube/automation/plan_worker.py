@@ -14,6 +14,7 @@ from greenkube.automation.actions import ActionKindError, action_kind_of
 from greenkube.automation.delivery import (
     EXTERNAL_DELIVERY_RESUME_AFTER,
     normalized_url,
+    plan_ids_in_commit_messages,
     plan_trailer_of,
     pull_request_number_from_url,
 )
@@ -2284,9 +2285,12 @@ class PlanWorker:
             footer = parse_footer(body) if body is not None else None
             if (footer is not None and footer.get("plan_id") == plan.plan_id) or plan_trailer_of(body) == plan.plan_id:
                 linked_by = "trailer"
+            elif await self._commit_trailer_names_plan(target, number, plan):
+                # ``git am`` keeps the trailer in the commit message only (automation follow-ups 4).
+                linked_by = "trailer"
         if linked_by is None or not isinstance(head_ref, str) or not head_ref:
             hint = (
-                " or carry the 'GreenKube-Plan: <plan id>' trailer in its description"
+                " or carry the 'GreenKube-Plan: <plan id>' trailer in its description or commit messages"
                 if plan.delivery_mode == "patch"
                 else ""
             )
@@ -2329,6 +2333,28 @@ class PlanWorker:
             linked_by=linked_by,
             committed_on_revision=committed_on_revision,
         )
+
+    @staticmethod
+    async def _commit_trailer_names_plan(target: GitProviderTarget, number: int, plan: Plan) -> bool:
+        """Whether a commit of pull request ``number`` carries ``GreenKube-Plan: <plan id>``.
+
+        Only a link hint: the head commit must still hold exactly the planned change. A
+        provider that cannot list the commits links nothing (fail closed).
+        """
+        lister = getattr(target.provider, "list_pull_request_commit_messages", None)
+        if not callable(lister):
+            return False
+        try:
+            messages = await cast(Callable[..., Awaitable[Sequence[str]]], lister)(target.repository, number)
+        except GitProviderTransientError as exc:
+            raise ExternalDeliveryError(
+                "provider_not_ready", "The Git provider is temporarily unavailable; retry.", 503
+            ) from exc
+        except GitProviderError:
+            return False
+        if not isinstance(messages, (list, tuple)):
+            return False
+        return plan.plan_id in plan_ids_in_commit_messages([item for item in messages if isinstance(item, str)])
 
     async def _finish_success(self, execution: _Execution, plan: Plan, result: _PlanResult) -> None:
         await self._heartbeat(execution, force=True)

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Sequence
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -383,6 +384,30 @@ async def test_patch_link_back_accepts_the_plan_trailer_and_reads_the_head_from_
     with pytest.raises(ExternalDeliveryError) as error:
         await other.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=None, actor="user:alice")
     assert "GreenKube-Plan" in str(error.value)
+    assert other_plans.plans["plan-1"].status is PlanStatus.APPROVED
+
+
+@pytest.mark.asyncio
+async def test_patch_link_back_accepts_a_trailer_found_only_in_the_commit_messages():
+    """Regression (automation follow-ups item 4): ``git am`` keeps the trailer in the commit only."""
+    worker, _, plans, _, provider = _external_worker("patch")
+    provider.open_pull_request(head_ref="my-own-branch", body="Rightsizing from the GreenKube patch.")
+    messages = ["greenkube: rightsize payments/api\n\nGreenKube-Plan: plan-1\nGreenKube-Recommendations: 1"]
+    provider.list_pull_request_commit_messages = AsyncMock(return_value=messages)  # type: ignore[method-assign]
+
+    result = await worker.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=None, actor="user:alice")
+
+    assert result.linked_by == "trailer"
+    assert plans.plans["plan-1"].status is PlanStatus.PR_OPEN
+
+    # A commit trailer naming another plan does not link it.
+    other, _, other_plans, _, other_provider = _external_worker("patch")
+    other_provider.open_pull_request(head_ref="my-own-branch", body="Rightsizing.")
+    other_provider.list_pull_request_commit_messages = AsyncMock(  # type: ignore[method-assign]
+        return_value=["fix\n\nGreenKube-Plan: plan-2"]
+    )
+    with pytest.raises(ExternalDeliveryError):
+        await other.record_external_delivery("plan-1", pr_url=PR_URL, head_sha=None, actor="user:alice")
     assert other_plans.plans["plan-1"].status is PlanStatus.APPROVED
 
 
