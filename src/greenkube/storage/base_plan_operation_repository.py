@@ -57,4 +57,16 @@ class PlanOperationRepository(ABC):
     ) -> Operation: ...
 
     @abstractmethod
-    async def mark_failed(self, lease: PlanOperationLease, error: str, *, retryable: bool = True) -> Operation: ...
+    async def mark_failed(
+        self,
+        lease: PlanOperationLease,
+        error: str,
+        *,
+        retryable: bool = True,
+        retry_at: datetime | None = None,
+    ) -> Operation:
+        """Release the lease after a failure.
+
+        ``retry_at`` (a provider rate limit) reschedules a retryable operation at that time
+        without consuming an attempt: the provider throttled the call, the plan did not fail.
+        """

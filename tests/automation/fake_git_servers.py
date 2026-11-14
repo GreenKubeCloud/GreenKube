@@ -505,6 +505,7 @@ class FakeGiteaServer(_RecordingServer):
         super().__init__(repository)
         self.prefix = f"/api/v1/repos/{owner}/{name}"
         self.html = f"http://gitea.local/{owner}/{name}"
+        self.supports_old_ref_name = True
 
     def route(self, method: str, path: str, query: dict, body: dict) -> httpx.Response | None:
         repository = self.repository
@@ -520,11 +521,14 @@ class FakeGiteaServer(_RecordingServer):
             branch = body["new_branch_name"]
             if branch in repository.refs:
                 return _json(409, {"message": "The branch already exists."})
-            source = repository.resolve(body["old_branch_name"])
+            # Gitea 1.21+ creates a branch at ``old_ref_name`` (a commit); an older Gitea ignores
+            # it and branches from ``old_branch_name`` or the default branch.
+            requested = body.get("old_ref_name") if self.supports_old_ref_name else None
+            source = repository.resolve(requested or body.get("old_branch_name") or "main")
             if source is None:
                 return _json(404, {"message": "old branch not found"})
             repository.refs[branch] = source
-            return _json(201, {"name": branch})
+            return _json(201, {"name": branch, "commit": {"id": source}})
         if method == "PUT" and local.startswith("/branches/"):
             branch = local[len("/branches/") :]
             if repository.refs.get(branch) != body["old_commit_id"]:

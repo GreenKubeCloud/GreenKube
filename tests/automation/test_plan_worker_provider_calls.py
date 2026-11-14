@@ -205,7 +205,9 @@ class Operations:
         self.successes.append(details)
         return lease.operation.model_copy(update={"status": OperationStatus.SUCCEEDED})
 
-    async def mark_failed(self, lease: PlanOperationLease, error: str, *, retryable: bool = True) -> Operation:
+    async def mark_failed(
+        self, lease: PlanOperationLease, error: str, *, retryable: bool = True, retry_at: datetime | None = None
+    ) -> Operation:
         self.failures.append((error, retryable))
         return lease.operation.model_copy(update={"status": OperationStatus.FAILED})
 

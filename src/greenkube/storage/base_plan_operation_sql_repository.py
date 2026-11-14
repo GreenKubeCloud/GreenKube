@@ -509,9 +509,18 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
             assert row is not None
             return row_to_plan_operation(row)
 
-    async def mark_failed(self, lease: PlanOperationLease, error: str, *, retryable: bool = True) -> Operation:
+    async def mark_failed(
+        self,
+        lease: PlanOperationLease,
+        error: str,
+        *,
+        retryable: bool = True,
+        retry_at: datetime | None = None,
+    ) -> Operation:
         if not error.strip():
             raise ValueError("error must not be blank")
+        if retry_at is not None and (not isinstance(retry_at, datetime) or retry_at.tzinfo is None):
+            raise ValueError("retry_at must be a timezone-aware datetime")
         worker_id = self._lease_worker_id(lease)
         operation_id = lease.operation.operation_id
         now = self._now()
@@ -535,10 +544,16 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
             if row is None:
                 raise PlanOperationLeaseError("plan operation lease is no longer owned by this worker")
 
-            should_retry = retryable and int(row["attempts"]) < int(row["max_attempts"])
+            # A provider rate limit (retry_at) is not a failed attempt: the claim's attempt is
+            # refunded and the operation waits for the provider's reset time.
+            rate_limited = retryable and retry_at is not None
+            attempts = max(int(row["attempts"]) - 1, 0) if rate_limited else int(row["attempts"])
+            should_retry = retryable and attempts < int(row["max_attempts"])
             status = OperationStatus.RETRYING.value if should_retry else OperationStatus.FAILED.value
             available_at = self._db_datetime(now)
-            if should_retry:
+            if rate_limited and retry_at is not None:
+                available_at = self._db_datetime(max(retry_at, now))
+            elif should_retry:
                 retry_delay = self._retry_delay(
                     int(row["attempts"]),
                     int(row["backoff_base_seconds"]),
@@ -552,6 +567,7 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
                 UPDATE automation_plan_operations
                 SET status = ?,
                     available_at = ?,
+                    attempts = ?,
                     worker_id = NULL,
                     lease_id = NULL,
                     lease_expires_at = NULL,
@@ -566,6 +582,7 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
                 (
                     status,
                     available_at,
+                    attempts,
                     error.strip(),
                     self._db_datetime(now),
                     operation_id,

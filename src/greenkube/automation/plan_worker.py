@@ -36,6 +36,7 @@ from greenkube.automation.git.base import (
     parse_repo_url,
 )
 from greenkube.automation.git.budget import DEFAULT_PLAN_OPERATION_PROVIDER_CALL_BUDGET, provider_call_budget
+from greenkube.automation.git.rate_limit import rate_limit_retry_at_of
 from greenkube.automation.plans import PlanRevisionResolver
 from greenkube.automation.pr_content import (
     PullRequestContent,
@@ -220,7 +221,14 @@ class PlanOperationQueue(Protocol):
         pull_request_number: int | None = None,
     ) -> Operation: ...
 
-    async def mark_failed(self, lease: PlanOperationLease, error: str, *, retryable: bool = True) -> Operation: ...
+    async def mark_failed(
+        self,
+        lease: PlanOperationLease,
+        error: str,
+        *,
+        retryable: bool = True,
+        retry_at: datetime | None = None,
+    ) -> Operation: ...
 
 
 class PlanStateRepository(Protocol):
@@ -1143,12 +1151,15 @@ class PlanWorker:
             raise _replan_error("Plan is marked PR-open but no matching open pull request can be found.")
 
         try:
+            # The branch starts at the exact commit the plan was validated on (its base, or the
+            # verified moved head), never at the moving source ref.
+            assert plan.file_plan is not None
             await self._git_call(
                 execution,
                 provider.create_branch,
                 target.repository,
                 branch,
-                plan.source.ref,
+                plan.file_plan.base_revision,
             )
         except GitProviderError as exc:
             if isinstance(exc, GitProviderTransientError):
@@ -2443,11 +2454,18 @@ class PlanWorker:
         provider_error_code = _provider_access_error_code(error)
         if plan is not None and provider_error_code is not None:
             await self._record_provider_check(plan.source.provider_id, "error", error_code=provider_error_code)
-        failed_operation = await self.operations.mark_failed(
-            execution.lease,
-            _error_message(error),
-            retryable=retryable,
-        )
+        # A provider rate limit reschedules the operation at the provider's reset time (D5).
+        retry_at = rate_limit_retry_at_of(error) if retryable else None
+        if retry_at is not None:
+            failed_operation = await self.operations.mark_failed(
+                execution.lease, _error_message(error), retryable=True, retry_at=retry_at
+            )
+        else:
+            failed_operation = await self.operations.mark_failed(
+                execution.lease,
+                _error_message(error),
+                retryable=retryable,
+            )
         failed_status = getattr(failed_operation.status, "value", failed_operation.status)
         record_plan_operation(
             failed_status if isinstance(failed_status, str) else "unknown",
