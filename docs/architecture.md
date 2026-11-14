@@ -474,12 +474,14 @@ Schema (33 columns):
   - Restarts: restart_count
 - Metadata: node, node_instance_type, node_zone, emaps_zone, owner_kind, owner_name
 - Provenance (one column per dimension, see `greenkube.models.provenance`):
-  `cost_source` (opencost, kubecost, pricing_catalog, custom_rate, none; rows priced with the flat
+  `cost_source` (opencost, opencost_derived, kubecost, pricing_catalog, custom_rate, none;
+  `opencost_derived` is an OpenCost cost below its 5-decimal precision, rebuilt at OpenCost's node unit prices; rows priced with the flat
   `DEFAULT_COST` placeholder carry `none`),
   `usage_source` (prometheus, metrics_server, none),
   `power_source` (instance_profile, node_capacity_derived, default_profile, kepler),
   `intensity_source` (realtime, consolidated, stale, zone_default, global_default; `unknown` for legacy rows).
-  Hourly aggregates of rows with different sources carry `mixed`. Consumers decide what to trust with
+  Hourly aggregates of rows with different sources carry `mixed`, except a cost mixing only `opencost` and
+  `opencost_derived` rows, which carries `opencost_derived` and stays trusted. Consumers decide what to trust with
   `is_cost_trusted()` / `is_usage_trusted()` instead of `is_estimated`.
 - Estimation (deprecated, kept for API v1): is_estimated, estimation_reasons
 

@@ -345,6 +345,7 @@ _PROVENANCE_DIMENSIONS = ("cost_source", "usage_source", "power_source", "intens
 _PROVENANCE_VALUES = frozenset(
     {
         "opencost",
+        "opencost_derived",
         "kubecost",
         "pricing_catalog",
         "custom_rate",

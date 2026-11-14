@@ -133,11 +133,27 @@ The full fixture has three nodes and ten pods, including an over-committed node 
 Collection (`HistoricalRangeProcessor`) runs the allocation for every node and step:
 
 - pod rows store the allocated `joules` (all four energy components), `co2e_grams` (operational, with the row's PUE and grid intensity), `embodied_co2e_grams`, `gpu_power_watts` and `gpu_usage_millicores`, and `model_version`;
-- a pod with an observed OpenCost or Kubecost cost keeps it (`cost_source: opencost`); a pod without one is charged its reservation at the node's list price or custom rate, with `cost_source: pricing_catalog` or `custom_rate` and an estimation reason. A price derived from other pods' OpenCost costs is never used for such a row, so it can never pass for an observed cost;
+- a pod with an observed OpenCost or Kubecost cost keeps it (`cost_source: opencost`, or `opencost_derived` when OpenCost's figure is below its precision, see [OpenCost precision](#opencost-precision-sub-precision-costs)); a pod without one is charged its reservation at the node's list price or custom rate, with `cost_source: pricing_catalog` or `custom_rate` and an estimation reason. A price derived from other pods' OpenCost costs is never used for such a row, so it can never pass for an observed cost;
 - the node's unreserved share is written to `node_idle_metrics` (one row per node and step, `scope: idle`): idle and memory power, unattributed GPU power, embodied emissions and cost of the unreserved capacity (always priced at list prices or custom rates and labeled with that tier: OpenCost idle cost is not queried, so the idle cost is a model output even on clusters with OpenCost). The collection job commits idle rows together with the pod rows, after its leader-fence check, and does not advance its watermark when the idle write fails;
 - container rows are split from their pod row as before and inherit its `model_version`. DCGM attributes GPUs to pods, so only a single-container pod passes `gpu_power_watts` and `gpu_usage_millicores` to its container row; with several containers these fields stay empty rather than repeating the pod's GPU on each container.
 
 Pod rows plus the idle row equal the node totals for energy, operational and embodied CO₂e. Cost conserves too when no pod carries an observed cost; with OpenCost, pod rows keep OpenCost's allocation. Only rows whose cost is really observed (`opencost`, `kubecost`) feed the observed price tier, so a recompute never reads a stored modeled cost back as an observed price and is idempotent. Idle rows live in their own table, so pod-level dashboards, analyzers and recommendations never see a synthetic `__idle__` pod. Samples whose node cannot be resolved are allocated against the default profile without an idle row.
+
+### OpenCost precision: sub-precision costs
+
+OpenCost writes allocation costs with 5 decimals. Collection queries one step at a time (for example 1 minute), so a small pod's cost per step is often below 5e-6 and reads `0`; a pod costing 7e-6 reads `1e-05` (+40%). A zero cost for a pod that ran with requests is otherwise treated as a missing price (`cost_source: none`), so every small pod would lose its trusted samples. Rounding also biases deltas: a pod rightsized from 10m to 5m CPU would read `1e-05` → `0`, a 100% saving.
+
+OpenCost prices CPU and RAM as `cpuCoreHours × node CPU price` and `ramByteHours × node RAM price`. When an allocation's total is below **0.001** (where rounding exceeds 0.5% of the figure, a quarter of the verifier's 2% noise floor), the collector rebuilds its cost the same way:
+
+1. **Node unit prices** come from OpenCost itself: one `aggregate=node` query over the 24 hours before the window (`accumulate=true`, re-read once per hour of collection time or sooner when a node has no price yet, and only when some allocation is below the floor). A node's price is `cpuCost / cpuCoreHours` and `ramCost / ramByteHours`, kept only when that node cost is at least 0.001 (precise to 0.5%). A node with no cost gets no price.
+2. **Resource-hours** of the pod: `ramByteHours` (bytes, precise), and `max(cpuCoreRequestAverage, cpuCoreUsageAverage) × minutes / 60` clamped to the ±5e-6 interval the rounded `cpuCoreHours` allows.
+3. **Agreement check**: the rebuilt CPU and RAM costs must each equal OpenCost's `cpuCost` and `ramCost` within ±5e-6 (rounding) + 2%, and the rebuilt total (with adjustments, storage, network, LoadBalancer and GPU as reported) must equal `totalCost` within ±1.5e-5 + 2%.
+
+When all three hold, the row stores the rebuilt costs with `cost_source: opencost_derived`, which measurement trusts like `opencost`. Every allocation below the floor goes through the same rule, zero or not, so before and after a change are measured with the same precision and rounding neither creates nor erases a saving.
+
+Rollups (the hourly tables written by the metrics compressor, `workload_usage_hourly` and the baseline rows read from it) label an aggregate of rows that are all `opencost` or `opencost_derived` as `opencost_derived`, which stays trusted. A pod near the floor, or a missed node price query, can mix both labels within one hour, and both are OpenCost's own allocation. The aggregate takes the derived label, not `opencost`, so provenance never hides that part of its cost was rebuilt. Any other mix (with `none`, `custom_rate`, `pricing_catalog`, `kubecost`, `mixed`, or rows with no source) is still `mixed` and untrusted.
+
+The rule fails closed: a NaN, infinite, missing or negative OpenCost cost is never rebuilt; a zero that rounding cannot explain (a priced pod of 2 cores reported at 0, a node without an OpenCost price, an allocation without a node, a failed node price query) stays `cost_source: none` with the default placeholder; and an allocation at or above the floor keeps OpenCost's figures unchanged. A rebuilt cost is not "a price derived from other pods": it is only used for a pod OpenCost itself costed, and only when OpenCost's own figures agree with it.
 
 ## Unit prices: the cost fallback chain
 
@@ -150,7 +166,7 @@ The tier is recorded with every projection (`assumptions.unit_prices[].source` a
 
 | Tier | `source` | How the price is obtained | Confidence |
 |---|---|---|---|
-| 0. Observed, per sample | `opencost` / `kubecost` (the row's `cost_source`) | The sample's observed cost divided by its reserved quantity (below). `detail` is `observed_components` or `observed_total_apportioned`. | 0.9, or 0.8 when apportioned from a total |
+| 0. Observed, per sample | `opencost` / `opencost_derived` / `kubecost` (the row's `cost_source`) | The sample's observed cost divided by its reserved quantity (below). `detail` is `observed_components` or `observed_total_apportioned`. | 0.9, or 0.8 when apportioned from a total |
 | 1. Observed, per node | `opencost` / `kubecost` | `Σ cost_cpu / Σ reserved core-hours` and `Σ cost_ram / Σ reserved GiB-hours` over the node's metric rows. Both resources must be observed with positive values. | 0.9 |
 | 2. Pricing catalog | `pricing_catalog` | On-demand list price of the node's instance type in its region, split between CPU and RAM with the OpenCost ratio (below). | 0.75 |
 | 3a. Custom rates | `custom_rate` (`configured`) | `IMPACT_PRICING_CPU_CORE_HOUR` and `IMPACT_PRICING_RAM_GIB_HOUR`. | 0.7 |

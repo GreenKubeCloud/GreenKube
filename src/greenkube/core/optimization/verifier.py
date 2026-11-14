@@ -100,7 +100,7 @@ MIN_RELATIVE_CHANGE = 0.02
 GROUPING_TOLERANCE = timedelta(minutes=15)
 
 #: Cost provenance trusted for savings (A11 ``CostSource``).
-TRUSTED_COST_SOURCES = frozenset({"opencost", "kubecost", "pricing_catalog"})
+TRUSTED_COST_SOURCES = frozenset({"opencost", "opencost_derived", "kubecost", "pricing_catalog"})
 #: Usage provenance trusted for health gates (A11 ``UsageSource``).
 TRUSTED_USAGE_SOURCES = frozenset({"prometheus"})
 #: Carbon-intensity provenance trusted for CO2e savings (A11 ``IntensitySource``).

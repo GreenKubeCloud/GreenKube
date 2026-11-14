@@ -1,7 +1,8 @@
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import httpx
 
@@ -38,16 +39,80 @@ def _number(value: Any) -> float:
     return 0.0 if number is None else number
 
 
-def untrusted_cost_reason(item: dict) -> Optional[str]:
-    """Why an OpenCost allocation's cost must not back a measurement (``None`` when it can).
+#: OpenCost writes allocation figures with 5 decimals: the smallest non-zero cost is 1e-5.
+OPENCOST_PRECISION = 1e-5
+#: Largest rounding error of one OpenCost figure.
+_HALF_PRECISION = OPENCOST_PRECISION / 2
+#: Below this cost a figure's rounding error exceeds 0.5% (a quarter of the
+#: verifier's 2% noise floor): such allocations are rebuilt from resource-hours.
+PRECISION_FLOOR = 1e-3
+#: Relative tolerance between a rebuilt cost and OpenCost's figure, on top of rounding.
+_REBUILD_TOLERANCE = 0.02
+#: Look-back of the node-level allocation that yields OpenCost's node unit prices.
+NODE_PRICE_LOOKBACK_SECONDS = 24 * 3600
+#: Node unit prices are re-read once per hour of collection time.
+_NODE_PRICE_CACHE_SECONDS = 3600
+_OTHER_COST_KEYS = (
+    "pvCost",
+    "pvCostAdjustment",
+    "networkCost",
+    "networkCostAdjustment",
+    "loadBalancerCost",
+    "loadBalancerCostAdjustment",
+    "gpuCost",
+    "gpuCostAdjustment",
+)
+
+
+@dataclass(frozen=True)
+class NodeUnitPrices:
+    """OpenCost's own unit prices on one node (``None`` when not known precisely)."""
+
+    cpu_core_hour: Optional[float]
+    ram_byte_hour: Optional[float]
+
+
+def _precise_rate(cost: Any, quantity: Any) -> Optional[float]:
+    cost_value = _optional_number(cost)
+    quantity_value = _optional_number(quantity)
+    if cost_value is None or quantity_value is None or quantity_value <= 0 or cost_value < PRECISION_FLOOR:
+        return None
+    return cost_value / quantity_value
+
+
+def node_unit_prices(allocations: Mapping[str, Any]) -> Dict[str, NodeUnitPrices]:
+    """OpenCost unit prices per node from an ``aggregate=node`` allocation set.
+
+    OpenCost prices a pod's CPU and RAM as its core-hours and byte-hours times
+    its node's hourly prices, so a node's ``cpuCost / cpuCoreHours`` and
+    ``ramCost / ramByteHours`` are those prices. A price is kept only when the
+    node's cost is large enough (``PRECISION_FLOOR``) for OpenCost's rounding
+    to be negligible; a node without a price (cost 0) gets none.
+    """
+    prices: Dict[str, NodeUnitPrices] = {}
+    for key, item in allocations.items():
+        if not isinstance(item, dict):
+            continue
+        node = (item.get("properties") or {}).get("node")
+        if not node and key and not str(key).startswith("__"):
+            node = key
+        if not node:
+            continue
+        unit = NodeUnitPrices(
+            cpu_core_hour=_precise_rate(item.get("cpuCost"), item.get("cpuCoreHours")),
+            ram_byte_hour=_precise_rate(item.get("ramCost"), item.get("ramByteHours")),
+        )
+        if unit.cpu_core_hour is not None or unit.ram_byte_hour is not None:
+            prices[str(node)] = unit
+    return prices
+
+
+def broken_cost_reason(item: dict) -> Optional[str]:
+    """Why an OpenCost allocation's cost is broken (``None`` when it is a finite figure).
 
     A missing cost is missing, never a zero (fail closed): ``totalCost``,
-    ``cpuCost`` or ``ramCost`` present but NaN, infinite or not a number, a
-    total that is neither reported nor derivable from the CPU and RAM costs,
-    and a zero total for a pod that ran (``minutes > 0``) with non-zero
-    requests (OpenCost had no price for it yet) are all untrusted. Rows built
-    from such an allocation carry ``cost_source = none``, so a NaN never
-    becomes a measured saving.
+    ``cpuCost`` or ``ramCost`` present but NaN, infinite or not a number, and
+    a total that is neither reported nor derivable from the CPU and RAM costs.
     """
     for key in ("totalCost", "cpuCost", "ramCost"):
         if key in item and item[key] is not None and _optional_number(item[key]) is None:
@@ -57,13 +122,120 @@ def untrusted_cost_reason(item: dict) -> Optional[str]:
         _optional_number(item.get("cpuCost")) is None or _optional_number(item.get("ramCost")) is None
     ):
         return "OpenCost reported no total, CPU or RAM cost"
+    return None
+
+
+def _ran_with_requests(item: dict) -> bool:
     minutes = _optional_number(item.get("minutes"))
     requested = any(
         (_optional_number(item.get(key)) or 0.0) > 0 for key in ("cpuCoreRequestAverage", "ramByteRequestAverage")
     )
-    if total is not None and total == 0 and minutes is not None and minutes > 0 and requested:
+    return minutes is not None and minutes > 0 and requested
+
+
+def untrusted_cost_reason(item: dict) -> Optional[str]:
+    """Why an OpenCost allocation's own figures must not back a measurement (``None`` when they can).
+
+    Broken costs (:func:`broken_cost_reason`) and a zero total for a pod that
+    ran (``minutes > 0``) with non-zero requests (OpenCost had no price for
+    it) are untrusted. Rows built from such an allocation carry
+    ``cost_source = none``, so a NaN never becomes a measured saving. A zero
+    that is only OpenCost's 5-decimal rounding is rescued by
+    :func:`rebuilt_cost` before this rule applies.
+    """
+    broken = broken_cost_reason(item)
+    if broken is not None:
+        return broken
+    total = _optional_number(item.get("totalCost"))
+    if total is not None and total == 0 and _ran_with_requests(item):
         return "OpenCost reported a zero cost for a running pod with non-zero requests"
     return None
+
+
+def _core_hours(item: dict, hours: float) -> Optional[float]:
+    """The allocation's core-hours, refined within the rounding of ``cpuCoreHours``.
+
+    OpenCost charges ``max(request, usage)`` per minute. For a sub-precision
+    value the averages times the runtime are more precise; they are clamped to
+    the interval the rounded ``cpuCoreHours`` allows.
+    """
+    reported = _optional_number(item.get("cpuCoreHours"))
+    if reported is None or reported < 0:
+        return None
+    averaged = max(
+        _optional_number(item.get("cpuCoreRequestAverage")) or 0.0,
+        _optional_number(item.get("cpuCoreUsageAverage")) or 0.0,
+    )
+    if averaged <= 0:
+        return reported
+    return max(0.0, min(max(averaged * hours, reported - _HALF_PRECISION), reported + _HALF_PRECISION))
+
+
+def _agrees(reported: Optional[float], rebuilt: float, rounded_terms: int = 1) -> bool:
+    """Whether OpenCost's rounded figure is the rebuilt cost, within its rounding and tolerance."""
+    if reported is None:
+        return True
+    tolerance = rounded_terms * _HALF_PRECISION * 1.01 + _REBUILD_TOLERANCE * rebuilt
+    return abs(reported - rebuilt) <= tolerance
+
+
+def _reported_total(item: dict) -> float:
+    total = _optional_number(item.get("totalCost"))
+    if total is not None:
+        return total
+    return (
+        _number(item.get("cpuCost"))
+        + _number(item.get("ramCost"))
+        + sum(_number(item.get(k)) for k in _OTHER_COST_KEYS)
+    )
+
+
+def needs_node_prices(item: Any) -> bool:
+    """Whether an allocation may be below OpenCost's precision (worth the node price query)."""
+    if not isinstance(item, dict) or broken_cost_reason(item) is not None:
+        return False
+    if not (item.get("properties") or {}).get("node"):
+        return False
+    minutes = _optional_number(item.get("minutes"))
+    if minutes is None or minutes <= 0:
+        return False
+    return 0 <= _reported_total(item) < PRECISION_FLOOR
+
+
+def rebuilt_cost(item: dict, prices: Optional[NodeUnitPrices]) -> Optional[tuple[float, float]]:
+    """``(cpu, ram)`` cost of a sub-precision allocation rebuilt at OpenCost's node prices.
+
+    OpenCost prices CPU and RAM as core-hours and byte-hours times the node's
+    hourly prices, then writes 5 decimals: a pod costing less than 5e-6 per
+    window reads 0. The cost is rebuilt as the same product with the node's
+    OpenCost prices (:func:`node_unit_prices`). ``None`` unless the allocation
+    is finite and non-negative, ran, costs less than ``PRECISION_FLOOR``, and
+    OpenCost's own CPU, RAM and total figures equal the rebuilt costs within
+    their rounding. A zero that rounding cannot explain (a priced pod reported
+    at 0, a node without a price) is not rebuilt and stays untrusted.
+    """
+    if prices is None or not needs_node_prices(item):
+        return None
+    reported_cpu = _optional_number(item.get("cpuCost"))
+    reported_ram = _optional_number(item.get("ramCost"))
+    if (reported_cpu or 0.0) < 0 or (reported_ram or 0.0) < 0:
+        return None
+    minutes = _optional_number(item.get("minutes")) or 0.0
+    core_hours = _core_hours(item, minutes / 60.0)
+    byte_hours = _optional_number(item.get("ramByteHours"))
+    if core_hours is None or byte_hours is None or byte_hours < 0:
+        return None
+    if (core_hours > 0 and prices.cpu_core_hour is None) or (byte_hours > 0 and prices.ram_byte_hour is None):
+        return None
+    cpu = core_hours * (prices.cpu_core_hour or 0.0)
+    ram = byte_hours * (prices.ram_byte_hour or 0.0)
+    if not (_agrees(reported_cpu, cpu) and _agrees(reported_ram, ram)):
+        return None
+    adjustments = _number(item.get("cpuCostAdjustment")) + _number(item.get("ramCostAdjustment"))
+    others = sum(_number(item.get(key)) for key in _OTHER_COST_KEYS)
+    if not _agrees(_optional_number(item.get("totalCost")), cpu + ram + adjustments + others, rounded_terms=3):
+        return None
+    return cpu + _number(item.get("cpuCostAdjustment")), ram + _number(item.get("ramCostAdjustment"))
 
 
 def _parse_time(value: Any) -> Optional[datetime]:
@@ -76,8 +248,18 @@ def _parse_time(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _allocation_to_cost_metric(resource_id: str, item: Any, timestamp: datetime) -> Optional[CostMetric]:
-    """Convert one OpenCost allocation into a pod ``CostMetric`` (``None`` for idle/unallocated entries)."""
+def _allocation_to_cost_metric(
+    resource_id: str,
+    item: Any,
+    timestamp: datetime,
+    node_prices: Optional[Mapping[str, NodeUnitPrices]] = None,
+) -> Optional[CostMetric]:
+    """Convert one OpenCost allocation into a pod ``CostMetric`` (``None`` for idle/unallocated entries).
+
+    An allocation below OpenCost's precision whose figures agree with its
+    resource-hours at the node's OpenCost unit prices (``node_prices``) gets
+    the rebuilt cost and ``source = opencost_derived`` (:func:`rebuilt_cost`).
+    """
     if not isinstance(item, dict):
         return None
     properties = item.get("properties") or {}
@@ -105,9 +287,17 @@ def _allocation_to_cost_metric(resource_id: str, item: Any, timestamp: datetime)
 
     window = item.get("window") if isinstance(item.get("window"), dict) else {}
     minutes = item.get("minutes")
-    untrusted = untrusted_cost_reason(item)
-    if untrusted is not None:
-        logger.debug("Cost of %s/%s is not trusted: %s", namespace, pod_name, untrusted)
+    node = (item.get("properties") or {}).get("node")
+    rebuilt = rebuilt_cost(item, (node_prices or {}).get(node) if node else None)
+    if rebuilt is not None:
+        source = CostSource.OPENCOST_DERIVED.value
+        cpu, ram = rebuilt
+        total = cpu + ram + storage + network + lb + gpu
+    else:
+        untrusted = untrusted_cost_reason(item)
+        if untrusted is not None:
+            logger.debug("Cost of %s/%s is not trusted: %s", namespace, pod_name, untrusted)
+        source = CostSource.NONE.value if untrusted is not None else CostSource.OPENCOST.value
     return CostMetric(
         pod_name=pod_name,
         namespace=namespace,
@@ -122,7 +312,7 @@ def _allocation_to_cost_metric(resource_id: str, item: Any, timestamp: datetime)
         window_start=_parse_time(window.get("start")),
         window_end=_parse_time(window.get("end")),
         minutes=_number(minutes) if minutes is not None else None,
-        source=CostSource.NONE.value if untrusted is not None else CostSource.OPENCOST.value,
+        source=source,
     )
 
 
@@ -158,6 +348,8 @@ class OpenCostCollector(BaseCollector):
         self._resolved_url: Optional[str] = None
         # Reusable HTTP client (lazily initialized)
         self._client: Optional[httpx.AsyncClient] = None
+        # OpenCost node unit prices with the hour of collection time they were read for.
+        self._node_prices: Optional[tuple[int, Dict[str, NodeUnitPrices]]] = None
 
     async def _get_client(self, verify: bool = True) -> httpx.AsyncClient:
         """Return the reusable HTTP client, creating it lazily if needed."""
@@ -251,18 +443,65 @@ class OpenCostCollector(BaseCollector):
             return []
 
         now = timestamp if timestamp else datetime.now(timezone.utc)
+        allocation_sets = [allocation_set for allocation_set in response_data if isinstance(allocation_set, dict)]
+        node_prices: Dict[str, NodeUnitPrices] = {}
+        nodes = {
+            str(item["properties"]["node"])
+            for allocation_set in allocation_sets
+            for item in allocation_set.values()
+            if needs_node_prices(item)
+        }
+        if nodes:
+            node_prices = await self._fetch_node_prices(client, self._resolved_url or url, now, nodes)
         collected_metrics = []
-        for allocation_set in response_data:
-            if not isinstance(allocation_set, dict):
-                continue
+        for allocation_set in allocation_sets:
             for resource_id, item in allocation_set.items():
-                metric = _allocation_to_cost_metric(str(resource_id), item, now)
+                metric = _allocation_to_cost_metric(str(resource_id), item, now, node_prices)
                 if metric is not None:
                     collected_metrics.append(metric)
 
         record_collection_request("opencost", "success" if collected_metrics else "empty", elapsed(timer))
         logger.info("Successfully collected %d metrics from OpenCost.", len(collected_metrics))
         return collected_metrics
+
+    async def _fetch_node_prices(
+        self, client: httpx.AsyncClient, url: str, end: datetime, nodes: set[str]
+    ) -> Dict[str, NodeUnitPrices]:
+        """OpenCost's unit prices per node over the day before ``end``.
+
+        One ``aggregate=node`` query: a node's cost over a day is large enough
+        for OpenCost's 5-decimal rounding to be negligible. The result is
+        reused within the same hour of collection time while it covers every
+        node in ``nodes`` (a fresh cluster or a new node is re-read). Any
+        failure yields no prices, so sub-precision zeros stay untrusted (fail
+        closed).
+        """
+        end_ts = int(end.timestamp())
+        bucket = end_ts // _NODE_PRICE_CACHE_SECONDS
+        if self._node_prices is not None and self._node_prices[0] == bucket and nodes <= set(self._node_prices[1]):
+            return self._node_prices[1]
+        params = {
+            "window": f"{end_ts - NODE_PRICE_LOOKBACK_SECONDS},{end_ts}",
+            "aggregate": "node",
+            "accumulate": "true",
+            "includeIdle": "false",
+        }
+        prices: Dict[str, NodeUnitPrices] = {}
+        try:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json().get("data")
+        except Exception as exc:
+            logger.warning("Could not read OpenCost node unit prices; sub-precision costs stay untrusted: %s", exc)
+            return {}
+        if not isinstance(data, list):
+            logger.warning("OpenCost returned no node allocation; sub-precision costs stay untrusted.")
+            return {}
+        for allocation_set in data:
+            if isinstance(allocation_set, dict):
+                prices.update(node_unit_prices(allocation_set))
+        self._node_prices = (bucket, prices)
+        return prices
 
     async def collect_pv_costs(self, pv_names: Sequence[str], window_days: int = 7) -> Dict[str, float]:
         """Fetch the storage cost of specific PersistentVolumes from OpenCost.

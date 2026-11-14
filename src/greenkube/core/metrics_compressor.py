@@ -36,6 +36,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from ..core.config import Config, get_config
+from ..models.provenance import cost_source_aggregate_sql
 from ..utils.date_utils import to_iso_z
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,8 @@ class _MetricsTable:
             ("cost_storage", "SUM(cost_storage)"),
             ("cost_network", "SUM(cost_network)"),
             ("cost_lb", "SUM(cost_lb)"),
-            ("cost_source", _source_aggregate("cost_source")),
+            # opencost + opencost_derived stays a trusted OpenCost cost, not ``mixed``.
+            ("cost_source", cost_source_aggregate_sql("cost_source")),
             ("usage_source", _source_aggregate("usage_source")),
             ("power_source", _source_aggregate("power_source")),
             ("intensity_source", _source_aggregate("intensity_source")),

@@ -430,3 +430,28 @@ async def test_latest_request_comes_from_the_latest_sample_after_a_rollout_to_an
         assert api[""].cpu_request == 200
         assert api["web"].cpu_request == 200
         assert api["web"].cpu_limit == 400
+
+
+@pytest.mark.parametrize(
+    ("second", "expected"),
+    [("opencost_derived", "opencost_derived"), ("opencost", "opencost"), ("pricing_catalog", "mixed")],
+)
+async def test_cost_source_rollups_keep_opencost_and_derived_rows_trusted(db, second, expected):
+    """An hour (and a baseline) mixing ``opencost`` and ``opencost_derived`` rows is an OpenCost cost, not ``mixed``."""
+    start = _base_hour()
+    rows = []
+    for hour in range(2):
+        for step in range(12):
+            ts = start + timedelta(hours=hour, minutes=5 * step)
+            # Hour 0 alternates labels within the hour; hour 1 uses only the second label.
+            source = second if hour == 1 or step % 2 else "opencost"
+            rows.append(_row(ts, cost_source=source))
+            rows.append(_row(ts, container_name="web", cpu_request=400, cost_source=source))
+    repository, _ = await _rolled(db, rows, start, hours=2)
+
+    stored = await repository.read_hours(start, start + timedelta(hours=2))
+    assert stored and {item.cost_source for item in stored if item.hour_bucket == start} == {expected}
+    window = (start, start + timedelta(hours=2))
+    snapshot = await repository.read_usage_snapshot(*window)
+    _, containers = await repository.read_baseline_rows(*window, snapshot=snapshot)
+    assert containers and {row.cost_source for row in containers} == {expected}

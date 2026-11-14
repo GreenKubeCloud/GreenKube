@@ -35,7 +35,8 @@ async def test_collect_range_queries_the_exact_window_by_namespace_and_pod():
 
     await _collect_range()
 
-    params = dict(route.calls.last.request.url.params)
+    # The first call is the pod allocation; a node price query may follow (sub-precision costs).
+    params = dict(route.calls[0].request.url.params)
     assert params == {
         "window": f"{int(START.timestamp())},{int(END.timestamp())}",
         "aggregate": "namespace,pod",

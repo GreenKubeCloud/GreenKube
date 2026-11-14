@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from greenkube.models.provenance import MIXED
+from greenkube.models.provenance import cost_source_aggregate_sql
 from greenkube.models.workload_usage import (
     POD_LEVEL,
     USAGE_PERCENTILES,
@@ -345,10 +345,7 @@ def baseline_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces:
             SUM(cost_storage) AS cost_storage,
             SUM(cost_network) AS cost_network,
             SUM(cost_lb) AS cost_lb,
-            COUNT(cost_source) AS cost_source_n,
-            COUNT(*) AS row_n,
-            MIN(cost_source) AS cost_source_min,
-            MAX(cost_source) AS cost_source_max,
+            {cost_source_aggregate_sql("cost_source")} AS cost_source,
             SUM(co2e_grams) AS co2e_grams,
             SUM(embodied_co2e_grams) AS embodied_co2e_grams,
             SUM(joules) AS joules,
@@ -496,10 +493,7 @@ def baseline_from_row(
     name = row["target_name"]
     target = (row["namespace"], kind, name)
     summary = summaries.get(target, {}).get(container)
-    cost_source = None
-    if int(row["cost_source_n"] or 0):
-        same = row["cost_source_min"] == row["cost_source_max"] and row["cost_source_n"] == row["row_n"]
-        cost_source = row["cost_source_min"] if same else MIXED
+    cost_source = row["cost_source"]
     pue_n = int(row["pue_n"] or 0)
     intensity_n = int(row["intensity_n"] or 0)
     cpu_max = _f(row["cpu_max"])
