@@ -13,9 +13,11 @@ import logging
 import os
 import re
 import time
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import uvicorn
 from fastapi import Depends, FastAPI, Request
@@ -214,7 +216,7 @@ def _flat_routes(routes):
     for route in routes:
         effective = getattr(route, "effective_route_contexts", None)
         if callable(effective):
-            yield from effective()
+            yield from cast(Iterable[Any], effective())
         elif getattr(route, "path", None) is None and isinstance(getattr(route, "routes", None), list):
             yield from _flat_routes(route.routes)
         else:
