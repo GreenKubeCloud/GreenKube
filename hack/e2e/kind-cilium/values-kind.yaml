@@ -1,0 +1,29 @@
+# Extra values for the kind + Cilium e2e (GK_EXTRA_VALUES), merged after the
+# quickstart values and the harness's cluster values.
+config:
+  cloudProvider: on-prem
+  # docs/configuration.md "On-premises and bare-metal clusters".
+  defaultZone: FR
+  recommendations:
+    # Unused LoadBalancers and Released PVs are proposed after ~3 minutes
+    # (default 7 days), so waste-fixtures.yaml is judged within the run.
+    deletionMinUnusedDays: 0.002
+    # docs/examples/quickstart/values-change-measurement.yaml
+    changeMeasurement:
+      enabled: true
+      accelerated: true
+      preWindowDays: 0.25
+      postWindowDays: 0.05
+      warmupHours: 0.05
+monitoring:
+  serviceMonitor:
+    enabled: true
+    # kube-prometheus-stack (fullnameOverride=kps) runs Prometheus as kps-prometheus.
+    prometheusServiceAccount: kps-prometheus
+  prometheusRule:
+    enabled: true
+postgres:
+  backup:
+    enabled: true
+    persistence:
+      size: 1Gi

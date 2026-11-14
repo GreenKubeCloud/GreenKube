@@ -1091,60 +1091,95 @@ class Config(BaseSettings):
         except Exception:
             return "0.0.0"
 
-    @staticmethod
-    def _auto_detect_cluster_name() -> str:
-        """Auto-detect the cluster name without requiring extra dependencies.
+    _SERVICE_ACCOUNT_DIR: ClassVar[str] = "/var/run/secrets/kubernetes.io/serviceaccount"
+    _CLUSTER_NAME_LABELS: ClassVar[tuple[str, ...]] = (
+        "alpha.eksctl.io/cluster-name",
+        "eks.amazonaws.com/cluster-name",
+        "cluster.x-k8s.io/cluster-name",
+        "cloud.google.com/gke-cluster-name",
+        "aks.azure.com/cluster-name",
+        "minikube.k8s.io/name",
+    )
 
-        Detection order:
-        1. ``K8S_NODE_NAME`` env var (injected via the Helm Downward API).
-           For single-node clusters (minikube, kind, k3s) the node name equals
-           the cluster name, which is the most readable identifier.
-        2. Well-known cloud-provider node labels via the Kubernetes Python client
-           (only attempted when the ``kubernetes`` package is available).
-        3. Hard fallback: ``"default"``.
+    @classmethod
+    def _list_nodes_in_cluster(cls) -> Optional[tuple[list[dict], bool]]:
+        """Up to two nodes and whether more exist, read with the pod's service account.
+
+        Synchronous (configuration is loaded outside the event loop) and bounded
+        to 5 seconds. None out of cluster or on any error.
+        """
+        host = os.getenv("KUBERNETES_SERVICE_HOST", "")
+        token_path = os.path.join(cls._SERVICE_ACCOUNT_DIR, "token")
+        if not host or not os.path.isfile(token_path):
+            return None
+        try:
+            import httpx
+
+            with open(token_path, encoding="utf-8") as handle:
+                token = handle.read().strip()
+            ca_path = os.path.join(cls._SERVICE_ACCOUNT_DIR, "ca.crt")
+            if ":" in host:
+                host = f"[{host}]"
+            port = os.getenv("KUBERNETES_SERVICE_PORT", "443")
+            response = httpx.get(
+                f"https://{host}:{port}/api/v1/nodes",
+                params={"limit": "2"},
+                headers={"Authorization": f"Bearer {token}"},
+                verify=ca_path if os.path.isfile(ca_path) else True,
+                timeout=5.0,
+            )
+            response.raise_for_status()
+            body = response.json()
+            items = [item for item in body.get("items") or [] if isinstance(item, dict)]
+            more = bool((body.get("metadata") or {}).get("continue")) or len(items) > 1
+            return items, more
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Could not list nodes to detect the cluster name: %s", exc)
+            return None
+
+    @classmethod
+    def _auto_detect_cluster_name(cls) -> str:
+        """Auto-detect a cluster name that every GreenKube pod agrees on.
+
+        The name keys collection watermarks, GitOps bindings, savings and the
+        ledger identity, so it must not depend on the node a pod runs on.
+        Detection order (the nodes are read with the pod's service account):
+        1. A single-node cluster (minikube, kind, k3s): its node name.
+        2. A well-known cluster-name label on a node (EKS, GKE, AKS, Cluster API).
+        3. Any other multi-node cluster: ``"default"``; set config.clusterName
+           for a readable name.
+        4. Nodes unreadable (no RBAC, out of cluster): ``K8S_NODE_NAME``
+           (Downward API), else ``"default"``.
 
         Never raises — detection failures are logged at DEBUG level.
         """
         logger = logging.getLogger(__name__)
 
-        # Fast path: Downward API env var injected by the Helm chart.
+        listing = cls._list_nodes_in_cluster()
+        if listing is not None:
+            nodes, more = listing
+            if len(nodes) == 1 and not more:
+                name = (nodes[0].get("metadata") or {}).get("name")
+                if name:
+                    logger.debug("Auto-detected cluster name from the only node: %s", name)
+                    return str(name)
+            for node in nodes:
+                labels = (node.get("metadata") or {}).get("labels") or {}
+                for label in cls._CLUSTER_NAME_LABELS:
+                    if labels.get(label):
+                        logger.debug("Auto-detected cluster name from label %s: %s", label, labels[label])
+                        return str(labels[label])
+            if nodes:
+                logger.info(
+                    "Multi-node cluster without a cluster-name node label: using cluster name 'default' "
+                    "(set config.clusterName / CLUSTER_NAME for a readable name)."
+                )
+                return "default"
+
         node_name = os.getenv("K8S_NODE_NAME", "")
         if node_name:
             logger.debug("Auto-detected cluster name from K8S_NODE_NAME: %s", node_name)
             return node_name
-
-        # Slow path: use the Kubernetes Python client when available.
-        try:
-            from kubernetes import client as k8s_client  # pyrefly: ignore[missing-import]
-            from kubernetes import config as k8s_config  # pyrefly: ignore[missing-import]
-
-            try:
-                k8s_config.load_incluster_config()
-            except Exception:
-                k8s_config.load_kube_config()
-
-            v1 = k8s_client.CoreV1Api()
-            nodes = v1.list_node(limit=1, _request_timeout=5)
-            if nodes.items:
-                node = nodes.items[0]
-                labels = node.metadata.labels or {}
-                for label in [
-                    "alpha.eksctl.io/cluster-name",
-                    "eks.amazonaws.com/cluster-name",
-                    "cluster.x-k8s.io/cluster-name",
-                    "cloud.google.com/gke-cluster-name",
-                    "aks.azure.com/cluster-name",
-                    "minikube.k8s.io/name",
-                ]:
-                    if labels.get(label):
-                        logger.debug("Auto-detected cluster name from label %s: %s", label, labels[label])
-                        return labels[label]
-                name = node.metadata.name
-                if name:
-                    logger.debug("Auto-detected cluster name from first node name: %s", name)
-                    return name
-        except Exception as exc:
-            logger.debug("Could not auto-detect cluster name via k8s client: %s", exc)
 
         return "default"
 

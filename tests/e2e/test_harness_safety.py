@@ -100,6 +100,9 @@ def harness(tmp_path: Path):
             "FAKE_CONTEXT": context,
             "FAKE_OBJECTS": str(objects),
             "FAKE_GITEA_REPO": json.dumps({"description": "someone else's repository", "login": "greenkube"}),
+            # The fake curl answers every probe: treat it as this run's own listener.
+            "E2E_REUSE_PORT_GITEA": "1",
+            "E2E_REUSE_PORT_GREENKUBE": "1",
             **extra,
         }
         result = subprocess.run(
@@ -264,6 +267,24 @@ def test_setup_repo_resets_the_repository_when_the_token_can_recreate_it(harness
     joined = "\n".join(calls)
     assert "-X PATCH" in joined and "/user/settings" in joined
     assert "-X DELETE" in joined
+
+
+def test_a_port_forward_opened_by_someone_else_is_never_reused(harness) -> None:
+    # A Minikube e2e and a kind e2e on one host both default to the same local
+    # ports: the second run silently drove the first run's GreenKube.
+    result, calls = harness("setup-repo.sh", E2E_REUSE_PORT_GITEA="0")
+
+    assert result.returncode != 0
+    assert "already answers but was not opened by this harness" in result.stderr
+    assert not any("/repos/" in call for call in calls)
+
+
+def test_setup_gitops_skips_argocd_on_request(harness) -> None:
+    # A cluster without Argo CD (the kind + Cilium environment) runs only Flux.
+    result, calls = harness("setup-gitops.sh", E2E_ARGOCD="0")
+
+    assert result.returncode == 0, result.stderr
+    assert not any("application" in call for call in calls)
 
 
 def test_apps_namespace_cannot_be_overridden(harness) -> None:

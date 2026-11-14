@@ -47,8 +47,9 @@ if [[ "${repo_state}" == "missing" ]]; then
   log "Creating ${GITEA_OWNER}/${GITEA_REPO} on Gitea (POST ${path})..."
   gitea_api POST "${path}" "$(jq -cn --arg name "${GITEA_REPO}" --arg branch "${GITEA_BRANCH}" \
     --arg description "GreenKube quickstart sample app (${GITEA_REPO_MARKER})" \
-    '{name: $name, default_branch: $branch, private: false, auto_init: true, description: $description}')" >/dev/null ||
-    die "Could not create ${GITEA_OWNER}/${GITEA_REPO} with POST ${path}: the token needs access to ${GITEA_OWNER}."
+    '{name: $name, default_branch: $branch, private: false, auto_init: true, description: $description}')" \
+    >"${E2E_STATE_DIR}/gitea-create.json" ||
+    die "Could not create ${GITEA_OWNER}/${GITEA_REPO} with POST ${path}: the token needs access to ${GITEA_OWNER} and the scope Gitea names here: $(head -c 300 "${E2E_STATE_DIR}/gitea-create.json" 2>/dev/null)"
   [[ "$(gitea_repo_state)" == "owned" ]] || die "Gitea created the repository under another owner than ${GITEA_OWNER}."
 fi
 

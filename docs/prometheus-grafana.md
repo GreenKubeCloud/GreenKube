@@ -77,10 +77,12 @@ If GreenKube API authentication is enabled, add the Prometheus `authorization`/b
 
 Set `CLUSTER_NAME` (Helm: `config.clusterName`) to use a stable cluster label. When it is empty, GreenKube derives a name in this order:
 
-1. `K8S_NODE_NAME`, if set. The Helm chart injects the Kubernetes node hosting the GreenKube pod, and GreenKube uses that value directly.
-2. If the environment variable is empty, query one Kubernetes node for a recognized EKS, GKE, AKS, or cluster-api label.
-3. The queried node's name, if no recognized label is present.
-4. `default` if detection fails.
+1. On a single-node cluster (minikube, kind, k3s), the name of that node.
+2. A recognized EKS, GKE, AKS, Cluster API or minikube cluster-name label on a node.
+3. `default` on any other multi-node cluster, so every GreenKube pod uses the same name whatever node it runs on.
+4. When the nodes cannot be read (no RBAC, out of cluster): `K8S_NODE_NAME` (the chart injects the node hosting the pod), else `default`.
+
+The name also keys the collection watermark, the GitOps bindings and the savings ledger: set it before the first install of a multi-node cluster rather than after.
 
 The dashboard metric families use the resolved cluster value. Control-loop metrics have their own labels, documented below, and do not all include `cluster`. The chart's `ServiceMonitor` restores `cluster`, `region`, `namespace`, and `pod` labels after Prometheus target-label renaming, and replaces an empty `cluster` label with `default`. Static scrape configurations do not get those chart relabelings.
 
@@ -448,7 +450,7 @@ EOF
 ### "No data" in all panels
 
 1. **ServiceMonitor not enabled** — in the Prometheus UI (`/targets`), verify `greenkube-api` is `UP`.
-2. **Unexpected `cluster` label** — set `config.clusterName` (or `CLUSTER_NAME`) to a stable cluster identifier. If unset, the Helm deployment derives it from `K8S_NODE_NAME`, which is the node hosting the GreenKube pod.
+2. **Unexpected `cluster` label** — set `config.clusterName` (or `CLUSTER_NAME`) to a stable cluster identifier. If unset, a multi-node cluster without a cluster-name node label uses `default` ([Cluster labels](#2-cluster-labels)).
 3. **`DS_PROMETHEUS` not resolved** — open dashboard settings → Variables. `DS_PROMETHEUS` must show your Prometheus datasource name, not the literal string `${DS_PROMETHEUS}`. Re-import using `/api/dashboards/import`.
 4. **GreenKube just started** — metrics are populated after the first scheduler run (≤ 5 minutes). Stat panels show `0` until then; they self-correct once the scheduler completes its first cycle.
 
