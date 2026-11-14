@@ -360,3 +360,70 @@ async def test_leader_gate_scopes_a_fence_for_the_running_job():
         assert current_leader_fence() is fence
         assert fence.enforced and fence.token == 0
     assert not current_leader_fence().enforced
+
+
+# -- Shutdown hand-over: a stopping leader releases the Lease ------------------------
+
+
+@pytest.mark.asyncio
+async def test_stopping_leader_releases_the_lease_so_a_standby_takes_over_at_once():
+    import asyncio
+
+    api = _FakeCoordinationApi()
+    clock = _Clock()
+    leader = _elector(api, clock)
+    stop = asyncio.Event()
+    stop.set()
+    assert await leader.try_acquire_or_renew()
+    fence = leader.fencing_token
+    assert fence is not None
+
+    await leader.run(stop)
+
+    assert not leader.is_leader
+    assert api.lease is not None
+    assert api.lease.spec.holder_identity is None
+    standby = KubernetesLeaseElector(
+        api=api, name="controller-leader", namespace="greenkube", identity="controller-pod:2", clock=clock
+    )
+    # No wait for the 30 s expiry, and the generation moves on (old fences are void).
+    assert await standby.try_acquire_or_renew()
+    assert standby.fencing_token == fence + 1
+
+
+@pytest.mark.asyncio
+async def test_release_never_clears_a_lease_held_by_another_replica():
+    api = _FakeCoordinationApi(_lease("another-controller"))
+    elector = _elector(api)
+
+    assert await elector.release() is False
+    assert api.lease is not None
+    assert api.lease.spec.holder_identity == "another-controller"
+    assert api.replace_requests == []
+
+
+@pytest.mark.asyncio
+async def test_release_errors_leave_the_lease_to_expire():
+    api = _FakeCoordinationApi()
+    elector = _elector(api)
+    assert await elector.try_acquire_or_renew()
+    api.errors["replace"] = ApiException(status=500, reason="boom")
+
+    assert await elector.release() is False
+    assert not elector.is_leader
+    assert api.lease is not None
+    assert api.lease.spec.holder_identity == "controller-pod:1"
+
+
+@pytest.mark.asyncio
+async def test_standby_shutdown_does_not_touch_the_lease():
+    import asyncio
+
+    api = _FakeCoordinationApi(_lease("another-controller"))
+    elector = _elector(api)
+    stop = asyncio.Event()
+    stop.set()
+
+    await elector.run(stop)
+
+    assert api.replace_requests == []
