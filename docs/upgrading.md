@@ -232,7 +232,10 @@ uv run pytest tests/helm/test_helm_topology.py
 own kubeconfig (your current kubectl context is never used): it installs the 0.3.1 chart and image, seeds the
 database, runs `helm upgrade --reset-then-reuse-values --wait` to the working tree with an image built from it,
 then checks that the api and the controller are Ready, the schema is at the latest migration, every seeded row
-is kept and the API key is unchanged and still accepted. CI runs it on pull requests that touch migrations or
+is kept and the API key is unchanged and still accepted. Finally it rolls back as
+[Backup and restore](operations/backup-restore.md#roll-back-an-upgrade) describes (restore of the pre-upgrade
+dump, then `helm rollback`) and checks the 0.3.1 schema version, the rows and a Ready 0.3.1 release
+(`UPGRADE_ROLLBACK=0` skips it). CI runs it on pull requests that touch migrations or
 the chart, and every release tag requires it (`.github/workflows/upgrade-test.yml`). Set `UPGRADE_KEEP=1` to
 keep the cluster for inspection; the evidence (steps, row counts, logs on failure) lands in
 `$TMPDIR/greenkube-upgrade-test/evidence`.

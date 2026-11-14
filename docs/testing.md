@@ -119,5 +119,15 @@ The bootstrap script refuses to run outside GitHub Actions unless `E2E_BOOTSTRAP
 `make upgrade-test` (`hack/upgrade/upgrade-test.sh`) installs the 0.3.1 chart and image on a throwaway kind
 cluster with its own kubeconfig, seeds the database, upgrades it to the working tree with
 `helm upgrade --reset-then-reuse-values --wait` and checks readiness, the schema version, the seeded row counts and
-the API key ([Upgrading](upgrading.md#checking-an-upgrade-on-kind)). `.github/workflows/upgrade-test.yml` runs it on
+the API key ([Upgrading](upgrading.md#checking-an-upgrade-on-kind)). It then rolls back the documented way
+(restore of the dump taken before the upgrade, `helm rollback`) and checks the 0.3.1 schema version, the rows and a
+Ready 0.3.1 release; `UPGRADE_ROLLBACK=0` skips that phase.
+
+The restore procedure is also tested on PostgreSQL by `tests/integration/test_upgrade_from_v031.py`. It needs
+`pg_dump`, `pg_restore` and `psql` at least as new as the server: from the `PATH`, or through a wrapper in
+`GREENKUBE_TEST_PG_CLIENT` (CI: `docker run --rm -i --network host postgres:18.0-alpine3.22`), with
+`GREENKUBE_TEST_PG_CLIENT_DSN` when the wrapper reaches the server under another address (Docker Desktop:
+`host.docker.internal`). Without them the test is skipped.
+
+`.github/workflows/upgrade-test.yml` runs it on
 pull requests that touch migrations or the chart, and the release workflow requires it.
