@@ -13,6 +13,7 @@ from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import (
     EffortLevel,
     RecommendationCapability,
+    RecommendationPatchV2,
     RecommendationRecord,
     RecommendationStatus,
     RecommendationType,
@@ -246,6 +247,17 @@ ACTIVE_UPSERT_COLUMNS: tuple = (
 ) + V2_UPSERT_COLUMNS
 
 
+def _stored_patch(record: RecommendationRecord) -> Optional[RecommendationPatchV2]:
+    """The ``patch`` column: the typed action is stored inside it (``patch.action``).
+
+    A kind with no legacy patch view (``delete_resource``) keeps its action in a
+    patch without operations, so the action survives persistence.
+    """
+    if record.patch is None and record.action is not None:
+        return RecommendationPatchV2(action=record.action)
+    return record.patch
+
+
 def record_values(record: RecommendationRecord, encode_datetime=lambda value: value) -> dict:
     """Returns a ``{column: bind_value}`` mapping for a recommendation record.
 
@@ -296,7 +308,7 @@ def record_values(record: RecommendationRecord, encode_datetime=lambda value: va
         "effort": _enum(record.effort),
         "ranking_score": record.ranking_score,
         "ranking_factors": to_json(dict(record.ranking_factors)),
-        "patch": to_json(record.patch),
+        "patch": to_json(_stored_patch(record)),
         "expires_at": _dt(record.expires_at),
         "reversible": record.reversible,
         "requires_restart": record.requires_restart,

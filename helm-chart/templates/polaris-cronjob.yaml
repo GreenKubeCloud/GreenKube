@@ -27,7 +27,9 @@ metadata:
     {{- include "greenkube.labels" . | nindent 4 }}
     app.kubernetes.io/component: polaris
 ---
-# Polaris audits workload specs: read-only, no Secrets, no ConfigMaps.
+# Polaris audits workload specs: read-only, no Secrets. `polaris audit` lists
+# every kind its built-in checks target (ConfigMaps, ServiceAccounts and RBAC
+# objects included) and fails on the first forbidden list.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -37,7 +39,10 @@ metadata:
     app.kubernetes.io/component: polaris
 rules:
 - apiGroups: [""]
-  resources: ["pods", "nodes", "namespaces", "services", "replicationcontrollers"]
+  resources: ["pods", "nodes", "namespaces", "services", "replicationcontrollers", "serviceaccounts", "configmaps"]
+  verbs: ["get", "list"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
   verbs: ["get", "list"]
 - apiGroups: ["apps"]
   resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
@@ -165,7 +170,7 @@ spec:
                       method="POST",
                       headers={
                           "Content-Type": "application/json",
-                          "Authorization": "Bearer " + os.environ["GREENKUBE_SIGNALS_API_KEY"],
+                          "Authorization": "Bearer " + os.environ["GREENKUBE_SIGNALS_API_KEY"].strip(),
                       },
                   )
                   with urllib.request.urlopen(request, timeout=120) as response:

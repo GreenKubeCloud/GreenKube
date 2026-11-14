@@ -526,6 +526,30 @@ class TestWarmUpSinceInstall:
         assert eligible_at == install + timedelta(seconds=36 * 300)
         assert "Eligible in ~2h" in blocker["fix"]
 
+    def test_a_workload_younger_than_the_install_is_eligible_once_its_own_samples_accrue(self):
+        # e2e wave 4: a Deployment created a day after install, 1 of 6 samples, was
+        # reported warming up with an eligible_at a day in the past.
+        from greenkube.core.optimization.eligibility import warm_up
+
+        install = NOW - timedelta(days=1)
+        evidence = RecommendationEvidence(
+            sample_count=1,
+            coverage_ratio=1 / 2880,
+            observation_window_start=install,
+            observation_window_end=NOW,
+            observation_window_seconds=86400,
+        )
+        blocker, eligible_at = warm_up(
+            _record(evidence=evidence),
+            AutomationPolicyConfig(min_samples=6, min_coverage=0.0),
+            30,
+            NOW,
+            history_start=install,
+        )
+        assert blocker["code"] == "warming_up"
+        assert eligible_at == NOW + timedelta(seconds=5 * 30)
+        assert "Enough data should now be available" not in blocker["fix"]
+
     def test_the_lookback_caps_the_history_considered(self):
         from greenkube.automation.policy import coverage_since_history
 

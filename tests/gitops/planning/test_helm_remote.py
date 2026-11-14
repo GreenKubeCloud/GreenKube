@@ -98,8 +98,10 @@ _PRESETS = {
 class _BitnamiRunner:
     """Emulates ``helm template`` of the recorded Bitnami-style chart (and a plain two-container chart)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, omit_namespace: bool = False) -> None:
         self.calls: list[tuple[str, ...]] = []
+        # Most public charts (podinfo...) leave metadata.namespace out of their templates.
+        self.omit_namespace = omit_namespace
 
     def run(
         self,
@@ -136,7 +138,7 @@ class _BitnamiRunner:
         deployment = {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
-            "metadata": {"name": name, "namespace": namespace},
+            "metadata": {"name": name} if self.omit_namespace else {"name": name, "namespace": namespace},
             "spec": {"replicas": values.get("replicaCount", 1), "template": {"spec": {"containers": containers}}},
         }
         output = f"---\n# Source: {chart['name']}/templates/deployment.yaml\n{_dump(deployment)}"
@@ -295,6 +297,25 @@ def test_remote_plans_are_deterministic_and_render_twice_for_determinism():
         assert first.digest == second.digest
         templates = [call for call in runner.calls if call[1] == "template"]
         assert len(templates) % 2 == 0
+    finally:
+        snapshot.close()
+
+
+def test_a_chart_that_omits_metadata_namespace_is_planned_in_the_release_namespace():
+    # helm install, Argo CD and Flux create such resources in the release namespace
+    # (e2e wave 4: the podinfo chart was refused with "exact workload target not produced").
+    registry = FakeChartRegistry()
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES})
+    action = _action([_op("nginx", cpu="50m", memory="64Mi"), _op("metrics", cpu="20m")])
+
+    try:
+        plan = _planner(_BitnamiRunner(omit_namespace=True), _fetcher(registry)).plan(
+            action, _source(), snapshot, VALUES_REVISION
+        )
+
+        assert [edit.path for edit in plan.files] == [VALUES_PATH]
+        assert plan.files[0].content == EXPECTED_VALUES
+        assert plan.validation.passed
     finally:
         snapshot.close()
 

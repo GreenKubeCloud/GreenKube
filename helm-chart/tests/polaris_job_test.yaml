@@ -91,7 +91,7 @@ tests:
           value: http://RELEASE-NAME-greenkube-api.NAMESPACE.svc:8000/api/v1/sources/polaris/reports?complete=false
         documentIndex: 3
 
-  - it: gives Polaris a read-only ClusterRole without Secrets or ConfigMaps
+  - it: gives Polaris a read-only ClusterRole with every kind its audit lists, without Secrets
     templates:
       - templates/polaris-cronjob.yaml
     set:
@@ -105,14 +105,39 @@ tests:
           path: rules[0].resources
           content: secrets
         documentIndex: 1
-      - notContains:
+      # polaris audit 10.x lists ConfigMaps, ServiceAccounts and RBAC objects and
+      # fails on the first forbidden list (e2e wave 4).
+      - contains:
           path: rules[0].resources
           content: configmaps
+        documentIndex: 1
+      - contains:
+          path: rules[0].resources
+          content: serviceaccounts
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["rbac.authorization.k8s.io"]
+            resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+            verbs: ["get", "list"]
         documentIndex: 1
       - notContains:
           path: rules[0].verbs
           content: create
         documentIndex: 1
+
+  - it: strips a trailing newline from the API key before sending it
+    templates:
+      - templates/polaris-cronjob.yaml
+    set:
+      sources.polaris.job.enabled: true
+      sources.polaris.job.apiKeySecret.name: gk-polaris
+    asserts:
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command[2]
+          pattern: 'os\.environ\["GREENKUBE_SIGNALS_API_KEY"\]\.strip\(\)'
+        documentIndex: 3
 
   - it: can use an existing ServiceAccount
     templates:

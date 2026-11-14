@@ -1813,12 +1813,32 @@ def _render_chart(
         raise error_type("Helm renderer did not return a validated render result")
     if planner_renderer not in {RendererKind.HELM_VALUES, RendererKind.HELM_RELEASE}:
         raise error_type("Helm planner renderer kind is invalid")
+    result = _in_release_namespace(result, context.release_namespace)
     if context.remote_chart is not None:
         result = replace(
             result,
             warnings=tuple(sorted({*result.warnings, context.remote_chart.provenance})),
         )
     return result
+
+
+def _in_release_namespace(result: RawRenderResult, release_namespace: str) -> RawRenderResult:
+    """Place namespaced resources rendered without ``metadata.namespace`` in the release namespace.
+
+    Most charts (podinfo and many others) leave ``metadata.namespace`` out:
+    ``helm install``, Argo CD and Flux create those resources in the release
+    namespace, so the plan's workload target must match them there.
+    """
+    from greenkube.gitops.discovery.inventory import CLUSTER_SCOPED_KINDS
+
+    def placed(resource: Any) -> Any:
+        target = resource.target
+        group = target.api_version.rpartition("/")[0]
+        if target.namespace or (group, target.kind) in CLUSTER_SCOPED_KINDS:
+            return resource
+        return replace(resource, target=target.model_copy(update={"namespace": release_namespace}))
+
+    return replace(result, resources=tuple(placed(resource) for resource in result.resources))
 
 
 def _require_exact_target(
