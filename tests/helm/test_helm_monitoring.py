@@ -109,10 +109,11 @@ class TestServiceMonitor:
         sm = api_service_monitor(docs)
         assert sm is None, "ServiceMonitor should not be created when disabled"
 
-    def test_servicemonitor_namespace_is_monitoring(self):
+    def test_servicemonitor_defaults_to_the_release_namespace(self):
+        """Next to the scrape token Secret, which Prometheus Operator reads in the ServiceMonitor namespace."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = api_service_monitor(docs)
-        assert sm["metadata"]["namespace"] == "monitoring"  # type: ignore[index]
+        assert sm["metadata"]["namespace"] == "greenkube"  # type: ignore[index]
 
     def test_servicemonitor_has_kube_prometheus_label(self):
         """ServiceMonitor must have the label that the Prometheus Operator selects on."""
@@ -331,3 +332,100 @@ class TestPrometheusRBAC:
         )
         rb = find_manifest(docs, "RoleBinding", "prometheus-k8s")
         assert rb["subjects"][0]["name"] == "custom-prom"  # type: ignore[index]
+
+
+RELEASE_NAMESPACE = "greenkube"
+
+
+def _hook_env(docs: list[dict]) -> dict[str, str]:
+    job = find_manifest(docs, "Job", "credentials-bootstrap")
+    if job is None:
+        return {}
+    env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+    return {item["name"]: item.get("value", "") for item in env}
+
+
+def _available_secrets(docs: list[dict]) -> set[tuple[str, str]]:
+    """(namespace, name) of every Secret the chart renders or its bootstrap hook creates."""
+    available = {
+        (doc["metadata"].get("namespace", RELEASE_NAMESPACE), doc["metadata"]["name"])
+        for doc in docs
+        if doc.get("kind") == "Secret"
+    }
+    env = _hook_env(docs)
+    for key in ("GREENKUBE_SECRET_NAME", "GREENKUBE_INITIAL_ADMIN_SECRET"):
+        if env.get(key):
+            available.add((RELEASE_NAMESPACE, env[key]))
+    if env.get("GREENKUBE_SCRAPE_TOKEN_SECRET"):
+        available.add((env["GREENKUBE_SCRAPE_TOKEN_NAMESPACE"], env["GREENKUBE_SCRAPE_TOKEN_SECRET"]))
+    return available
+
+
+def _secret_references(node, found: set[str]) -> set[str]:
+    """Names of the Secrets an object requires (volumes, env, ServiceMonitor credentials).
+
+    Optional references (``optional: true``, e.g. the user-created Git credentials) are skipped.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in {"secretKeyRef", "secretRef", "secret", "credentials"} and isinstance(value, dict):
+                if value.get("name") and not value.get("optional"):
+                    found.add(value["name"])
+            elif key == "secretName" and isinstance(value, str) and value:
+                found.add(value)
+            _secret_references(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _secret_references(item, found)
+    return found
+
+
+class TestSecretReferencesResolve:
+    """Every Secret an object references must exist in that object's namespace.
+
+    Prometheus Operator resolves a ServiceMonitor's bearer token Secret in the
+    ServiceMonitor's own namespace and rejects the monitor otherwise.
+    """
+
+    MODES = {
+        "default": [],
+        "override": ["monitoring.serviceMonitor.namespace=monitoring"],
+        "override-values-token": ["monitoring.serviceMonitor.namespace=monitoring", "secrets.metricsToken=tok"],
+    }
+
+    def _render(self, extra: list[str]) -> list[dict]:
+        cmd = ["helm", "template", "greenkube", CHART_PATH, "--namespace", RELEASE_NAMESPACE]
+        for value in ["monitoring.serviceMonitor.enabled=true", "worker.replicas=1", *extra]:
+            cmd.extend(["--set", value])
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=True)
+        return [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
+
+    def _assert_resolved(self, docs: list[dict]) -> None:
+        available = _available_secrets(docs)
+        missing = []
+        for doc in docs:
+            namespace = doc["metadata"].get("namespace", RELEASE_NAMESPACE)
+            for name in _secret_references(doc.get("spec", {}), set()):
+                if (namespace, name) not in available:
+                    missing.append(f"{doc['kind']}/{doc['metadata']['name']} -> {namespace}/{name}")
+        assert not missing, f"Secrets referenced outside their namespace: {missing}"
+
+    def test_default_mode_keeps_servicemonitors_next_to_their_secret(self):
+        docs = self._render(self.MODES["default"])
+        monitors = [doc for doc in docs if doc.get("kind") == "ServiceMonitor"]
+        assert len(monitors) == 3
+        assert {doc["metadata"]["namespace"] for doc in monitors} == {RELEASE_NAMESPACE}
+        self._assert_resolved(docs)
+
+    def test_override_mode_copies_the_scrape_token_next_to_the_servicemonitors(self):
+        docs = self._render(self.MODES["override"])
+        monitors = [doc for doc in docs if doc.get("kind") == "ServiceMonitor"]
+        assert {doc["metadata"]["namespace"] for doc in monitors} == {"monitoring"}
+        self._assert_resolved(docs)
+        role = next(
+            doc for doc in docs if doc.get("kind") == "Role" and doc["metadata"].get("namespace") == "monitoring"
+        )
+        assert role["metadata"]["name"].endswith("credentials-bootstrap")
+
+    def test_override_mode_with_a_values_scrape_token(self):
+        self._assert_resolved(self._render(self.MODES["override-values-token"]))

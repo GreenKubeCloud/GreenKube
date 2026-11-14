@@ -4,7 +4,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ include "greenkube.fullname" . }}-worker
-  namespace: {{ .Values.monitoring.serviceMonitor.namespace | default "monitoring" }}
+  namespace: {{ include "greenkube.serviceMonitorNamespace" . }}
   labels:
     {{- include "greenkube.labels" . | nindent 4 }}
     app.kubernetes.io/part-of: kube-prometheus

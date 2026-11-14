@@ -33,7 +33,7 @@ Enable the `ServiceMonitor` in `values.yaml`:
 monitoring:
   serviceMonitor:
     enabled: true           # Creates a ServiceMonitor CRD resource
-    namespace: monitoring   # Namespace where Prometheus looks for ServiceMonitors
+    namespace: ""           # Empty: the release namespace (Prometheus must select it)
     interval: 30s           # Scrape interval (30s recommended)
   networkPolicy:
     enabled: true           # Applies ingress and egress policies to GreenKube components
@@ -53,7 +53,7 @@ The `ServiceMonitor` scrapes the `http` port (8000) at `/prometheus/metrics` on 
 
 When NetworkPolicy is enabled, the chart covers the API, controller and (optional) worker pods. It permits DNS and the bundled PostgreSQL connection, and allows Prometheus to scrape the API, controller or worker metrics port. Other ingress is denied unless configured with `additionalIngress`; external database, Git provider, and Kubernetes API traffic require narrow `additionalEgress` rules. The chart does not add unrestricted internet egress.
 
-The chart adds bearer-token authentication to the `ServiceMonitor`. Recommended: create an API key with only the `metrics:read` scope (**Settings > API keys**), store it in a Secret in `monitoring.serviceMonitor.namespace`, and set `monitoring.serviceMonitor.bearerTokenSecret.name` (and `.key`, default `token`). Without it, the ServiceMonitor uses the generated scrape token `GREENKUBE_METRICS_TOKEN` (`metrics:read` only; Secret `<release>`), or, when no scrape token exists (`secrets.existingSecret` without `secrets.existingSecretHasMetricsToken`), the deprecated bootstrap key `GREENKUBE_API_KEY`; that Secret must then be available in the ServiceMonitor namespace. See [Authentication](authentication.md#prometheus). If using static scrape configuration instead, configure the corresponding bearer token in Prometheus; unauthenticated scrapes will receive `401`.
+The chart adds bearer-token authentication to the `ServiceMonitor`. Prometheus Operator reads that token's Secret in the ServiceMonitor's own namespace, so the ServiceMonitors default to the release namespace, next to the generated scrape token `GREENKUBE_METRICS_TOKEN` (`metrics:read` only; Secret `<release>`). With `monitoring.serviceMonitor.namespace` set to another namespace (for example `monitoring`), the chart keeps a copy of the scrape token there, Secret `<release>-scrape-token` (key `token`), and the ServiceMonitors use it; see [Monitoring](configuration.md#monitoring-monitoring). When no scrape token exists (`secrets.existingSecret` without `secrets.existingSecretHasMetricsToken`), the ServiceMonitors fall back to the deprecated bootstrap key `GREENKUBE_API_KEY`, which is never copied: outside the release namespace, create that Secret in the ServiceMonitor namespace yourself. You can also scrape the API with an API key that has only the `metrics:read` scope (**Settings > API keys**): store it in a Secret in the ServiceMonitor namespace and set `monitoring.serviceMonitor.bearerTokenSecret.name` (and `.key`, default `token`). The `prometheus-k8s` RoleBinding lets the Prometheus ServiceAccount (`monitoring.serviceMonitor.prometheusServiceAccount` in `monitoring.serviceMonitor.prometheusNamespace`, default `monitoring.networkPolicy.prometheusNamespace`) discover the GreenKube Services and Pods. See [Authentication](authentication.md#prometheus). If using static scrape configuration instead, configure the corresponding bearer token in Prometheus; unauthenticated scrapes will receive `401`.
 
 ### Without the Prometheus Operator
 

@@ -1,0 +1,8 @@
+### Fixed
+
+- **Prometheus scrapes GreenKube again through the ServiceMonitors.** Prometheus Operator reads a ServiceMonitor's bearer token Secret in the ServiceMonitor's own namespace, but the ServiceMonitors defaulted to `monitoring` while the scrape token Secret lives in the release namespace: the operator rejected them (`secret not found`) and Prometheus had no GreenKube target. `monitoring.serviceMonitor.namespace` now defaults to the release namespace. When it is set to another namespace, the chart keeps a copy of the scrape token there, Secret `<release>-scrape-token` (key `token`): the credentials bootstrap hook copies a generated token or one held by `secrets.existingSecret` (with a Role and RoleBinding scoped to that Secret in that namespace), and a token from `secrets.metricsToken` is rendered there. The deprecated admin key is never copied; the install notes warn when nothing can be.
+- **The `prometheus-k8s` RoleBinding binds the Prometheus ServiceAccount in its own namespace**, new value `monitoring.serviceMonitor.prometheusNamespace` (default: `monitoring.networkPolicy.prometheusNamespace`, then `monitoring`), instead of the ServiceMonitor namespace.
+
+### Changed
+
+- `monitoring.serviceMonitor.namespace` defaults to empty (the release namespace) instead of `monitoring`. See [Upgrading](docs/upgrading.md#servicemonitors-and-the-scrape-token): an install that kept the default moves its ServiceMonitors to the release namespace, which Prometheus must select; a Secret `<release>` copied by hand into the ServiceMonitor namespace is no longer needed and should be deleted.

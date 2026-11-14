@@ -33,5 +33,5 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ .Values.monitoring.serviceMonitor.prometheusServiceAccount | default "prometheus-k8s" }}
-    namespace: {{ .Values.monitoring.serviceMonitor.namespace | default "monitoring" }}
+    namespace: {{ include "greenkube.prometheusNamespace" . }}
 {{- end }}

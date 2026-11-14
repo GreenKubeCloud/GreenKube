@@ -201,8 +201,8 @@ true
   {{- else if $generates -}}
     {{- fail "rbac.create=false: the chart cannot create generated credentials without its bootstrap RBAC. Set secrets.existingSecret (recommended for GitOps), or supply secrets.apiKey and, for the bundled PostgreSQL, postgres.auth.password." -}}
   {{- end -}}
-{{- else if include "greenkube.initialAdminSecretName" . -}}
-{{- /* secrets.existingSecret: the hook only creates the initial-admin Secret. */ -}}
+{{- else if or (include "greenkube.initialAdminSecretName" .) (eq (include "greenkube.scrapeTokenCopy" .) "hook") -}}
+{{- /* secrets.existingSecret: the hook only creates the initial-admin Secret and copies the scrape token. */ -}}
 true
 {{- end -}}
 {{- end -}}

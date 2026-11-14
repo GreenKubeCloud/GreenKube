@@ -38,13 +38,67 @@ true
 {{- end -}}
 
 {{/*
+Namespace of the ServiceMonitors: monitoring.serviceMonitor.namespace, else the
+release namespace, where the scrape token Secret lives.
+*/}}
+{{- define "greenkube.serviceMonitorNamespace" -}}
+{{- .Values.monitoring.serviceMonitor.namespace | default .Release.Namespace -}}
+{{- end -}}
+
+{{/*
+Namespace of the Prometheus ServiceAccount bound to the prometheus-k8s Role:
+monitoring.serviceMonitor.prometheusNamespace, else
+monitoring.networkPolicy.prometheusNamespace, else "monitoring". It is never
+derived from the ServiceMonitor namespace.
+*/}}
+{{- define "greenkube.prometheusNamespace" -}}
+{{- $monitoring := .Values.monitoring | default dict -}}
+{{- (($monitoring.serviceMonitor | default dict).prometheusNamespace) | default (($monitoring.networkPolicy | default dict).prometheusNamespace) | default "monitoring" -}}
+{{- end -}}
+
+{{/* Name of the scrape token copy in the ServiceMonitor namespace (key "token"). */}}
+{{- define "greenkube.scrapeTokenCopyName" -}}
+{{- printf "%s-scrape-token" (include "greenkube.fullname" .) -}}
+{{- end -}}
+
+{{/*
+How the scrape token reaches ServiceMonitors outside the release namespace.
+Prometheus Operator reads a ServiceMonitor's bearer token Secret in the
+ServiceMonitor's own namespace, so the chart then keeps a copy
+(greenkube.scrapeTokenCopyName, key "token") there:
+  "chart"  the token is supplied in values (secrets.metricsToken): rendered;
+  "hook"   the token is generated, or held by secrets.existingSecret
+           (existingSecretHasMetricsToken): the credentials bootstrap hook
+           copies it, which needs rbac.create;
+  ""       nothing to copy: same namespace, monitoring disabled, no dedicated
+           scrape token (the deprecated admin key is never copied), or an
+           existing Secret without rbac.create.
+*/}}
+{{- define "greenkube.scrapeTokenCopy" -}}
+{{- if and .Values.monitoring.serviceMonitor.enabled (ne (include "greenkube.serviceMonitorNamespace" .) .Release.Namespace) (include "greenkube.dedicatedScrapeToken" .) -}}
+  {{- $source := include "greenkube.secretNameFor" (dict "context" . "key" "GREENKUBE_METRICS_TOKEN") -}}
+  {{- if eq $source (include "greenkube.valuesSecretName" .) -}}
+chart
+  {{- else if .Values.rbac.create -}}
+hook
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The Secret key a ServiceMonitor sends as its bearer token, as YAML {name, key}:
-the scrape token when one exists, else the deprecated GREENKUBE_API_KEY.
+the scrape token when one exists (its copy when the ServiceMonitors live in
+another namespace), else the deprecated GREENKUBE_API_KEY.
 */}}
 {{- define "greenkube.scrapeCredentials" -}}
+{{- if include "greenkube.scrapeTokenCopy" . -}}
+name: {{ include "greenkube.scrapeTokenCopyName" . }}
+key: token
+{{- else -}}
 {{- $key := ternary "GREENKUBE_METRICS_TOKEN" "GREENKUBE_API_KEY" (eq (include "greenkube.dedicatedScrapeToken" .) "true") -}}
 name: {{ include "greenkube.secretNameFor" (dict "context" . "key" $key) }}
 key: {{ $key }}
+{{- end -}}
 {{- end -}}
 
 {{/* AUTH_LEGACY_API_KEY: what the bootstrap key may do (admin, metrics, disabled). */}}

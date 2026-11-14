@@ -517,6 +517,15 @@
             }
           }
         },
+        "serviceMonitor": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "namespace": {"type": "string"},
+            "prometheusServiceAccount": {"type": "string"},
+            "prometheusNamespace": {"type": "string"}
+          }
+        },
         "networkPolicy": {
           "type": "object",
           "properties": {

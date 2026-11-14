@@ -335,6 +335,11 @@ With `secrets.existingSecret`, add a `GREENKUBE_METRICS_TOKEN` key to your Secre
 `secrets.existingSecretHasMetricsToken: true`; until then the ServiceMonitors keep scraping with its
 `GREENKUBE_API_KEY`, as before. Without `rbac.create`, supply `secrets.metricsToken`.
 
+The ServiceMonitors default to the release namespace, next to the scrape token, because Prometheus Operator reads a
+ServiceMonitor's bearer token Secret in the ServiceMonitor's own namespace. With
+`monitoring.serviceMonitor.namespace` set elsewhere, the chart copies only the scrape token there, as Secret
+`<release>-scrape-token` ([Monitoring](configuration.md#monitoring-monitoring)).
+
 You can also scrape the API with a scoped key of your own. Create a key with only the `metrics:read` scope, store it
 in a Secret in the namespace of the ServiceMonitor, and reference it:
 

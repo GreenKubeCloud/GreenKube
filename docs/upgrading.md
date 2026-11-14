@@ -230,6 +230,34 @@ The bundled PostgreSQL now accepts connections only from the api, controller and
 `greenkube.cloud/postgres-client: "true"` on its Pod template, or a peer in
 `postgres.networkPolicy.additionalIngress`.
 
+### ServiceMonitors and the scrape token
+
+Prometheus Operator reads a ServiceMonitor's bearer token Secret in the ServiceMonitor's own namespace. 0.3.x put
+the ServiceMonitor in `monitoring` by default but its Secret in the release namespace, so unless both were the same
+namespace (or you copied the Secret by hand), Prometheus rejected it with `secret not found` and had no GreenKube
+target. `monitoring.serviceMonitor.namespace` now defaults to empty, the release namespace
+([Monitoring](configuration.md#monitoring-monitoring)):
+
+- **You kept the default.** The upgrade deletes the ServiceMonitors in `monitoring` and creates them in the release
+  namespace, next to the scrape token. Check that Prometheus selects that namespace
+  (`serviceMonitorNamespaceSelector`; kube-prometheus-stack selects every namespace by default) and that
+  `monitoring.serviceMonitor.additionalLabels` still matches its `serviceMonitorSelector`. Prometheus Operator
+  cannot select it? Set `monitoring.serviceMonitor.namespace: monitoring` instead: the upgrade hook then copies only
+  the scrape token into Secret `<release>-scrape-token` there.
+- **You set the namespace explicitly.** The ServiceMonitors stay where they are and switch to the copy
+  `<release>-scrape-token` (key `token`) in that namespace. With `secrets.existingSecret`, the copy needs
+  `GREENKUBE_METRICS_TOKEN` in it and `secrets.existingSecretHasMetricsToken: true`; without them nothing is copied
+  (never the admin key), and the install notes say which Secret to create.
+- **You copied the Secret `<release>` into the ServiceMonitor namespace by hand.** It is no longer referenced and
+  holds the bootstrap key and the database password: delete it after the upgrade
+  (`kubectl -n monitoring delete secret <release>`).
+- **The `prometheus-k8s` RoleBinding** bound the Prometheus ServiceAccount in the ServiceMonitor namespace. It now
+  uses `monitoring.serviceMonitor.prometheusNamespace`, else `monitoring.networkPolicy.prometheusNamespace`
+  (default `monitoring`). If your Prometheus runs elsewhere, set `monitoring.serviceMonitor.prometheusNamespace`.
+
+After the upgrade, `kubectl get servicemonitors -A -l app.kubernetes.io/name=greenkube` lists them, and the
+Prometheus targets page shows `serviceMonitor/<namespace>/<release>/0` up.
+
 ### Checking an upgrade without a cluster
 
 The repository renders the 0.3.1 chart and the current chart with the same values and compares what must
