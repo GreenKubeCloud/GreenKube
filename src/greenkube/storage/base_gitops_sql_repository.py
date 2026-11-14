@@ -450,7 +450,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         if not repository_pattern.strip():
             raise ValueError("repository pattern must not be blank")
         async with self._transaction() as connection:
-            await self._execute(
+            inserted = await self._execute(
                 connection,
                 """
                 INSERT INTO gitops_provider_allowlists (provider_id, repository_pattern)
@@ -459,6 +459,18 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 """,
                 (provider_id, repository_pattern),
             )
+            if inserted:
+                # A widened allowlist may cover detached pull-request records again: make
+                # them due now instead of waiting out their backoff. The next poll either
+                # reattaches them or detaches them again silently.
+                await self._execute(
+                    connection,
+                    """
+                    UPDATE recommendation_pull_requests SET provider_retry_at = NULL
+                    WHERE provider_id = ? AND provider_detached_reason IS NOT NULL
+                    """,
+                    (provider_id,),
+                )
 
     async def list_provider_allowlists(self, provider_id: str) -> list[str]:
         async with self.db_manager.connection_scope() as connection:

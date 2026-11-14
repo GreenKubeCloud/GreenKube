@@ -80,4 +80,7 @@ def row_to_pull_request(row) -> PullRequestRecord:
         sync_revision=_get(row, "sync_revision"),
         sync_observed_at=_as_datetime(_get(row, "sync_observed_at")),
         sync_error_code=_get(row, "sync_error_code"),
+        provider_retry_failures=int(_get(row, "provider_retry_failures", 0) or 0),
+        provider_retry_at=_as_datetime(_get(row, "provider_retry_at")),
+        provider_detached_reason=_get(row, "provider_detached_reason"),
     )

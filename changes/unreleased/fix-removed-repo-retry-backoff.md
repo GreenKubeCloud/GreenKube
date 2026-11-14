@@ -1,0 +1,3 @@
+### Fixed
+
+- Pull-request records of a repository removed from the provider allowlist no longer log a `ProviderAuthorizationError` and "will be retried" on every controller tick. PR polling, plan branch cleanup and the lifecycle comment now back off per record (10 s, doubling, up to 1 h; migration 0113). Records of a repository that left the allowlist are marked detached, with one warning and a `pull_request_records_detached` audit event. They are reattached as soon as the repository is allowed again. Refused credentials back off the same way. Provider rate limits still wait for the provider's reset time.
