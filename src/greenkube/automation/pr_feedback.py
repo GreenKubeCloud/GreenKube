@@ -40,6 +40,7 @@ from greenkube.automation.provider_backoff import ProviderRetryBackoff
 from greenkube.gitops.contracts import ControllerKind, Plan
 from greenkube.models.metrics import PullRequestRecord, RecommendationRecord, RecommendationStatus
 from greenkube.storage.base_pull_request_repository import MAX_PULL_REQUEST_POLL_BATCH_SIZE
+from greenkube.verify.model import DECISION_GRACE
 
 logger = logging.getLogger(__name__)
 
@@ -363,7 +364,10 @@ class PullRequestFeedbackPublisher:
             return values
         state = getattr(status.state, "value", status.state)
         values["measurement_state"] = state
-        values["measurement_ends_at"] = status.post_window_end
+        # The outcome is written one grace hour after the post-window (late samples).
+        values["measurement_ends_at"] = (
+            status.post_window_end + DECISION_GRACE if status.post_window_end is not None else None
+        )
         if state in _DECIDED_STATES:
             values["outcome"] = state
             measurements = await repository.list_measurements(change.change_id)

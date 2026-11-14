@@ -39,6 +39,10 @@ def sha256_hex(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+#: A decision waits this long after the post-window so late samples are collected.
+DECISION_GRACE = timedelta(hours=1)
+
+
 class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True)
 

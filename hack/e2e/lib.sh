@@ -64,7 +64,9 @@ fi
 : "${GITEA_BRANCH:=main}"
 # Token with read/write repository scope: GITEA_TOKEN, or a file that holds it
 # in GITEA_TOKEN_FILE (GITEA_TOKEN wins). The token's user must be GITEA_OWNER,
-# a member of the GITEA_OWNER organization, or a Gitea administrator.
+# a member of the GITEA_OWNER organization, or a Gitea administrator. Creating
+# the repository in the user's own namespace also needs the write:user scope
+# (POST /user/repos); without it a fresh run stops before deleting anything.
 : "${GITEA_TOKEN_FILE:=}"
 # Set to 1 to delete and recreate the sample repository (only when its
 # description carries the harness marker, see GITEA_REPO_MARKER).
@@ -87,6 +89,8 @@ fi
 : "${E2E_TIMEOUT_PR:=300}"
 : "${E2E_TIMEOUT_SYNC:=600}"
 : "${E2E_TIMEOUT_APPLY:=600}"
+# cleanup.sh: how long the volumes of the release may take to be deleted.
+: "${E2E_TIMEOUT_VOLUMES:=120}"
 
 # --- Local state: port-forward PIDs, logs and the evidence of the last run ---------
 : "${E2E_STATE_DIR:=${TMPDIR:-/tmp}/greenkube-e2e}"
@@ -303,6 +307,21 @@ gitea_repo_state() {
   else
     printf 'foreign'
   fi
+}
+
+# require_gitea_recreate_access: called before the harness deletes the sample
+# repository to recreate it. When the token belongs to GITEA_OWNER, Gitea creates
+# the repository with POST /user/repos, which needs the write:user scope as well
+# as write:repository: a token without it could delete the repository but never
+# create it again. PATCH /user/settings with an empty body changes nothing and
+# needs the same scope, so it probes the token without side effects.
+require_gitea_recreate_access() {
+  local login code
+  login="$(gitea_api GET /user | jq -r .login)" || die "Cannot read the Gitea user of the token."
+  [[ "${login}" == "${GITEA_OWNER}" ]] || return 0
+  code="$(gitea_call PATCH /user/settings '{}')"
+  [[ "${code}" == "200" ]] ||
+    die "The Gitea token cannot create repositories for ${GITEA_OWNER} (PATCH /user/settings answered HTTP ${code}: it needs the write:user scope as well as write:repository). Nothing was deleted; use a token with both scopes, or run with E2E_FRESH=0 and GITEA_RESET_REPO=0."
 }
 
 # The API key install.sh passes as secrets.apiKey: GREENKUBE_API_KEY when set, else

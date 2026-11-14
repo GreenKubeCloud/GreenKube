@@ -21,6 +21,7 @@ if [[ "${repo_state}" == "foreign" ]]; then
 fi
 
 if [[ "${GITEA_RESET_REPO}" == "1" && "${repo_state}" == "owned" ]]; then
+  require_gitea_recreate_access
   log "Deleting ${GITEA_OWNER}/${GITEA_REPO} (GITEA_RESET_REPO=1)..."
   gitea_api DELETE "${repo_path}" >/dev/null
   repo_state=missing

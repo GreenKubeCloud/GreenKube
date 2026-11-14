@@ -41,6 +41,13 @@ cat >/dev/null 2>&1 || true
 exit 0
 """
 
+FAKE_MINIKUBE = r"""#!/usr/bin/env bash
+printf 'minikube %s\n' "$*" >>"${FAKE_LOG}"
+# Like the real `minikube ssh`, read stdin.
+cat >/dev/null 2>&1 || true
+exit 0
+"""
+
 FAKE_HELM = r"""#!/usr/bin/env bash
 printf 'helm %s\n' "$*" >>"${FAKE_LOG}"
 exit 0
@@ -49,6 +56,11 @@ exit 0
 FAKE_CURL = r"""#!/usr/bin/env bash
 printf 'curl %s\n' "$*" >>"${FAKE_LOG}"
 cat >/dev/null 2>&1 || true
+# PATCH /user/settings probes the write:user scope (gitea_call prints the status).
+if [[ "$*" == *"/user/settings"* ]]; then
+  printf '%s' "${FAKE_USER_SETTINGS_STATUS:-200}"
+  exit 0
+fi
 printf '%s' "${FAKE_GITEA_REPO}"
 """
 
@@ -62,7 +74,12 @@ def harness(tmp_path: Path):
     """Return a runner for a hack/e2e script against the fake CLIs."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name, body in (("kubectl", FAKE_KUBECTL), ("helm", FAKE_HELM), ("curl", FAKE_CURL)):
+    for name, body in (
+        ("kubectl", FAKE_KUBECTL),
+        ("helm", FAKE_HELM),
+        ("curl", FAKE_CURL),
+        ("minikube", FAKE_MINIKUBE),
+    ):
         path = bin_dir / name
         path.write_text(body)
         path.chmod(0o755)
@@ -147,6 +164,35 @@ def test_cleanup_removes_labelled_objects(harness) -> None:
     assert "-X DELETE" in joined
 
 
+def test_cleanup_removes_every_leftover_hostpath_volume(harness) -> None:
+    # The provisioner reuses a claim's directory: a database volume left behind
+    # hands the old data (and its old password) to the next install. `minikube
+    # ssh` reads stdin, so it must not swallow the rest of the volume list.
+    def volume(name: str, claim: str) -> dict:
+        return {
+            "metadata": {"name": name},
+            "spec": {
+                "claimRef": {"namespace": "greenkube", "name": claim},
+                "hostPath": {"path": f"/tmp/hostpath-provisioner/greenkube/{claim}"},
+            },
+        }
+
+    owned = {"greenkube.io/e2e": "true"}
+    objs = {
+        "namespace_greenkube": namespace("greenkube", owned),
+        "pv_-o": {
+            "items": [volume("pv-backup", "greenkube-postgres-backup"), volume("pv-data", "data-greenkube-postgres-0")]
+        },
+    }
+    result, calls = harness("cleanup.sh", objs=objs, E2E_TIMEOUT_VOLUMES="0")
+
+    assert result.returncode == 0, result.stderr
+    removed = [call for call in calls if call.startswith("minikube ssh")]
+    assert any("greenkube-postgres-backup" in call for call in removed), calls
+    assert any("data-greenkube-postgres-0" in call for call in removed), calls
+    assert any("delete pv pv-data" in call for call in calls), calls
+
+
 def test_cleanup_adopts_unlabelled_objects_on_request(harness) -> None:
     objs = {"namespace_greenkube": namespace("greenkube", {})}
     result, calls = harness("cleanup.sh", objs=objs, E2E_ADOPT="1")
@@ -194,6 +240,30 @@ def test_setup_repo_refuses_a_repository_it_did_not_create(harness) -> None:
     assert result.returncode != 0
     assert "was not created by the harness" in result.stderr
     assert not any("-X DELETE" in call or "-X POST" in call for call in calls)
+
+
+OWNED_REPO = json.dumps({"description": "GreenKube quickstart sample app (managed by hack/e2e)", "login": "greenkube"})
+
+
+def test_setup_repo_keeps_the_repository_when_the_token_cannot_recreate_it(harness) -> None:
+    # A token with write:repository but not write:user may delete the repository,
+    # but Gitea then refuses POST /user/repos: the reset must stop before the DELETE.
+    result, calls = harness(
+        "setup-repo.sh", GITEA_RESET_REPO="1", FAKE_GITEA_REPO=OWNED_REPO, FAKE_USER_SETTINGS_STATUS="403"
+    )
+
+    assert result.returncode != 0
+    assert "write:user" in result.stderr
+    assert "Nothing was deleted" in result.stderr
+    assert not any("-X DELETE" in call or "-X POST" in call for call in calls)
+
+
+def test_setup_repo_resets_the_repository_when_the_token_can_recreate_it(harness) -> None:
+    _, calls = harness("setup-repo.sh", GITEA_RESET_REPO="1", FAKE_GITEA_REPO=OWNED_REPO)
+
+    joined = "\n".join(calls)
+    assert "-X PATCH" in joined and "/user/settings" in joined
+    assert "-X DELETE" in joined
 
 
 def test_apps_namespace_cannot_be_overridden(harness) -> None:

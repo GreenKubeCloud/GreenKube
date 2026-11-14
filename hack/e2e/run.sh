@@ -30,6 +30,10 @@ trap stop_port_forwards EXIT
 log "Evidence directory: ${E2E_EVIDENCE_DIR}"
 
 if [[ "${E2E_FRESH}" == "1" ]]; then
+  # cleanup.sh deletes the sample repository: check first that the token can
+  # create it again, so a fresh run never leaves the environment without it.
+  gitea_port_forward
+  require_gitea_recreate_access
   "${E2E_DIR}/cleanup.sh"
   export GITEA_RESET_REPO=1
 fi

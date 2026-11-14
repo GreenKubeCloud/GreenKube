@@ -54,6 +54,7 @@ from greenkube.verify.confounders import (
 )
 from greenkube.verify.load_driver import CollectedLoad, LoadDriverResolver, PrometheusRangeReader
 from greenkube.verify.model import (
+    DECISION_GRACE,
     Allocation,
     BaselineSnapshot,
     ChangeApplicationMethod,
@@ -85,8 +86,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: A decision waits this long after the post-window so late samples are collected.
-DECISION_GRACE = timedelta(hours=1)
 #: How long evidence waits for an unreachable Prometheus load driver before it is frozen without it.
 LOAD_DRIVER_RETRY = timedelta(hours=24)
 #: Key of the snapshot's ``collector_versions`` (and of the measurement's
@@ -550,6 +549,12 @@ class ChangeMeasurementService:
             except Exception as exc:
                 logger.info("Could not read the pull request of plan %s: %s", plan_id, exc)
         synced_at = ensure_utc(pr.sync_observed_at) if pr is not None and pr.sync_observed_at is not None else None
+        # The provider's merge time: GreenKube observes the merge one PR poll later, often after a
+        # fast GitOps rollout completed, so the observed "merged" event alone would let the
+        # baseline run past the merge into the rollout.
+        merged_at = getattr(pr, "merged_at", None) if pr is not None else None
+        if isinstance(merged_at, datetime):
+            decision = min(decision, ensure_utc(merged_at))
 
         if first_seen is not None and first_seen <= completed:
             started, started_source = first_seen, "first_observed"

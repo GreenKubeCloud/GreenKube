@@ -46,7 +46,7 @@ When a recommendation is detected as applied (its rollout has completed and the 
 | `workload_uid`, `generation_before/after`, `spec_digest_before/after` | The live workload and the last observation of a different revision (or the plan's pre-apply baseline for the generation). `details.spec_before_source` says which. |
 | `rollout_started_at` | The first observation of the new revision, else the sync time, else the completion time (`rollout_started_source`). |
 | `rollout_completed_at` | Every replica updated and available (`rollout_completed_source`: the Deployment `Progressing` condition, otherwise the detection time). |
-| `baseline_window_end` | The PR merge, otherwise the plan approval, otherwise the rollout completion. |
+| `baseline_window_end` | The PR merge (the Git provider's merge time), otherwise the plan approval, otherwise the rollout completion. |
 
 At the same time GreenKube freezes a **baseline snapshot**: the workload's hourly observations over the baseline window, the load-driver series available for that window, the unit prices observed in it, the dominant carbon-intensity source and the Impact Model version. The snapshot carries a `content_sha256` over its content; `GET /api/v2/changes/{id}` reports whether it still verifies. Measurements always use the frozen snapshot, never a re-read of the baseline period.
 
