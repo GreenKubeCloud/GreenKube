@@ -1297,7 +1297,8 @@ class RuntimePlanService:
             target = await resolver.resolve(plan.source)
         except GitProviderTransientError:
             return None
-        except Exception as exc:
+        except (PlanWorkerError, GitProviderError) as exc:
+            # The provider is gone (removed, disabled, unsupported or misconfigured).
             logger.warning("Plan %s: provider unavailable while recovering its delivery: %s", plan.plan_id, exc)
             return await self._fail_applying_plan(
                 plan,
@@ -1309,6 +1310,11 @@ class RuntimePlanService:
                     "is not tracked. Close it on the provider, then re-plan."
                 ),
             )
+        except Exception as exc:
+            # Anything else (a storage hiccup reading the provider config) says nothing about
+            # the branch: keep the plan and its recommendations, retry on the next sweep.
+            logger.warning("Plan %s: could not resolve its provider, retrying later: %s", plan.plan_id, exc)
+            return None
         try:
             worker._validate_target(plan.source, target)
             committed = _plan_on_committed_revision(plan)
@@ -1403,6 +1409,17 @@ class RuntimePlanService:
                 AutomationErrorCode.PLAN_STALE,
                 f"the plan already has pull request #{number}; close it on the provider instead",
             )
+        if records:
+            # An earlier attempt may have opened a request it never recorded: refuse while the
+            # deterministic plan branch holds an open one, so the plan is not released with an
+            # untracked pull request a later plan would duplicate.
+            open_number = await self._open_pull_request_on_plan_branch(plan)
+            if open_number is not None:
+                raise AutomationPlanError(
+                    AutomationErrorCode.PLAN_STALE,
+                    f"pull request #{open_number} is open on plan branch {plan_branch_name(plan)}; "
+                    "close it on the provider, or wait for the reconciler to adopt it",
+                )
         operations = getattr(self.worker, "operations", None)
         canceller = getattr(operations, "cancel_unleased_operation", None)
         if callable(canceller):
@@ -1413,12 +1430,48 @@ class RuntimePlanService:
                     "a worker is applying this plan right now; retry after its lease expires",
                 )
         detail = f"Abandoned by {actor}" + (f": {reason}" if reason else "") + "."
+        logger.info("Plan %s: %s", plan_id, detail)
         updated = await self._fail_applying_plan(
             plan, actor=actor, reason_code="abandoned_by_operator", records=records, record_error=detail
         )
         if updated is None:
             raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "the plan changed while it was being abandoned")
         return updated
+
+    async def _open_pull_request_on_plan_branch(self, plan: Plan) -> int | None:
+        """Number of the open request on the plan's deterministic branch, or ``None``.
+
+        A provider that is gone cannot hold the branch any more (``None``); a transient
+        failure refuses the abandon so the operator retries once the provider answers.
+        """
+        resolver = getattr(self.worker, "provider_resolver", None)
+        if resolver is None:
+            return None
+        branch = plan_branch_name(plan)
+        try:
+            target = await resolver.resolve(plan.source)
+        except GitProviderTransientError:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                f"the provider could not be asked whether plan branch {branch} has a pull request; retry",
+            ) from None
+        except (PlanWorkerError, GitProviderError):
+            return None
+        try:
+            pull_request = await target.provider.find_pull_request(target.repository, branch, plan.source.ref)
+        except GitProviderTransientError:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                f"the provider could not be asked whether plan branch {branch} has a pull request; retry",
+            ) from None
+        except GitProviderError:
+            return None
+        finally:
+            try:
+                await target.provider.close()
+            except Exception:
+                pass
+        return pull_request.number if pull_request is not None else None
 
     async def supersede_plan(self, plan_id: str) -> Plan | None:
         return await self._plan_service.supersede_plan(plan_id)

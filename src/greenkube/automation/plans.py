@@ -659,10 +659,27 @@ class AutomationPlanService:
                 AutomationErrorCode.ROLLBACK_NOT_READY,
                 "another plan is already applying or syncing the resolved workload source",
             )
-        saved = await self.repository.save_plan_if_absent(
-            plan,
-            policy_result=policy_result,
-        )
+        # The busy check is repeated atomically with the insert (one plan per workload); the
+        # original plan the rollback reverses is tolerated in any busy status.
+        guarded_insert = getattr(self.repository, "save_plan_if_workload_idle", None)
+        if callable(guarded_insert):
+            guard = WorkloadPlanGuard(
+                blocking_statuses=_BUSY_STATUSES,
+                tolerated_plan_ids=frozenset({original_plan.plan_id}),
+                tolerated_statuses=_BUSY_STATUSES,
+            )
+            try:
+                saved = await cast(Any, guarded_insert)(plan, guard, policy_result=policy_result)
+            except WorkloadPlanConflictError as exc:
+                raise AutomationPlanError(
+                    AutomationErrorCode.ROLLBACK_NOT_READY,
+                    f"another plan is already applying or syncing the resolved workload source ({exc.plan_id})",
+                ) from exc
+        else:
+            saved = await self.repository.save_plan_if_absent(
+                plan,
+                policy_result=policy_result,
+            )
         if (
             saved.digest != plan.digest
             or saved.rollback_of_plan_id != original_plan.plan_id

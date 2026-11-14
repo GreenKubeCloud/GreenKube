@@ -1153,7 +1153,8 @@ class PlanWorker:
         try:
             # The branch starts at the exact commit the plan was validated on (its base, or the
             # verified moved head), never at the moving source ref.
-            assert plan.file_plan is not None
+            if plan.file_plan is None:
+                raise PlanWorkerError("Plan has no validated file plan to branch from.")
             await self._git_call(
                 execution,
                 provider.create_branch,

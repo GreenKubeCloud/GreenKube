@@ -65,7 +65,12 @@ from greenkube.gitops.renderers.raw import render_raw
 from greenkube.gitops.snapshots import RepositorySnapshot, SnapshotLimits
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
-from greenkube.storage.base_gitops_repository import GitOpsProviderConfig, WorkloadBinding
+from greenkube.storage.base_gitops_repository import (
+    GitOpsProviderConfig,
+    WorkloadBinding,
+    WorkloadPlanConflictError,
+    WorkloadPlanGuard,
+)
 
 #: These tests run without live discovery evidence; the default fails closed (D13).
 WARN_ON_MISSING_EVIDENCE = _PolicyConfig(missing_evidence="warn")
@@ -1613,6 +1618,7 @@ spec:
     class PlanRepository:
         def __init__(self):
             self.plans = {original_plan.plan_id: original_plan}
+            self.guards: list[WorkloadPlanGuard] = []
 
         async def get_plan(self, plan_id: str):
             return self.plans.get(plan_id)
@@ -1645,6 +1651,21 @@ spec:
             if existing is not None:
                 return existing
             return await self.save_plan(plan, policy_result=policy_result)
+
+        async def save_plan_if_workload_idle(
+            self,
+            plan: Plan,
+            guard: WorkloadPlanGuard,
+            *,
+            policy_result: dict[str, Any] | None = None,
+            actor: str = "system",
+        ) -> Plan:
+            # Rollback creation repeats the busy check atomically with the insert.
+            self.guards.append(guard)
+            for other in self.plans.values():
+                if other.plan_id != plan.plan_id and guard.blocks(other.plan_id, other.status):
+                    raise WorkloadPlanConflictError(other.plan_id, other.status)
+            return await self.save_plan_if_absent(plan, policy_result=policy_result)
 
         async def set_plan_status(
             self,
@@ -1729,6 +1750,10 @@ spec:
     assert rollback_plan.file_plan.base_revision == current_revision
     assert rollback_plan.file_plan.files[0].content == original_content
     assert blobs.calls == [(source.id, path, original_revision)]
+    # The SYNCED original is tolerated by the atomic per-workload guard; any other busy plan is not.
+    assert len(repository.guards) == 1
+    assert not repository.guards[0].blocks(original_plan.plan_id, PlanStatus.SYNCED)
+    assert repository.guards[0].blocks("other-plan", PlanStatus.APPLYING)
     assert snapshot.closed
     assert queue.keys == []
 

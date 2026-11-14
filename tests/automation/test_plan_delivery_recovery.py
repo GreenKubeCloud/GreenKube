@@ -192,3 +192,75 @@ def test_pending_record_helper_ignores_records_with_numbers():
     assert not _pending_without_number(pending.model_copy(update={"pr_number": 3}))
     assert not _pending_without_number(pending.model_copy(update={"status": PullRequestStatus.OPEN}))
     assert not _pending_without_number(object())
+
+
+@pytest.mark.asyncio
+async def test_abandon_refuses_while_the_plan_branch_holds_an_untracked_open_pull_request():
+    worker, plans, pull_requests, provider = _crashed_after_pending("after")
+    await _run_until_stranded(worker, plans)
+    assert len(provider.pull_requests) == 1
+    worker.operations = _Operations(OperationStatus.FAILED)
+    runtime = _runtime(worker, plans)
+
+    with pytest.raises(AutomationPlanError, match="#17 is open on plan branch"):
+        await runtime.abandon_plan("plan-1", actor="user:alice")
+
+    assert plans.plans["plan-1"].status is PlanStatus.APPLYING
+    assert {record.status for record in pull_requests.records} == {PullRequestStatus.PENDING}
+
+
+@pytest.mark.asyncio
+async def test_abandon_refuses_while_the_provider_cannot_be_asked():
+    worker, plans, _, provider = _crashed_after_pending("before")
+    await _run_until_stranded(worker, plans)
+    worker.operations = _Operations(OperationStatus.FAILED)
+
+    async def unavailable(*_args: Any) -> None:
+        raise GitProviderTransientError("503")
+
+    provider.find_pull_request = unavailable  # type: ignore[method-assign]
+    runtime = _runtime(worker, plans)
+
+    with pytest.raises(AutomationPlanError, match="retry"):
+        await runtime.abandon_plan("plan-1", actor="user:alice")
+    assert plans.plans["plan-1"].status is PlanStatus.APPLYING
+
+
+@pytest.mark.asyncio
+async def test_recovery_keeps_the_plan_when_the_provider_config_cannot_be_read():
+    worker, plans, pull_requests, _ = _crashed_after_pending("after")
+    await _run_until_stranded(worker, plans)
+    worker.operations = _Operations(OperationStatus.FAILED)
+
+    class _BrokenResolver:
+        async def resolve(self, _source: Any) -> Any:
+            raise OSError("database is locked")
+
+    worker.provider_resolver = _BrokenResolver()
+    runtime = _runtime(worker, plans)
+
+    assert await runtime.reconcile_exhausted_operations() == []
+    assert plans.plans["plan-1"].status is PlanStatus.APPLYING
+    assert {record.status for record in pull_requests.records} == {PullRequestStatus.PENDING}
+
+
+@pytest.mark.asyncio
+async def test_recovery_fails_the_plan_when_its_provider_is_gone():
+    from greenkube.automation.plan_worker import PlanWorkerError
+
+    worker, plans, pull_requests, _ = _crashed_after_pending("after")
+    await _run_until_stranded(worker, plans)
+    worker.operations = _Operations(OperationStatus.FAILED)
+
+    class _GoneResolver:
+        async def resolve(self, _source: Any) -> Any:
+            raise PlanWorkerError("Git provider 'github' is not configured.")
+
+    worker.provider_resolver = _GoneResolver()
+    runtime = _runtime(worker, plans)
+
+    reconciled = await runtime.reconcile_exhausted_operations()
+
+    assert [plan.status for plan in reconciled] == [PlanStatus.FAILED]
+    assert plans.reason_codes[-1] == "delivery_recovery_provider_unavailable"
+    assert {record.status for record in pull_requests.records} == {PullRequestStatus.ERROR}
