@@ -352,3 +352,110 @@ def test_an_oom_increase_that_kept_or_lowered_the_limit_keeps_the_strict_gate(ra
     )
     assert kept == gates
     assert _gate(kept, "oom_kills").status is HealthGateStatus.FAILED
+
+
+# --------------------------------------------------------------------------- #
+# Baseline exposure of young workloads                                        #
+# --------------------------------------------------------------------------- #
+
+#: Scan time of the live e2e: the cluster's data started 8.4 hours before it.
+SCAN = datetime(2026, 11, 10, 18, 0, tzinfo=timezone.utc)
+DATA_WINDOW = 8.4 * 3600
+
+
+def _young_member(*, first_observed: datetime | None, oom_events: int = 23, container: str = "api"):
+    """A memory increase whose evidence window starts at the cluster's data start, not at the workload's."""
+    member = _member(oom_events=oom_events, window=DATA_WINDOW, container=container)
+    member.evidence.observation_window_start = SCAN - timedelta(seconds=DATA_WINDOW)
+    member.evidence.observation_window_end = SCAN
+    member.evidence.first_observed_at = first_observed
+    return member
+
+
+def test_a_young_workload_baseline_counts_only_the_time_it_was_observed() -> None:
+    """Regression (live e2e): a workload 40 minutes old was treated as observed for the 8.4-hour data
+    window, so its baseline OOM rate (23 kills) was about 12 times too low."""
+    post_start = SCAN + timedelta(hours=1)
+    _, outcome = container_reliability(
+        [_young_member(first_observed=SCAN - timedelta(minutes=40))],
+        _gates(0),
+        post_start,
+        post_start + timedelta(hours=1.2),
+        oom_restarts=0,
+    )
+    assert outcome is not None
+    assert outcome.baseline_hours == pytest.approx(40 / 60, abs=1e-3)
+    assert outcome.baseline_rate_per_day == pytest.approx(23 / (40 / 60) * 24, rel=1e-3)
+    assert outcome.baseline_exposure_source == "workload_first_observed"
+    assert outcome.as_dict()["baseline_exposure_source"] == "workload_first_observed"
+
+
+@pytest.mark.parametrize("first", [SCAN - timedelta(seconds=DATA_WINDOW), SCAN - timedelta(days=30)])
+def test_an_old_workload_keeps_the_evidence_window(first: datetime) -> None:
+    """A workload observed since the window started is exposed for the whole window (never more)."""
+    post_start = SCAN + timedelta(hours=1)
+    _, outcome = container_reliability(
+        [_young_member(first_observed=first)], _gates(0), post_start, post_start + timedelta(hours=1.2), 0
+    )
+    assert outcome is not None
+    assert outcome.baseline_hours == pytest.approx(8.4)
+    assert outcome.baseline_rate_per_day == pytest.approx(23 / 8.4 * 24, rel=1e-3)
+
+
+@pytest.mark.parametrize("first_observed", [None, SCAN + timedelta(minutes=5)])
+def test_an_unknown_exposure_falls_back_to_the_evidence_window(first_observed: datetime | None) -> None:
+    """Evidence without a usable first observation (stored before the field existed, or after the window)
+    keeps the evidence window, and the measurement diagnostics say so."""
+    post_start = SCAN + timedelta(hours=1)
+    _, outcome = container_reliability(
+        [_young_member(first_observed=first_observed)], _gates(0), post_start, post_start + timedelta(hours=1.2), 0
+    )
+    assert outcome is not None
+    assert outcome.baseline_hours == pytest.approx(8.4)
+    assert outcome.baseline_exposure_source == "evidence_window"
+    _, legacy = container_reliability(
+        [_member(oom_events=12)], _gates(0), post_start, post_start + timedelta(days=7), 0
+    )
+    assert legacy is not None and legacy.baseline_exposure_source == "evidence_window"
+    assert legacy.baseline_hours == pytest.approx(WEEK / 3600)
+
+
+def test_the_live_scenario_verdict_flips_to_realized() -> None:
+    """Live e2e: 23 kills in the 40 minutes before the change, none in the 1.2 hours after.
+
+    Against the diluted 8.4-hour baseline the interim check (30 minutes in) was inconclusive; on the
+    workload's real exposure it is realized, and so is the whole post-window, with a p-value far below
+    the diluted one."""
+    post_start = SCAN + timedelta(minutes=10)
+    interim_end = post_start + timedelta(minutes=30)
+    young = _young_member(first_observed=SCAN - timedelta(minutes=40))
+    _, diluted = container_reliability([_young_member(first_observed=None)], _gates(0), post_start, interim_end, 0)
+    _, interim = container_reliability([young], _gates(0), post_start, interim_end, 0)
+    assert diluted is not None and diluted.outcome is ChangeOutcome.INCONCLUSIVE
+    assert interim is not None and interim.outcome is ChangeOutcome.REALIZED
+
+    final_end = post_start + timedelta(hours=1.2)
+    _, before_fix = container_reliability([_young_member(first_observed=None)], _gates(0), post_start, final_end, 0)
+    _, final = container_reliability([young], _gates(0), post_start, final_end, 0)
+    assert final is not None and final.outcome is ChangeOutcome.REALIZED
+    assert before_fix is not None and before_fix.p_value is not None and final.p_value is not None
+    assert final.p_value < before_fix.p_value / 1000
+
+
+def test_the_change_level_outcome_keeps_the_exposure_of_young_containers() -> None:
+    """Two raised containers of one young workload: the summed outcome uses their real exposure."""
+    post_start = SCAN + timedelta(hours=1)
+    members = [
+        _young_member(first_observed=SCAN - timedelta(minutes=40)),
+        _young_member(first_observed=SCAN - timedelta(minutes=40), oom_events=5, container="worker"),
+    ]
+    _, outcome = increase_reliability(
+        members,
+        {"api": _gates(0), "worker": _gates(0)},
+        post_start,
+        post_start + timedelta(hours=1.2),
+        {"api": 0, "worker": 0},
+    )
+    assert outcome is not None and outcome.baseline_events == 28
+    assert outcome.baseline_hours == pytest.approx(40 / 60, abs=1e-3)
+    assert outcome.baseline_exposure_source == "workload_first_observed"

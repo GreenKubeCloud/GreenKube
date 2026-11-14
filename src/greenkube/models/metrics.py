@@ -756,6 +756,13 @@ class PullRequestRecord(BaseModel):
         None, description="When synchronization last observed the pull request."
     )
     sync_error_code: Optional[str] = Field(None, description="Latest synchronization error code.")
+    provider_retry_failures: int = Field(0, description="Consecutive provider authorization failures (backoff step).")
+    provider_retry_at: Optional[datetime] = Field(
+        None, description="Provider calls for this record are deferred until this time (backoff or rate limit)."
+    )
+    provider_detached_reason: Optional[str] = Field(
+        None, description="Why the record is detached from provider polling, e.g. repository_not_allowed."
+    )
 
 
 class IgnoreRecommendationRequest(BaseModel):

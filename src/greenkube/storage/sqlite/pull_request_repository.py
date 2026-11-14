@@ -350,6 +350,26 @@ class SQLitePullRequestRepository(PullRequestRepository):
                 (to_iso_z(datetime.now(timezone.utc)), plan_id, provider_id, repo, branch_name),
             )
 
+    async def set_provider_retry_state(
+        self,
+        pr_ids: Sequence[int],
+        *,
+        failures: int,
+        retry_at: datetime | None,
+        detached_reason: str | None,
+    ) -> None:
+        ids = self.validate_provider_retry_state(pr_ids, failures, retry_at)
+        if not ids:
+            return
+        placeholders = ", ".join("?" for _ in ids)
+        async with self.db_manager.transaction() as conn:
+            await conn.execute(
+                "UPDATE recommendation_pull_requests "
+                "SET provider_retry_failures = ?, provider_retry_at = ?, provider_detached_reason = ? "
+                f"WHERE id IN ({placeholders})",
+                (failures, to_iso_z(retry_at) if retry_at else None, detached_reason, *ids),
+            )
+
     async def reconcile_open_pull_requests(self, *, stale_before: datetime, limit: int) -> int:
         if not isinstance(stale_before, datetime) or stale_before.tzinfo is None or stale_before.utcoffset() is None:
             raise ValueError("stale_before must be a timezone-aware datetime.")

@@ -60,7 +60,8 @@ def test_an_oom_kill_with_a_missed_spike_is_sized_from_the_limit_it_proves() -> 
     assert proposal.direction == "increase"
     assert "oom_kills" in proposal.triggers
     assert proposal.basis == "oom_limit"
-    assert proposal.proposed == math.ceil(64 * 1.1) * MIB
+    # A short spike (max 8Mi far below the 64Mi limit): limit x 1.5, never the 1.1x creep.
+    assert proposal.proposed == 96 * MIB
     # The request cannot exceed the limit the kill happened at: the limit is raised with it.
     [advice] = proposal.limit_advice
     assert advice.resource == "memory" and advice.action == "raise"
@@ -81,7 +82,7 @@ def test_an_oom_kill_without_a_limit_is_sized_from_the_request() -> None:
     proposal = memory_proposal(Config(), _summary(oom_kill_count=1, memory_limit=None))
 
     assert proposal is not None and proposal.direction == "increase"
-    assert proposal.proposed == math.ceil(64 * 1.1) * MIB
+    assert proposal.proposed == 96 * MIB
 
 
 def test_an_observed_peak_above_the_limit_bound_still_sizes_the_increase() -> None:
@@ -139,7 +140,116 @@ def test_the_analyzer_explains_the_limit_based_sizing() -> None:
 
     (rec,) = MemoryRightsizingAnalyzer(context.config).analyze(context)
 
-    assert rec.recommended_memory_request_bytes == 71 * MIB
+    assert rec.recommended_memory_request_bytes == 96 * MIB
     assert rec.current_memory_request_bytes == 64 * MIB
     assert "OOM-killed" in rec.reason
     assert "memory limit (64MiB)" in rec.reason
+
+
+def _pinned_at_limit(size_mib: int = 32, **overrides: Any) -> WorkloadUsageSummary:
+    """Live e2e: request = limit, the working set sits at the limit and the kernel kills it there."""
+    values: dict[str, Any] = {
+        "oom_kill_count": 3,
+        "restarts_in_window": 3,
+        "memory_request": size_mib * MIB,
+        "memory_limit": size_mib * MIB,
+        "memory": UsageStats(
+            sample_count=576,
+            avg=size_mib * 0.8 * MIB,
+            p50=size_mib * 0.8 * MIB,
+            p90=size_mib * 0.95 * MIB,
+            p95=size_mib * 0.97 * MIB,
+            p99=size_mib * 0.98 * MIB,
+            max=size_mib * 0.99 * MIB,
+        ),
+    }
+    values.update(overrides)
+    return _summary(**values)
+
+
+def test_an_oom_kill_at_the_limit_takes_one_decisive_step() -> None:
+    """Regression (live e2e): 32Mi -> 36Mi -> 40Mi ..., one pull request and measurement window per step."""
+    proposal = memory_proposal(Config(), _pinned_at_limit())
+
+    assert proposal is not None and proposal.basis == "oom_limit"
+    assert proposal.proposed == 64 * MIB
+    [advice] = proposal.limit_advice
+    assert advice.reason == "oom_headroom"
+    assert advice.minimum is not None and advice.minimum > proposal.proposed
+    assert advice.minimum == math.ceil(64 * 1.1) * MIB
+
+
+def test_the_decisive_oom_step_follows_the_configured_cap() -> None:
+    summary = _pinned_at_limit()
+
+    wide = memory_proposal(Config().model_copy(update={"RIGHTSIZING_MAX_INCREASE_FACTOR": 3.0}), summary)
+    narrow = memory_proposal(Config().model_copy(update={"RIGHTSIZING_MAX_INCREASE_FACTOR": 1.25}), summary)
+
+    assert wide is not None and wide.proposed == 96 * MIB
+    assert narrow is not None and narrow.proposed == 40 * MIB
+
+
+def test_a_short_spike_oom_step_never_exceeds_the_configured_cap() -> None:
+    narrow = Config().model_copy(update={"RIGHTSIZING_MAX_INCREASE_FACTOR": 1.25})
+
+    proposal = memory_proposal(narrow, _summary(oom_kill_count=2))
+
+    assert proposal is not None and proposal.proposed == 80 * MIB
+
+
+def test_the_oom_step_doubles_the_limit_when_the_request_is_below_it() -> None:
+    summary = _pinned_at_limit(memory_request=16 * MIB)
+
+    proposal = memory_proposal(Config(), summary)
+
+    # The request is sized from usage (p99 x 1.2 = 38Mi, above 2x the request: OOM steps are uncapped)...
+    assert proposal is not None and proposal.proposed == 38 * MIB
+    [advice] = proposal.limit_advice
+    # ...and the limit the kills happen at doubles (2x the limit, the configured bound), above the request.
+    assert advice.minimum == 64 * MIB > proposal.proposed
+
+
+def test_a_non_oom_increase_keeps_its_p99_sizing() -> None:
+    busy = _summary(memory_request=100 * MIB, memory_limit=None, memory=_stats(95 * MIB, 99 * MIB))
+
+    proposal = memory_proposal(Config(), busy)
+
+    assert proposal is not None and proposal.basis == "p99"
+    assert proposal.proposed == math.ceil(95 * 1.2) * MIB
+
+
+def test_limit_pressure_without_oom_keeps_its_observed_max_sizing() -> None:
+    pressured = _summary(
+        memory_request=30 * MIB, memory_limit=32 * MIB, memory=_stats(20 * MIB, 31 * MIB), oom_kill_count=0
+    )
+
+    proposal = memory_proposal(Config(), pressured)
+
+    assert proposal is not None and proposal.basis == "observed_max"
+    assert proposal.proposed == math.ceil(31 * 1.1) * MIB
+
+
+def test_the_shared_planner_scenario_is_the_analyzer_step() -> None:
+    """The planner tests render 24Mi -> 48Mi: that is the step the analyzer proposes for the scenario."""
+    from tests.automation.actions.oom_limit_scenario import (  # pyrefly: ignore[missing-import]
+        OOM_PROPOSED,
+        oom_summary,
+    )
+
+    proposal = memory_proposal(Config(), oom_summary())
+
+    assert proposal is not None and proposal.proposed == OOM_PROPOSED
+
+
+def test_the_analyzer_explains_the_decisive_step() -> None:
+    spike = OptimizationContext(config=Config(), usage=_snapshot(_summary(oom_kill_count=2)))
+    pinned = OptimizationContext(config=Config(), usage=_snapshot(_pinned_at_limit()))
+
+    (spike_rec,) = MemoryRightsizingAnalyzer(spike.config).analyze(spike)
+    (pinned_rec,) = MemoryRightsizingAnalyzer(pinned.config).analyze(pinned)
+
+    assert "memory limit (64MiB) the OOM kills prove was passed x 1.5" in spike_rec.reason
+    assert "short spike" in spike_rec.reason
+    assert pinned_rec.recommended_memory_request_bytes == 64 * MIB
+    assert "memory limit (32MiB) the OOM kills prove was passed x 2" in pinned_rec.reason
+    assert "one decisive step" in pinned_rec.reason

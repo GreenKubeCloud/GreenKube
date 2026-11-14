@@ -36,6 +36,7 @@ from greenkube.automation.pr_content.lifecycle import (
     render_lifecycle_comment,
 )
 from greenkube.automation.pr_content.model import PullRequestRenderSettings
+from greenkube.automation.provider_backoff import ProviderRetryBackoff
 from greenkube.gitops.contracts import ControllerKind, Plan
 from greenkube.models.metrics import PullRequestRecord, RecommendationRecord, RecommendationStatus
 from greenkube.storage.base_pull_request_repository import MAX_PULL_REQUEST_POLL_BATCH_SIZE
@@ -153,6 +154,8 @@ class PullRequestFeedbackPublisher:
         self._open_checked: OrderedDict[str, datetime] = OrderedDict()
         #: Credentials are read-only (``patch``/``ci`` delivery, F4): never write to the provider.
         self._read_only = read_only
+        #: Per-record provider backoff shared (through storage) with PR polling and branch cleanup.
+        self.backoff = ProviderRetryBackoff(pull_request_repository, clock=self.clock)
 
     def writes_allowed(self, plan: Plan) -> bool:
         """Whether the comment may be written for ``plan``.
@@ -185,7 +188,15 @@ class PullRequestFeedbackPublisher:
         if self._published.get(plan_id) == digest:
             self._published.move_to_end(plan_id)
             return FeedbackOutcome.UNCHANGED
-        target = await self.provider_resolver.resolve(plan.source)
+        if self.backoff.deferred(records):
+            # Backing off (repository detached, credentials refused, rate limited).
+            return FeedbackOutcome.SKIPPED
+        try:
+            target = await self.provider_resolver.resolve(plan.source)
+        except Exception as error:
+            if await self.backoff.failed(records, error, loop="lifecycle comment"):
+                return FeedbackOutcome.SKIPPED
+            raise
         provider = target.provider
         try:
             if record.repo != target.repository.full_name:
@@ -193,6 +204,8 @@ class PullRequestFeedbackPublisher:
                 return FeedbackOutcome.SKIPPED
             if not provider.supports(GitProviderCapability.PULL_REQUEST_COMMENTS):
                 return FeedbackOutcome.UNSUPPORTED
+            # A refused comment is a degraded best-effort feature, not a detached record:
+            # it must not defer the polling of the same record, so it keeps its handling.
             result, _ = await provider.upsert_pull_request_comment(
                 target.repository, record.pr_number, marker=LIFECYCLE_MARKER, body=body
             )
@@ -201,6 +214,7 @@ class PullRequestFeedbackPublisher:
                 await provider.close()
             except Exception:
                 pass
+        await self.backoff.succeeded(records)
         self._remember(plan_id, digest)
         return {
             CommentUpsertResult.CREATED: FeedbackOutcome.CREATED,
