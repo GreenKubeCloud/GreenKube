@@ -27,6 +27,9 @@ MIXED = "mixed"
 
 class CostSource(StrEnum):
     OPENCOST = "opencost"
+    OPENCOST_DERIVED = "opencost_derived"
+    """OpenCost cost below its JSON precision, rebuilt from the allocation's resource-hours and
+    OpenCost's own node unit prices (see ``collectors/opencost_collector.py``)."""
     KUBECOST = "kubecost"
     PRICING_CATALOG = "pricing_catalog"
     CUSTOM_RATE = "custom_rate"
@@ -61,9 +64,13 @@ class IntensitySource(StrEnum):
 
 
 #: Cost sources whose figures may back a measured cost saving (C0.3).
-TRUSTED_COST_SOURCES: frozenset[str] = frozenset({CostSource.OPENCOST, CostSource.KUBECOST, CostSource.PRICING_CATALOG})
+TRUSTED_COST_SOURCES: frozenset[str] = frozenset(
+    {CostSource.OPENCOST, CostSource.OPENCOST_DERIVED, CostSource.KUBECOST, CostSource.PRICING_CATALOG}
+)
 #: Cost sources that come from an allocation engine rather than list prices.
-ALLOCATED_COST_SOURCES: frozenset[str] = frozenset({CostSource.OPENCOST, CostSource.KUBECOST})
+ALLOCATED_COST_SOURCES: frozenset[str] = frozenset(
+    {CostSource.OPENCOST, CostSource.OPENCOST_DERIVED, CostSource.KUBECOST}
+)
 #: Usage sources accepted by the measurement gates (C0.3).
 TRUSTED_USAGE_SOURCES: frozenset[str] = frozenset({UsageSource.PROMETHEUS})
 #: Usage sources that are measurements (time series or point-in-time).
@@ -109,7 +116,8 @@ def is_cost_trusted(row: Any, *, allowed: Iterable[str] = TRUSTED_COST_SOURCES) 
     adjustments that must not be presented as savings). A zero total on a row
     that requested CPU or memory is not trusted either: OpenCost had no price
     for it (a missing cost read as zero), and a zero after a change would be
-    measured as the whole cost saved.
+    measured as the whole cost saved. A pod so small that OpenCost rounds its
+    cost to zero is stored with its rebuilt cost (``opencost_derived``), not 0.
     """
     source = _normalized(_value(row, "cost_source"))
     if source is None or source not in {str(item) for item in allowed}:

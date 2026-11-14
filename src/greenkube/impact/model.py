@@ -42,6 +42,7 @@ from greenkube.impact.types import (
 #: Confidence in a unit price, by cost tier (documented in the methodology).
 PRICE_CONFIDENCE = {
     CostSource.OPENCOST: 0.9,
+    CostSource.OPENCOST_DERIVED: 0.9,
     CostSource.KUBECOST: 0.9,
     CostSource.PRICING_CATALOG: 0.75,
     CostSource.CUSTOM_RATE: 0.7,
