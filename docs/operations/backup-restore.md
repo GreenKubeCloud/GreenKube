@@ -38,7 +38,8 @@ The chart then renders a CronJob `<release>-postgres-backup` and a claim `<relea
 `helm uninstall`). Each run:
 
 1. runs `pg_dump --format=custom` of the GreenKube schema (`config.db.schema`), reading `DB_CONNECTION_STRING`,
-   so it works for the bundled and for an external PostgreSQL;
+   with the TLS mode of `config.db.sslMode` (`PGSSLMODE`), so it works for the bundled and for an external
+   PostgreSQL;
 2. checks the archive with `pg_restore --list`;
 3. renames it `greenkube-<UTC timestamp>.dump` and deletes the dumps beyond `keep`.
 

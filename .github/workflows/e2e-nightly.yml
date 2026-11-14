@@ -62,7 +62,9 @@ jobs:
     timeout-minutes: 150
     env:
       E2E_KUBE_CONTEXT: minikube
-      E2E_FLUX: ${{ (github.event_name != 'workflow_dispatch' || inputs.flux) && '1' || '0' }}
+      # inputs.flux is set by workflow_dispatch and workflow_call (where github.event_name
+      # is the caller's event), and empty for schedule and pull_request: Flux runs then.
+      E2E_FLUX: ${{ inputs.flux == false && '0' || '1' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

@@ -43,7 +43,7 @@ tests:
           pattern: 'up\{namespace="NAMESPACE",job="RELEASE-NAME-greenkube-api"\}'
       - matchRegex:
           path: spec.groups[4].rules[1].expr
-          pattern: 'greenkube_loop_consecutive_failures\{loop="controller-heartbeat"\}'
+          pattern: 'greenkube_loop_consecutive_failures\{namespace="NAMESPACE",loop="controller-heartbeat"\}'
       - matchRegex:
           path: spec.groups[4].rules[5].expr
           pattern: 'persistentvolumeclaim=~"data-RELEASE-NAME-greenkube-postgres-\[0-9\]\+\|RELEASE-NAME-greenkube-postgres-backup"'

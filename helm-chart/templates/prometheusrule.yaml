@@ -219,7 +219,7 @@ spec:
         - alert: GreenKubeDatabaseUnavailable
           # Every controller replica writes a heartbeat row every 30 s, leader or
           # standby: repeated failures mean the database refuses writes.
-          expr: max(greenkube_loop_consecutive_failures{loop="controller-heartbeat"}) >= 3
+          expr: max(greenkube_loop_consecutive_failures{namespace="{{ $ns }}",loop="controller-heartbeat"}) >= 3
           for: 5m
           labels:
             severity: critical

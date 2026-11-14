@@ -92,6 +92,10 @@ spec:
                       key: DB_CONNECTION_STRING
                 - name: DB_SCHEMA
                   value: {{ .Values.config.db.schema | default "public" | quote }}
+                # Same TLS mode as the application (DB_SSL_MODE); an sslmode in the
+                # connection string still takes precedence.
+                - name: PGSSLMODE
+                  value: {{ .Values.config.db.sslMode | default "disable" | quote }}
                 - name: BACKUP_KEEP
                   value: {{ int ($backup.keep | default 7) | quote }}
               command:

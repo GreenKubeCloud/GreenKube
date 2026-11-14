@@ -64,6 +64,23 @@ tests:
           content:
             name: BACKUP_KEEP
             value: "14"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PGSSLMODE
+            value: disable
+
+  - it: uses the application's TLS mode for pg_dump
+    set:
+      postgres.backup.enabled: true
+      config.db.sslMode: verify-full
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PGSSLMODE
+            value: verify-full
       - matchRegex:
           path: spec.jobTemplate.spec.template.spec.containers[0].command[2]
           pattern: 'pg_dump --dbname="\$DB_CONNECTION_STRING" --schema="\$DB_SCHEMA"'

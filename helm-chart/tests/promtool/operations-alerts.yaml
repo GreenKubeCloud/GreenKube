@@ -60,9 +60,9 @@ tests:
   # ---------------------------------------------------------------------------
   - interval: 1m
     input_series:
-      - series: 'greenkube_loop_consecutive_failures{job="c",instance="leader:9102",loop="controller-heartbeat"}'
+      - series: 'greenkube_loop_consecutive_failures{job="c",namespace="default",instance="leader:9102",loop="controller-heartbeat"}'
         values: '0x3 1 2 3 4 5 6 7 8 9 10 11 12'
-      - series: 'greenkube_loop_consecutive_failures{job="c",instance="leader:9102",loop="collection"}'
+      - series: 'greenkube_loop_consecutive_failures{job="c",namespace="default",instance="leader:9102",loop="collection"}'
         values: '0x15'
     alert_rule_test:
       - eval_time: 7m
@@ -80,10 +80,13 @@ tests:
   - interval: 1m
     input_series:
       # Another loop failing is not a database outage.
-      - series: 'greenkube_loop_consecutive_failures{job="c",instance="leader:9102",loop="collection"}'
+      - series: 'greenkube_loop_consecutive_failures{job="c",namespace="default",instance="leader:9102",loop="collection"}'
         values: '5x20'
-      - series: 'greenkube_loop_consecutive_failures{job="c",instance="leader:9102",loop="controller-heartbeat"}'
+      - series: 'greenkube_loop_consecutive_failures{job="c",namespace="default",instance="leader:9102",loop="controller-heartbeat"}'
         values: '0x20'
+      # Another release's controller, in another namespace of the same Prometheus.
+      - series: 'greenkube_loop_consecutive_failures{job="c",namespace="other",instance="other:9102",loop="controller-heartbeat"}'
+        values: '5x20'
     alert_rule_test:
       - eval_time: 15m
         alertname: GreenKubeDatabaseUnavailable
