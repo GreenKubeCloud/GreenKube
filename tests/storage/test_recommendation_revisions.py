@@ -351,6 +351,84 @@ class TestRevisions:
         assert await repo.get_active_recommendations() == []
 
 
+def _pair_action(rec_ids: list[int], cpu: str, memory: str):
+    from greenkube.gitops.contracts import (
+        ActionPlanV3,
+        ContainerResources,
+        ResourceTarget,
+        SetContainerResources,
+    )
+
+    return ActionPlanV3(
+        action_id="act-api-web",
+        recommendation_ids=rec_ids,
+        target=ResourceTarget(api_version="apps/v1", kind="Deployment", namespace="shop", name="api"),
+        operations=[
+            SetContainerResources(
+                container="web", resources=ContainerResources(requests={"cpu": cpu, "memory": memory})
+            )
+        ],
+        constraints={"container_targeted": True},
+        evidence_ref="recommendation/pair",
+    )
+
+
+def _memory(memory_mib: int, **overrides) -> RecommendationRecord:
+    values = dict(
+        type=RecommendationType.RIGHTSIZING_MEMORY,
+        description=f"Memory request 512Mi -> {memory_mib}Mi",
+        current_cpu_request_millicores=None,
+        recommended_cpu_request_millicores=None,
+        current_memory_request_bytes=512 * MIB,
+        recommended_memory_request_bytes=memory_mib * MIB,
+        fingerprint="fp-memory",
+    )
+    values.update(overrides)
+    return _cpu(0, **values)
+
+
+class TestBundledActionsUnderAnOpenPlan:
+    """A CPU+memory pair shares one action: an open plan must never see its copies diverge (wave-4 e2e)."""
+
+    async def test_a_cpu_and_memory_pair_keeps_identical_actions_across_scans(self, db):
+        repo = _repo(db)
+        await repo.upsert_recommendations([_cpu(300), _memory(256)])
+        cpu_id = _id(next(r for r in await repo.get_active_recommendations() if r.fingerprint == "fp-cpu"))
+        memory_id = _id(next(r for r in await repo.get_active_recommendations() if r.fingerprint == "fp-memory"))
+        planned = _pair_action([cpu_id, memory_id], "300m", "256Mi")
+        await repo.upsert_recommendations([_cpu(300, action=planned), _memory(256, action=planned)])
+        for rec_id in (cpu_id, memory_id):
+            await _set_action_status(db, rec_id, "plan_ready")
+
+        # Next scans: the CPU advice is unchanged, the memory advice moved; the new action carries both.
+        for memory_mib in (300, 320):
+            newer = _pair_action([cpu_id, memory_id], "300m", f"{memory_mib}Mi")
+            await repo.upsert_recommendations([_cpu(300, action=newer), _memory(memory_mib, action=newer)])
+
+        cpu_record, memory_record = await _get(repo, cpu_id), await _get(repo, memory_id)
+        assert cpu_record.action is not None and memory_record.action is not None
+        assert cpu_record.action.model_dump(mode="json") == memory_record.action.model_dump(mode="json")
+        assert cpu_record.action.model_dump(mode="json") == planned.model_dump(mode="json")
+        assert memory_record.recommended_memory_request_bytes == 256 * MIB
+        assert (await repo.get_queued_revisions([memory_id]))[memory_id].revision == 2
+        assert await repo.get_queued_revisions([cpu_id]) == {}
+
+    async def test_a_frozen_record_with_the_same_advice_keeps_its_content(self, db):
+        repo = _repo(db)
+        now = datetime.now(timezone.utc)
+        await repo.upsert_recommendations([_cpu(300, description="as planned", expires_at=now + timedelta(days=1))])
+        rec_id = _id((await repo.get_active_recommendations())[0])
+        await _set_action_status(db, rec_id, "plan_ready")
+
+        await repo.upsert_recommendations(
+            [_cpu(300, description="rescanned", potential_savings_cost=99.0, expires_at=now + timedelta(days=14))]
+        )
+
+        frozen = await _get(repo, rec_id)
+        assert (frozen.description, frozen.potential_savings_cost) == ("as planned", 12.5)
+        assert frozen.expires_at is not None and frozen.expires_at > now + timedelta(days=13)
+
+
 class TestPlanPins:
     async def test_the_first_pin_of_a_plan_wins(self, db):
         repo = _repo(db)
