@@ -1,0 +1,3 @@
+### Fixed
+
+- **A change applied by hand, or detected without its plan, no longer ends its baseline at the approval of an abandoned plan (live e2e).** "Mark as applied" took the latest approval of any plan of the recommendation as the decision time, even a plan that then went stale, was closed or failed without delivering anything: a change applied at 19:40 was measured against a baseline window that ended at a stale approval six hours earlier, before the workload had data, so its measurement could only be inconclusive. Without a known plan, approvals of plans whose latest status is `closed`, `stale`, `failed`, `rejected` or `superseded` are now ignored, and the baseline ends at the apply time unless a live plan was approved or merged.

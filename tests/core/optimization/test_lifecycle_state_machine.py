@@ -428,6 +428,26 @@ class TestBaselineWindow:
 
         assert datetime.fromisoformat(_baseline(updated)["baseline_window_end"]) == approved_at
 
+    async def test_manual_apply_ignores_the_approval_of_an_abandoned_plan(self, repo):
+        # Live e2e: a plan approved 6 h earlier went stale without a PR; marking the
+        # recommendation applied by hand ended its baseline at that old approval.
+        record = await _saved(repo)
+        approved_at = datetime.now(timezone.utc) - timedelta(hours=6)
+        for status, moment in (("approved", approved_at), ("stale", approved_at + timedelta(seconds=1))):
+            await repo.record_event(
+                RecommendationEvent(
+                    recommendation_id=_id(record),
+                    event_type="plan_status_changed",
+                    payload={"details": {"plan_id": "plan-3", "new_status": status}},
+                    created_at=moment,
+                )
+            )
+        applied_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+
+        updated = await RecommendationLifecycle(repo).apply(_id(record), actual_cpu=300, applied_at=applied_at)
+
+        assert datetime.fromisoformat(_baseline(updated)["baseline_window_end"]) == applied_at
+
     async def test_baseline_never_ends_after_the_change(self, repo):
         record = await _saved(repo)
         applied_at = datetime.now(timezone.utc) - timedelta(hours=6)
