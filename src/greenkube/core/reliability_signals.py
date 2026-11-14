@@ -9,6 +9,9 @@ with what rightsizing needs to size increases and to judge decreases:
   at the 5-minute step of the restart, was ``OOMKilled`` (kube-state-metrics), or cAdvisor
   ``container_oom_events_total`` when larger; 0 when kube-state-metrics is
   scraped and reports none, None when it is not.
+* ``restarts_in_window``: container restarts over the lookback, whatever their
+  cause (kube-state-metrics); 0 when it is scraped and reports none. A memory
+  decrease is never proposed for a container that restarted (wave-4 e2e).
 * ``throttling_ratio``: throttled / total CFS periods over the lookback
   (cAdvisor; the series only exist for containers with a CPU limit).
 * ``jvm_hint``: why the container is believed to run a JVM (``JAVA_TOOL_OPTIONS``
@@ -122,6 +125,7 @@ class ReliabilitySignals:
     """Signals per target container (``""`` = whole pod), with what was readable."""
 
     oom_kills: Dict[Tuple[TargetKey, str], int] = field(default_factory=dict)
+    restarts: Dict[Tuple[TargetKey, str], int] = field(default_factory=dict)
     throttled: Dict[Tuple[TargetKey, str], float] = field(default_factory=dict)
     periods: Dict[Tuple[TargetKey, str], float] = field(default_factory=dict)
     jvm: Dict[Tuple[TargetKey, str], str] = field(default_factory=dict)
@@ -188,6 +192,14 @@ async def read_prometheus_signals(
         for key, value in source.items():
             kills[key] = max(kills.get(key, 0.0), value)
     signals.oom_kills = {key: int(round(value)) for key, value in kills.items() if round(value) > 0}
+    restarts = await query(
+        "max by (namespace, pod, container) "
+        f"(round(increase(kube_pod_container_status_restarts_total{{{_CONTAINERS}}}[{window}])))",
+        at,
+    )
+    signals.restarts = {
+        key: int(round(value)) for key, value in _per_container(restarts, known).items() if round(value) > 0
+    }
 
     throttled = await query(
         "max by (namespace, pod, container) "
@@ -259,6 +271,7 @@ def _by_target(values: Mapping[Tuple[TargetKey, str], Any]) -> Dict[TargetKey, D
 def apply_signals(snapshot: UsageSnapshot, signals: ReliabilitySignals) -> None:
     """Fills the snapshot's summaries; the pod-level summary gets the totals over its containers."""
     kills_by_target = _by_target(signals.oom_kills)
+    restarts_by_target = _by_target(signals.restarts)
     throttled_by_target = _by_target(signals.throttled)
     periods_by_target = _by_target(signals.periods)
     jvm_by_target = _by_target(signals.jvm)
@@ -266,17 +279,21 @@ def apply_signals(snapshot: UsageSnapshot, signals: ReliabilitySignals) -> None:
         for name, summary in containers.items():
             if name == POD_LEVEL:
                 kills = sum(kills_by_target.get(target, {}).values())
+                restarts = sum(restarts_by_target.get(target, {}).values())
                 throttled = sum(throttled_by_target.get(target, {}).values())
                 periods = sum(periods_by_target.get(target, {}).values())
                 hints = jvm_by_target.get(target, {})
                 hint = hints[min(hints)] if hints else None
             else:
                 kills = signals.oom_kills.get((target, name), 0)
+                restarts = signals.restarts.get((target, name), 0)
                 throttled = signals.throttled.get((target, name), 0.0)
                 periods = signals.periods.get((target, name), 0.0)
                 hint = signals.jvm.get((target, name))
             if kills or signals.oom_known:
                 summary.oom_kill_count = kills
+            if restarts or signals.oom_known:
+                summary.restarts_in_window = restarts
             if periods > 0:
                 summary.throttling_ratio = max(0.0, min(throttled / periods, 1.0))
             if hint:

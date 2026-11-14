@@ -254,27 +254,33 @@ class PostgresRecommendationRepository(RecommendationRepository):
                             count += 1
                             continue
                         decision = RevisionDecision("queue", decision.revision)
-                    if decision.action == "queue":
-                        # A record never changes under an open plan (E7), but the scan still saw its
-                        # target: keep it alive so it does not expire while the plan is open.
-                        await self._queue_revision(conn, stored, r, decision.revision, now)
-                        await conn.execute(
-                            "UPDATE recommendation_history SET expires_at = COALESCE($1, expires_at), updated_at = $2 "
-                            "WHERE id = $3",
-                            values["expires_at"],
-                            now,
-                            existing["id"],
-                        )
-                        count += 1
-                        continue
-                    async with conn.transaction():
-                        await self._settle_revision(conn, stored, False, now)
+                    if decision.action == "refresh":
                         update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
                             decision.revision,
                             now,
                             existing["id"],
                         ]
-                        await conn.execute(update_query, *update_params)
+                        async with conn.transaction():
+                            await self._settle_revision(conn, stored, False, now)
+                            # Guarded like a revision: a plan opened since the read freezes the record (E7).
+                            result = await conn.execute(f"{update_query} AND {NO_OPEN_PLAN_SQL}", *update_params)
+                        if not str(result).endswith(" 0"):
+                            count += 1
+                            continue
+                        decision = RevisionDecision("keep", decision.revision)
+                    if decision.action == "queue":
+                        await self._queue_revision(conn, stored, r, decision.revision, now)
+                    else:
+                        await self._settle_revision(conn, stored, False, now)
+                    # A record never changes under an open plan (E7), not even its shared action, but the
+                    # scan still saw its target: keep it alive so it does not expire while the plan is open.
+                    await conn.execute(
+                        "UPDATE recommendation_history SET expires_at = COALESCE($1, expires_at), updated_at = $2 "
+                        "WHERE id = $3",
+                        values["expires_at"],
+                        now,
+                        existing["id"],
+                    )
                     count += 1
                     continue
 

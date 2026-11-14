@@ -30,6 +30,7 @@ from greenkube.core.optimization.context_builder import ContextBuilder
 from greenkube.core.optimization.dedup import (
     RESOURCE_FIELDS,
     apply_consensus_assessment,
+    apply_revision_hysteresis,
     consensus_policy,
     consensus_refiner,
     entries_for_reports,
@@ -425,6 +426,8 @@ class OptimizationEngine:
         await self._backfill_v2_fields(reco_repo)
         previous = await self._active_snapshot(reco_repo, namespace)
         kept = self._preserve_last_known(recommendations, previous, incomplete_sources)
+        # Usage jitter below the hysteresis keeps the stored advice (no new revision, one shared action).
+        kept = apply_revision_hysteresis(kept, previous)
         records = [self._record(r) for r in kept]
         if records:
             await reco_repo.upsert_recommendations(records)

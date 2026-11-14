@@ -465,14 +465,91 @@ def finalize_recommendations(recs: List[Recommendation], config: "Config") -> Li
     return finalize_entries(entries_for_recommendations(recs, cluster_uid(config)), config)
 
 
+#: Relative change of a proposed request below which a scan keeps the stored advice (hysteresis):
+#: usage jitter between scans (byte-level working-set noise) must not create a new revision.
+REVISION_HYSTERESIS = 0.05
+
+#: Fields of a held recommendation taken from the stored record: the advice and everything derived
+#: from its value (projection, wording, evidence and consensus), so the record stays self-consistent.
+_HELD_FIELDS = (
+    "recommended_cpu_request_millicores",
+    "recommended_memory_request_bytes",
+    "description",
+    "reason",
+    "priority",
+    "potential_savings_cost",
+    "potential_savings_co2e_grams",
+    "impact",
+    "evidence",
+    "proposal",
+    "consensus",
+)
+
+
+def within_hysteresis(rec: Any, before: Any, threshold: float = REVISION_HYSTERESIS) -> bool:
+    """True when ``rec`` restates ``before``'s request advice within ``threshold`` (relative).
+
+    Only a request change of the same kind, against the same observed current
+    request and in the same direction (both decreases or both increases) is
+    held; any other difference is new advice.
+    """
+    rec_type = _type_value(rec)
+    resource = KIND_REQUEST_RESOURCES.get(rec_type)
+    if resource is None or rec_type != source_text(getattr(before, "type", None)):
+        return False
+    current_field, proposed_field = RESOURCE_FIELDS[resource]
+    current, previous_current = getattr(rec, current_field), getattr(before, current_field)
+    proposed, previous = getattr(rec, proposed_field), getattr(before, proposed_field)
+    if None in (current, previous_current, proposed, previous) or int(current) != int(previous_current):
+        return False
+    proposed, previous, current = int(proposed), int(previous), int(current)
+    if proposed == previous or previous <= 0 or (proposed > current) != (previous > current):
+        return False
+    return abs(proposed - previous) <= threshold * previous
+
+
+def apply_revision_hysteresis(
+    recs: Sequence[Recommendation],
+    previous: Sequence[RecommendationRecord],
+    threshold: float = REVISION_HYSTERESIS,
+) -> List[Recommendation]:
+    """Holds the stored advice of every recommendation whose new proposal moved by at most ``threshold``.
+
+    A held recommendation takes the stored proposal and what is derived from it
+    (:data:`_HELD_FIELDS`), so persisting it refreshes the record without a new
+    revision (E7), and the typed action built afterwards for its workload bundle
+    is the same for every member: a CPU and a memory recommendation of one
+    container never carry two different copies of their shared action.
+    """
+    by_fingerprint = {record.fingerprint: record for record in previous if record.fingerprint}
+    held: List[Recommendation] = []
+    for rec in recs:
+        fingerprint = legacy_fingerprint(rec)
+        before = by_fingerprint.get(fingerprint) if fingerprint else None
+        if before is None or not within_hysteresis(rec, before, threshold):
+            held.append(rec)
+            continue
+        update = {name: getattr(before, name) for name in _HELD_FIELDS if name in type(before).model_fields}
+        logger.debug(
+            "Holding %s %s: the new proposal moved by at most %.0f%%.",
+            _type_value(rec),
+            before.fingerprint,
+            threshold * 100,
+        )
+        held.append(rec.model_copy(update=update))
+    return held
+
+
 def legacy_fingerprint(rec: Recommendation) -> Optional[str]:
     """The v1 (v3 identity) fingerprint of a recommendation."""
     return RecommendationRecord.from_recommendation(rec).fingerprint
 
 
 __all__ = [
+    "REVISION_HYSTERESIS",
     "RecommendationSource",
     "SignalEntry",
+    "apply_revision_hysteresis",
     "consensus_policy",
     "consolidate_entries",
     "deduplicate",
@@ -482,4 +559,5 @@ __all__ = [
     "legacy_fingerprint",
     "materialize",
     "proposes_no_change",
+    "within_hysteresis",
 ]

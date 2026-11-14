@@ -132,6 +132,18 @@ def test_a_foreign_or_missing_action_is_refused() -> None:
     assert "action_unavailable" in _codes(assess_eligibility(other, _ctx())["blockers"])
 
 
+def test_a_missing_deletion_action_is_explained_as_a_deletion() -> None:
+    [blocker] = [
+        entry
+        for entry in assess_eligibility(_record(action=None), _ctx())["blockers"]
+        if entry["code"] == "action_unavailable"
+    ]
+
+    text = f"{blocker['message']} {blocker['fix']}".lower()
+    assert "delet" in blocker["message"].lower()
+    assert "container" not in text and "request" not in text
+
+
 def test_deletions_are_never_auto_approved() -> None:
     policy = AutoApprovePolicy(enabled=True, max_risk="high", min_confidence=0.0)
     assert "deletion_requires_review" in auto_approve_blockers([_record()], policy, expected=1)
@@ -153,3 +165,9 @@ async def test_unreadable_resource_bindings_fail_closed() -> None:
             raise RuntimeError("database is down")
 
     assert await load_resource_bindings(_Gitops(_Broken()), "prod") is None
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc))

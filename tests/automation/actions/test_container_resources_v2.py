@@ -497,3 +497,28 @@ def test_raw_argo_rollout_request_increase() -> None:
         kind="Rollout",
     )
     assert _container(plan)["resources"] == {"requests": {"memory": "768Mi"}}
+
+
+# -- canonical quantities (wave-4 e2e: Helm values received ``memory: '24114500'``) -------------
+
+
+def test_a_byte_level_proposal_is_written_in_mebibytes() -> None:
+    operation = _only_operation(_recommendation(current=512 * MIB, proposed=24114500))
+
+    assert operation.resources.requests == {"memory": "23Mi"}
+
+
+def test_a_byte_level_limit_is_written_in_mebibytes_and_still_covers_the_request() -> None:
+    limit = LimitChange(resource="memory", action="set", current=None, proposed=26214500, reason="below_floor")
+    operation = _only_operation(_recommendation(current=512 * MIB, proposed=24114500, limit_changes=[limit]))
+
+    assert operation.resources.requests == {"memory": "23Mi"}
+    assert operation.resources.limits == {"memory": "26Mi"}
+
+
+def test_the_raw_planner_diff_shows_mebibytes_not_bytes() -> None:
+    operation = _only_operation(_recommendation(current=512 * MIB, proposed=24114500))
+    plan = _raw_plan([operation])
+
+    assert _container(plan)["resources"]["requests"]["memory"] == "23Mi"
+    assert "24114500" not in (plan.diff or "")

@@ -71,14 +71,6 @@ from greenkube.gitops.contracts import (
 if TYPE_CHECKING:
     from greenkube.models.metrics import Recommendation
 
-_MEMORY_UNITS = (
-    ("Ei", 1024**6),
-    ("Pi", 1024**5),
-    ("Ti", 1024**4),
-    ("Gi", 1024**3),
-    ("Mi", 1024**2),
-    ("Ki", 1024),
-)
 _QUANTITY_PATTERN = re.compile(
     r"(?P<number>(?:\d+(?:\.\d*)?|\.\d+))"
     r"(?P<suffix>[eE][+-]?\d+|Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|K|M|G|T|P|E)?"
@@ -309,7 +301,7 @@ class ContainerResourcesSpec(ActionKindSpec):
                 value = container_baseline.cpu_millicores if resource == "cpu" else container_baseline.memory_bytes
                 if value is None or isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise InverseConflictError(f"the persisted pre-apply baseline omits the target {resource} request")
-                restored[resource] = f"{value}m" if resource == "cpu" else str(value)
+                restored[resource] = _cpu_quantity(value) if resource == "cpu" else _memory_quantity(value, exact=True)
             try:
                 inverse.append(
                     SetContainerResources(
@@ -558,17 +550,21 @@ class _ActionGroup:
 
 
 def _cpu_quantity(millicores: int) -> str:
-    """Format a positive millicore value as a canonical CPU quantity."""
-    cores, remainder = divmod(millicores, 1000)
-    return str(cores) if remainder == 0 else f"{millicores}m"
+    """Format a positive millicore value as a canonical CPU quantity (``250m``, ``2``)."""
+    from greenkube.utils.k8s_quantities import format_cpu_quantity
+
+    return format_cpu_quantity(millicores)
 
 
-def _memory_quantity(byte_count: int) -> str:
-    """Format a positive byte value using its largest exact binary unit."""
-    for suffix, factor in _MEMORY_UNITS:
-        if byte_count % factor == 0:
-            return f"{byte_count // factor}{suffix}"
-    return str(byte_count)
+def _memory_quantity(byte_count: int, *, exact: bool = False) -> str:
+    """Format a positive byte value in human binary units (``23Mi``, ``1Gi``), never a raw byte count.
+
+    A proposal that is not a whole number of mebibytes is rounded up to one;
+    ``exact`` keeps the value byte for byte (rollbacks restore the baseline).
+    """
+    from greenkube.utils.k8s_quantities import format_memory_quantity
+
+    return format_memory_quantity(byte_count, exact=exact)
 
 
 def _resource_proposal(recommendation: Recommendation) -> _Proposal | None:

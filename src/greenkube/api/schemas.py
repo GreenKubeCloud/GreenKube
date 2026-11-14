@@ -315,6 +315,8 @@ class AutomationPlanErrorResponse(GitOpsResponseModel):
 
     code: str
     detail: str
+    #: The planner's own explanation (plan creation and rollback preview only), redacted and bounded.
+    reason: Optional[str] = None
     policy_result: Optional[Dict[str, Any]] = None
     mapping_options: Optional[AutomationPlanMappingOptionsResponse] = None
 

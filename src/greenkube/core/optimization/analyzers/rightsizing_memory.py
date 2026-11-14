@@ -9,7 +9,9 @@ from greenkube.core.optimization.analyzers.rightsizing import (
     MEMORY_MAX_FACTOR,
     MIB,
     RightsizingProposal,
+    max_increase_factor,
     memory_proposal,
+    oom_proven_usage,
     skipped_increase,
 )
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
@@ -20,7 +22,7 @@ from greenkube.models.workload_usage import POD_LEVEL
 if TYPE_CHECKING:
     from greenkube.core.config import Config
     from greenkube.core.optimization.context import OptimizationContext
-    from greenkube.models.workload_usage import TargetKey, UsageStats
+    from greenkube.models.workload_usage import TargetKey, UsageStats, WorkloadUsageSummary
 
 LOG = logging.getLogger(__name__)
 
@@ -34,15 +36,32 @@ _TRIGGER_TEXT = {
 Skip = Tuple["TargetKey", Optional[str], str, str]
 
 
-def increase_sizing_text(config: "Config", proposal: RightsizingProposal, stats: "UsageStats", unit: str) -> str:
-    """Explains how an increase was sized (shared wording with the CPU analyzer)."""
+def increase_sizing_text(
+    config: "Config",
+    proposal: RightsizingProposal,
+    stats: "UsageStats",
+    unit: str,
+    stats_owner: Optional["WorkloadUsageSummary"] = None,
+) -> str:
+    """Explains how an increase was sized (shared wording with the CPU analyzer).
+
+    ``stats_owner`` is the container's summary: it names the limit an OOM-sized increase starts from.
+    """
 
     def fmt(value: float) -> str:
         return f"{value / MIB:.0f}MiB" if unit == "MiB" else f"{value:.0f}m"
 
     bounded = CONTAINER_USAGE_EXCEEDS_POD in proposal.evidence
     owner = "pod's" if bounded else "per-replica"
-    if proposal.basis == "observed_max":
+    if proposal.basis == "oom_limit":
+        proven = oom_proven_usage(stats_owner) if stats_owner is not None else 0
+        what = "memory limit" if stats_owner is not None and stats_owner.memory_limit else "memory request"
+        text = (
+            f"Sized from the {what} ({fmt(proven)}) the OOM kills prove was reached x {MEMORY_MAX_FACTOR:g}, "
+            f"at most {max_increase_factor(config):g}x the current request: the samples missed the spike "
+            f"(observed maximum {fmt(stats.max)})."
+        )
+    elif proposal.basis == "observed_max":
         text = (
             f"Sized from the {owner} observed maximum ({fmt(stats.max)}) x {MEMORY_MAX_FACTOR:g}, "
             "because OOM kills or limit pressure show that peaks matter."
@@ -124,7 +143,7 @@ class MemoryRightsizingAnalyzer(Analyzer):
                 )
                 reason = (
                     f"Reliability: {causes}. Average usage is {usage_ratio:.0%} of the request. "
-                    f"{increase_sizing_text(cfg, proposal, stats, 'MiB')}"
+                    f"{increase_sizing_text(cfg, proposal, stats, 'MiB', summary)}"
                 )
                 priority = "high"
             else:

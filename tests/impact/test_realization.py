@@ -377,3 +377,9 @@ class TestCollector:
     async def test_collect_without_kubernetes_returns_none(self, monkeypatch):
         monkeypatch.setattr(autoscaler_collector, "get_core_v1_api", AsyncMock(return_value=None))
         assert await AutoscalerCollector().collect() is None
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc))

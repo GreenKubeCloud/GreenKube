@@ -17,8 +17,17 @@ How an increase is sized (USER BUG 2, docs/recommendation.md):
   usage percentiles exclude the warm-up after a container (re)start;
 * the observed maximum (x 1.1) only raises a memory target when OOM kills or
   limit pressure show that peaks matter; a single startup spike does not;
+* an OOM kill proves the container reached its memory limit (its request when
+  it has none), even when the spike was shorter than the scrape and the
+  observed maximum stayed small (wave-4 e2e): the target is at least that
+  limit x 1.1, bounded by ``RIGHTSIZING_MAX_INCREASE_FACTOR`` x the request
+  (basis ``oom_limit``);
 * one step is capped at ``RIGHTSIZING_MAX_INCREASE_FACTOR`` (default 2) x the
   current request unless OOM kills back it; the next scan re-evaluates;
+* a container OOM-killed or restarted within the window is never offered a
+  memory decrease;
+* memory proposals are whole mebibytes, so Git receives ``23Mi``, never a raw
+  byte count;
 * a usage summary that only exists at pod level (no container series) never
   produces an increase: it is skipped with the reason ``pod_level_usage_only``;
 * a container can never use more than its pod: when a container's statistics
@@ -361,6 +370,13 @@ def _round_up_mib(value: float) -> int:
     return int(math.ceil(value / MIB - 1e-6)) * MIB
 
 
+def oom_proven_usage(summary: "WorkloadUsageSummary") -> int:
+    """Memory an OOM kill proves the container reached: its limit, or its request when it has none."""
+    limit = int(summary.memory_limit or 0)
+    request = int(summary.memory_request or 0)
+    return limit if limit > 0 else request
+
+
 def memory_proposal(
     config: "Config",
     summary: "WorkloadUsageSummary",
@@ -389,6 +405,11 @@ def memory_proposal(
             peak = increase_stats.max * MEMORY_MAX_FACTOR
             if peak > target:
                 target, basis = peak, "observed_max"
+        if "oom_kills" in triggers:
+            # The kill proves usage reached the limit, even when the 30 s samples missed the spike.
+            floor = min(oom_proven_usage(summary) * MEMORY_MAX_FACTOR, request * max_increase_factor(config))
+            if floor > target:
+                target, basis = floor, "oom_limit"
         raw = _round_up_mib(target)
         if raw <= request:
             # The request already covers usage; only the limit is at risk, and a
@@ -415,10 +436,13 @@ def memory_proposal(
     if evidence or _memory_triggers(config, summary):
         # The container's own data contradicts its pod's: no decrease from it either (fail closed).
         return None
+    if summary.oom_kill_count or summary.restarts_in_window:
+        # A container OOM-killed or restarted in the window may have peaks the samples missed.
+        return None
 
     if stats.avg / request >= config.RIGHTSIZING_MEMORY_THRESHOLD or not _coverage_ok(config, summary):
         return None
-    raw = balanced_rightsizing_target(config, stats.avg, stats.max, stats.p95)
+    raw = _round_up_mib(balanced_rightsizing_target(config, stats.avg, stats.max, stats.p95))
     if policy == "memory_equals_request":
         # The limit will equal the request: it must still cover the observed maximum.
         raw = max(raw, _round_up_mib(stats.max * MEMORY_MAX_FACTOR))

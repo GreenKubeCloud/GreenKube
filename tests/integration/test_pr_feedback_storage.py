@@ -102,3 +102,9 @@ async def test_feedback_listing_validates_its_page(database):
     repository = _repository(database)
     with pytest.raises(ValueError):
         await repository.list_feedback_pull_requests(merged_since=NOW, limit=0)
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc).replace(microsecond=0))

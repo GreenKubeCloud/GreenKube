@@ -2,7 +2,8 @@
 """Recommendation API v2 (roadmap E4, E6, E7).
 
 Endpoints (prefix ``/api/v2``):
-  GET /recommendations        - Active recommendations in the v2 shape (?namespace=&status=&capability=&source=&limit=)
+  GET /recommendations        - Active recommendations in the v2 shape
+                                (?namespace=&status=&capability=&kind=&source=&limit=)
   GET /recommendations/{id}   - One recommendation with its revision history
 
 The v2 shape is built around the canonical target, a typed ``proposal``, the
@@ -36,7 +37,7 @@ from greenkube.api.dependencies import (
 from greenkube.api.routers.recommendations import _decide, _decision_request
 from greenkube.core.config import get_config
 from greenkube.core.optimization.registry import cluster_uid
-from greenkube.models.metrics import RecommendationRecord, RecommendationStatus
+from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.models.recommendation_v2 import RecommendationV2, to_v2
 from greenkube.signals.mapping import capability_for
 from greenkube.storage.base_gitops_repository import GitOpsRepository
@@ -74,7 +75,31 @@ def _status_values(status: Optional[List[str]]) -> Optional[List[str]]:
     return values or None
 
 
-def _matches(record: RecommendationRecord, capability: Optional[str], source: Optional[str]) -> bool:
+def _kind_values(kind: Optional[List[str]]) -> Optional[frozenset]:
+    """Finding kinds (the v1 types, case-insensitive) of the ``kind`` filter; ``422`` when unknown."""
+    if not kind:
+        return None
+    known = {item.value.upper(): item.value for item in RecommendationType}
+    values = set()
+    for item in kind:
+        for value in str(item).split(","):
+            value = value.strip()
+            if not value:
+                continue
+            if value.upper() not in known:
+                raise HTTPException(status_code=422, detail=f"Unknown recommendation kind '{value}'.")
+            values.add(known[value.upper()])
+    return frozenset(values) or None
+
+
+def _matches(
+    record: RecommendationRecord,
+    capability: Optional[str],
+    source: Optional[str],
+    kinds: Optional[frozenset] = None,
+) -> bool:
+    if kinds is not None and str(getattr(record.type, "value", record.type) or "") not in kinds:
+        return False
     if capability and capability not in (
         capability_for(record.type).value,
         str(getattr(record.capability, "value", record.capability) or ""),
@@ -97,6 +122,9 @@ async def list_recommendations_v2(
     capability: Optional[str] = Query(
         None, description="v2 capability (container_requests, schedule, cleanup...) or v1 capability."
     ),
+    kind: Optional[List[str]] = Query(
+        None, description="Finding kinds, the v1 types (RIGHTSIZING_CPU...); repeat or comma-separate."
+    ),
     source: Optional[str] = Query(None, description="Only recommendations this source supports."),
     limit: int = Query(100, ge=1, le=MAX_LIMIT),
     profile: Optional[str] = Query(None, description="Ranking profile of the expected value."),
@@ -109,11 +137,12 @@ async def list_recommendations_v2(
     """Recommendations in the v2 shape with their live expected value and eligibility."""
     decision = _decision_request(profile, carbon_price)
     statuses = _status_values(status)
+    kinds = _kind_values(kind)
     if statuses is None:
         records = await reco_repo.get_active_recommendations(namespace=namespace, include_pr_open=True)
     else:
         records = await reco_repo.get_recommendations_by_statuses(statuses, namespace=namespace)
-    records = [record for record in records if _matches(record, capability, source)]
+    records = [record for record in records if _matches(record, capability, source, kinds)]
     decided = await _decide(records, decision, reco_repo, gitops_repo, pr_repo, service)
     page = decided[:limit]
     queued = await reco_repo.get_queued_revisions([record.id for record in page if record.id is not None])

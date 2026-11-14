@@ -180,10 +180,35 @@ async def test_scan_signals_are_per_target_container_and_count_duplicates_once()
 
 
 @pytest.mark.asyncio
+async def test_restarts_in_the_window_are_read_per_container():
+    snapshot = _snapshot(_summary(API, "web"), _summary(API, "proxy"), _summary(API, ""))
+    query = FakeQuery(
+        {
+            "count(kube_pod_container_status_restarts_total)": [_series(3)],
+            "kube_pod_container_status_last_terminated_reason": [],
+            "round(increase(kube_pod_container_status_restarts_total{": [
+                _series(2, namespace="shop", pod="api-7d9f8b6c5d-abcde", container="web"),
+                _series(1, namespace="shop", pod="api-7d9f8b6c5d-fghij", container="web"),
+            ],
+        }
+    )
+
+    await attach_reliability_signals(snapshot, Config(), start=START, end=END, query=query, list_pods=_no_pods)
+
+    containers = snapshot.summaries[API]
+    assert containers["web"].restarts_in_window == 3
+    assert containers["proxy"].restarts_in_window == 0  # kube-state-metrics is scraped: a known zero
+    assert containers[""].restarts_in_window == 3
+    (restarts,) = [q for q in query.queries if "round(increase(kube_pod_container_status_restarts_total{" in q]
+    assert f"[{14 * 86400}s]" in restarts
+
+
+@pytest.mark.asyncio
 async def test_without_kube_state_metrics_oom_kills_stay_unknown():
     snapshot = _snapshot(_summary(STS, "prometheus"))
     await attach_reliability_signals(snapshot, Config(), start=START, end=END, query=FakeQuery({}), list_pods=_no_pods)
     assert snapshot.summaries[STS]["prometheus"].oom_kill_count is None
+    assert snapshot.summaries[STS]["prometheus"].restarts_in_window is None
     assert snapshot.summaries[STS]["prometheus"].throttling_ratio is None
 
 
@@ -292,3 +317,11 @@ def test_container_kinds_from_pod_specs_mark_native_sidecars_and_init_containers
     assert snapshot.summaries[API]["web"].container_kind == "container"
     assert snapshot.summaries[API]["proxy"].container_kind == "sidecar"
     assert snapshot.summaries[API][""].container_kind is None
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``END``/``START`` for each test: a wall-clock window taken at import ages during a long suite."""
+    end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    monkeypatch.setitem(globals(), "END", end)
+    monkeypatch.setitem(globals(), "START", end - timedelta(days=14))

@@ -5,7 +5,12 @@ consolidated proposal is compared with the stored one through
 :func:`~greenkube.models.recommendation_v2.advice_signature` (what the
 recommendation advises, without observed state, projections or wording):
 
-* same advice: the record is refreshed in place, its revision is unchanged;
+* same advice, no open plan: the record is refreshed in place, its revision is unchanged;
+* same advice under an open plan: the record is kept as the plan pinned it,
+  only its liveness (``expires_at``) is refreshed. Its typed action is shared
+  with the other recommendations of the workload bundle (a CPU and a memory
+  change of one container): rewriting it from a scan whose sibling advice
+  moved would make the members' copies diverge under the plan;
 * new advice, no open plan: the previous proposal is kept as a ``superseded``
   revision and the record moves to ``revision + 1``;
 * new advice under an open plan (``plan_ready``, ``pr_open``, ``merged``,
@@ -71,8 +76,9 @@ def prune_superseded_sql(placeholder) -> str:
 
 @dataclass(frozen=True)
 class RevisionDecision:
-    #: ``refresh`` (same advice), ``revise`` (new revision on the record) or ``queue`` (frozen record).
-    action: Literal["refresh", "revise", "queue"]
+    #: ``refresh`` (same advice), ``keep`` (same advice, frozen record: liveness only),
+    #: ``revise`` (new revision on the record) or ``queue`` (new advice, frozen record).
+    action: Literal["refresh", "keep", "revise", "queue"]
     #: Revision written on the record (refresh, revise) or of the queued advice (queue).
     revision: int
 
@@ -88,7 +94,7 @@ def decide(existing: RecommendationRecord, incoming: RecommendationRecord, *, fr
     """How an incoming proposal is written against the stored record."""
     current = max(1, int(existing.revision or 1))
     if advice_signature(existing) == advice_signature(incoming):
-        return RevisionDecision("refresh", current)
+        return RevisionDecision("keep" if frozen else "refresh", current)
     if frozen:
         return RevisionDecision("queue", current + 1)
     return RevisionDecision("revise", current + 1)

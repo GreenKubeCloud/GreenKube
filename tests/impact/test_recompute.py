@@ -267,3 +267,11 @@ def test_command_is_registered():
     assert result.exit_code == 0
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     assert "--since" in plain
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``T0`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(
+        globals(), "T0", datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=3)
+    )

@@ -25,7 +25,6 @@ from greenkube.models.metrics import Recommendation, RecommendationRecord, Recom
 from greenkube.storage.resource_binding_repository import StoredResourceBinding
 from tests.gitops.planning.test_raw_manifest import _source  # pyrefly: ignore[missing-import]
 
-NOW = datetime.now(timezone.utc)
 PV = ResourceTarget(api_version="v1", kind="PersistentVolume", namespace="", name="pv-orphan")
 ARGO = (ControllerKind.ARGOCD, "argocd", "payments-prod")
 POLICY = AutomationPolicyConfig(missing_evidence="warn", max_risk_level="high")
@@ -103,8 +102,13 @@ def _service(stored: StoredResourceBinding | None, record: RecommendationRecord 
     )
 
 
+def _now() -> datetime:
+    """The wall clock at test time (never at import: a long suite would age the bindings)."""
+    return datetime.now(timezone.utc)
+
+
 def _stored(
-    *, status: str = "resolved", location: Any = "default", observed_at: datetime = NOW
+    *, status: str = "resolved", location: Any = "default", age: timedelta = timedelta(0)
 ) -> StoredResourceBinding:
     binding = ResourceBinding(
         ref=PV,
@@ -113,7 +117,7 @@ def _stored(
         location=_source(evidence=HEALTHY) if location == "default" else location,
         prune=True,
     )
-    return StoredResourceBinding(binding=binding, observed_at=observed_at)
+    return StoredResourceBinding(binding=binding, observed_at=_now() - age)
 
 
 @pytest.mark.asyncio
@@ -135,15 +139,15 @@ async def test_a_cluster_scoped_deletion_resolves_its_source_from_the_resource_b
 @pytest.mark.parametrize(
     ("stored", "code", "message"),
     [
-        (None, AutomationErrorCode.AMBIGUOUS_BINDING, "not managed by an Argo CD Application"),
-        (_stored(status="ambiguous"), AutomationErrorCode.AMBIGUOUS_BINDING, "several GitOps controllers"),
-        (_stored(location=None), AutomationErrorCode.AMBIGUOUS_BINDING, "unresolved"),
-        (_stored(observed_at=NOW - timedelta(days=2)), AutomationErrorCode.SOURCE_CHANGED, "stale"),
+        (lambda: None, AutomationErrorCode.AMBIGUOUS_BINDING, "not managed by an Argo CD Application"),
+        (lambda: _stored(status="ambiguous"), AutomationErrorCode.AMBIGUOUS_BINDING, "several GitOps controllers"),
+        (lambda: _stored(location=None), AutomationErrorCode.AMBIGUOUS_BINDING, "unresolved"),
+        (lambda: _stored(age=timedelta(days=2)), AutomationErrorCode.SOURCE_CHANGED, "stale"),
     ],
 )
 async def test_unbound_ambiguous_or_stale_resources_fail_closed(stored, code, message) -> None:
     with pytest.raises(AutomationPlanError) as error:
-        await _service(stored)._resolve_request([9])
+        await _service(stored())._resolve_request([9])
     assert error.value.code is code
     assert message in error.value.detail
 
@@ -166,7 +170,7 @@ async def test_the_policy_evaluates_a_deletion_with_the_production_defaults() ->
     evaluator = AutomationPolicyEvaluator(
         config=AutomationPolicyConfig(max_risk_level="high"),
         plan_repository=cast(Any, _Policies()),
-        clock=lambda: NOW,
+        clock=_now,
     )
 
     result = await evaluator.evaluate([_record()], source)
@@ -183,7 +187,7 @@ async def test_an_unhealthy_controller_still_blocks_a_deletion() -> None:
     evaluator = AutomationPolicyEvaluator(
         config=AutomationPolicyConfig(max_risk_level="high"),
         plan_repository=cast(Any, _Policies()),
-        clock=lambda: NOW,
+        clock=_now,
     )
 
     result = await evaluator.evaluate([_record()], source)

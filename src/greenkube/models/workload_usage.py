@@ -166,6 +166,8 @@ class WorkloadUsageSummary:
     #: Reliability signals over the lookback, when a source provided them (None = unknown).
     #: Filled by scans from kube-state-metrics / cAdvisor (``greenkube.core.reliability_signals``).
     oom_kill_count: Optional[int] = None
+    #: Container restarts over the lookback (kube-state-metrics), 0 when it reports none, None when unknown.
+    restarts_in_window: Optional[int] = None
     throttling_ratio: Optional[float] = None
     #: Why the container is believed to run a JVM (``JAVA_TOOL_OPTIONS``, ``-Xmx``, image name), None when not.
     jvm_hint: Optional[str] = None

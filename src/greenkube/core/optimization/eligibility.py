@@ -66,6 +66,16 @@ PLANNED_ACTION_KINDS: Dict[str, Tuple[str, str]] = {
 DELIVERY_DIRECT = "direct"
 DELIVERY_MANUAL = "manual"
 
+#: ``action_unavailable`` worded for each action kind other than container resources (message, fix).
+ACTION_UNAVAILABLE_BY_KIND: Dict[str, Tuple[str, str]] = {
+    ACTION_DELETE_RESOURCE: (
+        "No typed deletion could be built for this recommendation: the stored delete_resource action does not "
+        "delete this recommendation's resource.",
+        "The next scan rebuilds the deletion once the resource is identified again; otherwise delete it by hand "
+        "after review and mark the recommendation as applied.",
+    ),
+}
+
 #: Policy gates evaluated locally (for every recommendation, with or without a binding).
 _LOCAL_GATES = frozenset({"maximum_risk", "minimum_confidence", "change_freeze_window", "sample_count_coverage"})
 #: Policy gates reported as warnings: an unapproved preview of the workload is reused or
@@ -637,7 +647,8 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
     if deletion:
         recommendation_ids, action_code = validate_deletion_action(record)
         if action_code:
-            blockers.append(_entry(action_code))
+            worded = ACTION_UNAVAILABLE_BY_KIND.get(action_kind) if action_code == "action_unavailable" else None
+            blockers.append(_entry(action_code, *(worded or (None, None))))
         # A person always reviews a deletion: the PR is offered, never auto-approved.
         warnings.append(_entry("deletion_reviewed_in_pr"))
     elif action_kind is None and rec_type in DELETION_TYPES:

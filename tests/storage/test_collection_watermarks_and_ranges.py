@@ -134,3 +134,11 @@ async def test_range_reads_are_half_open(database):
     assert [m.timestamp for m in containers] == [BASE]
     assert total == 1 and [m.timestamp for m in page] == [BASE]
     assert summary["row_count"] == 1
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``BASE`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(
+        globals(), "BASE", (datetime.now(timezone.utc) - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
+    )

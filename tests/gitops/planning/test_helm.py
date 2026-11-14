@@ -426,6 +426,32 @@ featureFlags:
         snapshot.close()
 
 
+def test_helm_values_receive_mebibytes_not_a_raw_byte_count():
+    """Wave-4 e2e: a byte-level memory proposal reached the Helm values as ``memory: '24114500'``."""
+    from greenkube.automation.actions.container_resources import build_container_resource_actions
+    from tests.automation.actions.test_container_resources_v2 import (  # pyrefly: ignore[missing-import]
+        _recommendation,
+    )
+
+    recommendation = _recommendation(current=128 * 1024**2, proposed=24114500)
+    built = build_container_resource_actions([recommendation])[recommendation.id or 0]
+    action = built.model_copy(update={"target": TARGET})
+    values_content = "app:\n  resources:\n    requests:\n      cpu: 100m\n      memory: 128Mi\n"
+    snapshot = _snapshot({**_CHART, "apps/prod/values.yaml": values_content})
+    planner = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner()))
+
+    try:
+        plan = planner.plan(action, _values_source(), snapshot, BASE_REVISION, mapping=_values_mapping())
+
+        planned_values = plan.files[0].content
+        assert planned_values is not None
+        assert "memory: 23Mi" in planned_values
+        assert "24114500" not in planned_values
+        assert "24114500" not in (plan.diff or "")
+    finally:
+        snapshot.close()
+
+
 def test_helm_values_planner_can_render_current_source_with_the_explicit_mapping():
     snapshot = _snapshot({**_CHART, "apps/prod/values.yaml": "app:\n  resources:\n    requests:\n      cpu: 300m\n"})
     planner = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner()))

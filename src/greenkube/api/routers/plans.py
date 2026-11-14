@@ -88,6 +88,28 @@ _DOMAIN_ERRORS: dict[AutomationErrorCode, tuple[int, str]] = {
     AutomationErrorCode.ROLLBACK_UNSUPPORTED: (422, "This plan cannot be reversed safely."),
     AutomationErrorCode.ROLLBACK_CONFLICT: (409, "The original plan or current source changed."),
 }
+#: Codes whose message is the planner's own explanation of the targeting, binding, source or
+#: render decision (written by GreenKube, redacted before it is returned). Provider, policy and
+#: chart-mapping errors keep their stable detail only: they have structured fields or may quote
+#: provider responses.
+_PUBLIC_REASON_CODES = frozenset(
+    {
+        AutomationErrorCode.PLAN_STALE,
+        AutomationErrorCode.PLAN_EXPIRED,
+        AutomationErrorCode.SOURCE_CHANGED,
+        AutomationErrorCode.REVISION_CONFLICT,
+        AutomationErrorCode.UNSUPPORTED_SOURCE,
+        AutomationErrorCode.AMBIGUOUS_BINDING,
+        AutomationErrorCode.RENDER_VALIDATION_FAILED,
+        AutomationErrorCode.NO_EFFECTIVE_CHANGE,
+        AutomationErrorCode.REQUIRES_CONTAINER_TARGET,
+        AutomationErrorCode.NOT_ACTIVE,
+        AutomationErrorCode.UNSAFE_PATH,
+        AutomationErrorCode.ROLLBACK_NOT_READY,
+        AutomationErrorCode.ROLLBACK_UNSUPPORTED,
+        AutomationErrorCode.ROLLBACK_CONFLICT,
+    }
+)
 _CANCELLABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanStatus.APPROVED})
 _MAX_PUBLIC_WARNINGS = 20
 _MAX_PUBLIC_WARNING_CHARS = 300
@@ -138,7 +160,7 @@ async def create_automation_plan(
                 values_mapping=request.values_mapping.model_dump(mode="python"),
             )
     except AutomationPlanError as error:
-        return _domain_error_response(error)
+        return _domain_error_response(error, with_reason=True)
     policy = AutoApprovePolicy.from_config(get_config())
     if not policy.enabled:
         return _plan_response(plan)
@@ -204,7 +226,7 @@ async def preview_automation_plan_rollback(
     try:
         plan = await service.prepare_rollback(plan_id)
     except AutomationPlanError as error:
-        return _domain_error_response(error)
+        return _domain_error_response(error, with_reason=True)
     return _plan_response(plan)
 
 
@@ -377,28 +399,39 @@ def _public_warnings(warnings: list[str]) -> list[str]:
     for warning in warnings[:_MAX_PUBLIC_WARNINGS]:
         if not isinstance(warning, str):
             continue
-        text = _CONTROL_CHARACTERS.sub(" ", warning)
-        text = _URL_CREDENTIALS.sub(r"\g<scheme>[redacted]@", text)
-        text = _URL_QUERY.sub(r"\g<url>?[redacted]", text)
-        text = _SECRET_ASSIGNMENT.sub(r"\g<key>\g<separator>[redacted]", text)
-        text = _PROVIDER_TOKEN.sub("[redacted]", text).strip()
-        if len(text) > _MAX_PUBLIC_WARNING_CHARS:
-            text = text[: _MAX_PUBLIC_WARNING_CHARS - 3] + "..."
+        text = _public_text(warning)
         if text:
             public.append(text)
     return public
 
 
-def _domain_error_response(error: AutomationPlanError) -> JSONResponse:
+def _public_text(value: str) -> str:
+    """``value`` with credentials, query strings and tokens redacted, on one line and bounded."""
+    text = _CONTROL_CHARACTERS.sub(" ", value)
+    text = _URL_CREDENTIALS.sub(r"\g<scheme>[redacted]@", text)
+    text = _URL_QUERY.sub(r"\g<url>?[redacted]", text)
+    text = _SECRET_ASSIGNMENT.sub(r"\g<key>\g<separator>[redacted]", text)
+    text = _PROVIDER_TOKEN.sub("[redacted]", text).strip()
+    if len(text) > _MAX_PUBLIC_WARNING_CHARS:
+        text = text[: _MAX_PUBLIC_WARNING_CHARS - 3] + "..."
+    return text
+
+
+def _domain_error_response(error: AutomationPlanError, *, with_reason: bool = False) -> JSONResponse:
+    """The stable error body; ``with_reason`` adds the planner's redacted explanation (plan creation, preview)."""
     status_code, detail = _DOMAIN_ERRORS.get(
         error.code,
         (422, "The automation plan request could not be completed."),
     )
     mapping_options = error.mapping_options if error.code is AutomationErrorCode.NEEDS_CHART_MAPPING else None
+    reason = None
+    if with_reason and error.code in _PUBLIC_REASON_CODES and isinstance(error.detail, str):
+        reason = _public_text(error.detail) or None
     return _error_response(
         status_code,
         error.code.value,
         detail,
+        reason=reason,
         policy_result=error.policy_result,
         mapping_options=mapping_options,
     )
@@ -413,12 +446,14 @@ def _error_response(
     code: str,
     detail: str,
     *,
+    reason: str | None = None,
     policy_result: dict[str, Any] | None = None,
     mapping_options: dict[str, list[str]] | None = None,
 ) -> JSONResponse:
     body = AutomationPlanErrorResponse(
         code=code,
         detail=detail,
+        reason=reason,
         policy_result=policy_result,
         mapping_options=mapping_options,
     ).model_dump(mode="json", exclude_none=True)

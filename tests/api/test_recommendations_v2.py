@@ -124,6 +124,49 @@ class TestListV2:
         assert [item["id"] for item in response.json()["items"]] == [12]
         mock_reco_repo.get_recommendations_by_statuses.assert_awaited_with(["active", "applied"], namespace=None)
 
+    def test_filters_by_kind(self, client, mock_reco_repo):
+        memory = _record(
+            id=13,
+            type=RecommendationType.RIGHTSIZING_MEMORY,
+            recommended_cpu_request_millicores=None,
+            current_cpu_request_millicores=None,
+            recommended_memory_request_bytes=256 * 1024 * 1024,
+            current_memory_request_bytes=512 * 1024 * 1024,
+            consensus=None,
+        )
+        pv = _record(
+            id=14,
+            type=RecommendationType.ORPHANED_PERSISTENT_VOLUME,
+            pod_name="pv-1",
+            scope="cluster",
+            owner_kind=None,
+            owner_name=None,
+            container_name=None,
+            recommended_cpu_request_millicores=None,
+            current_cpu_request_millicores=None,
+            consensus=None,
+        )
+        mock_reco_repo.get_active_recommendations = AsyncMock(return_value=[_record(), memory, pv])
+        mock_reco_repo.get_queued_revisions = AsyncMock(return_value={})
+
+        memory_only = client.get("/api/v2/recommendations", params={"kind": "RIGHTSIZING_MEMORY"})
+        rightsizing = client.get("/api/v2/recommendations", params={"kind": "rightsizing_cpu,RIGHTSIZING_MEMORY"})
+        repeated = client.get(
+            "/api/v2/recommendations", params=[("kind", "ORPHANED_PERSISTENT_VOLUME"), ("kind", "RIGHTSIZING_CPU")]
+        )
+
+        assert memory_only.status_code == 200
+        assert [item["id"] for item in memory_only.json()["items"]] == [13]
+        assert memory_only.json()["total"] == 1
+        assert sorted(item["id"] for item in rightsizing.json()["items"]) == [12, 13]
+        assert sorted(item["id"] for item in repeated.json()["items"]) == [12, 14]
+
+    def test_unknown_kind_is_rejected(self, client):
+        response = client.get("/api/v2/recommendations", params={"kind": "NOT_A_KIND"})
+
+        assert response.status_code == 422
+        assert "NOT_A_KIND" in response.text
+
     def test_unknown_status_is_rejected(self, client):
         assert client.get("/api/v2/recommendations", params={"status": "maybe"}).status_code == 422
 
