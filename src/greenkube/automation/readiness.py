@@ -199,8 +199,39 @@ def infer_well_known(host: str) -> ProviderInference | None:
     return ProviderInference(provider_type, None, "host") if provider_type else None
 
 
+def probe_allowed(base_url: str) -> bool:
+    """Whether an unauthenticated provider probe may be sent to ``base_url`` (security hardening).
+
+    The hosts come from GitOps sources (Argo CD Applications, Flux sources) that
+    anyone able to create one controls, so the probe is restricted: HTTPS only,
+    and never to a literal loopback, link-local (cloud metadata), multicast or
+    unspecified address. A plain-HTTP self-hosted provider is configured
+    explicitly (``automation.providers``) instead of inferred.
+    """
+    import ipaddress
+
+    try:
+        parts = urlsplit(base_url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host != "localhost" and not host.endswith(".localhost")
+    return not (address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified)
+
+
 async def probe_provider_host(base_url: str, *, timeout: float = PROBE_TIMEOUT_SECONDS) -> ProviderInference | None:
-    """Identify a self-hosted GitLab (``/api/v4/version``) or Gitea (``/api/v1/version``)."""
+    """Identify a self-hosted GitLab (``/api/v4/version``) or Gitea (``/api/v1/version``) over HTTPS.
+
+    Refused without a request when :func:`probe_allowed` says so.
+    """
+    if not probe_allowed(base_url):
+        logger.info("Not probing %s for a Git provider: only public HTTPS hosts are probed.", base_url)
+        return None
     import httpx
 
     base = base_url.rstrip("/")

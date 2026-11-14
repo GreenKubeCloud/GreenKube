@@ -37,7 +37,9 @@ serves, the reconciler infers a provider named `inferred-<host>`:
 - a self-hosted host is probed at `<scheme>://<host>/api/v4/version` (GitLab answers, `401` without a token) and
   `/api/v1/version` (Gitea); a success is cached, a failure retried after 10 minutes. The probe is an
   unauthenticated GET from the controller to a host a discovered source names: it carries no credential and
-  follows no redirect; restrict the controller egress to your Git hosts if outbound requests matter to you;
+  follows no redirect; restrict the controller egress to your Git hosts if outbound requests matter to you.
+  Only `https://` hosts are probed, never a literal loopback, link-local (cloud metadata), multicast or
+  unspecified address: a plain-HTTP self-hosted Gitea or GitLab is declared in `automation.providers`;
 - an unidentified host stays dormant with `provider_unknown`: declare it explicitly.
 
 Inferred providers read the Secret `automation.credentialsSecret` (default `greenkube-git-credentials`), key
