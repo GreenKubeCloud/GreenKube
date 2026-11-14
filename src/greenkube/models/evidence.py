@@ -114,6 +114,9 @@ class RecommendationEvidence(BaseModel):
     observation_window_start: Optional[datetime] = None
     observation_window_end: Optional[datetime] = None
     observation_window_seconds: Optional[float] = None
+    #: First sample of the target inside the observation window (H1: exposure of the OOM baseline);
+    #: None when unknown (evidence stored before it was recorded).
+    first_observed_at: Optional[datetime] = None
     sample_count: int = 0
     coverage_ratio: float = 1.0
     current: ResourceSnapshot = Field(default_factory=ResourceSnapshot)
