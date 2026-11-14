@@ -6,6 +6,7 @@ import { act, fireEvent, render, screen } from '@testing-library/svelte';
 import RecommendationsPage from '../../src/routes/recommendations/+page.svelte';
 import * as api from '$lib/api.js';
 import { resetOptimizationRunsSupport } from '$lib/optimizationRuns.js';
+import { currentUser } from '$lib/stores.js';
 
 vi.mock('$lib/api.js', () => ({
 	discardAutomationPlan: vi.fn(),
@@ -514,7 +515,11 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			});
 
 			expect(api.getOpenPullRequests).toHaveBeenCalledTimes(2);
-			expect(screen.getByRole('button', { name: 'Pull requests 1' })).toBeInTheDocument();
+			// The open pull requests live on the changes board (K4): the tab is a link there.
+			const changesLink = screen.getByTestId('changes-link');
+			expect(changesLink).toHaveAttribute('href', '/changes');
+			expect(changesLink).toHaveTextContent('Pull requests 1');
+			expect(screen.queryByRole('button', { name: /Pull requests/ })).not.toBeInTheDocument();
 		} finally {
 			await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 			vi.clearAllTimers();
@@ -967,5 +972,85 @@ describe('RecommendationsPage one-click Open PR, delivery modes and warm-up (F4,
 		render(RecommendationsPage);
 
 		expect(await screen.findByTestId('warm-up-eta')).toHaveTextContent('Collecting evidence — eligible in ~31h');
+	});
+});
+
+describe('RecommendationsPage role gating (viewer, write without approve)', () => {
+	const VIEWER = { kind: 'user', name: 'vera', role: 'viewer', scopes: ['read', 'metrics:read'] };
+	const WRITER_KEY = { kind: 'apikey', name: 'ci', role: null, scopes: ['read', 'write'] };
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		resetOptimizationRunsSupport();
+		api.discardAutomationPlan.mockResolvedValue({ discarded: true, status: 204 });
+		api.getNamespaces.mockResolvedValue(['production']);
+		api.listOptimizationRuns.mockResolvedValue([]);
+		api.getAppliedRecommendations.mockResolvedValue([]);
+		api.getIgnoredRecommendations.mockResolvedValue([{ ...recommendation, id: 202, pod_name: 'ignored-0', status: 'ignored' }]);
+		api.getOpenPullRequests.mockResolvedValue([]);
+		api.getRecommendationSavings.mockResolvedValue({});
+		api.getAutomationStatus.mockResolvedValue({ enabled: true, ready: true, delivery_mode: 'direct' });
+		api.getAutomationPlan.mockResolvedValue(validatedPlan);
+		api.getActiveRecommendations.mockResolvedValue([actionReadyRecommendation([101])]);
+	});
+
+	it('hides Open PR, Ignore, Restore and Rescan from a viewer and explains why', async () => {
+		currentUser.set(VIEWER);
+		render(RecommendationsPage);
+
+		expect(await screen.findByTestId('read-only-hint')).toHaveTextContent('Read-only access (viewer)');
+		expect(screen.queryByRole('button', { name: 'Open PR' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Ignore' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: /Rescan/ })).not.toBeInTheDocument();
+
+		await fireEvent.click(screen.getByRole('button', { name: /^Ignored/ }));
+		expect(await screen.findByText('ignored-0')).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: /Restore/ })).not.toBeInTheDocument();
+	});
+
+	it('shows the actions to an operator without the read-only hint', async () => {
+		render(RecommendationsPage);
+
+		expect(await screen.findByRole('button', { name: 'Open PR' })).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: 'Ignore' })).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: /Rescan/ })).toBeInTheDocument();
+		expect(screen.queryByTestId('read-only-hint')).not.toBeInTheDocument();
+	});
+
+	it('does not offer the approval to a principal without the approve scope', async () => {
+		currentUser.set(WRITER_KEY);
+		api.createAutomationPlan.mockResolvedValueOnce({ ...validatedPlan, auto_approved: false, auto_approve_blockers: [] });
+		render(RecommendationsPage);
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+
+		expect(await screen.findByTestId('approve-read-only')).toHaveTextContent('approve scope');
+		expect(screen.queryByRole('button', { name: 'Approve and open PR' })).not.toBeInTheDocument();
+	});
+
+	it('honours a plan that says the requester may not approve it', async () => {
+		api.createAutomationPlan.mockResolvedValueOnce({ ...validatedPlan, may_approve: false });
+		render(RecommendationsPage);
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+
+		expect(await screen.findByTestId('approve-read-only')).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Approve and open PR' })).not.toBeInTheDocument();
+	});
+
+	it('labels the increase auto-approval blockers', async () => {
+		api.createAutomationPlan.mockResolvedValueOnce({
+			...validatedPlan,
+			auto_approved: false,
+			auto_approve_blockers: ['increase_without_native_evidence', 'increase_requires_approval']
+		});
+		render(RecommendationsPage);
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));
+
+		const note = await screen.findByTestId('auto-approve-note');
+		expect(note).toHaveTextContent("an increase is only approved automatically when GreenKube's own analyzer sized it");
+		expect(note).toHaveTextContent('request increases need automation.autoApprove.increases');
+		expect(note).not.toHaveTextContent('increase_without_native_evidence');
 	});
 });

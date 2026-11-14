@@ -1,5 +1,5 @@
 <script>
-	import { selectedNamespace } from '$lib/stores.js';
+	import { currentUser, hasScope, selectedNamespace } from '$lib/stores.js';
 	import { onDestroy, onMount } from 'svelte';
 	import {
 		getActiveRecommendations,
@@ -58,6 +58,10 @@
 	let error = null;
 
 	let activeTab = 'active'; // 'active' | 'ignored' | 'savings'
+	// Mutating actions need the write scope and approvals the approve scope:
+	// a viewer sees the recommendations without buttons that would end in 403.
+	$: canWrite = hasScope($currentUser, 'write');
+	$: canApprove = hasScope($currentUser, 'approve');
 	let filterType = 'all';
 	let expandedApplied = new Set(); // ids of expanded applied cards
 	let expandedEvidence = new Set(); // ids of active cards showing the evidence panel
@@ -476,6 +480,10 @@
 		confidence_below_auto_approve: 'the confidence is below the auto-approval limit',
 		consensus_contested: 'sources disagree (contested advice is never approved automatically)',
 		decrease_without_native_evidence: 'a decrease needs GreenKube evidence or two agreeing sources',
+		increase_without_native_evidence: "an increase is only approved automatically when GreenKube's own analyzer sized it",
+		increase_requires_approval: 'request increases need automation.autoApprove.increases',
+		deletion_requires_review: 'a deletion is always approved by a person',
+		auto_approve_failed: 'the automatic approval failed (approve it by hand)',
 		not_active: 'a recommendation is not active',
 		recommendation_missing: 'a recommendation could not be read',
 		rollback_plan: 'rollbacks are always approved by a person',
@@ -1721,7 +1729,7 @@
 
 			<div class="flex gap-3 justify-end pt-1">
 				<button class="btn-secondary text-xs" on:click={closePrModal}>Close</button>
-				{#if canCancelPlan(prPlan)}
+				{#if canWrite && canCancelPlan(prPlan)}
 					<button
 						class="btn-secondary text-xs disabled:opacity-50"
 						disabled={prLoading}
@@ -1730,7 +1738,7 @@
 						{prLoading ? 'Cancelling…' : 'Cancel plan'}
 					</button>
 				{/if}
-				{#if canReplan(prPlan)}
+				{#if canWrite && canReplan(prPlan)}
 					<button
 						class="btn-secondary text-xs disabled:opacity-50"
 						disabled={prLoading}
@@ -1739,7 +1747,7 @@
 						Re-plan
 					</button>
 				{/if}
-				{#if canPreviewRollback(prPlan)}
+				{#if canWrite && canPreviewRollback(prPlan)}
 					<button
 						class="btn-secondary text-xs disabled:opacity-50"
 						disabled={prLoading}
@@ -1748,7 +1756,7 @@
 						{prLoading ? 'Preparing rollback…' : 'Preview rollback'}
 					</button>
 				{/if}
-				{#if prPlan && canApprovePlan(prPlan) && !planApprovalBlocked && !planApproval}
+				{#if prPlan && canApprove && prPlan?.may_approve !== false && canApprovePlan(prPlan) && !planApprovalBlocked && !planApproval}
 					<button
 						class="btn-primary text-xs flex items-center gap-2 disabled:opacity-50"
 						disabled={prLoading}
@@ -1757,6 +1765,10 @@
 						{#if prLoading}<span class="animate-spin">⟳</span>{/if}
 						{approveLabel()}
 					</button>
+				{:else if prPlan && (!canApprove || prPlan?.may_approve === false) && canApprovePlan(prPlan) && !planApprovalBlocked && !planApproval}
+					<p class="self-center text-xs text-dark-400" data-testid="approve-read-only">
+						Approving a plan needs the approve scope (operator or admin).
+					</p>
 				{/if}
 			</div>
 		</div>
@@ -1786,16 +1798,25 @@
 					{/each}
 				</select>
 			</label>
-			<button
-				class="btn-secondary text-xs disabled:opacity-50"
-				disabled={scanPending}
-				title="Run a new recommendation scan and reload the results when it completes"
-				on:click={rescan}
-			>
-				{scanPending ? '⟳ Scanning…' : '↻ Rescan'}
-			</button>
+			{#if canWrite}
+				<button
+					class="btn-secondary text-xs disabled:opacity-50"
+					disabled={scanPending}
+					title="Run a new recommendation scan and reload the results when it completes"
+					on:click={rescan}
+				>
+					{scanPending ? '⟳ Scanning…' : '↻ Rescan'}
+				</button>
+			{/if}
 		</div>
 	</div>
+
+	{#if !canWrite}
+		<p class="rounded-lg border border-dark-700 bg-dark-900 px-3 py-2 text-xs text-dark-400" role="note" data-testid="read-only-hint">
+			Read-only access{$currentUser?.role ? ` (${$currentUser.role})` : ''}: you can review recommendations and their
+			evidence. Opening pull requests, ignoring, restoring and rescanning need an operator or admin.
+		</p>
+	{/if}
 
 	{#if scanError}
 		<div class="card text-sm text-amber-300" role="alert">{scanError}</div>
@@ -1902,17 +1923,19 @@
 				{actionableActiveRecs.length}
 			</span>
 		</button>
-		<button
-			class="px-4 py-2 rounded-lg text-sm font-medium transition-colors
-			       {activeTab === 'pull-requests' ? 'bg-dark-700 text-dark-100' : 'text-dark-500 hover:text-dark-300'}"
-			on:click={() => switchTab('pull-requests')}
+		<!-- Pull requests live on the changes board (K4): a link, not a second list. -->
+		<a
+			class="px-4 py-2 rounded-lg text-sm font-medium transition-colors text-dark-500 hover:text-dark-300"
+			href="/changes"
+			title="Pull requests and their sync, apply and measurement stages are on the Changes board"
+			data-testid="changes-link"
 		>
 			Pull requests
-			<span class="ml-1.5 text-xs px-1.5 py-0.5 rounded-full
-			             {activeTab === 'pull-requests' ? 'bg-blue-600/20 text-blue-400' : 'bg-dark-700 text-dark-500'}">
+			<span class="ml-1.5 text-xs px-1.5 py-0.5 rounded-full bg-dark-700 text-dark-500">
 				{openPullRequests.length}
 			</span>
-		</button>
+			<span aria-hidden="true">→</span>
+		</a>
 		<button
 			class="px-4 py-2 rounded-lg text-sm font-medium transition-colors
 			       {activeTab === 'ignored' ? 'bg-dark-700 text-dark-100' : 'text-dark-500 hover:text-dark-300'}"
@@ -2161,43 +2184,6 @@
 				</div>
 			{/if}
 
-		{:else if activeTab === 'pull-requests'}
-			<div class="space-y-3">
-				<div>
-					<h2 class="text-sm font-semibold text-dark-300">Open pull requests</h2>
-					<p class="text-xs text-dark-500 mt-1">
-						Recommendations with a pending or open pull request are kept here until the PR is closed.
-					</p>
-					{#if $selectedNamespace || serverFiltersActive}
-						<p class="text-xs text-dark-500 mt-1">Pull requests are listed for all namespaces and sources.</p>
-					{/if}
-				</div>
-				{#if openPullRequests.length}
-					<div class="space-y-2">
-						{#each openPullRequests as pr (pr.id)}
-							<div class="card flex flex-col sm:flex-row sm:items-center gap-3">
-								<div class="flex-1 min-w-0">
-									<div class="flex items-center gap-2 flex-wrap">
-										<span class="text-sm font-semibold text-dark-100">Recommendation #{pr.recommendation_id}</span>
-										<span class="text-[10px] px-2 py-0.5 rounded-sm bg-blue-600/20 text-blue-400">{pr.status}</span>
-									</div>
-									<p class="text-xs text-dark-500 mt-1">
-										{pr.provider} · {pr.repo} · {pr.head_branch}
-									</p>
-								</div>
-								{#if pr.pr_url}
-									<a class="text-xs text-blue-400 hover:text-blue-300 underline break-all" href={pr.pr_url} target="_blank" rel="noreferrer">
-										View PR
-									</a>
-								{/if}
-							</div>
-						{/each}
-					</div>
-				{:else}
-					<div class="card text-sm text-dark-500">No pending or open pull requests.</div>
-				{/if}
-			</div>
-
 		<!-- ═══ ACTIVE / IGNORED TABS ════════════════════════════════════════════ -->
 		{:else}
 			<!-- Potential savings summary (active only) -->
@@ -2351,7 +2337,7 @@
 												</div>
 											{/if}
 											{#if activeTab === 'active'}
-												{#if canPreviewRecommendation(rec)}
+												{#if canWrite && canPreviewRecommendation(rec)}
 													<button
 														class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
 														       hover:border-green-600/50 hover:text-green-400 transition-colors"
@@ -2375,13 +2361,15 @@
 													href="/recommendations/{rec.id}#manual"
 													data-testid="apply-manually"
 												>Apply manually</a>
-												<button
-													class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
-													       hover:border-yellow-600/50 hover:text-yellow-400 transition-colors"
-													title="Ignore this recommendation"
-													on:click={() => openIgnoreModal(rec)}
-												>Ignore</button>
-											{:else}
+												{#if canWrite}
+													<button
+														class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
+														       hover:border-yellow-600/50 hover:text-yellow-400 transition-colors"
+														title="Ignore this recommendation"
+														on:click={() => openIgnoreModal(rec)}
+													>Ignore</button>
+												{/if}
+											{:else if canWrite}
 												<button
 													class="text-xs px-3 py-1.5 rounded-lg border border-dark-600 text-dark-400
 													       hover:border-green-600/50 hover:text-green-400 transition-colors disabled:opacity-40"

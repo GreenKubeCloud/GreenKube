@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import ManualApplyPanel from '../../../src/lib/components/ManualApplyPanel.svelte';
 import * as api from '$lib/api.js';
+import { currentUser } from '$lib/stores.js';
 
 vi.mock('$lib/api.js', () => ({
 	getManualGuide: vi.fn(),
@@ -42,6 +43,16 @@ describe('ManualApplyPanel', () => {
 		expect(api.getManualGuide).toHaveBeenCalledWith(6);
 		expect(await screen.findByText('kubectl delete persistentvolume pv-orphan')).toBeTruthy();
 		expect(screen.getByText(/cannot be undone/)).toBeTruthy();
+	});
+
+	it('shows a viewer the steps without "Mark as applied" (a write)', async () => {
+		currentUser.set({ kind: 'user', name: 'vera', role: 'viewer', scopes: ['read'] });
+		vi.mocked(api.getManualGuide).mockResolvedValue(deleteGuide);
+		render(ManualApplyPanel, { props: { recommendationId: 6, open: true } });
+
+		expect(await screen.findByTestId('manual-read-only')).toBeTruthy();
+		expect(screen.getByText('kubectl delete persistentvolume pv-orphan')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Mark as applied' })).toBeNull();
 	});
 
 	it('marks the recommendation applied after a confirmation', async () => {

@@ -1,5 +1,6 @@
 <script>
 	import { onMount } from 'svelte';
+	import { currentUser, hasScope } from '$lib/stores.js';
 	import DataState from '$lib/components/DataState.svelte';
 	import ControllerFamilyCard from '$lib/components/automation/ControllerFamilyCard.svelte';
 	import { groupControllerFamilies } from '$lib/components/automation/gitopsControllers.js';
@@ -43,6 +44,8 @@
 
 	let loading = true;
 	let refreshingDiscovery = false;
+	// Refreshing discovery and resolving bindings are writes (403 for a viewer).
+	$: canWrite = hasScope($currentUser, 'write');
 	let pageError = '';
 	let discoveryRefreshError = '';
 	let discoveryRefreshSuccess = '';
@@ -493,15 +496,33 @@
 				Review workload source candidates, approve expiring manual bindings, and check plan automation readiness.
 			</p>
 		</div>
-		<button
-			type="button"
-			class="shrink-0 self-start rounded-lg border border-dark-700 px-3 py-2 text-sm text-dark-300 hover:bg-dark-800 disabled:opacity-50"
-			disabled={loading || refreshingDiscovery}
-			on:click={refreshDiscovery}
-		>
-			{loading || refreshingDiscovery ? 'Refreshing…' : 'Refresh discovery & operations'}
-		</button>
+		{#if canWrite}
+			<button
+				type="button"
+				class="shrink-0 self-start rounded-lg border border-dark-700 px-3 py-2 text-sm text-dark-300 hover:bg-dark-800 disabled:opacity-50"
+				disabled={loading || refreshingDiscovery}
+				on:click={refreshDiscovery}
+			>
+				{loading || refreshingDiscovery ? 'Refreshing…' : 'Refresh discovery & operations'}
+			</button>
+		{:else}
+			<button
+				type="button"
+				class="shrink-0 self-start rounded-lg border border-dark-700 px-3 py-2 text-sm text-dark-300 hover:bg-dark-800 disabled:opacity-50"
+				disabled={loading}
+				on:click={loadOperations}
+			>
+				{loading ? 'Reloading…' : 'Reload'}
+			</button>
+		{/if}
 	</header>
+
+	{#if !canWrite}
+		<p class="rounded-lg border border-dark-700 bg-dark-900 px-3 py-2 text-xs text-dark-400" role="note" data-testid="read-only-hint">
+			Read-only access{$currentUser?.role ? ` (${$currentUser.role})` : ''}: refreshing discovery and resolving
+			bindings need an operator or admin.
+		</p>
+	{/if}
 
 	<DataState
 		{loading}
@@ -605,7 +626,11 @@
 										</p>
 									{/if}
 
-									{#if binding.canResolve}
+									{#if binding.canResolve && !canWrite}
+										<p class="text-sm text-dark-400" data-testid="resolve-read-only">
+											An operator or admin can resolve this binding by choosing its GitOps source.
+										</p>
+									{:else if binding.canResolve}
 										<div class="space-y-3">
 											<label
 												for={`candidate-${binding.key}`}
