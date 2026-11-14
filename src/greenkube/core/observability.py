@@ -556,6 +556,28 @@ def record_automation_failure(reason: str) -> None:
     AUTOMATION_FAILURES.labels(reason=_bounded_label(reason, _FAILURE_REASONS, "other")).inc()
 
 
+def audit_pull_request_detachment(
+    event: str,
+    *,
+    provider_id: str | None,
+    repo: str | None,
+    record_ids: list[int],
+    reason: str | None,
+) -> None:
+    """Emit the audit event of plan pull-request records detached from (or reattached to) polling."""
+    safe_event = event if event in {"pull_request_records_detached", "pull_request_records_reattached"} else "other"
+    _AUDIT_LOG.info(
+        safe_event,
+        extra={
+            "audit_event": safe_event,
+            "provider_id": provider_id,
+            "repo": repo,
+            "record_ids": record_ids,
+            "reason": reason,
+        },
+    )
+
+
 def record_pull_request_state(state: str, provider: str) -> None:
     PULL_REQUESTS.labels(
         state=_bounded_label(state, _PR_STATES, "unknown"),
