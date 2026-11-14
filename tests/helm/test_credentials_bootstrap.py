@@ -512,3 +512,168 @@ def test_initial_admin_only_mode_needs_no_release_secret():
     assert settings.secret_name == ""
     assert settings.initial_admin_secret == "gk-initial-admin"
     assert settings.initial_admin_username == "admin"
+
+
+# --------------------------------------------------------------------------- #
+# Scrape token copy for a ServiceMonitor namespace                             #
+# --------------------------------------------------------------------------- #
+# Prometheus Operator reads a ServiceMonitor's bearer token Secret in the
+# ServiceMonitor's own namespace, so with monitoring.serviceMonitor.namespace
+# set elsewhere the hook mirrors the scrape token there.
+
+
+class CopyApi:
+    """Secret store of one namespace with optimistic concurrency."""
+
+    def __init__(self, secrets: dict[str, dict[str, str]] | None = None):
+        self.secrets: dict[str, dict] = {
+            name: {"metadata": {"name": name, "resourceVersion": "1"}, "data": {k: _b64(v) for k, v in data.items()}}
+            for name, data in (secrets or {}).items()
+        }
+        self.writes: list[tuple[str, dict]] = []
+        self.patch_conflicts = 0
+
+    def read_secret(self, name):
+        secret = self.secrets.get(name)
+        return json.loads(json.dumps(secret)) if secret else None
+
+    def create_secret(self, body):
+        self.writes.append(("create", body))
+        name = body["metadata"]["name"]
+        if name in self.secrets:
+            raise bootstrap.ConflictError("exists")
+        self.secrets[name] = {**body, "metadata": {**body["metadata"], "resourceVersion": "1"}}
+
+    def patch_secret(self, name, body):
+        self.writes.append(("patch", body))
+        stored = self.secrets[name]
+        if self.patch_conflicts:
+            self.patch_conflicts -= 1
+            stored["metadata"]["resourceVersion"] = str(int(stored["metadata"]["resourceVersion"]) + 1)
+            raise bootstrap.ConflictError("changed")
+        assert body["metadata"]["resourceVersion"] == stored["metadata"]["resourceVersion"]
+        stored["data"] = {**stored.get("data", {}), **body["data"]}
+
+    def pvc_exists(self, name):  # pragma: no cover - unused by the copy
+        return False
+
+
+def _copy_settings(**overrides):
+    values = {
+        "scrape_token_namespace": "monitoring",
+        "scrape_token_secret": "gk-scrape-token",
+        "scrape_token_source": "greenkube",
+        "scrape_token_source_key": "GREENKUBE_METRICS_TOKEN",
+    }
+    values.update(overrides)
+    return _settings(**values)
+
+
+def test_copies_the_scrape_token_into_the_servicemonitor_namespace():
+    source = CopyApi({"greenkube": {"GREENKUBE_METRICS_TOKEN": "tok", "POSTGRES_PASSWORD": "pw"}})
+    target = CopyApi()
+
+    message = bootstrap.ensure_scrape_token_copy(source, target, _copy_settings())
+
+    assert message == "Created Secret gk-scrape-token in namespace monitoring with the scrape token"
+    body = target.secrets["gk-scrape-token"]
+    assert _plain(body) == {"token": "tok"}, "only the scrape token leaves the release namespace"
+    labels = body["metadata"]["labels"]
+    assert labels["app.kubernetes.io/component"] == "scrape-token"
+    assert "app.kubernetes.io/instance" not in labels
+    assert source.writes == []
+
+
+def test_the_scrape_token_copy_is_stable_across_upgrades():
+    source = CopyApi({"greenkube": {"GREENKUBE_METRICS_TOKEN": "tok"}})
+    target = CopyApi({"gk-scrape-token": {"token": "tok"}})
+
+    message = bootstrap.ensure_scrape_token_copy(source, target, _copy_settings())
+
+    assert "already holds the scrape token" in message
+    assert target.writes == []
+
+
+def test_the_scrape_token_copy_follows_a_rotated_source():
+    source = CopyApi({"greenkube": {"GREENKUBE_METRICS_TOKEN": "new"}})
+    target = CopyApi({"gk-scrape-token": {"token": "old"}})
+    target.patch_conflicts = 1
+
+    message = bootstrap.ensure_scrape_token_copy(source, target, _copy_settings())
+
+    assert message == "Updated Secret gk-scrape-token in namespace monitoring with the scrape token"
+    assert _plain(target.secrets["gk-scrape-token"]) == {"token": "new"}
+
+
+@pytest.mark.parametrize("secrets", [{}, {"greenkube": {"GREENKUBE_API_KEY": "admin"}}])
+def test_refuses_to_copy_a_missing_scrape_token(secrets):
+    target = CopyApi()
+
+    with pytest.raises(bootstrap.BootstrapError, match="GREENKUBE_METRICS_TOKEN"):
+        bootstrap.ensure_scrape_token_copy(CopyApi(secrets), target, _copy_settings())
+    assert target.writes == []
+
+
+def test_settings_from_env_reads_the_scrape_token_copy():
+    settings = bootstrap.Settings.from_env(
+        {
+            "GREENKUBE_NAMESPACE": "gk",
+            "GREENKUBE_SCRAPE_TOKEN_NAMESPACE": "monitoring",
+            "GREENKUBE_SCRAPE_TOKEN_SECRET": "gk-scrape-token",
+            "GREENKUBE_SCRAPE_TOKEN_SOURCE": "my-creds",
+        }
+    )
+
+    assert settings.secret_name == ""
+    assert settings.scrape_token_namespace == "monitoring"
+    assert settings.scrape_token_secret == "gk-scrape-token"
+    assert settings.scrape_token_source == "my-creds"
+    assert settings.scrape_token_source_key == "GREENKUBE_METRICS_TOKEN"
+
+
+def test_settings_from_env_requires_a_complete_scrape_token_copy():
+    with pytest.raises(bootstrap.BootstrapError, match="GREENKUBE_SCRAPE_TOKEN"):
+        bootstrap.Settings.from_env(
+            {
+                "GREENKUBE_NAMESPACE": "gk",
+                "GREENKUBE_SECRET_NAME": "gk",
+                "GREENKUBE_SCRAPE_TOKEN_NAMESPACE": "monitoring",
+            }
+        )
+
+
+def test_main_creates_the_credentials_before_copying_the_scrape_token(monkeypatch, capsys):
+    namespaces = {"gk": CopyApi(), "monitoring": CopyApi()}
+
+    class Api(CopyApi):
+        def __init__(self, namespace):
+            self.__dict__ = namespaces[namespace].__dict__
+
+        def in_namespace(self, namespace):
+            return Api(namespace)
+
+    monkeypatch.setattr(bootstrap.InClusterApi, "from_environment", classmethod(lambda cls, ns, env: Api(ns)))
+    env = {
+        "GREENKUBE_NAMESPACE": "gk",
+        "GREENKUBE_SECRET_NAME": "gk",
+        "GREENKUBE_GENERATE_METRICS_TOKEN": "true",
+        "GREENKUBE_SCRAPE_TOKEN_NAMESPACE": "monitoring",
+        "GREENKUBE_SCRAPE_TOKEN_SECRET": "gk-scrape-token",
+        "GREENKUBE_SCRAPE_TOKEN_SOURCE": "gk",
+    }
+
+    assert bootstrap.main(env) == 0
+
+    generated = _plain(namespaces["gk"].secrets["gk"])["GREENKUBE_METRICS_TOKEN"]
+    assert _plain(namespaces["monitoring"].secrets["gk-scrape-token"]) == {"token": generated}
+    assert "namespace monitoring" in capsys.readouterr().out
+
+
+def test_in_cluster_api_targets_another_namespace(client):
+    api, requests, responses = client
+    responses.append(None)
+
+    assert api.in_namespace("monitoring").read_secret("gk-scrape-token") == {}
+
+    assert requests[0].full_url == "https://10.0.0.1:443/api/v1/namespaces/monitoring/secrets/gk-scrape-token"
+    assert api.namespace == "gk"

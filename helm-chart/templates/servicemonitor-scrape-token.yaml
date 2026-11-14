@@ -1,0 +1,20 @@
+{{- /*
+Copy of the scrape token supplied in values (secrets.metricsToken) for
+ServiceMonitors outside the release namespace: Prometheus Operator reads a
+ServiceMonitor's bearer token Secret in the ServiceMonitor's own namespace.
+A generated token, or one held by secrets.existingSecret, is copied by the
+credentials bootstrap hook instead (greenkube.scrapeTokenCopy).
+*/ -}}
+{{- if eq (include "greenkube.scrapeTokenCopy" .) "chart" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "greenkube.scrapeTokenCopyName" . }}
+  namespace: {{ include "greenkube.serviceMonitorNamespace" . }}
+  labels:
+    {{- include "greenkube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: scrape-token
+type: Opaque
+data:
+  token: {{ .Values.secrets.metricsToken | toString | b64enc | quote }}
+{{- end }}

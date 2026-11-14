@@ -571,14 +571,27 @@ monitoring:
     additionalLabels: {}
   serviceMonitor:
     enabled: false       # Set to true if using the Prometheus Operator (kube-prometheus-stack)
-    namespace: monitoring
+    namespace: ""        # Empty: the release namespace, next to the scrape token Secret
     interval: 30s
+    prometheusServiceAccount: prometheus-k8s
+    prometheusNamespace: ""  # Namespace of that ServiceAccount; empty: networkPolicy.prometheusNamespace
   networkPolicy:
     enabled: false       # Restrict selected components to explicit ingress and egress rules
     prometheusNamespace: monitoring
     additionalIngress: []
     additionalEgress: [] # Add narrow rules for external DB, Git provider, or Kubernetes API endpoints.
 ```
+
+**ServiceMonitor namespace and scrape token.** Prometheus Operator reads a ServiceMonitor's bearer token Secret in the ServiceMonitor's own namespace and rejects the ServiceMonitor otherwise (`secret not found`, no target). The ServiceMonitors therefore default to the release namespace, where the scrape token Secret `<release>` lives; Prometheus must select that namespace (`serviceMonitorNamespaceSelector`, which kube-prometheus-stack leaves open to every namespace by default; its `serviceMonitorSelector` still needs your `additionalLabels`, e.g. `release: <stack release>`). With `serviceMonitor.namespace` set to another namespace, the chart keeps a copy of the scrape token there, Secret `<release>-scrape-token` with key `token`, and every ServiceMonitor uses it:
+
+| Scrape token source | How the copy is made |
+| --- | --- |
+| Generated (default) | The credentials bootstrap hook copies it on every install and upgrade, with a Role and RoleBinding scoped to that Secret in the ServiceMonitor namespace (hook resources, deleted after the run). The copy changes only when the source does, and stays after `helm uninstall` like the Secret `<release>`. |
+| `secrets.metricsToken` | Rendered by the chart in the ServiceMonitor namespace (a release resource). |
+| `secrets.existingSecret` with `existingSecretHasMetricsToken: true` | Copied by the hook, which may then read that Secret (needs `rbac.create`). |
+| None (`existingSecret` without a scrape token, or `rbac.create: false` with an existing Secret) | Nothing is copied, and never the deprecated admin key: create the referenced Secret in the ServiceMonitor namespace yourself, set `bearerTokenSecret`, or leave `namespace` empty. The install notes print a warning. |
+
+`serviceMonitor.prometheusServiceAccount` and `serviceMonitor.prometheusNamespace` name the Prometheus ServiceAccount bound to the `prometheus-k8s` Role (Service, Pod and EndpointSlice discovery in the release namespace). Its namespace is independent of the ServiceMonitor namespace: `prometheusNamespace`, else `networkPolicy.prometheusNamespace`, else `monitoring`. Upgrading from a chart that put the ServiceMonitors in `monitoring` by default: see [Upgrading](upgrading.md#servicemonitors-and-the-scrape-token).
 
 The controller's own metrics endpoint is configured with `controller.metricsPort` (see [Controller metrics endpoint](#controller-metrics-endpoint-controllermetricsport)); `serviceMonitor.enabled` also adds its ServiceMonitor.
 
@@ -715,7 +728,7 @@ config:
 | `auth.oidc.groupsClaim` | `groups` | `OIDC_GROUPS_CLAIM` | Claim holding the groups (a list, or a comma-separated string). |
 | `auth.oidc.redirectUrl` | `""` | `OIDC_REDIRECT_URL` | Redirect URI registered at the provider. Empty: `<config.externalUrl>/api/v1/auth/oidc/callback`, or the request's origin when `externalUrl` is empty. |
 | `auth.oidc.providerName` | `SSO` | `OIDC_PROVIDER_NAME` | Label of the **Sign in with ...** button. |
-| `monitoring.serviceMonitor.bearerTokenSecret` | `{name: "", key: token}` | | Secret with a `metrics:read` API key for the API scrape. Empty uses the scrape token `GREENKUBE_METRICS_TOKEN` (or, without one, the deprecated bootstrap key). The controller and worker ServiceMonitors always use the scrape token. |
+| `monitoring.serviceMonitor.bearerTokenSecret` | `{name: "", key: token}` | | Secret with a `metrics:read` API key for the API scrape, in the ServiceMonitor namespace. Empty uses the scrape token `GREENKUBE_METRICS_TOKEN` (its copy `<release>-scrape-token` outside the release namespace; without a scrape token, the deprecated bootstrap key). The controller and worker ServiceMonitors always use the scrape token. See [Monitoring](#monitoring-monitoring). |
 | `secrets.metricsToken` | `""` | `GREENKUBE_METRICS_TOKEN` | See [Secrets](#secrets-secrets). |
 
 `SESSION_COOKIE_NAME` (default `greenkube_session`) is not exposed in values.

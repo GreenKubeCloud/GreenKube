@@ -171,3 +171,29 @@ tests:
           pattern: "request increases and the other sources need\\s+36 samples"
       - matchRegexRaw:
           pattern: "decreases need 7 days of history"
+
+  - it: names the ServiceMonitor namespace, the release namespace by default
+    set:
+      monitoring.serviceMonitor.enabled: true
+    asserts:
+      - matchRegexRaw:
+          pattern: "ServiceMonitors: namespace greenkube;"
+      - notMatchRegexRaw:
+          pattern: scrape-token
+
+  - it: names the scrape token copy for ServiceMonitors in another namespace
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+    asserts:
+      - matchRegexRaw:
+          pattern: "Secret gk-greenkube-scrape-token\\s+\\(namespace monitoring, key \"token\"\\), written by the gk-greenkube-credentials-bootstrap hook"
+
+  - it: warns when nothing can be copied into the ServiceMonitor namespace
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+      secrets.existingSecret: my-creds
+    asserts:
+      - matchRegexRaw:
+          pattern: "Create Secret my-creds \\(key GREENKUBE_API_KEY\\) in namespace monitoring"

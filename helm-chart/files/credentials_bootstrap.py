@@ -27,6 +27,14 @@ after the first sign-in and keeps it as an empty tombstone, so a later hook run
 never issues a second initial password. GREENKUBE_SECRET_NAME may be empty
 (secrets.existingSecret) when only the initial-admin Secret is needed.
 
+With GREENKUBE_SCRAPE_TOKEN_NAMESPACE set (monitoring.serviceMonitor.namespace
+outside the release namespace), the script also mirrors the scrape token of
+Secret GREENKUBE_SCRAPE_TOKEN_SOURCE into Secret GREENKUBE_SCRAPE_TOKEN_SECRET
+(key ``token``) of that namespace: Prometheus Operator reads a ServiceMonitor's
+bearer token Secret in the ServiceMonitor's own namespace. Only the scrape token
+is copied; the copy is rewritten only when the source changed, so it is as
+stable as the source.
+
 The Secret carries no Helm or Argo CD tracking metadata: uninstalling the
 release keeps it, like the PostgreSQL volume whose password it holds.
 
@@ -102,15 +110,21 @@ class Settings:
     postgres_host: str = ""
     postgres_port: str = "5432"
     postgres_pvc: str = ""
+    scrape_token_namespace: str = ""
+    scrape_token_secret: str = ""
+    scrape_token_source: str = ""
+    scrape_token_source_key: str = METRICS_TOKEN
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
         namespace = env.get("GREENKUBE_NAMESPACE", "").strip()
         secret_name = env.get("GREENKUBE_SECRET_NAME", "").strip()
         initial_admin_secret = env.get("GREENKUBE_INITIAL_ADMIN_SECRET", "").strip()
-        if not namespace or not (secret_name or initial_admin_secret):
+        scrape_token_namespace = env.get("GREENKUBE_SCRAPE_TOKEN_NAMESPACE", "").strip()
+        if not namespace or not (secret_name or initial_admin_secret or scrape_token_namespace):
             raise BootstrapError(
-                "GREENKUBE_NAMESPACE and GREENKUBE_SECRET_NAME or GREENKUBE_INITIAL_ADMIN_SECRET are required"
+                "GREENKUBE_NAMESPACE and GREENKUBE_SECRET_NAME, GREENKUBE_INITIAL_ADMIN_SECRET or "
+                "GREENKUBE_SCRAPE_TOKEN_NAMESPACE are required"
             )
         settings = cls(
             namespace=namespace,
@@ -126,7 +140,15 @@ class Settings:
             postgres_host=env.get("GREENKUBE_POSTGRES_HOST", "").strip(),
             postgres_port=env.get("GREENKUBE_POSTGRES_PORT", "5432").strip() or "5432",
             postgres_pvc=env.get("GREENKUBE_POSTGRES_PVC", "").strip(),
+            scrape_token_namespace=scrape_token_namespace,
+            scrape_token_secret=env.get("GREENKUBE_SCRAPE_TOKEN_SECRET", "").strip(),
+            scrape_token_source=env.get("GREENKUBE_SCRAPE_TOKEN_SOURCE", "").strip(),
         )
+        if settings.scrape_token_namespace and not (settings.scrape_token_secret and settings.scrape_token_source):
+            raise BootstrapError(
+                "GREENKUBE_SCRAPE_TOKEN_SECRET and GREENKUBE_SCRAPE_TOKEN_SOURCE are required "
+                "with GREENKUBE_SCRAPE_TOKEN_NAMESPACE"
+            )
         if settings.generate_postgres_password and not (
             settings.postgres_user and settings.postgres_database and settings.postgres_host
         ):
@@ -287,6 +309,45 @@ def ensure_credentials(
     raise BootstrapError(f"Secret {settings.secret_name} kept changing concurrently; retry the upgrade")
 
 
+def ensure_scrape_token_copy(
+    source_api: SecretApi,
+    target_api: SecretApi,
+    settings: Settings,
+    *,
+    attempts: int = 5,
+) -> str:
+    """Mirror the scrape token into the ServiceMonitor namespace and describe what happened.
+
+    ``source_api`` reads the release namespace, ``target_api`` writes the
+    ServiceMonitor namespace. Only the scrape token is copied, under key ``token``.
+    """
+    name, namespace = settings.scrape_token_secret, settings.scrape_token_namespace
+    source = source_api.read_secret(settings.scrape_token_source)
+    token = _decode(source.get("data") if source else None).get(settings.scrape_token_source_key, "")
+    if not token:
+        raise BootstrapError(
+            f"Secret {settings.scrape_token_source} in namespace {settings.namespace} has no "
+            f"{settings.scrape_token_source_key} to copy into namespace {namespace} for the ServiceMonitors"
+        )
+    for _ in range(attempts):
+        target = target_api.read_secret(name)
+        try:
+            if target is None:
+                target_api.create_secret(new_secret(settings, {"token": token}, name=name, component="scrape-token"))
+                return f"Created Secret {name} in namespace {namespace} with the scrape token"
+            if _decode(target.get("data")).get("token") == token:
+                return f"Secret {name} in namespace {namespace} already holds the scrape token; nothing to do"
+            patch: dict[str, Any] = {"data": _encode({"token": token})}
+            resource_version = (target.get("metadata") or {}).get("resourceVersion")
+            if resource_version:
+                patch["metadata"] = {"resourceVersion": resource_version}
+            target_api.patch_secret(name, patch)
+            return f"Updated Secret {name} in namespace {namespace} with the scrape token"
+        except ConflictError:
+            continue
+    raise BootstrapError(f"Secret {name} in namespace {namespace} kept changing concurrently; retry the upgrade")
+
+
 class InClusterApi:
     """Minimal Kubernetes REST client using the pod's service-account token."""
 
@@ -312,6 +373,10 @@ class InClusterApi:
         except OSError as error:
             raise BootstrapError(f"Cannot read the service-account credentials: {error}") from error
         return cls(namespace, f"https://{host}:{port}", token, context)
+
+    def in_namespace(self, namespace: str) -> InClusterApi:
+        """The same client, scoped to another namespace."""
+        return InClusterApi(namespace, self.base_url, self.token, self.context, self.timeout)
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None, content_type: str = "") -> Any:
         data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -366,6 +431,9 @@ def main(env: Mapping[str, str] | None = None) -> int:
             print(f"GreenKube: {ensure_credentials(api, settings)}")
         if settings.initial_admin_secret:
             print(f"GreenKube: {ensure_initial_admin_secret(api, settings)}")
+        if settings.scrape_token_namespace:
+            target = api.in_namespace(settings.scrape_token_namespace)
+            print(f"GreenKube: {ensure_scrape_token_copy(api, target, settings)}")
     except BootstrapError as error:
         print(f"GreenKube credentials bootstrap failed: {error}", file=sys.stderr)
         return 1

@@ -1142,8 +1142,13 @@ monitoring:
     # Production worker mode also creates a dedicated worker ServiceMonitor.
     # Set to true only if kube-prometheus-stack (or similar) is installed.
     enabled: false
-    # Namespace where the ServiceMonitor will be created (must match Prometheus serviceMonitorNamespaceSelector).
-    namespace: monitoring
+    # Namespace of the ServiceMonitors. Empty (default): the release namespace,
+    # next to the scrape token Secret (Prometheus Operator reads a ServiceMonitor's
+    # bearer token Secret in the ServiceMonitor's own namespace). Prometheus must
+    # select it (serviceMonitorNamespaceSelector; kube-prometheus-stack selects all
+    # namespaces by default). Another namespace: the chart keeps a copy of the scrape
+    # token there, Secret <release>-scrape-token (see docs/prometheus-grafana.md).
+    namespace: ''
     # Scrape interval (e.g., "30s", "1m").
     interval: 30s
     # Scrape timeout.
@@ -1152,10 +1157,16 @@ monitoring:
     additionalLabels: {}
     # Name of the Prometheus ServiceAccount (for RBAC). Defaults to "prometheus-k8s".
     prometheusServiceAccount: prometheus-k8s
+    # Namespace of that ServiceAccount, bound to the prometheus-k8s Role that lets
+    # Prometheus discover GreenKube's Services and Pods. Empty:
+    # monitoring.networkPolicy.prometheusNamespace (default "monitoring"). It is
+    # independent of the ServiceMonitor namespace.
+    prometheusNamespace: ''
     # Bearer credential Prometheus sends to /prometheus/metrics. Recommended:
     # create an API key with only the metrics:read scope (Settings > API keys),
     # store it in a Secret in the ServiceMonitor namespace and reference it
-    # here. Empty: the deprecated bootstrap key GREENKUBE_API_KEY is used.
+    # here. Empty: the scrape token GREENKUBE_METRICS_TOKEN (or, without one, the
+    # deprecated bootstrap key GREENKUBE_API_KEY) is used.
     bearerTokenSecret:
       name: ''
       key: token

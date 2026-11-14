@@ -1,0 +1,287 @@
+suite: ServiceMonitor namespace and scrape token Secret
+# Prometheus Operator resolves a ServiceMonitor's bearer token Secret in the
+# ServiceMonitor's own namespace. These tests pin that every Secret a
+# ServiceMonitor references exists there.
+release:
+  name: gk
+  namespace: greenkube
+templates:
+  - templates/servicemonitor.yaml
+  - templates/controller-servicemonitor.yaml
+  - templates/worker-servicemonitor.yaml
+  - templates/credentials-bootstrap.yaml
+  - templates/servicemonitor-scrape-token.yaml
+  - templates/prometheus-rbac.yaml
+
+tests:
+  # ------------------------------------------------------------------ default
+  - it: puts every ServiceMonitor in the release namespace by default, next to the scrape token
+    set:
+      monitoring.serviceMonitor.enabled: true
+      worker.replicas: 1
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: greenkube
+        template: templates/servicemonitor.yaml
+      - equal:
+          path: metadata.namespace
+          value: greenkube
+        template: templates/controller-servicemonitor.yaml
+      - equal:
+          path: metadata.namespace
+          value: greenkube
+        template: templates/worker-servicemonitor.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value: {name: gk-greenkube, key: GREENKUBE_METRICS_TOKEN}
+        template: templates/servicemonitor.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value: {name: gk-greenkube, key: GREENKUBE_METRICS_TOKEN}
+        template: templates/controller-servicemonitor.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value: {name: gk-greenkube, key: GREENKUBE_METRICS_TOKEN}
+        template: templates/worker-servicemonitor.yaml
+
+  - it: copies nothing when the ServiceMonitors live in the release namespace
+    set:
+      monitoring.serviceMonitor.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 4
+        template: templates/credentials-bootstrap.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_SCRAPE_TOKEN_NAMESPACE
+            value: greenkube
+          any: true
+        template: templates/credentials-bootstrap.yaml
+        documentIndex: 3
+      - hasDocuments:
+          count: 0
+        template: templates/servicemonitor-scrape-token.yaml
+
+  - it: treats a namespace override equal to the release namespace as the default
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: greenkube
+    asserts:
+      - hasDocuments:
+          count: 4
+        template: templates/credentials-bootstrap.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials.name
+          value: gk-greenkube
+        template: templates/servicemonitor.yaml
+
+  # ----------------------------------------------- Prometheus RBAC subject
+  - it: binds the Prometheus ServiceAccount in its own namespace, not the ServiceMonitor one
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: observability
+    template: templates/prometheus-rbac.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: subjects[0]
+          value: {kind: ServiceAccount, name: prometheus-k8s, namespace: monitoring}
+
+  - it: binds the Prometheus ServiceAccount in monitoring.serviceMonitor.prometheusNamespace
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.prometheusNamespace: prom-system
+      monitoring.networkPolicy.prometheusNamespace: ignored
+    template: templates/prometheus-rbac.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: subjects[0].namespace
+          value: prom-system
+
+  - it: falls back to monitoring.networkPolicy.prometheusNamespace for the Prometheus ServiceAccount
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.networkPolicy.prometheusNamespace: observability
+    template: templates/prometheus-rbac.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: subjects[0].namespace
+          value: observability
+
+  # ----------------------------------------------------------------- override
+  - it: points every ServiceMonitor in another namespace at the scrape token copy there
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+      worker.replicas: 1
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: monitoring
+        template: templates/servicemonitor.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value: {name: gk-greenkube-scrape-token, key: token}
+        template: templates/servicemonitor.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value: {name: gk-greenkube-scrape-token, key: token}
+        template: templates/controller-servicemonitor.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value: {name: gk-greenkube-scrape-token, key: token}
+        template: templates/worker-servicemonitor.yaml
+
+  - it: lets the bootstrap hook copy the generated scrape token into the ServiceMonitor namespace
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+    template: templates/credentials-bootstrap.yaml
+    asserts:
+      - hasDocuments:
+          count: 6
+      - documentIndex: 3
+        isKind:
+          of: Role
+      - documentIndex: 3
+        equal:
+          path: metadata.namespace
+          value: monitoring
+      - documentIndex: 3
+        equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["secrets"]
+              verbs: ["create"]
+            - apiGroups: [""]
+              resources: ["secrets"]
+              resourceNames: ["gk-greenkube-scrape-token"]
+              verbs: ["get", "patch"]
+      - documentIndex: 3
+        equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+      - documentIndex: 4
+        isKind:
+          of: RoleBinding
+      - documentIndex: 4
+        equal:
+          path: metadata.namespace
+          value: monitoring
+      - documentIndex: 4
+        equal:
+          path: subjects[0]
+          value: {kind: ServiceAccount, name: gk-greenkube-credentials-bootstrap, namespace: greenkube}
+      - documentIndex: 5
+        isKind:
+          of: Job
+      - documentIndex: 5
+        contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: GREENKUBE_SCRAPE_TOKEN_NAMESPACE, value: monitoring}
+      - documentIndex: 5
+        contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: GREENKUBE_SCRAPE_TOKEN_SECRET, value: gk-greenkube-scrape-token}
+      - documentIndex: 5
+        contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: GREENKUBE_SCRAPE_TOKEN_SOURCE, value: gk-greenkube}
+      - hasDocuments:
+          count: 0
+        template: templates/servicemonitor-scrape-token.yaml
+
+  - it: renders the copy from values when the scrape token is supplied in values
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+      secrets.metricsToken: supplied-token
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/servicemonitor-scrape-token.yaml
+      - equal:
+          path: metadata.name
+          value: gk-greenkube-scrape-token
+        template: templates/servicemonitor-scrape-token.yaml
+      - equal:
+          path: metadata.namespace
+          value: monitoring
+        template: templates/servicemonitor-scrape-token.yaml
+      - equal:
+          path: data.token
+          value: c3VwcGxpZWQtdG9rZW4=
+        template: templates/servicemonitor-scrape-token.yaml
+      - hasDocuments:
+          count: 4
+        template: templates/credentials-bootstrap.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value: {name: gk-greenkube-scrape-token, key: token}
+        template: templates/controller-servicemonitor.yaml
+
+  - it: copies the scrape token of an existing Secret that declares one
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+      secrets.existingSecret: my-creds
+      secrets.existingSecretHasMetricsToken: true
+      auth.admin.existingSecret: my-admin
+    template: templates/credentials-bootstrap.yaml
+    asserts:
+      - hasDocuments:
+          count: 6
+      - documentIndex: 1
+        contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["secrets"]
+            resourceNames: ["my-creds"]
+            verbs: ["get"]
+      - documentIndex: 5
+        contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: GREENKUBE_SCRAPE_TOKEN_SOURCE, value: my-creds}
+      - documentIndex: 5
+        contains:
+          path: spec.template.spec.containers[0].env
+          content: {name: GREENKUBE_SECRET_NAME, value: ""}
+
+  - it: keeps the API scrape on monitoring.serviceMonitor.bearerTokenSecret and still copies the token for the controller
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+      monitoring.serviceMonitor.bearerTokenSecret.name: gk-metrics-key
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value: {name: gk-metrics-key, key: token}
+        template: templates/servicemonitor.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials.name
+          value: gk-greenkube-scrape-token
+        template: templates/controller-servicemonitor.yaml
+
+  - it: never copies the deprecated admin key across namespaces
+    set:
+      monitoring.serviceMonitor.enabled: true
+      monitoring.serviceMonitor.namespace: monitoring
+      secrets.existingSecret: my-creds
+      auth.admin.existingSecret: my-admin
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/credentials-bootstrap.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/servicemonitor-scrape-token.yaml
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value: {name: my-creds, key: GREENKUBE_API_KEY}
+        template: templates/servicemonitor.yaml

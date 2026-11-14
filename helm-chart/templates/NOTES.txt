@@ -159,6 +159,22 @@ Welcome to
   If auto-discovery fails, set the URL manually:
     --set config.prometheus.url=http://prometheus-server.monitoring.svc.cluster.local:80
 {{- end }}
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- $smNamespace := include "greenkube.serviceMonitorNamespace" . }}
+{{- $copy := include "greenkube.scrapeTokenCopy" . }}
+  ServiceMonitors: namespace {{ $smNamespace }}; Prometheus must select it (serviceMonitorNamespaceSelector).
+{{- if $copy }}
+  Their bearer token is the copy of the scrape token in Secret {{ include "greenkube.scrapeTokenCopyName" . }}
+  (namespace {{ $smNamespace }}, key "token"){{ if eq $copy "hook" }}, written by the {{ include "greenkube.credentialsBootstrapName" . }} hook
+  and kept outside the release (delete it by hand after uninstalling){{ end }}.
+{{- else if ne $smNamespace .Release.Namespace }}
+{{- $smCredentials := include "greenkube.scrapeCredentials" . | fromYaml }}
+  WARNING: Prometheus Operator reads a ServiceMonitor's bearer token Secret in the
+  ServiceMonitor's namespace, and the chart has no scrape token to copy there.
+  Create Secret {{ $smCredentials.name }} (key {{ $smCredentials.key }}) in namespace {{ $smNamespace }},
+  or leave monitoring.serviceMonitor.namespace empty (release namespace).
+{{- end }}
+{{- end }}
 
 * No Electricity Maps token? GreenKube uses default intensity ({{ .Values.config.defaultIntensity }} gCO₂e/kWh).
    For accurate data, set: secrets.electricityMapsToken
