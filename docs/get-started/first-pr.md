@@ -42,7 +42,10 @@ On a workstation you also need `kubectl`, `helm`, `curl`, `jq` and `minikube`.
 
 You need a Gitea API token with read/write repository scope. Its user must be
 the owner of the sample repository (`GITEA_OWNER`, default `greenkube`), a
-member of that organization, or a Gitea administrator. Pass it as
+member of that organization, or a Gitea administrator. When the repository
+belongs to the token's own user, Gitea also requires the `write:user` scope to
+create it: a fresh run (`E2E_FRESH=1`, `GITEA_RESET_REPO=1`) checks that scope
+and stops before deleting anything when it is missing. Pass the token as
 `GITEA_TOKEN`, or as a file with `GITEA_TOKEN_FILE`; there is no default.
 
 ## Run it

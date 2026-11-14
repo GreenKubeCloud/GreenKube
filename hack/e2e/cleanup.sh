@@ -67,13 +67,15 @@ if harness_owns namespace "${GK_NAMESPACE}"; then
   # The PostgreSQL volume must be gone before a fresh install: Minikube's hostpath
   # provisioner reuses the directory of a claim name, so a volume it failed to
   # delete would hand the old database (and its old password) to the new release.
-  if ! wait_until "the volumes of namespace ${GK_NAMESPACE} to be deleted" 120 3 no_release_volumes; then
+  if ! wait_until "the volumes of namespace ${GK_NAMESPACE} to be deleted" "${E2E_TIMEOUT_VOLUMES}" 3 no_release_volumes; then
     while read -r volume path; do
       [[ -n "${volume}" ]] || continue
       if [[ "${path}" == /tmp/hostpath-provisioner/${GK_NAMESPACE}/* ]]; then
         warn "Removing the leftover hostpath volume ${volume} (${path})."
-        minikube ssh -- sudo rm -rf "${path}" >/dev/null
-        kubectl delete pv "${volume}" --ignore-not-found >/dev/null
+        # </dev/null: minikube ssh reads stdin, which would swallow the rest of
+        # the volume list and leave the next volume (the database) in place.
+        minikube ssh -- sudo rm -rf "${path}" </dev/null >/dev/null
+        kubectl delete pv "${volume}" --ignore-not-found </dev/null >/dev/null
       else
         warn "Volume ${volume} of namespace ${GK_NAMESPACE} was not deleted; delete it before a fresh install."
       fi

@@ -1,0 +1,4 @@
+### Fixed
+
+- `make e2e` with `E2E_FRESH=1` (or `GITEA_RESET_REPO=1`) no longer deletes the sample Gitea repository when the token cannot create it again: Gitea needs the `write:user` scope for `POST /user/repos`, and a token with only `write:repository` could delete the repository but not recreate it. The harness now probes that scope first and stops before deleting anything.
+- `make e2e-clean` and fresh runs now remove every leftover hostpath volume of the GreenKube namespace. `minikube ssh` read the rest of the volume list from stdin, so only the first volume was removed and the next install reused the old PostgreSQL data with its old password (the controller and API then crash-looped on `password authentication failed`). The volume wait is configurable with `E2E_TIMEOUT_VOLUMES` (120 s by default).
