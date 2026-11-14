@@ -14,7 +14,7 @@ def _workflow(name: str) -> dict:
 
 def _triggers(workflow: dict) -> dict:
     # PyYAML reads the bare "on" key as the boolean True.
-    return workflow.get("on", workflow.get(True))
+    return workflow["on"] if "on" in workflow else workflow[True]
 
 
 def test_release_requires_the_e2e_loop_and_the_upgrade_test():
