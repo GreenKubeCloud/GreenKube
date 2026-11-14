@@ -79,9 +79,12 @@ spec:
           command:
             - sh
             - -c
+            # -w bounds each probe: without it a SYN dropped while the PostgreSQL
+            # pod is replaced (upgrade, node drain) waits for the kernel TCP
+            # timeout (minutes) instead of retrying every two seconds.
             - >-
               for attempt in $(seq 1 150); do
-                if nc -z {{ include "greenkube.fullname" $root }}-postgres 5432; then exit 0; fi;
+                if nc -z -w 2 {{ include "greenkube.fullname" $root }}-postgres 5432; then exit 0; fi;
                 echo "waiting for postgres";
                 sleep 2;
               done;
