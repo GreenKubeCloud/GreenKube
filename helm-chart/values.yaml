@@ -397,9 +397,10 @@ config:
   cloudProvider: unknown
   # Cluster name used as the `cluster` label in Prometheus metrics for
   # multi-cluster Grafana filtering.  Leave empty (default) to auto-detect:
-  #   1. Node name from the Kubernetes Downward API (works for minikube/kind/k3s).
-  #   2. Well-known cloud-provider node labels (EKS, GKE, AKS).
-  #   3. Falls back to "default" when nothing is detectable.
+  #   1. Single-node cluster (minikube/kind/k3s): the node name.
+  #   2. Well-known cluster-name node labels (EKS, GKE, AKS, Cluster API).
+  #   3. Any other multi-node cluster: "default" (the same in every pod).
+  #   4. Nodes unreadable: the pod's node name (Downward API), else "default".
   clusterName: ''
   defaultZone: '' # Override with your Electricity Maps zone code (e.g. 'FR', 'DE', 'US-CAL-CISO').
                   # Used when an individual node's zone and region cannot be mapped.
