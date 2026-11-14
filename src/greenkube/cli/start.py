@@ -935,6 +935,7 @@ async def _async_start(last: Optional[str]):
     initial_work_task = None
     processor = None
     plan_executor = None
+    leader_election = None
     try:
         leader_election = _create_controller_leader_election(cfg)
         if leader_election is None:
@@ -1052,11 +1053,19 @@ async def _async_start(last: Optional[str]):
             tasks = [task for task in (leader_election_task, initial_work_task) if task is not None]
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            if plan_executor is not None:
-                plan_executor.close()
-            if processor is not None:
-                await processor.close()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                if plan_executor is not None:
+                    plan_executor.close()
+                if processor is not None:
+                    await processor.close()
+            finally:
+                # Hand the Lease over only now that every leader loop and the deferred
+                # initial work have stopped, so a standby never overlaps with them. The
+                # release is a compare-and-set on this replica's identity, so it is also
+                # safe when the election task ended abnormally.
+                if leader_election_task is not None and leader_election is not None and results[0] is not False:
+                    await leader_election.release()
             await stop_controller_metrics_server(metrics_endpoint)
             logger.info("🛑 Shutting down GreenKube service gracefully.")
 

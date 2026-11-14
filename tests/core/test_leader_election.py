@@ -378,10 +378,16 @@ async def test_stopping_leader_releases_the_lease_so_a_standby_takes_over_at_onc
     fence = leader.fencing_token
     assert fence is not None
 
-    await leader.run(stop)
+    held = await leader.run(stop)
 
+    # run() never releases by itself: leader work may still be unwinding (the caller
+    # releases once it has stopped), so the Lease still names this replica.
+    assert held is True
     assert not leader.is_leader
     assert api.lease is not None
+    assert api.lease.spec.holder_identity == "controller-pod:1"
+
+    assert await leader.release() is True
     assert api.lease.spec.holder_identity is None
     standby = KubernetesLeaseElector(
         api=api, name="controller-leader", namespace="greenkube", identity="controller-pod:2", clock=clock
@@ -424,6 +430,6 @@ async def test_standby_shutdown_does_not_touch_the_lease():
     stop = asyncio.Event()
     stop.set()
 
-    await elector.run(stop)
+    assert await elector.run(stop) is False
 
     assert api.replace_requests == []

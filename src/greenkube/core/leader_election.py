@@ -136,8 +136,14 @@ class KubernetesLeaseElector:
                 self._log_api_error("request", error)
                 return False
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Continuously renew or contend until stopped, then release a held Lease."""
+    async def run(self, stop_event: asyncio.Event) -> bool:
+        """Continuously renew or contend until stopped.
+
+        Returns whether this replica held the Lease when it stopped. The Lease is NOT
+        released here: leader work may still be running or unwinding, so the caller
+        calls :meth:`release` only once all of it has stopped.
+        """
+        held = False
         try:
             while not stop_event.is_set():
                 await self.try_acquire_or_renew()
@@ -150,15 +156,15 @@ class KubernetesLeaseElector:
         finally:
             held = self._leader
             self._lose_leadership()
-        if held:
-            await self.release()
+        return held
 
     async def release(self, timeout_seconds: float = 5.0) -> bool:
         """Hand the Lease over on shutdown so a standby takes over without waiting for expiry.
 
-        Local leadership is dropped first, so in-flight leader work fails its fence check
-        before another replica can acquire. Best effort: any error leaves the Lease to
-        expire as before.
+        Call it only after every piece of leader work has stopped: once the holder is
+        cleared, a standby can acquire within one retry period. Clearing is a
+        compare-and-set on this replica's identity. Best effort: any error leaves the
+        Lease to expire as before.
         """
         self._lose_leadership()
         try:

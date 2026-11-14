@@ -189,3 +189,67 @@ async def test_restart_within_the_interval_still_scans_the_fresh_collection(run_
     await _run_controller_until_first_scan_settles(scans)
 
     assert scans == [{"trigger": OptimizationRunTrigger.SCHEDULED, "data_collected": True}]
+
+
+# -- Shutdown: the Lease is handed over only after all leader work has stopped ------
+# Releasing lets a standby acquire within one retry period, so leader loops and the
+# deferred initial work must no longer be running or unwinding at that point.
+
+
+class _ReleasingElector:
+    """Leader from the first renewal; records what was still running at release."""
+
+    is_leader = True
+    fencing_token = 1
+
+    def __init__(self, state: dict) -> None:
+        self.state = state
+        self.releases: List[dict] = []
+
+    async def try_acquire_or_renew(self) -> bool:
+        return True
+
+    async def run(self, stop_event: asyncio.Event) -> bool:
+        await stop_event.wait()
+        return True
+
+    async def release(self, timeout_seconds: float = 5.0) -> bool:
+        running = sorted(
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if not task.done() and (task.get_name().startswith("loop-") or task.get_name() == "controller-initial-work")
+        )
+        self.releases.append({"running": running, "initial_work_unwound": self.state["unwound"]})
+        return True
+
+
+async def test_lease_is_released_once_leader_loops_and_initial_work_have_stopped(run_db, monkeypatch):
+    state = {"collected": False, "started": False, "unwound": False}
+    runs = SQLiteOptimizationRunRepository(run_db)
+    _install_controller(monkeypatch, runs, leader_election=True, state=state, scans=[])
+    elector = _ReleasingElector(state)
+    monkeypatch.setattr(start_module, "_create_controller_leader_election", lambda cfg: elector)
+
+    async def endless_initial_collection(last=None):
+        state["started"] = True
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            # Leader work that unwinds with awaits after cancellation.
+            await asyncio.sleep(0.2)
+            state["unwound"] = True
+
+    monkeypatch.setattr(start_module, "async_write_combined_metrics_to_database", endless_initial_collection)
+
+    loop = asyncio.get_running_loop()
+    controller = asyncio.create_task(start_module._async_start(last=None))
+    try:
+        deadline = loop.time() + 15
+        while not state["started"] and loop.time() < deadline and not controller.done():
+            await asyncio.sleep(0.05)
+        assert state["started"], "the deferred initial work never started"
+    finally:
+        controller.cancel()
+        await asyncio.gather(controller, return_exceptions=True)
+
+    assert elector.releases == [{"running": [], "initial_work_unwound": True}]

@@ -215,8 +215,8 @@ controller:
 ```
 
 API replicas are stateless and share sessions through PostgreSQL. Only the controller holding the
-`greenkube-leader` Lease runs the loops; a stopping leader releases the Lease, so a standby takes over at once
-instead of after its expiry. For very large installations, `worker.replicas` adds dedicated plan executors next
+`greenkube-leader` Lease runs the loops; a stopping leader releases the Lease once its loops have stopped, so a standby
+takes over at once instead of after its expiry. For very large installations, `worker.replicas` adds dedicated plan executors next
 to the controller.
 
 With more than one replica the chart also renders, for the api and the controller:

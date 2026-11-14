@@ -11,7 +11,7 @@
 ### Changed
 
 - **Controller rollouts:** the controller and the worker use the `Recreate` strategy (`controller.strategy`, `worker.strategy`), so the old and the new release never write side by side while the schema migrates.
-- **Controller Lease hand-over:** a stopping leader releases the Lease (holder cleared, CAS on the resource version), so a standby takes over at once instead of after the Lease duration; in-flight leader work already fails its fence.
+- **Controller Lease hand-over:** a stopping leader releases the Lease (holder cleared, CAS on the resource version) once all of its leader loops and its deferred initial work have stopped, so a standby takes over at once instead of after the Lease duration, without overlapping with the old leader's work.
 - **Pinned helper images:** `postgres:18-alpine` and `busybox:1.37` (init container and Helm test pod, which used `busybox:1.36`) are pinned by their multi-arch index digest; an explicit `digest` key pins any tag.
 - **PostgreSQL pod:** memory-backed `/dev/shm` (`postgres.shmSizeLimit`, 128Mi) for parallel query workers and a 60 s termination grace period.
 - **Nightly e2e:** the scheduled run checks out `dev` (GitHub only schedules the default branch's workflow), and pull requests touching `src/greenkube/**`, `helm-chart/**`, `frontend/**` or the Dockerfile run the loop.
