@@ -2879,6 +2879,21 @@ def _operations_from_patch(
     return operations
 
 
+def _with_release_namespace(manifest: Mapping[str, Any], target: ResourceTarget) -> Any:
+    """A plain copy of a rendered manifest that names the namespace its identity carries.
+
+    Charts commonly leave ``metadata.namespace`` to ``helm --namespace`` (the release or
+    ``targetNamespace``): re-rendering the bare document would key it to no namespace and
+    lose its source path (e2e: KeyError, HTTP 500 on a Flux HelmRelease plan).
+    """
+    document = _plain(manifest)
+    if target.namespace and isinstance(document, dict):
+        metadata = document.setdefault("metadata", {})
+        if isinstance(metadata, dict) and not metadata.get("namespace"):
+            metadata["namespace"] = target.namespace
+    return document
+
+
 def _normalise_rendered_result(
     original: RawRenderResult,
     manifests: Mapping[tuple[str, str, str, str], Mapping[str, Any]],
@@ -2890,7 +2905,10 @@ def _normalise_rendered_result(
     yaml.sort_base_mapping_type_on_output = False
     try:
         yaml.dump_all(
-            [_plain(manifests[_target_identity(resource.target)]) for resource in original.resources],
+            [
+                _with_release_namespace(manifests[_target_identity(resource.target)], resource.target)
+                for resource in original.resources
+            ],
             stream,
         )
         normalized = render_raw({"rendered/helm-release.yaml": stream.getvalue()})
