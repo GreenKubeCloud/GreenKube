@@ -7,10 +7,18 @@ detection has verified that the resource is absent, the realized saving is the r
 resource was charged before the change:
 
 * the mean trusted cost of the resource in the baseline window when GreenKube observed it
-  (``pre_window_mean``);
+  (``pre_window_mean``, rate source ``observed``);
 * otherwise the allocated rate frozen with the recommendation at decision time
-  (``allocated_rate_at_decision``: the OpenCost per-asset cost or the configured rate,
-  as the recommendation's ``cost_source`` says).
+  (``allocated_rate_at_decision``), **only when that rate has a trusted provenance**: the
+  OpenCost or Kubecost per-asset cost, or a pricing-catalog asset price (the projection's
+  ``assumptions.cost_source``). A configured default (``LOAD_BALANCER_COST_PER_MONTH``,
+  ``STORAGE_COST_PER_GIB_MONTH``: ``custom_rate``), no cost (``none``) or an unknown
+  provenance is never booked as measured: the deletion is ``inconclusive`` and its saving
+  stays a projection.
+
+The rate source is recorded on the estimate (``rate_source``), in the counterfactual
+parameters and in the measurement's ``strategy_version`` (``1.1:<method>:<source>``), which
+the savings ledger v2 carries as the entries' ``method_version``.
 
 A resource still observed after the change is ``not_realized``; a change whose absence
 was never verified against the live cluster (``rollout_completed_source`` other than
@@ -25,6 +33,7 @@ import math
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence
 
+from greenkube.models.provenance import TRUSTED_COST_SOURCES
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.confounders import is_contaminated
 from greenkube.verify.load_driver import ResolvedLoad
@@ -45,6 +54,25 @@ if TYPE_CHECKING:
 HOURS_PER_YEAR = 365.25 * 24
 METHOD_PRE_WINDOW = "pre_window_mean"
 METHOD_ALLOCATED_RATE = "allocated_rate_at_decision"
+#: Rate source of a rate measured on the resource's own trusted cost rows before the change.
+RATE_SOURCE_OBSERVED = "observed"
+#: Rate source when the recommendations do not say where their frozen rate came from.
+RATE_SOURCE_UNKNOWN = "unknown"
+
+
+def frozen_rate_source(sources: Sequence[str]) -> str:
+    """One provenance for the frozen rate of a change's recommendations (``mixed`` when they differ)."""
+    values = sorted({str(item).strip().lower() or RATE_SOURCE_UNKNOWN for item in sources})
+    if not values:
+        return RATE_SOURCE_UNKNOWN
+    return values[0] if len(values) == 1 else "mixed"
+
+
+def is_trusted_rate_source(source: str) -> bool:
+    """Whether a frozen asset rate may back a measured saving (an allocation engine or a price catalog)."""
+    return source in {str(item) for item in TRUSTED_COST_SOURCES}
+
+
 #: The rollout completion source apply detection (and manual mode) records once it read the resource as absent.
 COMPLETION_RESOURCE_ABSENT = "resource_absent"
 
@@ -53,7 +81,7 @@ class ResourceDeletionStrategy:
     """Measures a resource deletion: the released allocated rate once the resource is absent."""
 
     key = "resource_deletion"
-    version = "1.0"
+    version = "1.1"
     primary = "allocated_cost"
 
     def required_windows(self, change: ChangeEvent, settings: MeasurementSettings) -> WindowPlan:
@@ -78,6 +106,7 @@ class ResourceDeletionStrategy:
         projections: Mapping[str, Optional[float]],
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
+        rate_sources: Sequence[str] = (),
     ) -> StrategyResult:
         from greenkube.verify.strategy import StrategyResult
 
@@ -94,10 +123,17 @@ class ResourceDeletionStrategy:
         pre_costs = [bucket.cost for bucket in pre if bucket.cost is not None and bucket.cost_coverage > 0]
         rate: Optional[float] = None
         method: Optional[str] = None
+        rate_source: Optional[str] = None
+        untrusted_rate = False
         if pre_costs:
-            rate, method = math.fsum(pre_costs) / len(pre_costs), METHOD_PRE_WINDOW
+            rate, method, rate_source = math.fsum(pre_costs) / len(pre_costs), METHOD_PRE_WINDOW, RATE_SOURCE_OBSERVED
         elif isinstance(projected, (int, float)) and math.isfinite(projected) and projected > 0:
-            rate, method = float(projected) / HOURS_PER_YEAR, METHOD_ALLOCATED_RATE
+            method, rate_source = METHOD_ALLOCATED_RATE, frozen_rate_source(rate_sources)
+            if is_trusted_rate_source(rate_source):
+                rate = float(projected) / HOURS_PER_YEAR
+            else:
+                untrusted_rate = True
+        base["rate_source"] = rate_source
 
         reasons: List[str] = []
         if observed_after:
@@ -113,6 +149,16 @@ class ResourceDeletionStrategy:
                 method=method,
                 outcome=ChangeOutcome.INCONCLUSIVE,
                 reason="the absence of the resource was never verified in the cluster, so no saving is claimed",
+            )
+        elif untrusted_rate:
+            estimate = SavingsEstimate(
+                **base,
+                method=method,
+                outcome=ChangeOutcome.INCONCLUSIVE,
+                reason=(
+                    f"the frozen rate of the deleted resource comes from {rate_source} pricing, not from a trusted "
+                    "allocation (OpenCost, Kubecost) or price catalog: the saving stays a projection"
+                ),
             )
         elif rate is None:
             estimate = SavingsEstimate(
@@ -138,7 +184,8 @@ class ResourceDeletionStrategy:
                 outcome=ChangeOutcome.REALIZED,
                 reason=(
                     "the resource is absent: its allocated rate is released "
-                    f"({'measured before the change' if method == METHOD_PRE_WINDOW else 'allocated rate at decision'})"
+                    f"({'measured before the change' if method == METHOD_PRE_WINDOW else 'allocated rate at decision'}"
+                    f", {rate_source})"
                 ),
                 projection_accuracy=(annual / projected) if projected else None,
             )
@@ -153,5 +200,10 @@ class ResourceDeletionStrategy:
             outcome=outcome,
             reasons=reasons,
             coverage=estimate.coverage,
-            counterfactual_params={"model": method or "none", "pre_cost_hours": len(pre_costs)},
+            counterfactual_params={
+                "model": method or "none",
+                "pre_cost_hours": len(pre_costs),
+                "rate_source": rate_source,
+            },
+            strategy_version=f"{self.version}:{method or 'none'}:{rate_source or 'none'}",
         )

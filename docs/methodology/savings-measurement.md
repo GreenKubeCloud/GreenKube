@@ -66,10 +66,11 @@ Seven days give every hour of the week one baseline observation. A shorter basel
 
 Rows of the workload (pod level, all containers) are reduced to one bucket per UTC clock hour:
 
-- **Allocated cost** — only from rows whose cost provenance is trusted (`opencost`, `kubecost`, `pricing_catalog`; or, for legacy rows, a positive cost not flagged estimated). A sample time counts only when every replica row at that time is trusted. The rate divides by the covered time, so raw 5-minute rows and hourly rollups mix correctly.
+- **Allocated cost** — only from rows whose cost provenance is trusted (`opencost`, `kubecost`, `pricing_catalog`; or, for legacy rows, a positive cost not flagged estimated). A sample time counts only when every replica row at that time is trusted. The rate divides by the covered time, so raw 5-minute rows and hourly rollups mix correctly. A missing cost is missing, never zero: an OpenCost allocation whose `totalCost`, `cpuCost` or `ramCost` is NaN, infinite or absent (with no CPU and RAM cost to rebuild the total), or whose total is 0 for a pod that ran (`minutes > 0`) with non-zero requests, is stored with `cost_source = none` and the default placeholder cost, and a stored row with a zero total and non-zero requests is not trusted either. Such hours do not count; they never read as the whole cost saved.
 - **CPU and RAM cost components** (`cost_cpu`, `cost_ram`) when every trusted row carries them.
 - **Requested capacity** — requested CPU cores and memory GiB summed over replicas.
-- **Replicas**, **CPU usage**, **energy**, **CO₂e** (only from rows with measured intensity and a profiled node), and the node **instance types** running the pods.
+- **Replicas** — the mean number of pods covering the hour (pod-seconds over covered seconds).
+- **CPU usage**, **energy**, **CO₂e** (only from rows with measured intensity and a profiled node), and the node **instance types** running the pods.
 - **Embodied CO₂e** (`embodied_co2e_grams`, the hardware manufacturing emissions the Impact Model allocates by reservation). It does not depend on the grid intensity, so it needs no measured intensity. Snapshots frozen before it was measured have no value for it (`embodied_co2e_g` is absent from their hours and from their digest, which therefore still verifies).
 
 An hour counts for a quantity when at least half of it is covered by qualifying data.
@@ -129,7 +130,9 @@ The fitted elasticities and the number of matched hours of the week are stored i
 
 ## 5. Quantities
 
-The `request_rightsizing` strategy measures, per hour:
+The `request_rightsizing` strategy (version 2.1) measures, per hour:
+
+**Per replica.** A request change moves what each replica is charged, not how many replicas run. Every quantity below is fitted *per replica* (each hour's value over its replica count) and the per-replica saving is multiplied by the mean replica count of the aligned post-window hours: `saving = Δ(per-replica rate) × post replica-hours`, which is `Σ Δrequest × replica-hours` for requested capacity. A replica count that drops for another reason (an HPA scaling 4 → 2 during the post-window) is therefore never credited to the change: it saves nothing per replica. It is reported by the `replica_shift` confounder (moderate). Hours without a replica count are left out. The interval and counterfactual are scaled by the same replica count, so the outcome rule decides exactly as it would per replica. Measurements decided by version 2.0 compared workload totals (stated by `strategy_version`).
 
 | Quantity | Unit | Claimed | Role |
 |---|---|---|---|
@@ -140,6 +143,10 @@ The `request_rightsizing` strategy measures, per hour:
 | `embodied_co2e_g` | gCO₂e | no | The embodied part alone (reported). |
 
 Stored rows are allocated by the Impact Model: idle CPU power follows the CPU reservation, memory power the memory reservation and embodied emissions the CPU reservation, so a request change moves the measured CO₂e. A baseline snapshot frozen before embodied emissions were measured carries none; its measurement compares operational CO₂e with the operational projection, as before (`components = [operational_energy, idle_share]`). A window whose embodied CO₂e is zero everywhere (no hardware profile for its nodes) is treated the same way. Before Impact Model 2.0.0, `co2e_g` was reported only and recommendations stored a measured CO₂e of 0.
+
+### Resource deletions (`resource_deletion` 1.1, H6)
+
+Deleting an orphaned LoadBalancer Service or PersistentVolume releases the asset's whole allocated rate once apply detection has verified that the resource is absent. The rate is the mean trusted cost of the resource in the baseline window when GreenKube observed it (`pre_window_mean`, rate source `observed`), otherwise the rate frozen in the recommendation's projection (`allocated_rate_at_decision`), **only when that rate has a trusted provenance**: the OpenCost or Kubecost per-asset cost or a pricing-catalog asset price (`impact.assumptions.cost_source`). A configured default (`LOAD_BALANCER_COST_PER_MONTH`, `STORAGE_COST_PER_GIB_MONTH`, recorded as `custom_rate`), no cost (`none`), recommendations that disagree (`mixed`) or an unknown provenance are never booked as measured: the deletion is `inconclusive` with the reason, and its saving stays a projection. The rate source is recorded on the estimate (`rate_source`), in `counterfactual_params.rate_source` and in the measurement's `strategy_version` (`1.1:<method>:<rate source>`, e.g. `1.1:allocated_rate_at_decision:opencost`), which the savings ledger v2 carries as its entries' `method_version` (`resource_deletion/1.1:…`). A resource still observed after the change is `not_realized`, a deletion whose absence was never verified is `inconclusive`.
 
 ## 6. Uncertainty and outcome (C4)
 
@@ -225,7 +232,9 @@ A request increase is a reliability fix: its cost is measured like any request c
 A change is measured once, on its workload. The saving is split between its recommendations:
 
 - **by cost component** when the workload's rows carry the CPU/RAM split: CPU recommendations share the `cost_cpu` saving and memory recommendations the `cost_ram` saving, each in proportion to the request reduction it made. A recommendation claims its component share only when that component's own interval shows a saving: in a `realized` change, a recommendation whose component was `not_realized` (for example memory requests that grew) or `inconclusive` gets that outcome instead of `verified`;
-- otherwise **by projected share** of the `allocated_cost` saving (equal shares when nothing was projected).
+- otherwise **by projected share** of the `allocated_cost` saving: each recommendation's projected *allocated* annual saving (`impact.allocated_cost_annual`, `potential_savings_cost` for projections stored before the Impact Model) over the group's total, a projected increase weighing nothing (equal shares when nothing was projected).
+
+**Component claims never exceed the net saving.** A bundle can cut CPU (`cost_cpu` −$100/yr) while it raises memory (`cost_ram` +$80/yr), or a component the change did not touch can grow. The component shares that save are scaled by `net ÷ (sum of the saving components)`, with `net` the change's measured `allocated_cost` saving, whenever the components add up to more than the net (and to zero when the change saved nothing net). The bundle above books the net $20/yr on the CPU recommendation, never the gross $100/yr; the memory recommendation keeps its signed, unclaimed estimate (`not_realized`, no accrual). Components that add up to at most the net are not scaled.
 
 Shares within a basis sum to one, so a change is never claimed twice. Each recommendation receives one immutable row in `savings_measurements` (`change_id`, `group_id` = the change measurement), with its share of the estimates and the change's outcome. Its status follows:
 
@@ -324,7 +333,7 @@ A failure is sticky. `ledger_chain_status` keeps the last head that passed (`ver
 
 ## Limitations
 
-- **Request changes only.** `request_rightsizing` is the only strategy. Replica, schedule, deletion and node-pool changes need their own strategies.
+- **Request changes and asset deletions only.** `request_rightsizing` and `resource_deletion` are the only strategies. Replica, schedule and node-pool changes need their own strategies.
 - **Allocated, not billed.** The measured saving is allocated cost. The bill only drops when nodes are removed; pool-level realization (C10) is not implemented.
 - **Pool confounders need pool labels.** Node-pool checks, the pool price card included, use the `node_pool` of the node snapshots; clusters whose nodes carry no pool label get no pool-level check, and price changes are then seen per workload only (the unit price of an untouched resource).
 - **Drift is per replica.** The drift monitor watches allocated cost per replica-hour, the quantity a request change moves; a regression that only shows in replica counts (an HPA retuned) is not a drift of this change, and CO₂e is not monitored on its own.

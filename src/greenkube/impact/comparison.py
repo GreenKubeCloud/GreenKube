@@ -9,6 +9,11 @@ emissions (:func:`~greenkube.impact.types.co2e_components`); a measurement
 over stored metric rows sees only :data:`MEASURED_CO2E_COMPONENTS`. A measured
 value is therefore compared with the projected value of those components only,
 never with a total that includes components the measurement cannot see.
+
+They must also be on the same **basis**: a measurement over stored rows sees
+*allocated* cost and CO2e (projected != allocated != realized), so its
+projection accuracy is measured / allocated projection, never measured /
+realization-scaled (billable) projection (``allocated=True``).
 """
 
 from __future__ import annotations
@@ -58,17 +63,23 @@ def projected_co2e_components(impact: Optional[Mapping[str, Any]]) -> Optional[d
 def measurable_co2e_projection(
     impact: Optional[Mapping[str, Any]],
     components: Sequence[str] = MEASURED_CO2E_COMPONENTS,
+    *,
+    allocated: bool = False,
 ) -> Optional[float]:
-    """Expected annual CO2e of ``components`` only: what a measurement of them is compared with.
+    """Projected annual CO2e of ``components`` only.
 
-    It is the allocated value of those components times the projection's
-    realization factor, the same basis as ``co2e_expected_annual_g``. None
-    (nothing to compare with: fail closed) when the projection is missing or
-    does not model CO2e.
+    By default it is the allocated value of those components times the
+    projection's realization factor, the same basis as
+    ``co2e_expected_annual_g``. With ``allocated`` it is the allocated value
+    alone: what a change measurement (which reads rows allocated by the Impact
+    Model, before any realization) is compared with. None (nothing to compare
+    with: fail closed) when the projection is missing or does not model CO2e.
     """
     split = projected_co2e_components(impact)
     if split is None or impact is None:
         return None
+    if allocated:
+        return sum(split.get(name, 0.0) for name in components)
     realization = _number(impact.get("realization_factor"))
     realization = 1.0 if realization is None else min(max(realization, 0.0), 1.0)
     return sum(split.get(name, 0.0) for name in components) * realization

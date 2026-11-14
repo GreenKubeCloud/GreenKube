@@ -369,7 +369,8 @@ def test_cost_components_split_cpu_and_memory_records_by_request_reduction():
             3, RecommendationType.RIGHTSIZING_MEMORY, current_memory_request_bytes=4, recommended_memory_request_bytes=2
         ),
     ]
-    shares = allocate(records, [_estimate("allocated_cost"), _estimate("cost_cpu"), _estimate("cost_ram")])
+    # The components add up to the net allocated saving (no cap).
+    shares = allocate(records, [_estimate("allocated_cost", 2.0), _estimate("cost_cpu"), _estimate("cost_ram")])
     by_id = {share.record.id: share for share in shares}
     assert by_id[1].quantity == by_id[2].quantity == "cost_cpu"
     assert by_id[1].share == pytest.approx(0.75) and by_id[2].share == pytest.approx(0.25)

@@ -327,6 +327,8 @@ class SavingsEstimate(_Frozen):
     reason: str = ""
     projected_annual: Optional[float] = None
     projection_accuracy: Optional[float] = None
+    #: Where a frozen rate came from (deletions: ``observed``, ``opencost``, ``custom_rate``...); None otherwise.
+    rate_source: Optional[str] = None
 
 
 class Allocation(_Frozen):

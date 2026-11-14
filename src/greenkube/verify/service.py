@@ -43,7 +43,7 @@ from greenkube.models.metrics import RecommendationEventType, RecommendationReco
 from greenkube.models.verification import HealthGateResult, HealthGateStatus, MeasuredLedgerInput
 from greenkube.storage.change_repository import ChangeConflictError, ChangeRepository, change_identity
 from greenkube.utils.time import ensure_utc
-from greenkube.verify.attribution import allocate
+from greenkube.verify.attribution import allocate, allocated_projection
 from greenkube.verify.confounders import (
     ConfounderDetector,
     PoolContext,
@@ -995,8 +995,9 @@ class ChangeMeasurementService:
             pool=pool,
         )
         in_effect = [member for member in members if _value(member.status) in _IN_EFFECT]
+        # Measured rows are allocated (projected != allocated != realized): compare with the allocated projection.
         projections = {
-            "allocated_cost": _sum(member.potential_savings_cost for member in in_effect),
+            "allocated_cost": _sum(allocated_projection(member) for member in in_effect),
             # Component-matched: only the projected components the measured rows carry.
             "co2e_g": _sum(_measurable_co2e(member) for member in in_effect),
             CO2E_WITH_EMBODIED: _sum(_measurable_co2e(member, CO2E_COMPONENTS) for member in in_effect),
@@ -1011,6 +1012,7 @@ class ChangeMeasurementService:
             projections=projections,
             settings=self.settings,
             seed_parts=(change.change_id, status.sequence),
+            rate_sources=[_rate_source(member) for member in in_effect],
         )
         awaiting = [member for member in in_effect if _awaiting(member)]
         gates, reliability = (
@@ -1046,7 +1048,7 @@ class ChangeMeasurementService:
             change_id=change.change_id,
             sequence=status.sequence,
             strategy_key=strategy.key,
-            strategy_version=strategy.version,
+            strategy_version=result.strategy_version or strategy.version,
             impact_model_version=snapshot.impact_model_version,
             baseline_snapshot_id=snapshot.snapshot_id,
             baseline_sha256=snapshot.content_sha256,
@@ -1230,7 +1232,7 @@ class ChangeMeasurementService:
         if failed:
             outcome = MeasurementOutcome.ROLLBACK_REVIEW
             reasons = [gate.detail for gate in failed]
-        cost = _quantity_estimate("cost", "currency", basis, share, estimate, outcome, member.potential_savings_cost)
+        cost = _quantity_estimate("cost", "currency", basis, share, estimate, outcome, allocated_projection(member))
         co2e_source = measurement.estimate("co2e_g")
         # The measured CO2e (operational, allocated by the Impact Model like the
         # projection) is claimed only when its own interval shows a saving, and
@@ -1358,14 +1360,21 @@ def _co2e_basis(shares: Mapping[int, float]) -> str:
 def _measurable_co2e(
     member: RecommendationRecord, components: Sequence[str] = MEASURED_CO2E_COMPONENTS
 ) -> Optional[float]:
-    """Projected CO2e of the components a measurement sees (None: nothing comparable)."""
-    return measurable_co2e_projection(getattr(member, "impact", None), components)
+    """Projected allocated CO2e of the components a measurement sees (None: nothing comparable)."""
+    return measurable_co2e_projection(getattr(member, "impact", None), components, allocated=True)
 
 
 def _co2e_components_of(measurement: ChangeMeasurement) -> Sequence[str]:
     """Components the measured CO2e covers (operational only for measurements before embodied was measured)."""
     estimate = measurement.estimate("co2e_g")
     return tuple(estimate.components) if estimate is not None and estimate.components else MEASURED_CO2E_COMPONENTS
+
+
+def _rate_source(member: RecommendationRecord) -> str:
+    """Provenance of the rate frozen in a recommendation's projection (``assumptions.cost_source``)."""
+    impact = member.impact if isinstance(member.impact, dict) else {}
+    assumptions = impact.get("assumptions") if isinstance(impact.get("assumptions"), dict) else {}
+    return str(assumptions.get("cost_source") or "unknown")
 
 
 def _sum(values: Iterable[Optional[float]]) -> Optional[float]:
