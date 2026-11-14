@@ -358,6 +358,9 @@ class FakePullRequestRepository:
     async def get_pull_requests_for_recommendation(self, recommendation_id: int) -> list[PullRequestRecord]:
         return [record for record in self.records if record.recommendation_id == recommendation_id]
 
+    async def list_pull_requests_by_plan_id(self, plan_id: str) -> list[PullRequestRecord]:
+        return [record for record in self.records if record.plan_id == plan_id]
+
     async def save_pull_request(self, record: PullRequestRecord) -> PullRequestRecord:
         saved = record.model_copy(update={"id": self._next_id})
         self._next_id += 1

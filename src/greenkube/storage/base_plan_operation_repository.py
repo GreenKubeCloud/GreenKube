@@ -70,3 +70,7 @@ class PlanOperationRepository(ABC):
         ``retry_at`` (a provider rate limit) reschedules a retryable operation at that time
         without consuming an attempt: the provider throttled the call, the plan did not fail.
         """
+
+    async def cancel_unleased_operation(self, plan_id: str, reason: str) -> Operation | None:
+        """Cancel the plan's operation unless a worker holds a live lease (an operator abandon)."""
+        raise NotImplementedError

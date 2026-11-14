@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, ConfigDict, Field
 
 from greenkube.api.dependencies import (
     AutomationPlanApiService,
@@ -272,6 +273,56 @@ async def cancel_automation_plan(
     if cancelled is None:
         return _error_response(404, "plan_not_found", "Automation plan not found.")
     return _plan_response(cancelled)
+
+
+class AutomationPlanAbandonRequest(BaseModel):
+    """Why an operator abandons a stuck plan; recorded in the audit trail."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.post(
+    "/automation/plans/{plan_id}/abandon",
+    dependencies=[Depends(require_scope(Scope.APPROVE))],
+    response_model=AutomationPlanResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def abandon_automation_plan(
+    plan_id: str,
+    http_request: Request,
+    request: AutomationPlanAbandonRequest | None = None,
+    service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
+) -> AutomationPlanResponse | JSONResponse:
+    """Fail a plan stuck in APPLYING (operator or admin; audited).
+
+    Cancels its operation unless a worker holds a live lease on it, closes its pending
+    pull-request records and releases the recommendations so they can be re-planned.
+    Refused when a pull request was already recorded for the plan: close that request on
+    the provider instead.
+    """
+    if service is None:
+        return _service_unavailable(
+            "plan_service_unavailable", "Server-side automation plan service is not configured."
+        )
+    abandon = getattr(service, "abandon_plan", None)
+    if not callable(abandon):
+        return _service_unavailable("plan_abandon_unavailable", "Server-side plan abandon is not configured.")
+    try:
+        abandoned = await cast(Any, abandon)(
+            plan_id,
+            actor=get_authenticated_actor(http_request),
+            reason=request.reason if request is not None else None,
+        )
+    except AutomationPlanError as error:
+        if error.code is AutomationErrorCode.PLAN_STALE:
+            return _error_response(409, AutomationErrorCode.PLAN_STALE.value, str(error.detail))
+        return _domain_error_response(error)
+    if abandoned is None:
+        return _error_response(404, "plan_not_found", "Automation plan not found.")
+    operation = await service.read_operation_for_plan(plan_id)
+    return _plan_response(abandoned, operation)
 
 
 @router.delete(

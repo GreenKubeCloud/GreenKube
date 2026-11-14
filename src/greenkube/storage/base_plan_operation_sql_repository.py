@@ -601,6 +601,65 @@ class BaseSQLPlanOperationRepository(PlanOperationRepository):
             assert updated_row is not None
             return row_to_plan_operation(updated_row)
 
+    async def cancel_unleased_operation(self, plan_id: str, reason: str) -> Operation | None:
+        """Cancel the plan's operation unless a worker holds a live lease on it.
+
+        Queued, retrying and lease-expired running operations become ``cancelled``; a
+        running operation with a live lease is returned unchanged (the caller refuses),
+        and a terminal one is returned as is. ``None`` when the plan has no operation.
+        """
+        if not reason.strip():
+            raise ValueError("reason must not be blank")
+        now = self._now()
+        async with self._transaction(immediate=True) as connection:
+            query = "SELECT * FROM automation_plan_operations WHERE plan_id = ?"
+            if self._postgres:
+                query += " FOR UPDATE"
+            row = await self._fetchrow(connection, query, (plan_id,))
+            if row is None:
+                return None
+            await self._execute(
+                connection,
+                """
+                UPDATE automation_plan_operations
+                SET status = 'cancelled',
+                    worker_id = NULL,
+                    lease_id = NULL,
+                    lease_expires_at = NULL,
+                    locked_at = NULL,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE operation_id = ?
+                  AND (
+                      status IN ('queued', 'retrying')
+                      OR (status = 'running' AND lease_expires_at <= ?)
+                  )
+                """,
+                (reason.strip()[:1000], self._db_datetime(now), row["operation_id"], self._db_datetime(now)),
+            )
+            await self._execute(
+                connection,
+                """
+                UPDATE automation_worker_heartbeats
+                SET status = 'idle',
+                    lease_id = NULL,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    lease_plan_operation_id = NULL,
+                    updated_at = ?
+                WHERE lease_plan_operation_id = ?
+                  AND lease_expires_at <= ?
+                """,
+                (self._db_datetime(now), row["operation_id"], self._db_datetime(now)),
+            )
+            updated_row = await self._fetchrow(
+                connection,
+                "SELECT * FROM automation_plan_operations WHERE operation_id = ?",
+                (row["operation_id"],),
+            )
+            assert updated_row is not None
+            return row_to_plan_operation(updated_row)
+
     def _lease_worker_id(self, lease: PlanOperationLease) -> str:
         worker_id = lease.operation.worker_id
         if worker_id is None:

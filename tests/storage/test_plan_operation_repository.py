@@ -429,3 +429,26 @@ async def test_non_retryable_failure_ignores_retry_at(plan_operation_store):
     )
     assert failed.status is OperationStatus.FAILED
     assert failed.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_unleased_operation_refuses_a_live_lease_and_cancels_otherwise(plan_operation_store):
+    repository, _, manager, backend = plan_operation_store
+    plan = _plan("plan-abandon")
+    await _persist_plan(manager, backend, plan)
+    queued = await repository.enqueue(plan, idempotency_key=f"plan:{plan.plan_id}:{plan.digest}", max_attempts=3)
+    assert await repository.cancel_unleased_operation("plan-missing", "abandoned") is None
+
+    lease = await repository.claim_next("worker-a", lease_seconds=60)
+    assert lease is not None
+    live = await repository.cancel_unleased_operation(plan.plan_id, "abandoned by user:alice")
+    assert live is not None and live.status is OperationStatus.RUNNING
+
+    await _expire_lease(manager, backend, queued.operation_id)
+    cancelled = await repository.cancel_unleased_operation(plan.plan_id, "abandoned by user:alice")
+    assert cancelled is not None and cancelled.status is OperationStatus.CANCELLED
+    assert cancelled.last_error == "abandoned by user:alice"
+    # The stale owner can no longer finish it, and nothing claims it again.
+    with pytest.raises(PlanOperationLeaseError):
+        await repository.mark_succeeded(lease)
+    assert await repository.claim_next("worker-b") is None
