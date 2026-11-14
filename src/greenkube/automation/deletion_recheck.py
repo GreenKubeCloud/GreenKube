@@ -153,7 +153,11 @@ class OpenDeletionRechecker:
         return invalidated
 
     async def invalidate(self, plan: Plan, reason: str) -> bool:
-        """Comment on and close the pull request (best effort), then mark the plan and recommendations stale."""
+        """Mark the plan stale, then comment on and close its pull request (best effort) and retire it.
+
+        The compare-and-swap comes first: a plan that polling already moved to merged or
+        closed is left alone, so no "do not merge" comment lands on a finished pull request.
+        """
         target = plan.action.target
         logger.warning(
             "Open deletion plan %s: %s is in use again (%s); invalidating its pull request.",
@@ -161,7 +165,6 @@ class OpenDeletionRechecker:
             _describe(target),
             reason,
         )
-        closed = await self._comment_and_close(plan, reason)
         stale = await self.worker.plans.set_plan_status(
             plan.plan_id,
             PlanStatus.STALE,
@@ -172,6 +175,7 @@ class OpenDeletionRechecker:
         )
         if stale is None:
             return False
+        closed = await self._comment_and_close(plan, reason)
         await self.worker.plans.set_recommendation_action_status(
             plan.recommendation_ids,
             ActionStatus.NONE,

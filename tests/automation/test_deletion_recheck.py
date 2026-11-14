@@ -357,6 +357,20 @@ async def test_an_orphan_or_unreadable_target_leaves_the_pull_request_open():
 
 
 @pytest.mark.asyncio
+async def test_a_plan_that_left_pr_open_meanwhile_gets_no_do_not_merge_comment():
+    worker, plans, provider, recommendations = _rechecking_worker(_reader(httproutes=[HTTP_ROUTE]))
+    plan = plans.plans["plan-delete"]
+    # Polling recorded the merge after the plan was listed: the stale compare-and-swap fails.
+    plans.plans["plan-delete"] = plan.model_copy(update={"status": PlanStatus.MERGED})
+
+    assert await OpenDeletionRechecker(worker, _checker(_reader())).invalidate(plan, "in use") is False
+
+    assert provider.comments == [] and provider.closed == []
+    assert recommendations.transitions == []
+    assert plans.plans["plan-delete"].status is PlanStatus.MERGED
+
+
+@pytest.mark.asyncio
 async def test_rechecker_ignores_non_deletion_plans():
     plan = make_plan(status=PlanStatus.PR_OPEN)
     plans = _Plans(plan)
