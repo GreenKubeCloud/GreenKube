@@ -144,7 +144,7 @@
         "ui_action": null
       },
       "id": "evidence",
-      "reason": "Enough history to recommend and open PRs.",
+      "reason": "Enough history to recommend increases, decreases and other sources, and to open PRs.",
       "status": "ok",
       "title": "Evidence warm-up"
     }

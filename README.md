@@ -122,7 +122,10 @@ kubectl -n greenkube create secret generic greenkube-git-credentials \
 There is no profile and no feature flag: the chart deploys the API, the controller, an isolated renderer and
 PostgreSQL, sized for kind or minikube. GreenKube discovers Prometheus, OpenCost, VPA, Karpenter, Argo CD and Flux,
 infers the Git provider of every discovered repository, and the **Setup** page lists what is active and the fix
-for anything missing. A pull request is never opened without your approval of a plan digest. The
+for anything missing. Recommendations need evidence first: request increases and the other sources appear after
+about 3 hours (36 samples at the default 5-minute step), request decreases only after 7 days of history, so a
+weekly cycle is seen. The setup checklist shows both estimates. A pull request is never opened without your
+approval of a plan digest. The
 [Installation guide](docs/installation.md) covers external databases, Ingress/TLS and high availability;
 [Upgrading](docs/upgrading.md) covers 0.3.x installs.
 

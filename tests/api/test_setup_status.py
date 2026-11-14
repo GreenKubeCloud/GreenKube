@@ -298,3 +298,34 @@ def test_controllers_check_lists_families_not_crd_kinds(client, inputs):
 
     assert check["status"] == "ok"
     assert check["reason"] == "Discovered: argocd, flux."
+
+
+def test_warm_up_reports_a_separate_eta_for_request_decreases(client, inputs):
+    """Decreases need RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS (7 days), not the ~3h sample warm-up."""
+    inputs.earliest = _now() - timedelta(minutes=5)
+
+    reason = _checks(client.get("/api/v1/setup/status").json())["evidence"]["reason"]
+
+    assert "increases and other sources become eligible in ~3h" in reason
+    assert "request decreases need 7 days of history" in reason
+    assert "eligible in ~7 days" in reason
+
+
+def test_after_the_sample_warm_up_decreases_still_wait_for_coverage(client, inputs):
+    inputs.earliest = _now() - timedelta(hours=6)
+
+    check = _checks(client.get("/api/v1/setup/status").json())["evidence"]
+
+    assert check["status"] == "ok"
+    assert "Increases and other sources can be recommended now" in check["reason"]
+    assert "request decreases need 7 days" in check["reason"]
+    assert "open PRs" not in check["reason"]
+
+
+def test_after_the_decrease_coverage_everything_is_eligible(client, inputs):
+    inputs.earliest = _now() - timedelta(days=8)
+
+    check = _checks(client.get("/api/v1/setup/status").json())["evidence"]
+
+    assert check["status"] == "ok"
+    assert "decreases" in check["reason"]
