@@ -1021,6 +1021,10 @@ class ChangeMeasurementService:
             else ([], None)
         )
         counterfactual_params = dict(result.counterfactual_params)
+        # Measured savings are allocated; the realization factor of the projections says how much of
+        # them is expected on the bill (realized_billed is not measured yet, C10).
+        counterfactual_params["projection_basis"] = PROJECTION_BASIS
+        counterfactual_params["realization_factor"] = realization_factor(in_effect)
         reasons = list(result.reasons)
         if reliability is not None:
             # The outcome of a reliability increase (H1); its cost stays in the estimates, as a cost.
@@ -1370,6 +1374,34 @@ def _co2e_components_of(measurement: ChangeMeasurement) -> Sequence[str]:
     return tuple(estimate.components) if estimate is not None and estimate.components else MEASURED_CO2E_COMPONENTS
 
 
+#: What a measurement is compared with (projected != allocated != realized).
+PROJECTION_BASIS = "allocated"
+
+
+def _factor(record: RecommendationRecord) -> Optional[float]:
+    impact = record.impact if isinstance(record.impact, dict) else {}
+    value = impact.get("realization_factor")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return None
+    return min(max(float(value), 0.0), 1.0)
+
+
+def realization_factor(records: Sequence[RecommendationRecord]) -> Optional[float]:
+    """Realization factor of a group's projections, weighted by their allocated saving (None when one is unknown)."""
+    pairs = []
+    for record in records:
+        factor = _factor(record)
+        if factor is None:
+            return None
+        pairs.append((max(float(allocated_projection(record) or 0.0), 0.0), factor))
+    if not pairs:
+        return None
+    total = math.fsum(weight for weight, _ in pairs)
+    if total <= 0:
+        return math.fsum(factor for _, factor in pairs) / len(pairs)
+    return math.fsum(weight * factor for weight, factor in pairs) / total
+
+
 def _rate_source(member: RecommendationRecord) -> str:
     """Provenance of the rate frozen in a recommendation's projection (``assumptions.cost_source``)."""
     impact = member.impact if isinstance(member.impact, dict) else {}
@@ -1459,4 +1491,4 @@ def _quantity_outcome(outcome: ChangeOutcome) -> QuantityOutcome:
     }.get(outcome, QuantityOutcome.INCONCLUSIVE)
 
 
-__all__ = ["ChangeMeasurementService", "DECISION_GRACE"]
+__all__ = ["ChangeMeasurementService", "DECISION_GRACE", "PROJECTION_BASIS", "realization_factor"]

@@ -171,6 +171,36 @@ async def get_change(
     }
 
 
+def savings_basis(measurement: Any) -> dict[str, Any]:
+    """What a measurement's figures are (projected != allocated != realized), for labels.
+
+    ``measured_allocated_annual`` is the measured saving of the change (allocated cost:
+    what the workload stops being charged), ``projected_allocated_annual`` the allocated
+    projection it is compared with (``projection_accuracy``), ``realization_factor`` the
+    projections' share of allocated savings expected to leave the bill, and
+    ``realized_billed_annual_expected`` = measured allocated x factor: an expectation,
+    not a measurement (``realized_billed_measured`` is false until billed savings are
+    measured). Measurements decided before these were recorded return ``None`` for
+    the factor.
+    """
+    params = getattr(measurement, "counterfactual_params", None) or {}
+    estimate = measurement.estimate("allocated_cost") if hasattr(measurement, "estimate") else None
+    measured = estimate.annualized if estimate is not None else None
+    factor = params.get("realization_factor")
+    factor = float(factor) if isinstance(factor, (int, float)) and not isinstance(factor, bool) else None
+    return {
+        "measured_method": "measured_allocated",
+        "projection_basis": params.get("projection_basis") or "billable_expected",
+        "measured_allocated_annual": measured,
+        "measured_allocated_claimed": bool(estimate is not None and estimate.claimed),
+        "projected_allocated_annual": estimate.projected_annual if estimate is not None else None,
+        "projection_accuracy": estimate.projection_accuracy if estimate is not None else None,
+        "realization_factor": factor,
+        "realized_billed_annual_expected": measured * factor if measured is not None and factor is not None else None,
+        "realized_billed_measured": False,
+    }
+
+
 @router.get("/changes/{change_id}/measurements")
 async def list_change_measurements(
     change_id: str = _CHANGE_ID,
@@ -193,6 +223,7 @@ async def list_change_measurements(
     items = []
     for measurement in decided:
         payload = measurement.model_dump(mode="json")
+        payload["savings_basis"] = savings_basis(measurement)
         payload["recommendations"] = [
             {
                 "recommendation_id": row.recommendation_id,

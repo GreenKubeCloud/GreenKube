@@ -174,6 +174,35 @@ class SavingsBlock(BaseModel):
     end: Optional[datetime] = Field(None, description="Window end for accrued blocks.")
 
 
+class RealizationSummary(BaseModel):
+    """How the measured run rate relates to the bill (projected != allocated != realized).
+
+    GreenKube measures *allocated* savings (``measured_allocated``: what the
+    changed workloads stop being charged). The bill drops only when capacity
+    is removed; the realization factor of each recommendation's projection is
+    the expected share. ``realized_billed_*_expected`` are expectations, not
+    measurements (``realized_billed_measured`` stays false until billed
+    savings are measured, roadmap C10).
+    """
+
+    measured_allocated_cost_annual: float = Field(0.0, description="Same as run_rate_annual.cost.")
+    measured_allocated_co2e_grams_annual: float = Field(0.0, description="Same as run_rate_annual.co2e_grams.")
+    realization_factor: Optional[float] = Field(
+        None, description="Measured-cost-weighted realization factor of the measured recommendations' projections."
+    )
+    realized_billed_cost_annual_expected: Optional[float] = Field(
+        None, description="Sum of measured allocated cost x realization factor (an expectation, not a measurement)."
+    )
+    realized_billed_co2e_grams_annual_expected: Optional[float] = Field(
+        None, description="Sum of measured allocated CO2e x realization factor (an expectation)."
+    )
+    recommendation_count: int = Field(0, description="Recommendations with a measured annual rate.")
+    without_realization_count: int = Field(
+        0, description="Measured recommendations whose projection has no realization factor (left out of the factor)."
+    )
+    realized_billed_measured: bool = Field(False, description="Whether billed savings are measured (not yet).")
+
+
 def _deprecated(description: str) -> Any:
     return Field(0.0, description=f"Deprecated: {description}", json_schema_extra={"deprecated": True})
 
@@ -208,6 +237,15 @@ class SavingsReport(BaseModel):
     applied_count: int = Field(0, description="Recommendations in an applied, verifying, verified or review state.")
     verified_count: int = Field(0, description="Recommendations with a verified (measured) outcome.")
     diagnostics: List[str] = Field(default_factory=list, description="Caveats that apply to these figures.")
+    measured_basis: Literal["measured_allocated"] = Field(
+        "measured_allocated",
+        description="run_rate_annual and realized_to_date are measured allocated savings (ledger v2 method "
+        "measured_allocated), not billed savings.",
+    )
+    realization: RealizationSummary = Field(
+        default_factory=RealizationSummary,
+        description="Measured allocated run rate, its realization factor and the billed saving it implies.",
+    )
 
     total_carbon_saved_co2e_grams: float = _deprecated("same as realized_to_date.co2e_grams.")
     total_cost_saved: float = _deprecated("same as realized_to_date.cost.")

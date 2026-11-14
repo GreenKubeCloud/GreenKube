@@ -172,7 +172,7 @@ The rule is applied once, at the end of the post-window (plus one hour of grace 
 
 Values are **signed and never floored**: a cost increase is reported as a negative saving with its interval.
 
-**Projection accuracy** (measured annual saving ÷ projected annual saving) is reported for each claimed quantity. It is not a gate: a saving can be realized at 30% of its projection. It feeds the track record of the recommendation's source.
+**Projection accuracy** (measured annual saving ÷ projected annual saving) is reported for each claimed quantity. A measurement reads allocated cost and CO₂e, so it is compared with the **allocated** projection (`impact.allocated_cost_annual` and the allocated CO₂e of the measured components, recorded as `counterfactual_params.projection_basis = allocated`), never with the realization-scaled billable projection (`potential_savings_cost`, `co2e_expected_annual_g`): projected ≠ allocated ≠ realized. The measurement also records `counterfactual_params.realization_factor`, the allocated-weighted realization factor of the change's projections, from which the API derives the billed saving to expect (an expectation, not a measurement). It is not a gate: a saving can be realized at 30% of its projection. It feeds the track record of the recommendation's source.
 
 ### Confounders
 
@@ -303,7 +303,7 @@ Every saving GreenKube reports ends up as an **entry** of an append-only, hash-c
 | `book` | `accrued` mirrors the v1 accrual ledger and reconciles with `GET /api/v1/recommendations/savings`; `restatement` holds the restatements and the reversals of the projections they replace. |
 | `reason` | `accrual`, `drift` (a drift-monitor reversal, [section 10](#10-drift-monitor-c8)), `supersession` (rollback review, revert or phantom repair), `restatement`. |
 | `method` | `projected`, `measured_allocated` (this methodology, allocated cost), `realized_billed` (pool-level realization, C10, not written yet), `user_declared`. Never summed together. |
-| `quantity`, `value`, `unit` | `cost` in the pricing currency (`IMPACT_PRICING_CURRENCY`) or `co2e_g` in gCO₂e. Values are signed and never floored. |
+| `quantity`, `value`, `unit` | `cost` in the currency its recommendation was priced in (the projection's `impact.currency`; `IMPACT_PRICING_CURRENCY` when the recommendation has none), so a later currency change never relabels past accruals, or `co2e_g` in gCO₂e. Values are signed and never floored. The summary keeps one total per method, quantity and unit: amounts in different currencies are never added. |
 | `period_start`, `period_end`, `slot_start` | The accrued period, on the fixed UTC hour grid of the accrual job. |
 | `recommendation_ids`, `change_id`, `measurement_id`, `pr_url`, `method_version` | Provenance: the change's recommendations, the change and its pull request, the measurement and the strategy version (`request_rightsizing/2.0`) of measured amounts. |
 | `cluster_uid`, `cluster_name` | The UID of the `kube-system` namespace (roadmap N9), stored next to `CLUSTER_NAME` in `cluster_identities` the first time it is read and never replaced; `name:<CLUSTER_NAME>` without Kubernetes access. Signal ids and recommendation fingerprints keep their own cluster key. |
