@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 from greenkube.automation.plan_worker import PlanWorker, PlanWorkerError
+from greenkube.collectors.lb_collector import OrphanCheck
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     ControllerKind,
@@ -55,6 +56,11 @@ class _Bindings:
         return self.stored
 
 
+class _StillOrphaned:
+    async def check(self, target: ResourceTarget) -> OrphanCheck:
+        return OrphanCheck("orphan")
+
+
 def _worker(reader: Any = None, bindings: Any = None) -> PlanWorker:
     unused = cast(Any, object())
     return PlanWorker(
@@ -65,6 +71,7 @@ def _worker(reader: Any = None, bindings: Any = None) -> PlanWorker:
         pull_request_repository=unused,
         resource_reader=reader,
         resource_binding_reader=bindings,
+        deletion_orphan_checker=cast(Any, _StillOrphaned()),
     )
 
 

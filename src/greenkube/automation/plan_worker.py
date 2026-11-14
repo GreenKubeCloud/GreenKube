@@ -11,6 +11,15 @@ from functools import partial
 from typing import Any, Literal, Protocol, TypeVar, cast
 
 from greenkube.automation.actions import ActionKindError, action_kind_of
+from greenkube.automation.deletion_recheck import (
+    DELETION_TARGET_IN_USE,
+    ORPHAN,
+    ORPHAN_ABSENT,
+    ORPHAN_IN_USE,
+    DeletionOrphanChecker,
+    OpenDeletionRechecker,
+    is_deletion_plan,
+)
 from greenkube.automation.delivery import (
     EXTERNAL_DELIVERY_RESUME_AFTER,
     normalized_url,
@@ -79,6 +88,7 @@ from greenkube.gitops.contracts import (
     configured_binding_ttl,
 )
 from greenkube.gitops.discovery.inventory import CONTROLLER_PRUNE_EVIDENCE
+from greenkube.gitops.planning.render_inputs import changed_render_inputs, records_render_inputs
 from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 from greenkube.models.metrics import (
     PullRequestRecord,
@@ -407,6 +417,7 @@ class PlanWorker:
         pull_request_features: PullRequestFeatures | None = None,
         resource_reader: PlanResourceReader | None = None,
         resource_binding_reader: PlanResourceBindingReader | None = None,
+        deletion_orphan_checker: DeletionOrphanChecker | None = None,
     ) -> None:
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be a positive integer")
@@ -420,6 +431,9 @@ class PlanWorker:
         self.binding_reader = binding_reader
         self.resource_reader = resource_reader
         self.resource_binding_reader = resource_binding_reader
+        #: Full orphan re-check of a deletion target (H6); ``None`` fails deletions closed.
+        self.deletion_orphan_checker = deletion_orphan_checker
+        self._deletion_rechecker: OpenDeletionRechecker | None = None
         self.pull_request_options = pull_request_options or EMPTY_PULL_REQUEST_OPTIONS
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lease_seconds = lease_seconds
@@ -577,9 +591,17 @@ class PlanWorker:
         plan: Plan,
         revision: str,
     ) -> None:
-        """Fail with a re-plan error unless every planned file is unchanged at ``revision``."""
+        """Fail with a re-plan error unless every planned file and render input is unchanged at ``revision``.
+
+        The edited blobs are not enough (D7): a moved head that changes a Kustomize base or
+        patch, a values file, a chart file or another manifest of the rendered directory
+        changes what the plan renders, so the plan is marked stale and must be re-planned.
+        A plan that recorded no render inputs (rendered before they were recorded) cannot
+        prove it and is stale on a moved head too.
+        """
         file_plan = plan.file_plan
         assert file_plan is not None
+        await self._ensure_render_inputs_unchanged(execution, target, plan, revision)
         for edit in file_plan.files:
             git_file = await self._git_call(execution, target.provider.get_file, target.repository, edit.path, revision)
             if edit.operation == "create":
@@ -598,6 +620,32 @@ class PlanWorker:
                     "Source revision changed a file this plan edits after the plan was created; "
                     "re-plan before applying."
                 )
+
+    async def _ensure_render_inputs_unchanged(
+        self,
+        execution: _Execution | None,
+        target: GitProviderTarget,
+        plan: Plan,
+        revision: str,
+    ) -> None:
+        file_plan = plan.file_plan
+        assert file_plan is not None
+        if not records_render_inputs(file_plan.validation):
+            raise _replan_error(
+                "The source revision moved and this plan records no render inputs (it was rendered by an older "
+                "release); re-plan before applying."
+            )
+        comparison = await self._git_call(
+            execution, target.provider.compare_trees, target.repository, file_plan.base_revision, revision
+        )
+        changes = _validated_tree_changes(comparison, file_plan.base_revision, revision)
+        changed = changed_render_inputs(file_plan.validation, changes)
+        if changed:
+            shown = ", ".join(repr(path) for path in changed[:5]) + (", ..." if len(changed) > 5 else "")
+            raise _replan_error(
+                f"Source revision changed files this plan was rendered from ({shown}) after the plan was created; "
+                "re-plan before applying."
+            )
 
     async def _record_committed_on_revision(self, plan: Plan, revision: str) -> Plan:
         """Persist the moved branch head the plan is committed on, separately from its base (D7)."""
@@ -788,12 +836,61 @@ class PlanWorker:
                 action_status=ActionStatus.FAILED,
                 reason_code=NO_EFFECTIVE_CHANGE_REASON if no_change else None,
             ) from exc
+        if is_deletion_plan(plan):
+            await self._ensure_still_orphaned(execution, target)
         if baseline is None:
             return plan
         persisted = await self.plans.set_plan_pre_apply_baseline_if_absent(plan.plan_id, baseline)
         if persisted is None or not _same_plan_content(plan, persisted):
             raise _replan_error("Persisted plan content changed while saving its pre-apply baseline.")
         return persisted
+
+    async def _ensure_still_orphaned(self, execution: _Execution | None, target: ResourceTarget) -> None:
+        """Run the collectors' full orphan check again before a deletion branch is created (H6).
+
+        The live type and phase are not enough: a LoadBalancer may have gained endpoints or
+        an HTTPRoute reference, a volume a claim or a snapshot since it was recommended.
+        In use: the plan fails with the reason. Unreadable: retried, never read as unused.
+        """
+        checker = self.deletion_orphan_checker
+        if checker is None:
+            raise PlanWorkerError(
+                "Could not re-check that the resource is still unused because no orphan checker is configured; "
+                "verify worker configuration, then retry.",
+                retryable=True,
+            )
+        await self._heartbeat(execution)
+        result = await checker.check(target)
+        if result.status == ORPHAN_IN_USE:
+            raise PlanWorkerError(
+                f"{target.kind} {target.name!r} is no longer unused ({result.reason}); no branch or pull request "
+                "was created.",
+                plan_status=PlanStatus.FAILED,
+                action_status=ActionStatus.FAILED,
+                reason_code=DELETION_TARGET_IN_USE,
+            )
+        if result.status == ORPHAN_ABSENT:
+            raise PlanWorkerError(
+                f"{NO_EFFECTIVE_CHANGE_REASON}: {result.reason}",
+                plan_status=PlanStatus.FAILED,
+                action_status=ActionStatus.FAILED,
+                reason_code=NO_EFFECTIVE_CHANGE_REASON,
+            )
+        if result.status != ORPHAN:
+            raise PlanWorkerError(
+                f"Could not prove that {target.kind} {target.name!r} is still unused ({result.reason}); verify "
+                "Kubernetes read permissions for the deletion evidence, then retry.",
+                retryable=True,
+            )
+
+    async def recheck_open_deletions(self) -> int:
+        """Invalidate open deletion pull requests whose resource is in use again (controller step)."""
+        checker = self.deletion_orphan_checker
+        if checker is None:
+            return 0
+        if self._deletion_rechecker is None:
+            self._deletion_rechecker = OpenDeletionRechecker(self, checker, clock=self.clock)
+        return await self._deletion_rechecker.recheck_once()
 
     async def _ensure_pre_apply_baseline(self, execution: _Execution | None, plan: Plan) -> Plan:
         spec = action_kind_of(plan.action)

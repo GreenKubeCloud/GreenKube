@@ -149,6 +149,9 @@ def _plan(
         requests_within_limits=True,
         renderer=RendererKind.RAW,
         output_digest=OUTPUT_DIGEST,
+        # D7: the raw render read the manifests of apps/payments (moved heads compare them).
+        render_inputs={MANIFEST_PATH: _blob_sha(BASE_CONTENT)},
+        render_scopes=["apps/payments"],
     )
     file_plan = FilePlan(
         plan_id=action.action_id,

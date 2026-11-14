@@ -109,6 +109,12 @@ _WORKLOAD_KINDS: Tuple[Tuple[str, str], ...] = (
     ("cronjobs", "CronJob"),
 )
 
+#: Outcomes of an orphan check (:class:`OrphanCheck`).
+ORPHAN = "orphan"
+ORPHAN_IN_USE = "in_use"
+ORPHAN_UNKNOWN = "unknown"
+ORPHAN_ABSENT = "absent"
+
 #: Gateway API route kinds whose backendRefs or parentRefs may name a Service.
 ROUTE_KINDS: Tuple[str, ...] = ("httproutes", "grpcroutes", "tlsroutes", "tcproutes", "udproutes")
 
@@ -367,95 +373,144 @@ class LoadBalancerCollector:
         return result
 
     async def _evaluate(self, reader: Any, service: Mapping[str, Any]) -> Tuple[Optional[OrphanedLoadBalancer], str]:
-        metadata = _metadata(service)
-        spec = service.get("spec") or {}
-        namespace = metadata.get("namespace") or ""
-        name = metadata.get("name") or ""
-        selector = {str(k): str(v) for k, v in (spec.get("selector") or {}).items()}
-        addresses = external_addresses(service)
+        candidate, reason, _status = await evaluate_load_balancer_usage(reader, service)
+        return candidate, reason
 
-        def unproven(listing: ObjectList) -> str:
-            return f"cannot prove it is unused: {listing.kind} unreadable ({listing.detail})"
 
-        endpoints = await reader.list("endpoints", namespace)
-        if not endpoints.known:
-            return None, unproven(endpoints)
-        legacy = next((item for item in endpoints.items if _metadata(item).get("name") == name), None)
-        legacy_count = _legacy_endpoint_count(legacy)
-        if legacy_count:
-            return None, f"{legacy_count} endpoint(s) in its Endpoints object"
+async def evaluate_load_balancer_usage(
+    reader: Any, service: Mapping[str, Any]
+) -> Tuple[Optional[OrphanedLoadBalancer], str, str]:
+    """The usage checks of one LoadBalancer Service past its static exclusions.
 
-        slices = await reader.list("endpointslices", namespace, f"kubernetes.io/service-name={name}")
-        if slices.status != "ok":
-            return None, unproven(slices)
-        slice_count = _slice_endpoint_count(slices.items)
-        if slice_count:
-            return None, f"{slice_count} endpoint(s) in {len(slices.items)} EndpointSlice(s)"
+    Returns the candidate (or ``None``), the reason it is not one, and the outcome:
+    ``orphan``, ``in_use`` or ``unknown`` (an API it depends on could not be read).
+    """
+    metadata = _metadata(service)
+    spec = service.get("spec") or {}
+    namespace = metadata.get("namespace") or ""
+    name = metadata.get("name") or ""
+    selector = {str(k): str(v) for k, v in (spec.get("selector") or {}).items()}
+    addresses = external_addresses(service)
 
-        pods = await reader.list("pods", namespace, label_selector(selector))
-        if not pods.known:
-            return None, unproven(pods)
-        if pods.items:
-            return None, f"its selector matches {len(pods.items)} pod(s)"
+    def unproven(listing: ObjectList) -> str:
+        return f"cannot prove it is unused: {listing.kind} unreadable ({listing.detail})"
 
-        for kind, label in _WORKLOAD_KINDS:
-            workloads = await reader.list(kind, namespace)
-            if not workloads.known:
-                return None, unproven(workloads)
-            for workload in workloads.items:
-                if _selects(selector, _template_labels(kind, workload)):
-                    return (
-                        None,
-                        f"{label} {_metadata(workload).get('name')} selects it (scaled to zero or between runs)",
-                    )
+    endpoints = await reader.list("endpoints", namespace)
+    if not endpoints.known:
+        return None, unproven(endpoints), ORPHAN_UNKNOWN
+    legacy = next((item for item in endpoints.items if _metadata(item).get("name") == name), None)
+    legacy_count = _legacy_endpoint_count(legacy)
+    if legacy_count:
+        return None, f"{legacy_count} endpoint(s) in its Endpoints object", ORPHAN_IN_USE
 
-        gateways = await reader.list("gateways")
-        if not gateways.known:
-            return None, unproven(gateways)
-        reference = gateway_reference(gateways.items, addresses)
+    slices = await reader.list("endpointslices", namespace, f"kubernetes.io/service-name={name}")
+    if slices.status != "ok":
+        return None, unproven(slices), ORPHAN_UNKNOWN
+    slice_count = _slice_endpoint_count(slices.items)
+    if slice_count:
+        return None, f"{slice_count} endpoint(s) in {len(slices.items)} EndpointSlice(s)", ORPHAN_IN_USE
+
+    pods = await reader.list("pods", namespace, label_selector(selector))
+    if not pods.known:
+        return None, unproven(pods), ORPHAN_UNKNOWN
+    if pods.items:
+        return None, f"its selector matches {len(pods.items)} pod(s)", ORPHAN_IN_USE
+
+    for kind, label in _WORKLOAD_KINDS:
+        workloads = await reader.list(kind, namespace)
+        if not workloads.known:
+            return None, unproven(workloads), ORPHAN_UNKNOWN
+        for workload in workloads.items:
+            if _selects(selector, _template_labels(kind, workload)):
+                return (
+                    None,
+                    f"{label} {_metadata(workload).get('name')} selects it (scaled to zero or between runs)",
+                    ORPHAN_IN_USE,
+                )
+
+    gateways = await reader.list("gateways")
+    if not gateways.known:
+        return None, unproven(gateways), ORPHAN_UNKNOWN
+    reference = gateway_reference(gateways.items, addresses)
+    if reference:
+        return None, reference, ORPHAN_IN_USE
+    ingresses = await reader.list("ingresses")
+    if not ingresses.known:
+        return None, unproven(ingresses), ORPHAN_UNKNOWN
+    reference = ingress_reference(ingresses.items, namespace, name, addresses)
+    if reference:
+        return None, reference, ORPHAN_IN_USE
+    for kind in ROUTE_KINDS:
+        routes = await reader.list(kind)
+        if not routes.known:
+            return None, unproven(routes), ORPHAN_UNKNOWN
+        reference = route_reference(routes.items, namespace, name)
         if reference:
-            return None, reference
-        ingresses = await reader.list("ingresses")
-        if not ingresses.known:
-            return None, unproven(ingresses)
-        reference = ingress_reference(ingresses.items, namespace, name, addresses)
-        if reference:
-            return None, reference
-        for kind in ROUTE_KINDS:
-            routes = await reader.list(kind)
-            if not routes.known:
-                return None, unproven(routes)
-            reference = route_reference(routes.items, namespace, name)
-            if reference:
-                return None, reference
+            return None, reference, ORPHAN_IN_USE
 
-        selector_text = label_selector(selector)
-        evidence = [
-            f"selector {selector_text} matches no pod in namespace {namespace}",
-            "no Deployment, StatefulSet, DaemonSet or CronJob pod template matches the selector",
-            "0 endpoints (ready or not) in its Endpoints object and EndpointSlices",
-            "no owner references and no gateway, ingress or mesh controller labels or annotations",
-            "no Gateway, Ingress or Gateway API route references it or uses its address",
-        ]
-        ports = ",".join(
-            f"{port.get('port')}/{port.get('protocol') or 'TCP'}"
-            for port in spec.get("ports") or []
-            if isinstance(port, Mapping) and port.get("port")
-        )
-        return (
-            OrphanedLoadBalancer(
-                name=name,
-                namespace=namespace,
-                endpoint_count=0,
-                external_ip=addresses[0] if addresses else None,
-                ports=ports,
-                uid=metadata.get("uid") or "",
-                selector=selector,
-                evidence=evidence,
-                bare_metal_allocator=bare_metal_allocator(service),
-            ),
-            "",
-        )
+    selector_text = label_selector(selector)
+    evidence = [
+        f"selector {selector_text} matches no pod in namespace {namespace}",
+        "no Deployment, StatefulSet, DaemonSet or CronJob pod template matches the selector",
+        "0 endpoints (ready or not) in its Endpoints object and EndpointSlices",
+        "no owner references and no gateway, ingress or mesh controller labels or annotations",
+        "no Gateway, Ingress or Gateway API route references it or uses its address",
+    ]
+    ports = ",".join(
+        f"{port.get('port')}/{port.get('protocol') or 'TCP'}"
+        for port in spec.get("ports") or []
+        if isinstance(port, Mapping) and port.get("port")
+    )
+    return (
+        OrphanedLoadBalancer(
+            name=name,
+            namespace=namespace,
+            endpoint_count=0,
+            external_ip=addresses[0] if addresses else None,
+            ports=ports,
+            uid=metadata.get("uid") or "",
+            selector=selector,
+            evidence=evidence,
+            bare_metal_allocator=bare_metal_allocator(service),
+        ),
+        "",
+        ORPHAN,
+    )
+
+
+@dataclass(frozen=True)
+class OrphanCheck:
+    """Whether a resource proposed for deletion is still unused, with the reason.
+
+    ``status`` is ``orphan`` (every check passed), ``in_use`` (something uses it, or it
+    is no longer a deletion candidate), ``unknown`` (an API a check depends on could not
+    be read: never read as unused) or ``absent`` (the resource no longer exists).
+    """
+
+    status: str
+    reason: str = ""
+
+    @property
+    def orphan(self) -> bool:
+        return self.status == ORPHAN
+
+
+async def check_load_balancer(reader: Any, service: Mapping[str, Any]) -> OrphanCheck:
+    """The full orphan check of one live Service, as the collector runs it (H6 re-check).
+
+    A Service that is no longer of type ``LoadBalancer``, is opted out, lost its selector,
+    gained an owner or a gateway/mesh label, has endpoints (Endpoints or EndpointSlices),
+    is selected by a pod or a workload template, or is referenced by a Gateway, an
+    Ingress or a Gateway API route is ``in_use``; an unreadable dependency is ``unknown``.
+    """
+    spec = service.get("spec") or {}
+    if spec.get("type") != "LoadBalancer":
+        return OrphanCheck(ORPHAN_IN_USE, f"is no longer a LoadBalancer (live type {spec.get('type') or 'ClusterIP'})")
+    reason = static_exclusion(service)
+    if reason:
+        return OrphanCheck(ORPHAN_IN_USE, reason)
+    _candidate, reason, status = await evaluate_load_balancer_usage(reader, service)
+    return OrphanCheck(status, reason)
 
 
 async def enrich_orphaned_lb_costs(

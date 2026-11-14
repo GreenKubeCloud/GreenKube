@@ -59,6 +59,7 @@ from greenkube.gitops.planning.raw_manifest import (
     _validate_rendered_change,
     remove_document,
 )
+from greenkube.gitops.planning.render_inputs import note_read, recording_reads, workspace_blob_shas
 from greenkube.gitops.renderers.kustomize import KustomizeRenderer
 from greenkube.gitops.renderers.raw import RawRenderResult
 from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
@@ -150,7 +151,11 @@ class KustomizePlanner:
         if overlay_path not in kustomizations:
             raise KustomizePlanError("resolved overlay does not contain a Kustomization file in the snapshot")
 
-        configs = _validate_render_graph(root, snapshot_files, kustomizations, overlay_path)
+        with recording_reads() as render_reads:
+            # Every file the Kustomize build reads: the Kustomization files of the render
+            # graph, their resources and their patch files (D7 render inputs).
+            configs = _validate_render_graph(root, snapshot_files, kustomizations, overlay_path)
+        render_inputs = _render_input_shas(root, render_reads, base_revision)
         if _find_overlay_consumers(root, snapshot_files, kustomizations, overlay_path, configs):
             raise KustomizePlanError("refusing to edit a shared base referenced by another Kustomize consumer")
 
@@ -190,6 +195,7 @@ class KustomizePlanner:
                 overrides=overrides,
                 before=before,
                 rendered_target=rendered_target,
+                render_inputs=render_inputs,
             )
         _reject_post_build_variables(before, rendered_target, overrides, _patch_fields(spec, action.target, operations))
         selector = _target_selector(
@@ -312,6 +318,7 @@ class KustomizePlanner:
             renderer=RendererKind.KUSTOMIZE,
             output_digest=after.output_digest,
             warnings=warnings,
+            render_inputs=render_inputs,
         )
         source_revision = source.source_revision or source.revision
         digest = plan_digest(
@@ -649,6 +656,7 @@ def _read_snapshot_file(root: Path, files: Mapping[str, Any], relative_path: str
         raise KustomizePlanError(f"{path}: snapshot file could not be read") from exc
     if len(content) != item.size_bytes or f"sha256:{hashlib.sha256(content).hexdigest()}" != item.digest:
         raise KustomizePlanError(f"{path}: snapshot file content no longer matches its archive digest")
+    note_read(path)
     try:
         return content.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -1639,6 +1647,13 @@ def _read_bytes(root: Path, relative_path: str) -> bytes:
         raise KustomizePlanError(f"{relative_path}: snapshot file could not be read for staging") from exc
 
 
+def _render_input_shas(root: Path, paths: set[str], base_revision: str) -> dict[str, str]:
+    try:
+        return workspace_blob_shas(root, paths, base_revision)
+    except OSError as exc:
+        raise KustomizePlanError("snapshot render inputs could not be read") from exc
+
+
 def _git_blob_sha(content: bytes, base_revision: str) -> str:
     algorithm = hashlib.sha256 if len(base_revision) == 64 else hashlib.sha1
     header = f"blob {len(content)}\0".encode("ascii")
@@ -1777,6 +1792,7 @@ def _plan_resource_deletion(
     overrides: _FluxBuildOverrides,
     before: RawRenderResult,
     rendered_target: ResourceTarget,
+    render_inputs: Mapping[str, str],
 ) -> FilePlan:
     """Delete the target: drop its file and ``resources:`` entry, or remove its document."""
     location = _locate_deletion_source(root, snapshot_files, kustomizations, configs, action.target)
@@ -1868,6 +1884,7 @@ def _plan_resource_deletion(
         renderer=RendererKind.KUSTOMIZE,
         output_digest=after.output_digest,
         warnings=warnings,
+        render_inputs=dict(render_inputs),
     )
     source_revision = source.source_revision or source.revision
     digest = plan_digest(

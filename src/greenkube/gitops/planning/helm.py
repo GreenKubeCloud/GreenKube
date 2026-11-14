@@ -76,6 +76,7 @@ from greenkube.gitops.planning.raw_manifest import (
     _validate_operation_resources,
     _validate_rendered_change,
 )
+from greenkube.gitops.planning.render_inputs import files_in_scope, workspace_blob_shas
 from greenkube.gitops.renderers.charts import (
     ChartFetchError,
     ChartHostNotAllowedError,
@@ -357,6 +358,7 @@ class HelmValuesPlanner:
                 remote=self._remote,
                 stack=stack,
             )
+            render_inputs = _helm_render_inputs(context, base_revision, HelmValuesPlanError)
             before = _render_chart(
                 self.renderer,
                 snapshot,
@@ -418,6 +420,7 @@ class HelmValuesPlanner:
             after=after,
             edits=[file_edit],
             originals={values_path: original_values},
+            render_inputs=render_inputs,
         )
 
 
@@ -531,6 +534,9 @@ class FluxHelmReleasePlanner:
         parsed_release = prepared.release
         spec = prepared.spec
         context = prepared.helm
+        render_inputs = _helm_render_inputs(
+            context, base_revision, FluxHelmReleasePlanError, extra_paths=(parsed_release.path,)
+        )
 
         with _stage(root, snapshot_files, prepared.temporary_values, FluxHelmReleaseUnsupportedError):
             before_chart = _render_chart(
@@ -633,6 +639,7 @@ class FluxHelmReleasePlanner:
             after=after,
             edits=[file_edit],
             originals={parsed_release.path: parsed_release.content},
+            render_inputs=render_inputs,
         )
 
 
@@ -1881,6 +1888,7 @@ def _file_plan(
     after: RawRenderResult,
     edits: list[FileEdit],
     originals: Mapping[str, str],
+    render_inputs: Mapping[str, Any],
 ) -> FilePlan:
     edits = sorted(edits, key=lambda item: item.path)
     diff = _file_diff(edits, originals)
@@ -1899,6 +1907,7 @@ def _file_plan(
         renderer=renderer,
         output_digest=after.output_digest,
         warnings=warnings,
+        **render_inputs,
     )
     plan_id = _plan_identifier(action, source, base_revision)
     digest = plan_digest(
@@ -1927,6 +1936,32 @@ def _file_plan(
         warnings=warnings,
         digest=digest,
     )
+
+
+def _helm_render_inputs(
+    context: _HelmContext,
+    base_revision: str,
+    error_type: type[HelmPlanError],
+    *,
+    extra_paths: Sequence[str] = (),
+) -> dict[str, Any]:
+    """The repository files a Helm render reads (D7 render inputs).
+
+    A chart in the repository is read whole (Chart.yaml, templates, its values and
+    vendored dependencies), so its directory is a render scope; a remote chart is pinned
+    by version and digest in the binding. The values files and ``extra_paths`` (the Flux
+    HelmRelease manifest) are read from the repository in both cases.
+    """
+    paths = {path for path in (*context.values_files, *extra_paths) if path in context.files}
+    scopes: list[str] = []
+    if context.remote_chart is None:
+        paths.update(files_in_scope(context.files, context.chart_path))
+        scopes.append(context.chart_path)
+    try:
+        shas = workspace_blob_shas(context.root, paths, base_revision)
+    except OSError as exc:
+        raise error_type("snapshot render inputs could not be read") from exc
+    return {"render_inputs": shas, "render_scopes": scopes}
 
 
 def _validate_flux_manifest_owner(source: WorkloadSource, base_revision: str) -> Mapping[str, Any]:

@@ -244,6 +244,15 @@ class AuthorizedGitBlobResolver:
         finally:
             await _close_provider(target.provider)
 
+    async def changed_paths(self, source: WorkloadSource, base_revision: str, head_revision: str) -> list[str]:
+        """Every path that differs between two immutable revisions (D7 render-input check)."""
+        target = await self._provider_resolver.resolve(source)
+        try:
+            comparison = await target.provider.compare_trees(target.repository, base_revision, head_revision)
+            return [change.path for change in comparison.changes]
+        finally:
+            await _close_provider(target.provider)
+
 
 class ProviderSourceSnapshotResolver:
     """Build bounded snapshots from authorized provider archives pinned to an immutable commit."""
@@ -1729,6 +1738,7 @@ async def create_plan_runtime(
         # Kustomize and Helm previews say when the renderer's egress is not enforced (F6).
         renderer_egress_unenforced=renderer_egress_probe(db_manager),
     )
+    from greenkube.automation.deletion_recheck import DeletionOrphanChecker
     from greenkube.core.optimization.applied_detector import K8sResourceReader
     from greenkube.storage.resource_binding_repository import ResourceBindingRepository
 
@@ -1745,6 +1755,8 @@ async def create_plan_runtime(
         binding_reader=gitops_repository,
         resource_reader=K8sResourceReader(),
         resource_binding_reader=resource_bindings,
+        # H6 delivery safety: the collectors' full orphan check before and after a deletion PR opens.
+        deletion_orphan_checker=DeletionOrphanChecker(),
     )
     api_plan_service = RuntimePlanService(
         recommendation_repository=recommendation_repository,

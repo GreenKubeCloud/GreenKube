@@ -48,6 +48,11 @@ from greenkube.gitops.planning.raw_manifest import (
 from greenkube.gitops.planning.raw_manifest import (
     RepositorySnapshot as RawManifestSnapshot,
 )
+from greenkube.gitops.planning.render_inputs import (
+    changed_render_inputs,
+    inverse_render_inputs,
+    records_render_inputs,
+)
 from greenkube.gitops.renderers import RawRenderError, render_raw
 from greenkube.gitops.renderers.helm import HelmError
 from greenkube.gitops.renderers.kustomize import KustomizeError
@@ -567,6 +572,7 @@ class AutomationPlanService:
             output_digest=inverse.rendered_after_digest,
             warnings=list(inverse.warnings),
             reason="exact inverse render validated against the original resource target",
+            **inverse_render_inputs(original_file_plan.validation, inverse.files),
         )
         if not validation.passed:
             raise AutomationPlanError(
@@ -896,14 +902,17 @@ class AutomationPlanService:
         return git_file
 
     async def _touched_files_unchanged(self, plan: Plan, revision: str) -> bool:
-        """Whether every file the plan edits is byte-identical at ``revision`` (D7, BUG-49).
+        """Whether every file the plan edits or its render read is unchanged at ``revision`` (D7, BUG-49).
 
-        Unrelated commits on a busy branch then no longer stale an approved plan; only a
-        change to a touched file requires re-rendering.
+        Unrelated commits on a busy branch then no longer stale an approved plan; a change
+        to a touched file or to a render input (Kustomize base or patch, values file, chart
+        file, manifest of the rendered directory) requires re-rendering.
         """
         file_plan = plan.file_plan
         resolver = self.git_blob_resolver
         if file_plan is None or resolver is None:
+            return False
+        if not await self._render_inputs_unchanged(plan, revision):
             return False
         for edit in file_plan.files:
             try:
@@ -927,6 +936,34 @@ class AutomationPlanService:
             ):
                 return False
         return True
+
+    async def _render_inputs_unchanged(self, plan: Plan, revision: str) -> bool:
+        """Whether no render input of the plan changed between its base revision and ``revision``."""
+        file_plan = plan.file_plan
+        resolver = self.git_blob_resolver
+        if file_plan is None or resolver is None or not records_render_inputs(file_plan.validation):
+            return False
+        validation = file_plan.validation
+        changed_paths = getattr(resolver, "changed_paths", None)
+        try:
+            if callable(changed_paths):
+                paths = await cast(Any, changed_paths)(plan.source, file_plan.base_revision, revision)
+                return not changed_render_inputs(validation, paths)
+            if validation.render_scopes:
+                # An added file in a render scope is only visible in a tree comparison.
+                return False
+            for path, blob_sha in validation.render_inputs.items():
+                git_file = await resolver.get_blob_file(plan.source, path, revision)
+                if git_file is None or git_file.blob_sha.lower() != blob_sha.lower():
+                    return False
+            return True
+        except AutomationPlanError:
+            raise
+        except Exception as exc:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                f"could not compare the plan's render inputs at {revision}",
+            ) from exc
 
     async def _resolve_current_revision(self, source: WorkloadSource) -> str:
         resolver = self.revision_resolver
