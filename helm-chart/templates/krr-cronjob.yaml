@@ -93,6 +93,9 @@ spec:
             app.kubernetes.io/component: krr
         spec:
           restartPolicy: Never
+          {{- with include "greenkube.imagePullSecrets" . }}
+          {{- . | nindent 10 }}
+          {{- end }}
           serviceAccountName: {{ if $job.rbac.create }}{{ $name }}{{ else }}{{ required "sources.krr.job.serviceAccountName is required when sources.krr.job.rbac.create is false" $job.serviceAccountName }}{{ end }}
           securityContext:
             runAsNonRoot: true

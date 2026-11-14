@@ -104,6 +104,9 @@ spec:
             app.kubernetes.io/component: polaris
         spec:
           restartPolicy: Never
+          {{- with include "greenkube.imagePullSecrets" . }}
+          {{- . | nindent 10 }}
+          {{- end }}
           serviceAccountName: {{ if $rbacCreate }}{{ $name }}{{ else }}{{ required "sources.polaris.job.serviceAccountName is required when sources.polaris.job.rbac.create is false" $job.serviceAccountName }}{{ end }}
           securityContext:
             runAsNonRoot: true
