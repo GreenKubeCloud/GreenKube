@@ -115,6 +115,30 @@ where Prometheus, OpenCost and your Git hosts live).
 NetworkPolicy needs a CNI that enforces it (Calico, Cilium, the cloud CNIs with policy enabled). Without one these
 objects are accepted and ignored.
 
+Kubernetes API egress on Cilium: an `additionalEgress` `ipBlock` for the API Service (`10.96.0.1/32:443`) or for the
+API server endpoints (`kubectl get endpointslice -n default -l kubernetes.io/service-name=kubernetes`, port 6443)
+does not match. Cilium (with kube-proxy replacement, it sees the translated destination) treats the control-plane
+node as the `kube-apiserver` entity, which `ipBlock` never selects by default; the controller then cannot read its
+Lease and does no work. Allow it with a CiliumNetworkPolicy next to the chart's policies, or set Cilium's
+`policyCIDRMatchMode: nodes` and keep the `ipBlock` on the endpoints:
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: greenkube-kube-apiserver
+  namespace: greenkube
+spec:
+  endpointSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/instance, operator: In, values: [greenkube]}
+      - {key: app.kubernetes.io/component, operator: In, values: [api, controller, worker]}
+  egress:
+    - toEntities: [kube-apiserver]
+      toPorts:
+        - ports: [{port: "6443", protocol: TCP}, {port: "443", protocol: TCP}]
+```
+
 ## Hardening checklist for production
 
 1. Serve GreenKube over HTTPS (an Ingress with `tls` or an https HTTPRoute) and set `config.trustedProxyIps` to the
