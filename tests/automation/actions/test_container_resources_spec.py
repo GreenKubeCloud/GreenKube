@@ -92,7 +92,8 @@ def test_is_applied_compares_the_observed_request_within_tolerance() -> None:
 def test_inverse_restores_the_persisted_requests() -> None:
     (inverse,) = CONTAINER_RESOURCES.inverse([_op(requests={"cpu": "250m", "memory": "256Mi"})], _baseline())
 
-    assert inverse == _op(requests={"cpu": "500m", "memory": str(512 * 1024**2)})
+    # Canonical units (512Mi), not a raw byte count: the rollback diff stays readable.
+    assert inverse == _op(requests={"cpu": "500m", "memory": "512Mi"})
 
 
 @pytest.mark.parametrize(
