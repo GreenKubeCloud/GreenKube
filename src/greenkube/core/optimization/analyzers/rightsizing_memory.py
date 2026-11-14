@@ -6,12 +6,15 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.core.optimization.analyzers.rightsizing import (
     CONTAINER_USAGE_EXCEEDS_POD,
+    MEMORY_LIMIT_PRESSURE,
     MEMORY_MAX_FACTOR,
     MIB,
+    OOM_SPIKE_LIMIT_FACTOR,
     RightsizingProposal,
     max_increase_factor,
     memory_proposal,
     oom_proven_usage,
+    oom_step_factor,
     skipped_increase,
 )
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
@@ -56,10 +59,17 @@ def increase_sizing_text(
     if proposal.basis == "oom_limit":
         proven = oom_proven_usage(stats_owner) if stats_owner is not None else 0
         what = "memory limit" if stats_owner is not None and stats_owner.memory_limit else "memory request"
+        step = oom_step_factor(config, stats_owner, stats.max) if stats_owner is not None else OOM_SPIKE_LIMIT_FACTOR
+        if proven > 0 and stats.max >= proven * MEMORY_LIMIT_PRESSURE:
+            why = (
+                f"the working set reached it (observed maximum {fmt(stats.max)}), so the need above it is unknown: "
+                "one decisive step instead of small ones"
+            )
+        else:
+            why = f"a short spike the samples missed (observed maximum {fmt(stats.max)})"
         text = (
-            f"Sized from the {what} ({fmt(proven)}) the OOM kills prove was reached x {MEMORY_MAX_FACTOR:g}, "
-            f"at most {max_increase_factor(config):g}x the current request: the samples missed the spike "
-            f"(observed maximum {fmt(stats.max)})."
+            f"Sized from the {what} ({fmt(proven)}) the OOM kills prove was passed x {step:g}, "
+            f"at most {max_increase_factor(config):g}x the current request: {why}."
         )
     elif proposal.basis == "observed_max":
         text = (
