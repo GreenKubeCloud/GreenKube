@@ -113,7 +113,9 @@ describe('/changes/[plan_id]', () => {
 
 		const changeSection = await screen.findByTestId('change');
 		expect(changeSection).toHaveTextContent('Deployment shop/api');
-		expect(changeSection).toHaveTextContent('Realized');
+		// "Realized" is reserved for billed savings (principle 3).
+		expect(changeSection).toHaveTextContent('Saving measured');
+		expect(changeSection).not.toHaveTextContent('Realized');
 		expect(within(changeSection).getByTestId('measurement')).toHaveTextContent('Allocated cost');
 		expect(screen.getByTestId('plan')).toHaveTextContent('https://github.com/acme/deploy.git');
 		expect(screen.getByRole('link', { name: '#12' })).toHaveAttribute('href', '/recommendations/12');
@@ -161,6 +163,29 @@ describe('/ledger', () => {
 		expect(screen.getByTestId('ledger-total-pending')).toHaveTextContent('Projected');
 		expect(screen.getByText(/never added together/)).toBeInTheDocument();
 		for (const total of ['$620', '$800', '$920']) expect(container.textContent).not.toContain(total);
+	});
+
+	it('names measured figures allocated, shows the realization factor and reserves "Realized" for billed savings', async () => {
+		api.getRecommendationSavings.mockResolvedValue({ ...savings, realization: { realization_factor: 0.6 } });
+		render(LedgerPage, { props: { data: { change: null } } });
+
+		expect(await screen.findByTestId('ledger-total-realized')).toHaveTextContent('Measured allocated to date');
+		expect(screen.getByTestId('ledger-total-run-rate')).toHaveTextContent('Measured allocated run rate');
+		expect(screen.getByTestId('ledger-realization-factor')).toHaveTextContent('Realization factor 60%');
+		expect(screen.queryByTestId('ledger-total-billed')).not.toBeInTheDocument();
+		expect(screen.queryByText('Realized to date')).not.toBeInTheDocument();
+	});
+
+	it('shows realized billed savings apart when the server reports them', async () => {
+		api.getRecommendationSavings.mockResolvedValue({
+			...savings,
+			realized_billed_to_date: { method: 'realized_billed', basis: 'accrued', cost: 40, co2e_grams: 1000 }
+		});
+		render(LedgerPage, { props: { data: { change: null } } });
+
+		const billed = await screen.findByTestId('ledger-total-billed');
+		expect(billed).toHaveTextContent('Realized (billed) savings');
+		expect(billed).toHaveTextContent('$40');
 	});
 
 	it('lists applied changes and filters them by state', async () => {

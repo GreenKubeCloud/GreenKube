@@ -6,6 +6,7 @@
 	 */
 	import { createEventDispatcher } from 'svelte';
 	import { getManualGuide, markAppliedManually } from '$lib/api.js';
+	import { currentUser, hasScope } from '$lib/stores.js';
 
 	/** @type {number} */
 	export let recommendationId;
@@ -23,6 +24,9 @@
 	let applied = false;
 	let copied = -1;
 	let loadedFor = null;
+
+	// Recording the change is a write: a viewer reads the steps only.
+	$: canWrite = hasScope($currentUser, 'write');
 
 	$: if (open && recommendationId && loadedFor !== recommendationId) loadGuide();
 
@@ -125,6 +129,10 @@
 			{#if applied}
 				<p class="text-sm text-green-400" role="status" data-testid="manual-applied">
 					✓ Marked as applied. The change is measured over the next days on the ledger.
+				</p>
+			{:else if guide.can_mark_applied && !canWrite}
+				<p class="text-xs text-dark-500" data-testid="manual-read-only">
+					Read-only access: an operator or admin marks the change as applied once it is live.
 				</p>
 			{:else if guide.can_mark_applied}
 				{#if confirming}

@@ -253,7 +253,7 @@ error stops the run at once.
 | Symptom | Check |
 |---|---|
 | Image build fails while downloading Helm or Kustomize | The Dockerfile fetches pinned renderer binaries from `get.helm.sh` and GitHub releases; retry later, or rerun with `GK_SKIP_BUILD=1` to reuse an image already in Minikube |
-| No recommendation after 10 minutes | Prometheus URL and scrape of cAdvisor/kube-state-metrics; `kubectl -n greenkube logs deploy/greenkube -c greenkube` |
+| No recommendation after 10 minutes | Prometheus URL and scrape of cAdvisor/kube-state-metrics; `kubectl -n greenkube logs deploy/greenkube-controller -c controller` |
 | Recommendation not eligible | `eligibility.blockers` on the recommendation (`code`, `message`, `fix`; `warming_up` gives `eligible_at`): confidence grows with the number of samples. A rejected plan preview lists the failed gates in `policy_result.checks` |
 | Binding not resolved | The provider `apiBaseUrl` host must be the host of the Argo CD/Flux repository URL, and the repository must be in `repositoryAllowlist` |
 | Plan stays `merged` | The GitOps controller has not synced the merge commit yet; check the Application or Kustomization |

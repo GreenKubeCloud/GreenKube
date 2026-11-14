@@ -6,6 +6,7 @@
 		ApiError,
 		AUTH_REQUIRED_EVENT,
 		PASSWORD_CHANGE_REQUIRED_EVENT,
+		getConfig,
 		getHealth,
 		getMe,
 		getServicesHealth,
@@ -18,6 +19,7 @@
 	import PasswordChangeForm from '$lib/components/PasswordChangeForm.svelte';
 	import SetupBanner from '$lib/components/SetupBanner.svelte';
 	import { normalizeSetupStatus, setupBannerDismissed, setupStatus } from '$lib/setup.js';
+	import { setDisplayCurrency } from '$lib/utils/format.js';
 
 	let health = null;
 	let healthError = false;
@@ -70,13 +72,36 @@
 		}
 	}
 
-	function enter(principal) {
+	/**
+	 * Every amount is shown in the pricing currency (GET /config `currency`),
+	 * read before the pages render so none flashes a wrong symbol. A slow or
+	 * older server (no field) keeps USD after a short wait.
+	 */
+	async function loadDisplayCurrency() {
+		let timer;
+		try {
+			const config = await Promise.race([
+				getConfig(),
+				new Promise((resolve) => {
+					timer = setTimeout(() => resolve(null), 3000);
+				})
+			]);
+			setDisplayCurrency(config?.currency);
+		} catch {
+			// Keep the current currency; the pages still load.
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	async function enter(principal) {
 		currentUser.set(principal);
 		authError = '';
 		if (principal?.must_change_password) {
 			authState = 'password-change';
 			return;
 		}
+		await loadDisplayCurrency();
 		authState = 'ready';
 		authEpoch += 1;
 		refreshServicesHealth();

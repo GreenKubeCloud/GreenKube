@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import AutomationPage from '../../src/routes/automation/+page.svelte';
 import * as api from '$lib/api.js';
+import { currentUser } from '$lib/stores.js';
 
 vi.mock('$lib/api.js', () => ({
 	getGitOpsStatus: vi.fn(),
@@ -438,5 +439,23 @@ describe('AutomationPage', () => {
 			expect(api.getAutomationStatus).toHaveBeenCalledTimes(2);
 		});
 		expect(api.getOpenPullRequests).not.toHaveBeenCalled();
+	});
+
+	it('gives a viewer a read-only reload and no binding resolution (no 403 actions)', async () => {
+		currentUser.set({ kind: 'user', name: 'vera', role: 'viewer', scopes: ['read'] });
+		api.getGitOpsBindings.mockResolvedValue({ items: [actionableBinding] });
+		render(AutomationPage);
+
+		expect(await screen.findByTestId('read-only-hint')).toHaveTextContent('Read-only access (viewer)');
+		expect(await screen.findByTestId('resolve-read-only')).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Resolve binding' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Refresh discovery & operations' })).not.toBeInTheDocument();
+
+		const reload = screen.getByRole('button', { name: 'Reload' });
+		await waitFor(() => expect(reload).toBeEnabled());
+		await fireEvent.click(reload);
+
+		await waitFor(() => expect(api.getGitOpsStatus).toHaveBeenCalledTimes(2));
+		expect(api.refreshGitOpsDiscovery).not.toHaveBeenCalled();
 	});
 });

@@ -100,7 +100,7 @@
 	$: requests = requestRows(rec);
 	$: timeline = groupConsecutiveEvents(events);
 	$: planIds = [...new Set(pullRequests.map((pr) => pr.plan_id).filter(Boolean))];
-	$: currency = value?.currency ?? impact?.currency ?? 'USD';
+	$: currency = value?.currency ?? impact?.currency;
 
 	function pct(value) {
 		return value === null || value === undefined ? '—' : `${Math.round(value * 100)}%`;
@@ -518,10 +518,10 @@
 				</div>
 				{#if measured}
 					<dl class="grid grid-cols-2 gap-2 text-xs">
-						<div><dt class="text-dark-500">Measured cost saving</dt><dd class="text-dark-100">{measured.costAnnual === null ? '—' : `${formatMoney(measured.costAnnual, currency)}/yr`}</dd></div>
-						<div><dt class="text-dark-500">Measured CO₂e saving</dt><dd class="text-dark-100">{measured.co2eAnnualG === null ? '—' : `${formatCO2(measured.co2eAnnualG)}/yr`}</dd></div>
+						<div><dt class="text-dark-500">Measured allocated cost saving</dt><dd class="text-dark-100">{measured.costAnnual === null ? '—' : `${formatMoney(measured.costAnnual, currency)}/yr`}</dd></div>
+						<div><dt class="text-dark-500">Measured allocated CO₂e</dt><dd class="text-dark-100">{measured.co2eAnnualG === null ? '—' : `${formatCO2(measured.co2eAnnualG)}/yr`}</dd></div>
 						<div><dt class="text-dark-500">Verification</dt><dd class="text-dark-200">{measured.status ?? '—'}</dd></div>
-						<div><dt class="text-dark-500">Realized</dt><dd class="text-dark-200">{measured.realized === null ? '—' : measured.realized ? 'Yes' : 'No'}</dd></div>
+						<div><dt class="text-dark-500">Saving measured</dt><dd class="text-dark-200">{measured.realized === null ? '—' : measured.realized ? 'Yes' : 'No'}</dd></div>
 					</dl>
 				{:else}
 					<p class="text-sm text-dark-400">Not measured yet. Measurement starts after the change is applied and warmed up.</p>

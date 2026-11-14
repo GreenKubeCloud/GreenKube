@@ -583,3 +583,13 @@ class TestWarmUpSinceInstall:
 def _wall_clock_at_test_time(monkeypatch):
     """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
     monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc))
+
+
+def test_action_unavailable_wording_covers_increases_and_decreases():
+    """Two-way rightsizing: the fix must not say only a decrease can rebuild the action (K4)."""
+    from greenkube.core.optimization.eligibility import CODES
+
+    message, fix = CODES["action_unavailable"]
+
+    assert "request decrease are" not in fix
+    assert "increase or decrease" in fix

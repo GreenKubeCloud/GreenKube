@@ -45,7 +45,7 @@
 		const ns = $selectedNamespace || undefined;
 		const [recs, sav, prs, changes] = await Promise.allSettled([
 			getActiveRecommendations({ namespace: ns, signal }),
-			// Realized savings to date: the whole ledger, not the footprint period.
+			// Measured allocated savings to date: the whole ledger, not the footprint period.
 			getRecommendationSavings({ namespace: ns, signal }),
 			getOpenPullRequests({ signal }),
 			listChanges({ namespace: ns, state: ['applied', 'measuring'], limit: 200, signal })
@@ -91,7 +91,7 @@
 		</div>
 	</div>
 
-	<!-- Savings: realized, pending verification and opportunity, never summed (K1) -->
+	<!-- Savings: measured allocated, pending verification and opportunity, never summed (K1) -->
 	<SavingsHero {overview} loading={recoLoading} {savingsError} />
 
 	<!-- Changes in flight -->

@@ -1,6 +1,7 @@
 /**
  * ECharts theme and option builders for GreenKube.
  */
+import { currencySymbol } from '$lib/utils/format.js';
 
 const COLORS = {
 	green: '#22c55e',
@@ -102,11 +103,12 @@ export function buildMultiSeriesOption(data, { windowSlug = '' } = {}) {
 	if (!data || data.length === 0) return { ...BASE_OPTION };
 
 	const timestamps = data.map(d => d.timestamp);
+	const costName = `Cost (${currencySymbol()})`;
 
 	return {
 		...BASE_OPTION,
 		legend: {
-			data: ['CO₂e (g)', 'Cost ($)', 'Energy (kJ)'],
+			data: ['CO₂e (g)', costName, 'Energy (kJ)'],
 			textStyle: { color: COLORS.dark.text, fontSize: 11 },
 			top: '2%',
 			left: 'center'
@@ -154,7 +156,7 @@ export function buildMultiSeriesOption(data, { windowSlug = '' } = {}) {
 				itemStyle: { color: COLORS.green }
 			},
 			{
-				name: 'Cost ($)',
+				name: costName,
 				type: 'line',
 				smooth: true,
 				symbol: 'none',

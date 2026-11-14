@@ -4,6 +4,7 @@
  * eligibility (`eligibility`, roadmap F10). The server computes both; the UI
  * only formats them and never re-derives eligibility from the action itself.
  */
+import { currencyOrDefault } from './format.js';
 
 function finite(value) {
 	const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
@@ -20,20 +21,23 @@ export function successProbability(rec) {
 	return finite(rec?.value?.p_success);
 }
 
-/** Currency amount with no decimals above 10, e.g. "€412" or "-$3.50". */
-export function formatMoney(amount, currency = 'USD') {
+/**
+ * Currency amount with no decimals above 10, e.g. "€412" or "-$3.50". Without a
+ * valid currency it uses the pricing currency from `GET /config`.
+ */
+export function formatMoney(amount, currency) {
 	const value = finite(amount);
 	if (value === null) return '—';
 	const digits = Math.abs(value) >= 10 ? 0 : 2;
 	try {
 		return new Intl.NumberFormat('en-US', {
 			style: 'currency',
-			currency: typeof currency === 'string' && /^[A-Z]{3}$/.test(currency) ? currency : 'USD',
+			currency: currencyOrDefault(currency),
 			minimumFractionDigits: digits,
 			maximumFractionDigits: digits
 		}).format(value);
 	} catch {
-		return `${value.toFixed(digits)} ${currency}`;
+		return `${value.toFixed(digits)} ${currencyOrDefault(currency)}`;
 	}
 }
 

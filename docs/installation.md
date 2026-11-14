@@ -38,8 +38,11 @@ a self-hosted host the key does not name, so a GitOps source pointing at a serve
 receive it. Repositories on other hosts need an explicit provider ([Automation](automation.md#configure-a-provider)).
 
 **3. Done.** The **Setup** page (`/setup`, or `GET /api/v1/setup/status`) shows what is active and, for anything
-missing, the exact fix. Recommendations appear once enough evidence is collected (about 3 hours with the default
-5-minute step); the checklist shows the estimate.
+missing, the exact fix. Recommendations appear once enough evidence is collected, in two stages: request increases
+and the other sources after `config.recommendations.minSamples` samples (36, about 3 hours with the default 5-minute
+step), and request decreases (usually most of the savings) only after
+`config.recommendations.minDecreaseCoverageDays` of history (7 days, so a weekly cycle is seen). The **Evidence
+warm-up** check shows both estimates.
 
 ## What gets installed
 

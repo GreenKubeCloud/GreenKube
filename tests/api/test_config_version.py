@@ -54,3 +54,13 @@ class TestConfigEndpoint:
         assert "password" not in raw
         assert "secret" not in raw
         assert "bearer" not in raw
+
+    def test_config_exposes_the_pricing_currency(self, client, monkeypatch):
+        """The UI formats every amount in the pricing currency (no hard-coded '$')."""
+        from greenkube.core.config import get_config
+
+        monkeypatch.setattr(get_config(), "IMPACT_PRICING_CURRENCY", "EUR", raising=False)
+
+        data = client.get("/api/v1/config").json()
+
+        assert data["currency"] == "EUR"

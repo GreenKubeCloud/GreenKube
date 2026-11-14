@@ -10,6 +10,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/sve
 import Layout from '../../src/routes/+layout.svelte';
 import { clearCsrfToken, getConfig } from '$lib/api.js';
 import { currentUser } from '$lib/stores.js';
+import { getDisplayCurrency, setDisplayCurrency } from '$lib/utils/format.js';
 import { createMemoryStorage, installStorage } from '../helpers/storage.js';
 
 const ADMIN = {
@@ -194,6 +195,31 @@ describe('sign-in', () => {
 		await expect(getConfig()).rejects.toMatchObject({ status: 401 });
 
 		expect(await findLoginForm()).toBeInTheDocument();
+	});
+});
+
+describe('pricing currency', () => {
+	it('reads the pricing currency from /config before the pages render', async () => {
+		setDisplayCurrency('USD');
+		installServer({ principal: ADMIN });
+		const serve = globalThis.fetch;
+		globalThis.fetch = vi.fn((url, options) =>
+			new URL(url).pathname === '/api/v1/config' ? Promise.resolve(ok({ currency: 'EUR' })) : serve(url, options)
+		);
+		render(Layout);
+
+		expect(await screen.findByRole('button', { name: 'Sign out' })).toBeInTheDocument();
+		expect(getDisplayCurrency()).toBe('EUR');
+		setDisplayCurrency('USD');
+	});
+
+	it('keeps USD when the server has no currency field', async () => {
+		setDisplayCurrency('USD');
+		installServer({ principal: ADMIN });
+		render(Layout);
+
+		expect(await screen.findByRole('button', { name: 'Sign out' })).toBeInTheDocument();
+		expect(getDisplayCurrency()).toBe('USD');
 	});
 });
 

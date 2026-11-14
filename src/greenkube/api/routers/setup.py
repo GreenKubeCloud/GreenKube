@@ -531,7 +531,21 @@ def _executor_check(heartbeat: Optional[datetime], delivery: Optional[Capability
     )
 
 
+def _eta(remaining: timedelta) -> str:
+    """A rough, human ETA: hours under two days, days beyond."""
+    hours = max(1, round(remaining.total_seconds() / 3600))
+    if hours < 48:
+        return f"~{hours}h"
+    return f"~{round(hours / 24)} days"
+
+
 def _evidence_check(earliest: Optional[datetime], available: bool, now: datetime) -> SetupCheck:
+    """Two ETAs: increases and other sources after the minimum samples, decreases after the coverage days.
+
+    A request decrease needs ``RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS`` of
+    observed history (analyzers/rightsizing.py), so the checklist must not
+    promise pull requests for decreases after the short sample warm-up.
+    """
     from greenkube.core.config import get_config
     from greenkube.utils.time import parse_query_step_seconds
 
@@ -543,6 +557,11 @@ def _evidence_check(earliest: Optional[datetime], available: bool, now: datetime
     except Exception:
         step = 300
     required = timedelta(seconds=int(cfg.RECOMMENDATION_MIN_SAMPLES) * step)
+    try:
+        decrease_days = max(0.0, float(getattr(cfg, "RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", 7.0) or 0.0))
+    except (TypeError, ValueError):
+        decrease_days = 7.0
+    decrease_required = timedelta(days=decrease_days)
     if not available:
         return _check("evidence", "evidence", title, "pending", "Collection state could not be read.", "Retry.", docs)
     if earliest is None:
@@ -556,19 +575,36 @@ def _evidence_check(earliest: Optional[datetime], available: bool, now: datetime
             docs,
         )
     eligible_at = earliest + required
+    decreases_at = earliest + max(required, decrease_required)
+    days_label = f"{decrease_days:g} day{'' if decrease_days == 1 else 's'}"
+    if now >= decreases_at:
+        return _check(
+            "evidence",
+            "evidence",
+            title,
+            "ok",
+            "Enough history to recommend increases, decreases and other sources, and to open PRs.",
+            "Nothing to do.",
+            docs,
+        )
+    decreases = f"request decreases need {days_label} of history and become eligible in {_eta(decreases_at - now)}"
     if now >= eligible_at:
         return _check(
-            "evidence", "evidence", title, "ok", "Enough history to recommend and open PRs.", "Nothing to do.", docs
+            "evidence",
+            "evidence",
+            title,
+            "ok",
+            f"Increases and other sources can be recommended now; {decreases}.",
+            "Nothing to do: evidence accumulates on its own.",
+            docs,
         )
-    remaining = eligible_at - now
-    hours = max(1, round(remaining.total_seconds() / 3600))
     return _check(
         "evidence",
         "evidence",
         title,
         "pending",
-        f"Collecting evidence: recommendations become eligible in ~{hours}h "
-        f"({cfg.RECOMMENDATION_MIN_SAMPLES} samples).",
+        f"Collecting evidence: increases and other sources become eligible in {_eta(eligible_at - now)} "
+        f"({cfg.RECOMMENDATION_MIN_SAMPLES} samples); {decreases}.",
         "Nothing to do: evidence accumulates on its own.",
         docs,
     )

@@ -5,7 +5,7 @@
 	 * bundled Grafana dashboard is the deep-analysis surface.
 	 */
 	import { onDestroy } from 'svelte';
-	import { selectedNamespace, selectedTimeRange } from '$lib/stores.js';
+	import { currentUser, hasScope, selectedNamespace, selectedTimeRange } from '$lib/stores.js';
 	import {
 		getMetricsSummary,
 		getTimeseries,
@@ -107,6 +107,11 @@
 		if (refreshing) return;
 		refreshing = true;
 		try {
+			// Recomputing the cache is a write: a viewer only reloads what is there.
+			if (!hasScope($currentUser, 'write')) {
+				await loadFootprint();
+				return;
+			}
 			const ns = $selectedNamespace || undefined;
 			await refreshDashboardSummary({ namespace: ns });
 			// Give the background task a moment to complete before reloading

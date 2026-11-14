@@ -26,23 +26,23 @@ GreenKube closes that loop. It takes the advice, opens a pull request in your Gi
 
 ```mermaid
 flowchart LR
-  A["Aggregate<br/>GreenKube analyzers · VPA · Goldilocks · Karpenter"] --> D["Decide<br/>impact · risk · confidence · ranking"]
+  A["Aggregate<br/>GreenKube analyzers · VPA · KRR · Kubecost · Karpenter · push API"] --> D["Decide<br/>impact · risk · confidence · ranking"]
   D --> V["Deliver<br/>pull request to your GitOps repo"]
   V --> P["Prove<br/>Argo CD / Flux sync · apply detection · measurement"]
-  P --> L["Ledger<br/>projected vs measured savings, with audit trail"]
+  P --> L["Ledger<br/>projected vs measured savings, hash-chained audit trail"]
 ```
 
 1. **Aggregate.** GreenKube gathers recommendations from its own analyzers and from the sources installed in your cluster. All of them are converted into one model, with the provenance of each source kept.
 2. **Decide.** Each recommendation carries evidence (usage distribution, coverage, restarts), a projected cost and CO₂e impact, a risk level, a confidence score and an explainable ranking.
 3. **Deliver.** GreenKube finds the Git source of a workload through Argo CD or Flux. It renders the change, shows you the exact diff, and opens a pull request only after you approve it. GreenKube never modifies workloads directly: every change goes through Git.
 4. **Prove.** After the merge, GreenKube waits for Argo CD or Flux to sync. It detects that the new configuration is live, then compares the workload before and after the change, with health gates (restarts, usage headroom).
-5. **Ledger.** Every recommendation's history — created, pull request, merged, synced, applied, verified or flagged for review — is recorded with its events. Measured savings and projected savings are always reported separately.
+5. **Ledger.** Every recommendation's history — created, pull request, merged, synced, applied, verified or flagged for review — is recorded with its events. Projected, measured allocated and realized savings are always reported separately.
 
 ## Principles
 
 - **Git is the only write path.** No admission webhooks, no in-place mutation, no `ignoreDifferences` drift.
 - **Neutral by design.** GreenKube's own analyzers are one source among others. Each source is a plugin.
-- **Projected is not measured.** Projected and measured savings are labeled and never added together.
+- **Projected ≠ allocated ≠ realized.** Projected, measured allocated and realized (billed) savings are labeled and never added together.
 - **Evidence travels with the change.** The pull request carries the data a reviewer needs to decide.
 - **Cost and carbon, side by side.** Every recommendation has a cost dimension and a CO₂e dimension.
 - **Fail closed, explain why.** When a change cannot be automated safely, GreenKube says why.
@@ -51,25 +51,26 @@ flowchart LR
 
 ## What works today
 
-| Area | Status | Details |
-|---|---|---|
-| Recommendation sources | ✅ Available | GreenKube analyzers (rightsizing, zombie pods, autoscaling and off-peak candidates, idle namespaces, carbon-aware scheduling, node utilization, orphaned PersistentVolumes and LoadBalancers), VPA in recommendation mode (including VPAs created by Goldilocks), and Karpenter NodePool consolidation. VPA and Karpenter are detected automatically. |
-| Ranking | ✅ Available | Evidence, risk, confidence and effort on every recommendation; ranking profiles `balanced`, `cost_first`, `carbon_first`, `quick_wins` and `low_risk`. |
-| GitOps pull requests | ✅ Available (opt-in) | Lowering CPU and memory requests for Deployments, StatefulSets and DaemonSets managed by Argo CD or Flux. Supported sources: plain YAML, Kustomize overlays, and Helm charts stored in the same repository. Git providers: GitHub, GitLab and Gitea. Changes are approved by digest, rendered in an isolated sandbox, and the pipeline fails closed. |
-| Sync and apply tracking | ✅ Available | Argo CD and Flux revision and health checks; apply detection against per-container baselines; validated rollback pull requests. |
-| Savings verification and ledger | 🧪 Beta | Health and savings checks after apply; measured and projected savings kept separate. The measurement method is being hardened. See [Recommendation lifecycle](docs/recommendation.md). |
-| Cost and carbon footprint | ✅ Available | Per-workload cost (from OpenCost), energy and CO₂e estimates (Electricity Maps or Wattnet, Boavizta, PUE), node and namespace views, reports, Prometheus metrics and a Grafana dashboard. |
+Everything below ships in the next release (see the [changelog](CHANGELOG.md), section *Unreleased*).
+
+| Area | Details |
+|---|---|
+| **Recommendation sources** | GreenKube's own analyzers (two-way rightsizing, zombie workloads, autoscaling and off-peak candidates, idle namespaces, carbon-aware scheduling, node utilization, orphaned PersistentVolumes and LoadBalancers), VPA and Goldilocks, Karpenter, Robusta KRR, Kubecost, Fairwinds Polaris, GKE recommender insights and Azure Advisor, plus a push API with a public signal schema. A source SDK runs each one as a plugin; the Sources page shows their status, runs and measured track record. |
+| **Consensus** | Advice from several sources for the same workload is merged by a consensus engine, not by a fixed priority: every vote is shown, two sources of the same engine count once, and contested advice is labeled and never approved automatically. |
+| **Decision** | One versioned Impact Model projects cost and CO₂e (operational, idle share and embodied) and measures them later. Each recommendation carries evidence, risk, confidence and a risk-adjusted expected value, ranked with configurable profiles and carbon price. Server-side eligibility says why a recommendation cannot become a pull request and what would fix it. |
+| **Pull requests** | CPU and memory request decreases **and increases**, limits, native sidecars and init containers, Argo Rollouts, and deletion of orphaned resources. Sources: plain YAML, Kustomize overlays, Helm charts in the repository or pulled from Helm and OCI registries (Argo CD multi-source apps, Flux HelmRepository and OCIRepository). Providers: GitHub (token or GitHub App, signed commits), GitLab and Gitea. Plans are approved by digest and rendered in an isolated sandbox; the pipeline fails closed. Delivery modes: GreenKube opens the PR, you apply a patch, or your CI opens it. Optional policy-based auto-approval. |
+| **Without GitOps** | Manual mode gives the `kubectl` steps of a recommendation and records it as applied, so it is measured like a merged pull request. |
+| **Sync, apply and measurement** | Argo CD and Flux sync tracking, apply detection, rollback pull requests, and change measurement against a counterfactual baseline with a confidence interval, confounder detection and a drift monitor. |
+| **Savings ledger** | Append-only ledger with a verified hash chain, linked to the pull request, merge commit, synced revision and measurement. Projected, measured allocated and realized savings are separate methods and never summed; CSV and FOCUS-aligned exports. |
+| **One install, sign in once** | One Helm install with no profile and no feature flag. Automation is always on: discovery, previews, delivery, sync tracking and measurement activate themselves when their prerequisites appear, and `automation.policy.pauseDelivery` is the one switch that stops pull requests. Guided setup checklist, local accounts with sessions, SSO (OpenID Connect or an authentication proxy) with roles, scoped API keys. |
+| **UI** | Savings-first Overview, ranked recommendations with detail pages, a changes board (Plan → PR → Merged → Synced → Applied → Measuring → Outcome), the ledger, sources, setup and a footprint section (cost, energy and CO₂e per workload, node and namespace). Prometheus metrics, alerts and a Grafana dashboard. |
 
 ### On the roadmap
 
-- **More sources:** Robusta KRR, Kubecost request sizing, Polaris findings, cloud recommenders, and a public API for pushing recommendations from any tool. Recommendations from several sources for the same workload will be merged by consensus rather than by fixed priority.
-- **More kinds of change:** raising requests that are too low, limits, replica counts and HPAs, off-peak scale-down with KEDA cron triggers, deletion of orphaned resources, Helm charts pulled from remote repositories, and Karpenter NodePool settings.
-- **One install, sign in once:**
-  - A single production-grade installation, with no profiles to choose.
-  - GitOps automation turns itself on as soon as Argo CD or Flux and Git credentials are detected.
-  - A sign-in that your browser or password manager can save, so you no longer paste the API key after every reload.
-- **Faster first pull request:** guided setup, GitHub App authentication, and alternatives to letting GreenKube open the pull request (download a patch file, or let your CI open it).
-- **Ledger v2:** append-only entries linked to pull request, merge commit and synced revision; counterfactual baselines with confidence intervals; CSV export and export aligned with the FinOps FOCUS format.
+- **More kinds of change:** replica counts and HPAs, off-peak schedules with KEDA cron triggers, VPA mode graduation, Karpenter NodePool patches, and change sets that batch several recommendations in one pull request.
+- **Realized billed savings:** pool-level measurement of what actually left the bill once capacity is removed (today GreenKube measures allocated savings and shows the expected realization factor).
+- **Pull-request workflow:** grouping policies, comment commands and notifications.
+- **More sources:** commercial connectors through the source SDK, and measured node power with Kepler.
 
 See the full [roadmap](docs/roadmap.md) for priorities, milestones and specifications.
 
@@ -122,7 +123,10 @@ kubectl -n greenkube create secret generic greenkube-git-credentials \
 There is no profile and no feature flag: the chart deploys the API, the controller, an isolated renderer and
 PostgreSQL, sized for kind or minikube. GreenKube discovers Prometheus, OpenCost, VPA, Karpenter, Argo CD and Flux,
 infers the Git provider of every discovered repository, and the **Setup** page lists what is active and the fix
-for anything missing. A pull request is never opened without your approval of a plan digest. The
+for anything missing. Recommendations need evidence first: request increases and the other sources appear after
+about 3 hours (36 samples at the default 5-minute step), request decreases only after 7 days of history, so a
+weekly cycle is seen. The setup checklist shows both estimates. A pull request is never opened without your
+approval of a plan digest. The
 [Installation guide](docs/installation.md) covers external databases, Ingress/TLS and high availability;
 [Upgrading](docs/upgrading.md) covers 0.3.x installs.
 
@@ -133,7 +137,7 @@ for anything missing. A pull request is never opened without your approval of a 
 | Prometheus | Usage, restarts, evidence and verification | Strongly recommended |
 | Metrics Server | Per-container usage evidence | Recommended |
 | OpenCost | Cost allocation, used for cost savings | Recommended |
-| VPA, Goldilocks, Karpenter | Additional recommendation sources | Optional (detected automatically) |
+| VPA, Goldilocks, Karpenter, KRR, Kubecost, Polaris, GKE recommender, Azure Advisor | Additional recommendation sources | Optional (detected or configured) |
 | Argo CD or Flux | Pull request delivery and sync verification | Required for pull requests |
 | Electricity Maps or Wattnet | Real-time grid carbon intensity | Optional (regional defaults otherwise) |
 

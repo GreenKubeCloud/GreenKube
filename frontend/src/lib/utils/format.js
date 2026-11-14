@@ -14,16 +14,66 @@ export function formatCO2(grams) {
 	return `${(grams * 1000).toFixed(1)} mg`;
 }
 
+const CURRENCY_CODE = /^[A-Z]{3}$/;
+let displayCurrency = 'USD';
+
 /**
- * Format cost in USD.
+ * Set the pricing currency every amount is shown in (`GET /config` `currency`,
+ * i.e. `impact.pricing.currency`). An invalid or missing code keeps the current one.
+ * @param {unknown} code ISO 4217 code such as "EUR"
+ * @returns {string} the currency now in use
+ */
+export function setDisplayCurrency(code) {
+	const upper = typeof code === 'string' ? code.trim().toUpperCase() : '';
+	if (CURRENCY_CODE.test(upper)) displayCurrency = upper;
+	return displayCurrency;
+}
+
+/** The pricing currency amounts are shown in (USD until the server says otherwise). */
+export function getDisplayCurrency() {
+	return displayCurrency;
+}
+
+/** A valid ISO 4217 code, or the display currency. */
+export function currencyOrDefault(code) {
+	return typeof code === 'string' && CURRENCY_CODE.test(code) ? code : displayCurrency;
+}
+
+/** The symbol of a currency in en-US ("$", "€", "£"), or its code. */
+export function currencySymbol(currency) {
+	const code = currencyOrDefault(currency);
+	try {
+		const part = new Intl.NumberFormat('en-US', { style: 'currency', currency: code })
+			.formatToParts(0)
+			.find((item) => item.type === 'currency');
+		return part?.value || code;
+	} catch {
+		return code;
+	}
+}
+
+/**
+ * Format a cost in the pricing currency (never a hard-coded "$").
  * @param {number} cost
+ * @param {string} [currency] ISO 4217 code; defaults to the display currency
  * @returns {string}
  */
-export function formatCost(cost) {
-	if (cost == null) return '—';
-	if (cost >= 1) return `$${cost.toFixed(2)}`;
-	if (cost >= 0.01) return `$${cost.toFixed(3)}`;
-	return `$${cost.toFixed(4)}`;
+export function formatCost(cost, currency) {
+	if (cost == null || !Number.isFinite(cost)) return '—';
+	const code = currencyOrDefault(currency);
+	const magnitude = Math.abs(cost);
+	const digits = magnitude >= 1 ? 2 : magnitude >= 0.01 ? 3 : 4;
+	try {
+		return new Intl.NumberFormat('en-US', {
+			style: 'currency',
+			currency: code,
+			minimumFractionDigits: digits,
+			maximumFractionDigits: digits,
+			useGrouping: false
+		}).format(cost);
+	} catch {
+		return `${cost.toFixed(digits)} ${code}`;
+	}
 }
 
 /**

@@ -114,6 +114,12 @@ Welcome to
    automation.policy.pauseDelivery is true: no pull request is opened until you set it to false.
 {{- end }}
 
+{{- $recs := (.Values.config | default dict).recommendations | default dict }}
+
+* First recommendations: request increases and the other sources need
+  {{ $recs.minSamples | default 36 }} samples (about 3 hours at the default 5-minute step); request
+  decreases need {{ $recs.minDecreaseCoverageDays | default 7 }} days of history. The setup checklist shows both estimates.
+
 * One topology: api ({{ $v.api.replicas }}), controller ({{ $v.controller.replicas }}, Lease {{ include "greenkube.leaseName" . }}), renderer
 {{- if gt (int ($v.worker.replicas | default 0)) 0 }}, worker ({{ $v.worker.replicas }}){{ end }}
 {{- if include "greenkube.bundledPostgres" . }} and PostgreSQL{{ end }}.

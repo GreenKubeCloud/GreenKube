@@ -155,7 +155,7 @@ describe('buildChangeBoard', () => {
 	});
 
 	it('keeps changes without a plan and drops unsafe PR links', () => {
-		expect(byKey['change:chg-0']).toMatchObject({ stage: 'outcome', statusLabel: 'Realized', href: null, ledgerHref: '/ledger?change=chg-0' });
+		expect(byKey['change:chg-0']).toMatchObject({ stage: 'outcome', statusLabel: 'Saving measured', href: null, ledgerHref: '/ledger?change=chg-0' });
 		expect(byKey['pr:4']).toMatchObject({ stage: 'plan', prUrl: null, href: null });
 	});
 

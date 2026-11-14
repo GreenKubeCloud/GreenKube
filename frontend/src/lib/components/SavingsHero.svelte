@@ -2,6 +2,7 @@
 	import { formatCO2 } from '$lib/utils/format.js';
 	import { formatMoney } from '$lib/utils/decision.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
+	import { SAVINGS_TERMS, realizationText } from '$lib/savingsVocabulary.js';
 
 	/** Output of buildSavingsOverview ($lib/overview.js); null while unknown. */
 	export let overview = null;
@@ -9,7 +10,7 @@
 	/** Error message when the savings report could not be read. */
 	export let savingsError = '';
 
-	$: currency = overview?.currency ?? 'USD';
+	$: currency = overview?.currency;
 	$: realized = overview?.realized;
 	$: pending = overview?.pending;
 	$: opportunity = overview?.opportunity;
@@ -28,10 +29,10 @@
 	</div>
 
 	<div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
-		<!-- Realized (measured) -->
+		<!-- Measured allocated (principle 3: "Realized" is reserved for billed savings) -->
 		<article class="card-compact flex flex-col gap-2 border-green-700/40" data-testid="savings-realized" aria-labelledby="realized-title">
 			<div class="flex items-center justify-between gap-2">
-				<h3 id="realized-title" class="stat-label text-xs">Realized savings</h3>
+				<h3 id="realized-title" class="stat-label text-xs">{SAVINGS_TERMS.measuredAllocated}</h3>
 				<StatusPill label="Measured" tone="green" icon="✓" />
 			</div>
 			{#if loading}
@@ -40,11 +41,27 @@
 				<p class="text-sm text-amber-300" role="alert">{savingsError}</p>
 			{:else if realized?.hasMeasurement}
 				<p class="text-2xl font-bold text-green-400" data-testid="realized-cost">{money(realized.toDate?.cost)}</p>
-				<p class="text-sm text-dark-200" data-testid="realized-co2e">{formatCO2(realized.toDate?.co2eGrams ?? 0)} CO₂e avoided</p>
-				<p class="text-xs text-dark-500">Accrued in the savings ledger to date.</p>
+				<p class="text-sm text-dark-200" data-testid="realized-co2e">{SAVINGS_TERMS.allocatedCo2e}: {formatCO2(realized.toDate?.co2eGrams ?? 0)}</p>
+				<p class="text-xs text-dark-500">
+					What the changed workloads stopped being charged, accrued in the savings ledger to date. The bill drops
+					only when capacity is removed.
+				</p>
 				{#if realized.runRateAnnual}
 					<p class="text-xs text-dark-400" data-testid="realized-run-rate">
-						Measured run rate: {money(realized.runRateAnnual.cost)}/yr · {formatCO2(realized.runRateAnnual.co2eGrams)} CO₂e/yr
+						{SAVINGS_TERMS.measuredAllocatedRunRate}: {money(realized.runRateAnnual.cost)}/yr · {formatCO2(realized.runRateAnnual.co2eGrams)} CO₂e/yr
+					</p>
+				{/if}
+				{#if realized.realizationFactor !== null && realized.realizationFactor !== undefined}
+					<p class="text-xs text-dark-400" data-testid="realization-factor">
+						{realizationText(realized.realizationFactor)}
+						{#if realized.expectedBilledCostAnnual !== null && realized.expectedBilledCostAnnual !== undefined}
+							Expected on the bill ≈ {money(realized.expectedBilledCostAnnual)}/yr (an expectation, not a measurement).
+						{/if}
+					</p>
+				{/if}
+				{#if realized.realizedBilledToDate}
+					<p class="text-xs text-green-300" data-testid="realized-billed">
+						{SAVINGS_TERMS.realizedBilled}: {money(realized.realizedBilledToDate.cost)} · {formatCO2(realized.realizedBilledToDate.co2eGrams)} CO₂e
 					</p>
 				{/if}
 			{:else}

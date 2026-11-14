@@ -129,8 +129,8 @@ CODES: Dict[str, Tuple[str, str]] = {
     ),
     "action_unavailable": (
         "No typed container-resources change could be built for this recommendation.",
-        "The next scan rebuilds the action once the workload owner, the container and a request decrease are "
-        "known; otherwise apply the change manually.",
+        "The next scan rebuilds the action once the workload owner, the container and the request change "
+        "(increase or decrease) are known; otherwise apply the change manually.",
     ),
     "requires_container_target": (
         "The proposed change does not target one named container of the workload.",
