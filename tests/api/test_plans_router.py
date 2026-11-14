@@ -501,14 +501,12 @@ def test_create_enforces_recommendation_id_count_and_values(plan_api):
 @pytest.mark.parametrize(
     ("code", "status_code"),
     [
-        (AutomationErrorCode.PLAN_STALE, 409),
-        (AutomationErrorCode.SOURCE_CHANGED, 409),
-        (AutomationErrorCode.UNSUPPORTED_SOURCE, 422),
-        (AutomationErrorCode.AMBIGUOUS_BINDING, 422),
         (AutomationErrorCode.PROVIDER_NOT_READY, 424),
+        (AutomationErrorCode.PROVIDER_CAPABILITY_MISSING, 424),
+        (AutomationErrorCode.POLICY_EVIDENCE_MISSING, 424),
     ],
 )
-def test_create_maps_domain_errors_without_leaking_internal_messages(plan_api, code, status_code):
+def test_create_maps_provider_and_policy_errors_without_leaking_internal_messages(plan_api, code, status_code):
     client, _, _, service, _ = plan_api
     service.preparation = _FailingPreparationService(AutomationPlanError(code, _SECRET))
 
@@ -516,7 +514,56 @@ def test_create_maps_domain_errors_without_leaking_internal_messages(plan_api, c
 
     assert response.status_code == status_code
     assert response.json()["code"] == code.value
+    assert "reason" not in response.json()
     assert _SECRET not in response.text
+
+
+@pytest.mark.parametrize(
+    ("code", "status_code"),
+    [
+        (AutomationErrorCode.PLAN_STALE, 409),
+        (AutomationErrorCode.SOURCE_CHANGED, 409),
+        (AutomationErrorCode.UNSUPPORTED_SOURCE, 422),
+        (AutomationErrorCode.AMBIGUOUS_BINDING, 422),
+        (AutomationErrorCode.REQUIRES_CONTAINER_TARGET, 422),
+        (AutomationErrorCode.RENDER_VALIDATION_FAILED, 422),
+    ],
+)
+def test_create_returns_the_planner_reason_with_the_stable_detail(plan_api, code, status_code):
+    """The planner's reason is returned so a failed preview is explained without the pod logs."""
+    client, _, _, service, _ = plan_api
+    service.preparation = _FailingPreparationService(
+        AutomationPlanError(code, "recommendations do not share one persisted action")
+    )
+
+    response = client.post("/api/v1/automation/plans", json={"recommendation_ids": [42]})
+
+    assert response.status_code == status_code
+    body = response.json()
+    assert body["code"] == code.value
+    assert body["detail"]
+    assert body["reason"] == "recommendations do not share one persisted action"
+
+
+def test_create_redacts_credentials_in_the_planner_reason(plan_api):
+    client, _, _, service, _ = plan_api
+    message = (
+        "render failed for https://user:hunter2@git.example/repo.git?private_token=abc123 "
+        "with token=glpat_supersecretvalue\nsecond line " + "x" * 400
+    )
+    service.preparation = _FailingPreparationService(
+        AutomationPlanError(AutomationErrorCode.RENDER_VALIDATION_FAILED, message)
+    )
+
+    response = client.post("/api/v1/automation/plans", json={"recommendation_ids": [42]})
+
+    reason = response.json()["reason"]
+    assert "hunter2" not in response.text
+    assert "abc123" not in response.text
+    assert "supersecretvalue" not in response.text
+    assert "\n" not in reason
+    assert reason.startswith("render failed for https://[redacted]@git.example/repo.git?[redacted]")
+    assert len(reason) <= 300
 
 
 def test_create_returns_typed_policy_rejection_with_structured_result(plan_api):
@@ -664,6 +711,7 @@ def test_rollback_preview_returns_stable_unsupported_reason(plan_api):
     assert response.json() == {
         "code": "rollback_unsupported",
         "detail": "This plan cannot be reversed safely.",
+        "reason": "internal renderer detail",
     }
 
 
@@ -680,6 +728,7 @@ def test_rollback_preview_returns_not_ready_when_the_original_baseline_is_missin
     assert response.json() == {
         "code": "rollback_not_ready",
         "detail": "The linked recommendations are not ready for rollback.",
+        "reason": "the persisted pre-apply baseline is missing",
     }
 
 
