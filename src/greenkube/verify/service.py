@@ -587,7 +587,16 @@ class ChangeMeasurementService:
         )
 
     async def _close_superseded(self, change: ChangeEvent, now: datetime) -> None:
-        """A new change on a workload closes the accrual of its earlier realized changes."""
+        """A new change on a workload closes its earlier realized changes as ``superseded``.
+
+        A superseded change keeps accruing its own measured step (the newer
+        change is measured against a baseline that already includes it, so
+        nothing is counted twice) and stays watched by the drift monitor: its
+        accrual ends when a newer change on the workload ends (regressed,
+        reverted, spec drift, workload deleted), or when the workload is
+        deleted or drifts while no newer change is realized
+        (:meth:`greenkube.verify.drift.DriftMonitor.run`).
+        """
         try:
             earlier = await self.changes.changes_for_workload(*change.target.key)
         except Exception as exc:
@@ -606,6 +615,7 @@ class ChangeMeasurementService:
                     event_type="superseded",
                     reason=f"change {change.change_id} landed on the same workload",
                     payload={"superseded_by": change.change_id},
+                    details={**(status.details or {}), "superseded_by": change.change_id},
                     now=now,
                 )
             except ChangeConflictError as exc:

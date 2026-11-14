@@ -253,10 +253,13 @@ ALLOWED_TRANSITIONS: dict[MeasurementState, frozenset[MeasurementState]] = {
 def is_allowed_transition(current: MeasurementState, target: MeasurementState) -> bool:
     """Whether ``current → target`` is a lifecycle transition.
 
-    ``measuring → measuring`` is the only self-transition: it records an event
-    (e.g. ``health_checked``) on a change that is still being measured.
+    ``measuring → measuring`` records an event (e.g. ``health_checked``) on a
+    change that is still being measured; ``closed → closed`` ends the measured
+    accrual of a superseded change (C8): it was closed when a newer change
+    landed on its workload, and keeps accruing its own step until that newer
+    change's saving ends or the workload is deleted or drifts.
     """
-    if current is MeasurementState.MEASURING and target is MeasurementState.MEASURING:
+    if current is target and current in (MeasurementState.MEASURING, MeasurementState.CLOSED):
         return True
     return target in ALLOWED_TRANSITIONS.get(current, frozenset())
 

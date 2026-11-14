@@ -27,6 +27,16 @@ watches it after the measurement and acts when the saving is lost:
   template change is acted on only :data:`SPEC_DRIFT_GRACE` after it was
   observed, and a newer recorded change on the workload closes the change as
   ``superseded`` instead (each change keeps accruing its own measured step).
+* **Superseded changes.** A change closed as ``superseded`` still accrues its
+  own measured step (the newer change was measured against a baseline that
+  already includes it, so the steps add up without double counting), and it
+  stays watched: when a newer change on the workload ends (``regressed``, or
+  closed by a spec drift, a revert or a deletion), the superseded change's
+  accrual ends at the same instant (event ``superseded_ended``, fail closed:
+  the monitor cannot tell which step was lost); while the newest change is not
+  realized (still measured, not realized, inconclusive, contaminated), nobody
+  else watches the workload, so the superseded change gets the deletion check
+  and the spec-drift check against the newest change's template itself.
 * **Deletion.** A realized change whose workload the Kubernetes API reports
   as gone (HTTP 404 on the Deployment, StatefulSet or DaemonSet) gets a
   ``workload_absent`` event; still absent :data:`SPEC_DRIFT_GRACE` later, the
@@ -320,6 +330,17 @@ class DriftMonitor:
                 continue
             if outcome is not None:
                 result[outcome].append(status.change_id)
+        try:
+            closed = await self.changes.list_statuses([MeasurementState.CLOSED.value])
+        except Exception as exc:
+            logger.warning("Could not list closed changes: %s", exc)
+            closed = []
+        for status in closed:
+            try:
+                if await self._watch_superseded(status, moment):
+                    result["closed"].append(status.change_id)
+            except Exception as exc:
+                logger.warning("Superseded-change check of %s failed: %s", status.change_id, exc)
         ended = await self.changes.list_statuses([MeasurementState.REGRESSED.value, MeasurementState.CLOSED.value])
         for status in ended:
             if _accrual_end(status) is None or moment - ensure_utc(status.updated_at) > REVERSAL_HORIZON:
@@ -395,8 +416,13 @@ class DriftMonitor:
         logger.info("Change %s regressed: %s", change.change_id, assessment.reason)
         return True
 
-    async def _deleted(self, change: ChangeEvent, status: ChangeStatus, now: datetime) -> bool:
-        """Close the change once its workload has been absent for :data:`SPEC_DRIFT_GRACE`."""
+    async def _deleted(
+        self, change: ChangeEvent, status: ChangeStatus, now: datetime, *, superseded: bool = False
+    ) -> bool:
+        """Close the change once its workload has been absent for :data:`SPEC_DRIFT_GRACE`.
+
+        A ``superseded`` change is already closed: only its accrual is ended (``closed → closed``).
+        """
         if self.workload_probe is None:
             return False
         present = await self.workload_probe(*change.target.key)
@@ -435,6 +461,17 @@ class DriftMonitor:
             f"the workload {'/'.join(change.target.key)} was deleted: the measured saving stops accruing "
             f"from {absent_since.isoformat()}, when it was first found absent"
         )
+        if superseded:
+            await self._end_superseded(
+                change,
+                status,
+                absent_since,
+                reason,
+                now,
+                payload={"absent_since": absent_since.isoformat()},
+                event_type=WORKLOAD_DELETED,
+            )
+            return True
         await self.changes.transition(
             status,
             MeasurementState.CLOSED,
@@ -469,6 +506,7 @@ class DriftMonitor:
                 actor="drift-monitor",
                 reason=f"change {newer[-1].change_id} landed on the same workload",
                 payload={"superseded_by": newer[-1].change_id},
+                details={**(status.details or {}), _SUPERSEDED_BY: newer[-1].change_id},
                 now=now,
             )
             return "closed"
@@ -494,6 +532,120 @@ class DriftMonitor:
         await self._end_members(change, reason)
         logger.info("Change %s closed: %s", change.change_id, reason)
         return "closed"
+
+    # ------------------------------------------------------------------
+    # Superseded changes: still accruing, still watched
+    # ------------------------------------------------------------------
+
+    async def _is_superseded(self, status: ChangeStatus) -> bool:
+        """A closed change whose closing event is ``superseded`` (from its details, or its events for older rows)."""
+        if (status.details or {}).get(_SUPERSEDED_BY):
+            return True
+        events = await self.changes.list_events(status.change_id)
+        closing = next(
+            (
+                event
+                for event in events
+                if event.to_state is MeasurementState.CLOSED and event.from_state is not MeasurementState.CLOSED
+            ),
+            None,
+        )
+        return closing is not None and closing.event_type == SUPERSEDED
+
+    async def _watch_superseded(self, status: ChangeStatus, now: datetime) -> bool:
+        """End the measured accrual of a superseded change once the saving on its workload cannot be vouched for.
+
+        Returns whether the change's accrual was ended in this pass.
+        """
+        if _accrual_end(status) is not None or not await self._is_superseded(status):
+            return False
+        change = await self.changes.get_change(status.change_id)
+        if change is None:
+            return False
+        members = await self.service._records(change.recommendation_ids)
+        if not any(_status_of(record) == "verified" for record in members):
+            # Nothing accrues any more (rolled back, reviewed, regressed): nothing to watch.
+            return False
+        completed = ensure_utc(change.rollout_completed_at)
+        newer = sorted(
+            (
+                other
+                for other in await self.changes.changes_for_workload(*change.target.key)
+                if other.change_id != change.change_id and ensure_utc(other.rollout_completed_at) > completed
+            ),
+            key=lambda other: ensure_utc(other.rollout_completed_at),
+        )
+        if not newer:
+            return False
+        head = newer[-1]
+        head_status: Optional[ChangeStatus] = None
+        ended: List[tuple] = []
+        for other in newer:
+            other_status = await self.changes.get_status(other.change_id)
+            if other.change_id == head.change_id:
+                head_status = other_status
+            end = _accrual_end(other_status) if other_status is not None else None
+            if other_status is not None and end is not None:
+                why = str((other_status.details or {}).get(_ACCRUAL_END_REASON) or "its saving ended")
+                ended.append((end, other.change_id, why))
+        if ended:
+            end, other_id, why = min(ended, key=lambda item: item[0])
+            reason = (
+                f"change {other_id}, which superseded this one on the same workload, stopped accruing ({why}); "
+                f"the measured saving of this change stops accruing from {end.isoformat()} too"
+            )
+            await self._end_superseded(change, status, end, reason, now, payload={"ended_by": other_id})
+            return True
+        if head_status is not None and head_status.state is MeasurementState.REALIZED:
+            # The newest change is realized: its own watch covers the workload (and ends this one through it).
+            return False
+        # The newest change is not realized, so nothing else watches the workload: check it here.
+        if await self._deleted(change, status, now, superseded=True):
+            return True
+        observations = await self.changes.spec_observations(
+            *change.target.key, since=ensure_utc(head.rollout_completed_at)
+        )
+        drift = detect_spec_drift(head, observations)
+        if drift is None or now - ensure_utc(drift.latest.observed_at) < SPEC_DRIFT_GRACE:
+            return False
+        reason = (
+            f"{drift.reason} (newest change {head.change_id}): the measured saving of this superseded change "
+            f"no longer describes what runs and stops accruing from {drift.accrual_end.isoformat()}"
+        )
+        await self._end_superseded(
+            change,
+            status,
+            drift.accrual_end,
+            reason,
+            now,
+            payload={"newest_change_id": head.change_id, "drift": drift.event_type},
+        )
+        return True
+
+    async def _end_superseded(
+        self,
+        change: ChangeEvent,
+        status: ChangeStatus,
+        accrual_end: datetime,
+        reason: str,
+        now: datetime,
+        *,
+        payload: Dict[str, Any],
+        event_type: str = "superseded_ended",
+    ) -> None:
+        """``closed → closed``: store where the superseded change's accrual ended and stop its members."""
+        await self.changes.transition(
+            status,
+            MeasurementState.CLOSED,
+            event_type=event_type,
+            actor="drift-monitor",
+            reason=reason,
+            payload={**payload, "accrual_end": ensure_utc(accrual_end).isoformat()},
+            details=_ending(status, accrual_end, reason),
+            now=now,
+        )
+        await self._end_members(change, reason)
+        logger.info("Superseded change %s stopped accruing: %s", change.change_id, reason)
 
     async def _end_members(self, change: ChangeEvent, reason: str) -> None:
         """Stop the measured accrual of the change's verified recommendations (``verified → regressed``)."""
@@ -626,6 +778,14 @@ class DriftMonitor:
 #: Change details keys: where (and why) a change's measured accrual ended (drift onset or spec drift).
 _ACCRUAL_END = "accrual_end"
 _ACCRUAL_END_REASON = "accrual_end_reason"
+#: Change details key: the newer change that superseded a closed change (it still accrues its own step).
+_SUPERSEDED_BY = "superseded_by"
+#: Event closing a realized change when a newer change lands on its workload.
+SUPERSEDED = "superseded"
+
+
+def _status_of(record: Any) -> str:
+    return str(getattr(record.status, "value", record.status))
 
 
 async def kubernetes_workload_probe(namespace: str, kind: str, name: str) -> Optional[bool]:
