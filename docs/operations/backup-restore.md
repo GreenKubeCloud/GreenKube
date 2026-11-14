@@ -117,11 +117,12 @@ each upgrade.
 
 ## Back up by hand
 
-Bundled PostgreSQL, from your workstation (the password never leaves the pod):
+Bundled PostgreSQL, from your workstation (the password never leaves the pod). Like the CronJob, dump the
+GreenKube schema (`config.db.schema`, `public` by default):
 
 ```bash
 kubectl -n greenkube exec greenkube-postgres-0 -c postgres -- sh -c \
-  'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner' \
+  'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" --schema=public --format=custom --no-owner' \
   > greenkube-$(date -u +%Y%m%dT%H%M%SZ).dump
 pg_restore --list greenkube-*.dump | head        # the archive is readable
 kubectl -n greenkube get secret greenkube -o yaml > greenkube-secret.yaml   # store encrypted
@@ -129,8 +130,13 @@ kubectl -n greenkube get secret greenkube -o yaml > greenkube-secret.yaml   # st
 
 ## Restore
 
-Restoring replaces the whole GreenKube schema. Stop every writer first so nothing writes between the restore
-and the restart:
+A restore replaces the GreenKube schema with the content of the dump: **drop the schema, then replay the dump
+into it** (the dump recreates the schema), both in one transaction. Do not use `pg_restore --clean` over the
+existing schema: when the dump is older than the schema (the rollback of an upgrade), the objects that newer
+migrations created (tables, foreign keys, views) are not in the dump, so `--clean` cannot drop the tables they
+depend on and the restore aborts, and any table it left behind would break the next upgrade.
+
+Stop every writer first so nothing writes between the restore and the restart:
 
 ```bash
 NS=greenkube RELEASE=greenkube
@@ -139,18 +145,33 @@ kubectl -n $NS scale deployment/$RELEASE-worker --replicas=0 2>/dev/null || true
 kubectl -n $NS patch cronjob $RELEASE-postgres-backup -p '{"spec":{"suspend":true}}' 2>/dev/null || true
 ```
 
-Restore the dump into the bundled PostgreSQL (`--clean --if-exists` drops the objects of the dump before
-recreating them; `--single-transaction` makes it all or nothing):
+Restore the dump into the bundled PostgreSQL. `pg_restore --file=-` turns the archive into SQL, and `psql
+--single-transaction` runs the `DROP SCHEMA` and the whole dump as one transaction: on any error nothing
+changes. Set `SCHEMA` to your `config.db.schema` (`public` by default):
 
 ```bash
-kubectl -n $NS exec -i $RELEASE-postgres-0 -c postgres -- sh -c \
-  'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-     --clean --if-exists --no-owner --single-transaction' < greenkube-20261114T031700Z.dump
+SCHEMA=public DUMP=greenkube-20261114T031700Z.dump
+kubectl -n $NS exec -i $RELEASE-postgres-0 -c postgres -- sh -c '
+  { printf "DROP SCHEMA IF EXISTS \"%s\" CASCADE;\n" "$1"; pg_restore --no-owner --file=-; } |
+    PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      --single-transaction -v ON_ERROR_STOP=1 -q -o /dev/null' sh "$SCHEMA" < "$DUMP"
+```
+
+With an external database, run the same pipeline with the connection string of the backup, as a role that
+owns the schema (or may create it in the database), with client tools at least as new as the `pg_dump` that
+wrote the archive (PostgreSQL 18 for the chart's backups):
+
+```bash
+{ printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "$SCHEMA"; pg_restore --no-owner --file=- "$DUMP"; } |
+  psql "$DB_CONNECTION_STRING" --single-transaction -v ON_ERROR_STOP=1 -q -o /dev/null
 ```
 
 A dump from the backup claim can be read from a temporary pod that mounts `<release>-postgres-backup`, or copied
-out first with `kubectl cp` from such a pod. With an external database, run `pg_restore` with the same
-connection string as the backup.
+out first with `kubectl cp` from such a pod.
+
+The procedure is tested: `tests/integration/test_upgrade_from_v031.py` dumps a seeded 0.3.1 schema, upgrades
+it, restores it with this pipeline, checks the version and the rows, and upgrades it again; the kind upgrade
+test (`hack/upgrade/upgrade-test.sh`) ends with the same rollback on a real release.
 
 The restored schema has the version of the release that took the dump. Start the release that matches it (the
 same chart version, or a newer one: the controller then migrates the restored schema forward), then the

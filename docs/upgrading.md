@@ -11,9 +11,10 @@ taken before it ([Backup and restore](operations/backup-restore.md#roll-back-an-
 kubectl -n greenkube create job --from=cronjob/greenkube-postgres-backup backup-before-upgrade
 kubectl -n greenkube wait --for=condition=complete job/backup-before-upgrade --timeout=1h
 
-# Without them (0.3.x has none): dump the bundled PostgreSQL to your workstation.
+# Without them (0.3.x has none): dump the GreenKube schema (config.db.schema, "public"
+# by default) of the bundled PostgreSQL to your workstation.
 kubectl -n greenkube exec greenkube-postgres-0 -c postgres -- sh -c \
-  'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner' \
+  'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" --schema=public --format=custom --no-owner' \
   > greenkube-before-upgrade.dump
 pg_restore --list greenkube-before-upgrade.dump > /dev/null && echo "backup readable"
 kubectl -n greenkube get secret greenkube -o yaml > greenkube-secret.yaml   # store encrypted
@@ -21,7 +22,10 @@ kubectl -n greenkube get secret greenkube -o yaml > greenkube-secret.yaml   # st
 helm -n greenkube history greenkube   # note the revision to roll back to
 ```
 
-With an external PostgreSQL, use your provider's snapshot or `pg_dump` with the same connection string. Then:
+With an external PostgreSQL, use your provider's snapshot or `pg_dump --schema=<config.db.schema>` with the
+same connection string. A rollback restores this dump into an emptied schema (`DROP SCHEMA ... CASCADE` and the
+dump in one transaction, see [Restore](operations/backup-restore.md#restore)): `pg_restore --clean` over the
+upgraded schema fails, because the objects that newer migrations created are not in the dump. Then:
 
 - Check the free space of the data volume: a migration that backfills a large table temporarily needs about
   as much free space as that table ([Sizing](installation.md#sizing)).

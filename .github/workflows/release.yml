@@ -48,6 +48,8 @@ jobs:
           --health-retries 10
     env:
       GREENKUBE_TEST_POSTGRES_DSN: postgresql://greenkube:greenkube_password@localhost:5432/greenkube_test
+      # pg_dump/pg_restore matching the server, for the backup restore test.
+      GREENKUBE_TEST_PG_CLIENT: docker run --rm -i --network host postgres:18.0-alpine3.22
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
