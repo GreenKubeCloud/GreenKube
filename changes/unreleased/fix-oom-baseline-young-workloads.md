@@ -1,3 +1,0 @@
-### Fixed
-
-- **The OOM baseline of a reliability increase counts only the time the workload was observed (live e2e).** The baseline OOM-kill rate divided the kills by the evidence window, which starts at the cluster's data start: a workload 40 minutes old on a cluster with 8.4 hours of data had a baseline rate about 12 times too low, leaning its verdict towards `inconclusive`. The scan now records `evidence.first_observed_at` (the target's first sample inside the window, from its usage summary or raw series), and the baseline exposure runs from it to the window end, bounded by the window. Evidence without it keeps the whole window; `counterfactual_params.reliability.baseline_exposure_source` says which one was used (`workload_first_observed` or `evidence_window`).
