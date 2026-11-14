@@ -9,7 +9,8 @@ Container resources v2 (H1):
 
 - request **increases** (reliability) become actions like decreases;
 - **limits** delivered with a request change (``evidence.limit_changes``): set, raise,
-  or remove the CPU limit; a memory limit is never removed;
+  or remove the CPU limit; a memory limit is never removed; an OOM-driven memory
+  increase must raise the memory limit above the new request or stays advisory;
 - **native sidecars and init containers** (``container_kind``) are addressed in
   ``initContainers``;
 - every edited container keeps ``request <= limit`` (checked on the expected and the
@@ -647,7 +648,10 @@ def _limit_edits(evidence: Any, resource: str, proposed_request: int) -> dict[st
 
     A set limit must cover the proposed request; a memory limit is never removed. A
     known current limit below the proposed request with no limit change fails closed:
-    the pull request would not apply (request > limit).
+    the pull request would not apply (request > limit). A memory increase backed by
+    OOM kills (``evidence.oom_events``), or whose request reaches the known limit,
+    fails closed unless it raises the limit above the new request: the kernel kills
+    at the limit, so such a pull request could not stop the kills (it stays advisory).
     """
     edits: dict[str, str | None] = {}
     for change in getattr(evidence, "limit_changes", None) or []:
@@ -664,12 +668,34 @@ def _limit_edits(evidence: Any, resource: str, proposed_request: int) -> dict[st
             if not isinstance(value, int) or isinstance(value, bool) or value < proposed_request:
                 return None
             edits[resource] = _cpu_quantity(value) if resource == "cpu" else _memory_quantity(value)
-    if resource not in edits:
-        current = evidence.current
-        limit = current.cpu_limit_millicores if resource == "cpu" else current.memory_limit_bytes
-        if isinstance(limit, int) and limit > 0 and proposed_request > limit:
+    current = evidence.current
+    limit = current.cpu_limit_millicores if resource == "cpu" else current.memory_limit_bytes
+    if resource not in edits and isinstance(limit, int) and limit > 0 and proposed_request > limit:
+        return None
+    if resource == "memory" and _needs_memory_limit_headroom(evidence, limit, proposed_request):
+        # The kernel OOM-kills at the limit: an OOM-driven increase (or one whose request reaches
+        # the limit) that does not lift the limit above the new request cannot work. Advisory.
+        raised = edits.get("memory")
+        if raised is None or _memory_bytes(raised) <= proposed_request:
             return None
     return edits
+
+
+def _needs_memory_limit_headroom(evidence: Any, limit: Any, proposed_request: int) -> bool:
+    """A memory increase that must raise a known limit above the new request (OOM kills or request at the limit)."""
+    current_request = evidence.current.memory_request_bytes
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        return False
+    if not isinstance(current_request, int) or proposed_request <= current_request:
+        return False
+    oom_events = getattr(evidence, "oom_events", None)
+    return (isinstance(oom_events, int) and oom_events > 0) or proposed_request >= limit
+
+
+def _memory_bytes(quantity: str) -> int:
+    from greenkube.utils.k8s_quantities import parse_memory_quantity
+
+    return parse_memory_quantity(quantity) or 0
 
 
 def _target_for(recommendation: Recommendation) -> tuple[ResourceTarget, str] | None:

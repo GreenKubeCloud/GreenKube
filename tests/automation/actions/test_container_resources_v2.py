@@ -33,6 +33,7 @@ from greenkube.models.evidence import (
     ResourceSnapshot,
 )
 from greenkube.models.metrics import Recommendation, RecommendationType
+from tests.automation.actions.oom_limit_scenario import oom_operation  # pyrefly: ignore[missing-import]
 
 MIB = 1024**2
 BASE_REVISION = "a" * 40
@@ -522,3 +523,51 @@ def test_the_raw_planner_diff_shows_mebibytes_not_bytes() -> None:
 
     assert _container(plan)["resources"]["requests"]["memory"] == "23Mi"
     assert "24114500" not in (plan.diff or "")
+
+
+# -- OOM-driven increases must raise the memory limit (live Minikube e2e, request = limit = 24Mi) --
+
+RAW_OOM_DEPLOYMENT = """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: payments
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          image: example/api:v1
+          resources:
+            requests:
+              memory: 24Mi
+            limits:
+              memory: 24Mi
+"""
+
+
+def _with_oom_events(recommendation: Recommendation, events: int) -> Recommendation:
+    assert recommendation.evidence is not None
+    evidence = recommendation.evidence.model_copy(update={"oom_events": events})
+    return recommendation.model_copy(update={"evidence": evidence})
+
+
+def test_an_oom_increase_whose_limit_equals_the_new_request_stays_advisory() -> None:
+    """e2e: 24Mi -> 48Mi with the limit at 48Mi kept the OOM kills going (rollback_review)."""
+    equal = LimitChange(resource="memory", action="set", current=24 * MIB, proposed=48 * MIB, reason="below_floor")
+    recommendation = _recommendation(current=24 * MIB, proposed=48 * MIB, current_limit=24 * MIB, limit_changes=[equal])
+    assert build_container_resource_actions([_with_oom_events(recommendation, 3)]) == {}
+
+
+def test_an_oom_increase_below_an_unchanged_limit_stays_advisory() -> None:
+    recommendation = _recommendation(current=24 * MIB, proposed=48 * MIB, current_limit=64 * MIB)
+    assert build_container_resource_actions([_with_oom_events(recommendation, 2)]) == {}
+    # Without OOM kills, an increase well below the limit leaves it alone and is deliverable.
+    assert _only_operation(recommendation).resources.limits == {}
+
+
+def test_the_oom_scenario_is_rendered_by_the_raw_planner() -> None:
+    plan = _raw_plan([oom_operation()], content=RAW_OOM_DEPLOYMENT)
+    resources = _container(plan)["resources"]
+    assert resources == {"requests": {"memory": "48Mi"}, "limits": {"memory": "53Mi"}}
+    assert "+              memory: 53Mi" in (plan.diff or "")

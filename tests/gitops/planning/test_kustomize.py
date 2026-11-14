@@ -24,6 +24,7 @@ from greenkube.gitops.planning.kustomize import KustomizePlanError, KustomizePla
 from greenkube.gitops.renderers.kustomize import KustomizeOutputError, KustomizeUnavailableError
 from greenkube.gitops.renderers.sandbox import SandboxCommandNotFoundError, SandboxResult
 from greenkube.gitops.snapshots import RepositorySnapshot, extract_archive
+from tests.automation.actions.oom_limit_scenario import oom_operation  # pyrefly: ignore[missing-import]
 
 BASE_REVISION = "a" * 40
 OVERLAY_PATH = "apps/payments/overlays/prod"
@@ -635,6 +636,26 @@ def test_kustomize_plans_a_request_increase_with_a_raised_limit(tmp_path: Path):
             "resources": {"limits": {"memory": "1Gi"}, "requests": {"memory": "768Mi"}},
         }
         assert '"memory": "1Gi"' in plan.rendered_diff
+    finally:
+        snapshot.close()
+
+
+def test_kustomize_renders_the_oom_increase_with_its_raised_memory_limit(tmp_path: Path):
+    """e2e: request = limit = 24Mi, OOM-killed; the managed patch raises both, the limit above the request."""
+    deployment = DEPLOYMENT.replace("              memory: 128Mi\n", "              memory: 24Mi\n").replace(
+        "              memory: 512Mi\n", "              memory: 24Mi\n"
+    )
+    snapshot = _snapshot(tmp_path, {**BASE_FILES, "apps/payments/base/deployment.yaml": deployment})
+    try:
+        plan = KustomizePlanner(runner=_FakeKustomizeRunner()).plan(
+            _limits_action(**oom_operation().model_dump(exclude={"container"})), _source(), snapshot, BASE_REVISION
+        )
+        patch_edit = next(edit for edit in plan.files if "greenkube-patches/" in edit.path)
+        assert _rendered_api(patch_edit.content)["resources"] == {
+            "limits": {"memory": "53Mi"},
+            "requests": {"memory": "48Mi"},
+        }
+        assert plan.validation.requests_within_limits
     finally:
         snapshot.close()
 

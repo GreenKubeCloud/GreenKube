@@ -38,8 +38,12 @@ How an increase is sized (USER BUG 2, docs/recommendation.md):
 Limits follow ``RECOMMENDATION_LIMITS_POLICY`` (``keep`` by default): limits
 are left alone unless the change would make them invalid or unsafe, in which
 case the recommendation states the limit it requires as a structured
-:class:`LimitAdvice`. :func:`planned_limit_changes` turns that advice into the
-limit edits a pull request delivers with the request change (H1).
+:class:`LimitAdvice`. The kernel OOM-kills at the memory limit, so a memory
+increase backed by OOM kills, or whose request reaches the limit, raises the
+limit above the new request with headroom (:func:`headroom_memory_limit`); when
+the policy forbids that (``memory_equals_request``) it stays advisory.
+:func:`planned_limit_changes` turns that advice into the limit edits a pull
+request delivers with the request change (H1).
 """
 
 from __future__ import annotations
@@ -68,6 +72,9 @@ MEMORY_MAX_FACTOR = 1.1
 #: Default cap of one increase step, as a multiple of the current request.
 DEFAULT_MAX_INCREASE_FACTOR = 2.0
 
+#: Limit advice reason: the memory limit needs headroom the limits policy forbids (advisory only).
+OOM_HEADROOM_FORBIDDEN = "oom_headroom_forbidden"
+
 #: Skip reason of a target whose usage is only known for the whole pod.
 POD_LEVEL_USAGE_ONLY = "pod_level_usage_only"
 #: A container statistic may exceed its pod's by this share (different sample sets) before it is bounded.
@@ -91,7 +98,8 @@ class LimitAdvice:
     resource: Resource
     #: ``remove``, ``raise`` (to at least ``minimum``) or ``equal_to_request``.
     action: Literal["remove", "raise", "equal_to_request"]
-    #: Why: ``below_request``, ``throttling``, ``below_floor`` or ``policy``.
+    #: Why: ``below_request``, ``throttling``, ``below_floor``, ``policy``, ``oom_headroom``,
+    #: ``request_reaches_limit`` or ``oom_headroom_forbidden`` (advisory: the policy forbids the limit).
     reason: str
     #: Current limit (millicores or bytes), None when unset.
     current: Optional[int]
@@ -436,7 +444,7 @@ def memory_proposal(
             stats=increase_stats,
             evidence=evidence,
         )
-        proposal.limit_advice = _memory_limit_advice(policy, summary, proposed, increase_stats)
+        proposal.limit_advice = _memory_limit_advice(policy, summary, proposed, config, increase_stats)
         return proposal
     if evidence or _memory_triggers(config, summary):
         # The container's own data contradicts its pod's: no decrease from it either (fail closed).
@@ -457,17 +465,97 @@ def memory_proposal(
     proposal = RightsizingProposal(
         "memory", "decrease", request, proposed, raw, ["low_average_usage"], basis="balanced", stats=stats
     )
-    proposal.limit_advice = _memory_limit_advice(policy, summary, proposed)
+    proposal.limit_advice = _memory_limit_advice(policy, summary, proposed, config)
     return proposal
 
 
+def needs_limit_headroom(summary: "WorkloadUsageSummary", proposed: int) -> Optional[str]:
+    """Why a memory request increase must also raise the memory limit above the new request, or None.
+
+    The kernel OOM-kills a container at its memory **limit**, never at its request:
+    a request increase that leaves the limit at (or below) the new request cannot
+    stop OOM kills. ``oom_headroom`` when the container was OOM-killed in the
+    window (kube-state-metrics OOM restarts or cAdvisor OOM events),
+    ``request_reaches_limit`` when the new request reaches or exceeds the limit.
+    None for a decrease, a container without a memory limit or an increase that
+    stays below the limit without OOM kills.
+    """
+    limit = int(summary.memory_limit or 0)
+    request = int(summary.memory_request or 0)
+    if limit <= 0 or request <= 0 or proposed <= request:
+        return None
+    if summary.oom_kill_count:
+        return "oom_headroom"
+    if proposed >= limit:
+        return "request_reaches_limit"
+    return None
+
+
+def headroom_memory_limit(
+    config: Optional["Config"], summary: "WorkloadUsageSummary", proposed: int, observed_max: float
+) -> int:
+    """Memory limit of an increase that needs headroom (:func:`needs_limit_headroom`), whole mebibytes.
+
+    ``max(current limit x the request's factor, 110% of the observed maximum)``
+    (the limit keeps its ratio to the request: ``limit x proposed/request`` is
+    ``proposed x limit/request``), bounded by ``RIGHTSIZING_MAX_INCREASE_FACTOR`` x
+    the current limit. The result always sits at least ``MEMORY_MAX_FACTOR``
+    (10%) above the new request, even past that bound: an OOM-backed request
+    step is itself uncapped, and a limit equal to the request cannot stop the
+    kills. Never below the current limit.
+    """
+    limit = int(summary.memory_limit or 0)
+    request = int(summary.memory_request or 0)
+    scaled = limit * (proposed / request) if request > 0 else float(limit)
+    target = _round_up_mib(max(scaled, observed_max * MEMORY_MAX_FACTOR))
+    factor = max_increase_factor(config) if config is not None else DEFAULT_MAX_INCREASE_FACTOR
+    cap = int(math.floor(limit * factor / MIB)) * MIB
+    headroom = _round_up_mib(proposed * MEMORY_MAX_FACTOR)
+    return max(min(target, cap), headroom, limit)
+
+
 def _memory_limit_advice(
-    policy: str, summary: "WorkloadUsageSummary", proposed: int, stats: Optional["UsageStats"] = None
+    policy: str,
+    summary: "WorkloadUsageSummary",
+    proposed: int,
+    config: Optional["Config"],
+    stats: Optional["UsageStats"] = None,
 ) -> List[LimitAdvice]:
     stats = summary.memory if stats is None else stats
     observed_max = stats.max if stats is not None else 0.0
     floor = _round_up_mib(max(float(proposed), observed_max * MEMORY_MAX_FACTOR))
     limit = summary.memory_limit
+    headroom_reason = needs_limit_headroom(summary, proposed)
+    if headroom_reason is not None and limit:
+        target = headroom_memory_limit(config, summary, proposed, observed_max)
+        why = "to stop the OOM kills" if headroom_reason == "oom_headroom" else "to give it headroom"
+        if policy == "memory_equals_request":
+            # The policy keeps the limit equal to the request: no headroom is allowed, so a
+            # pull request could not stop the kills. The recommendation stays advisory.
+            return [
+                LimitAdvice(
+                    "memory",
+                    "raise",
+                    OOM_HEADROOM_FORBIDDEN,
+                    limit,
+                    target,
+                    f"The memory limit ({limit // MIB}MiB) must rise above the new request ({proposed // MIB}MiB) "
+                    f"{why} (OOM kills happen at the limit), but the limits policy memory_equals_request keeps it "
+                    f"equal to the request: this increase stays advisory. Raise the limit to at least "
+                    f"{target // MIB}MiB by hand, or use the limits policy keep.",
+                )
+            ]
+        return [
+            LimitAdvice(
+                "memory",
+                "raise",
+                headroom_reason,
+                limit,
+                target,
+                f"Raise the memory limit ({limit // MIB}MiB) to {target // MIB}MiB, above the new request "
+                f"({proposed // MIB}MiB), {why}: OOM kills happen at the limit, not the request.",
+            )
+        ]
     if policy == "memory_equals_request":
         return [
             LimitAdvice(
@@ -510,9 +598,13 @@ def planned_limit_changes(
     * an **increase** (reliability) carries every limit change it needs: a CPU
       limit below the new request or throttled is raised to the advised floor
       (or removed under ``remove_cpu``), a memory limit below the request or
-      110% of the observed maximum is raised to that floor. An increase never
-      lowers an existing limit: under ``memory_equals_request`` the memory limit
-      becomes ``max(request, 110% of the maximum)`` only when that raises it;
+      110% of the observed maximum is raised to that floor. An OOM-driven memory
+      increase, or one whose request reaches the limit, raises the memory limit
+      above the new request with headroom (:func:`headroom_memory_limit`);
+      under ``memory_equals_request`` it gets no limit change (the policy forbids
+      that headroom) and stays advisory. An increase never lowers an existing
+      limit: under ``memory_equals_request`` the memory limit becomes
+      ``max(request, 110% of the maximum)`` only when that raises it;
     * a **decrease** carries the limits policy's own changes only
       (``remove_cpu``, ``memory_equals_request``), so with the default ``keep``
       a decrease leaves limits untouched;
@@ -530,12 +622,15 @@ def planned_limit_changes(
     if resource == "cpu":
         advice = _cpu_limit_advice(policy, summary, proposed_request, summary.throttling_ratio, stats)
     else:
-        advice = _memory_limit_advice(policy, summary, proposed_request, stats)
+        advice = _memory_limit_advice(policy, summary, proposed_request, config, stats)
     current_limit = summary.cpu_limit if resource == "cpu" else summary.memory_limit
     current_limit = int(current_limit) if current_limit else None
     changes: List[LimitChange] = []
     for item in advice:
         if not increase and item.reason != "policy":
+            continue
+        if item.reason == OOM_HEADROOM_FORBIDDEN:
+            # The policy forbids the limit the increase needs: no change, the action stays advisory.
             continue
         if item.action == "remove":
             if resource != "cpu" or current_limit is None:

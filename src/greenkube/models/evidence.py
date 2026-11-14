@@ -56,7 +56,8 @@ class LimitChange(BaseModel):
     action: Literal["set", "remove"]
     current: Optional[int] = None
     proposed: Optional[int] = None
-    #: Why: ``below_request``, ``throttling``, ``below_floor`` or ``policy``.
+    #: Why: ``below_request``, ``throttling``, ``below_floor``, ``policy``, ``oom_headroom`` (an OOM-driven
+    #: memory increase lifts the limit above the new request) or ``request_reaches_limit``.
     reason: str = ""
 
 

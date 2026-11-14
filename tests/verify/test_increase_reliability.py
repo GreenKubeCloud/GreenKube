@@ -318,3 +318,37 @@ async def test_the_measurement_service_keeps_decrease_gates_strict_in_a_mixed_ch
     assert any(gate.gate == "oom_kills" and gate.detail.startswith("[b]") for gate in failed)
     assert not any(gate.gate == "oom_kills" and gate.detail.startswith("[a]") for gate in failed)
     assert outcome is not None and outcome.post_events == 0
+
+
+def _limited_member(*, limit: int, raised_to: int | None, oom_events: int = 12):
+    """A memory increase whose evidence knows the container's memory limit and its planned limit edit."""
+    member = _member(current=24 * MIB, proposed=48 * MIB, oom_events=oom_events)
+    member.evidence.current = SimpleNamespace(memory_limit_bytes=limit)
+    member.evidence.limit_changes = (
+        []
+        if raised_to is None
+        else [SimpleNamespace(resource="memory", action="set", current=limit, proposed=raised_to)]
+    )
+    return member
+
+
+def test_an_oom_increase_that_raised_the_limit_is_judged_on_the_rate() -> None:
+    """e2e (request = limit = 24Mi): the fix raises the limit above the new request; the rate judges it."""
+    start = datetime.now(timezone.utc) - timedelta(days=7)
+    gates, outcome = container_reliability(
+        [_limited_member(limit=24 * MIB, raised_to=53 * MIB)], _gates(1), start, start + timedelta(days=7), 1
+    )
+    assert _gate(gates, "oom_kills").status is HealthGateStatus.PASSED
+    assert outcome is not None and outcome.outcome is ChangeOutcome.REALIZED
+
+
+@pytest.mark.parametrize("raised_to", [None, 24 * MIB, 16 * MIB])
+def test_an_oom_increase_that_kept_or_lowered_the_limit_keeps_the_strict_gate(raised_to: int | None) -> None:
+    """The kernel kills at the limit: a request increase that left it in place cannot cure the kills."""
+    start = datetime.now(timezone.utc) - timedelta(days=7)
+    gates = _gates(1)
+    kept, _ = container_reliability(
+        [_limited_member(limit=24 * MIB, raised_to=raised_to)], gates, start, start + timedelta(days=7), 1
+    )
+    assert kept == gates
+    assert _gate(kept, "oom_kills").status is HealthGateStatus.FAILED
