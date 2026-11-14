@@ -206,6 +206,61 @@ async def test_a_file_the_plan_creates_appearing_upstream_requires_a_replan():
     assert plans.plans["plan-1"].status is PlanStatus.STALE
 
 
+def _plan_with_render_inputs(render_inputs: dict[str, str], render_scopes: list[str]) -> Plan:
+    plan = _plan()
+    assert plan.file_plan is not None
+    validation = plan.file_plan.validation.model_copy(
+        update={"render_inputs": render_inputs, "render_scopes": render_scopes}
+    )
+    return plan.model_copy(update={"file_plan": plan.file_plan.model_copy(update={"validation": validation})})
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "render_inputs", "render_scopes"),
+    [
+        # A Kustomize base the overlay reads, not edited by the plan.
+        ("apps/base/deployment.yaml", {"apps/base/deployment.yaml": "1" * 40}, []),
+        # A Helm values file of the release, not the one the plan edits.
+        ("charts/payments/values-prod.yaml", {"charts/payments/values-prod.yaml": "2" * 40}, ["charts/payments"]),
+        # A template added to the chart directory (a render scope).
+        ("charts/payments/templates/hpa.yaml", {"charts/payments/Chart.yaml": "3" * 40}, ["charts/payments"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_moved_head_that_changes_a_render_input_the_plan_does_not_edit_stales_the_plan(
+    changed_path: str, render_inputs: dict[str, str], render_scopes: list[str]
+):
+    """Regression (delivery safety, D7): only the edited blobs were compared on a moved head."""
+    provider = MovedHeadProvider()
+    provider.head_tree[changed_path] = GitFile(changed_path, "changed upstream\n", "7" * 40, "7" * 40)
+    plan = _plan_with_render_inputs({MANIFEST_PATH: _blob_sha(BASE_CONTENT), **render_inputs}, render_scopes)
+    worker, operations, plans, _, _ = _recording_worker(plan=plan, provider=provider, revision=MOVED_HEAD)
+
+    assert await worker.process_once("worker-1")
+
+    assert provider.branch_creations == []
+    assert provider.commit_requests == []
+    assert operations.failures and operations.failures[0][1] is False
+    assert changed_path in operations.failures[0][0]
+    assert plans.plans["plan-1"].status is PlanStatus.STALE
+    assert plans.committed_on == []
+
+
+@pytest.mark.asyncio
+async def test_a_plan_without_recorded_render_inputs_is_stale_on_a_moved_head():
+    """Plans rendered before render inputs were recorded cannot prove a moved head is safe."""
+    provider = MovedHeadProvider()
+    worker, operations, plans, _, _ = _recording_worker(
+        plan=_plan_with_render_inputs({}, []), provider=provider, revision=MOVED_HEAD
+    )
+
+    assert await worker.process_once("worker-1")
+
+    assert provider.commit_requests == []
+    assert "render inputs" in operations.failures[0][0]
+    assert plans.plans["plan-1"].status is PlanStatus.STALE
+
+
 def _rollback_on_moved_head() -> tuple[Plan, Plan]:
     """A synced original plan and its approved rollback, rendered on ``BASE_REVISION``."""
     template = _plan()

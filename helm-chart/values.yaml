@@ -223,6 +223,11 @@ automation:
   # Format: integer followed by ms, s, m, or h.
   discoveryInterval: 5m
   bindingTtl: 30m
+  # Delivery safety: extra Argo CD destination server URLs or cluster names that
+  # address this cluster (besides https://kubernetes.default.svc and in-cluster).
+  # Applications deploying to any other cluster, and Flux objects with
+  # spec.kubeConfig, never bind a workload or resource here (destination_remote).
+  localClusterAliases: []
   syncTimeoutSeconds: 1800
   # Signed Git provider webhook credentials. The referenced Secret must be in
   # the Helm release namespace; only the selected key is projected into API pods.

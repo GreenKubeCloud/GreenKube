@@ -53,6 +53,26 @@ def parse_helm_chart_hosts(value: str) -> tuple[str, ...]:
     return hosts
 
 
+def parse_local_cluster_aliases(value: str) -> tuple[str, ...]:
+    """Parse ``GITOPS_LOCAL_CLUSTER_ALIASES``: a JSON list of Argo CD server URLs or cluster names.
+
+    They name the cluster GreenKube runs in when Argo CD registers it under another address
+    than ``https://kubernetes.default.svc`` or another name than ``in-cluster``.
+    """
+    import json
+
+    text = (value or "").strip()
+    if not text:
+        return ()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        raise ValueError("GITOPS_LOCAL_CLUSTER_ALIASES must be a JSON list of server URLs or cluster names") from None
+    if not isinstance(parsed, list) or any(not isinstance(item, str) or not item.strip() for item in parsed):
+        raise ValueError("GITOPS_LOCAL_CLUSTER_ALIASES must be a JSON list of non-empty strings")
+    return tuple(item.strip() for item in parsed)
+
+
 def parse_repository_allowlist(value: str) -> tuple[str, ...]:
     """Parse ``AUTOMATION_REPOSITORY_ALLOWLIST``: a JSON list (or comma list) of patterns."""
     import json
@@ -548,6 +568,10 @@ class Config(BaseSettings):
     # bindings remain fresh for thirty minutes, matching the operator spec.
     GITOPS_DISCOVERY_INTERVAL: str = "5m"
     GITOPS_BINDING_TTL: str = "30m"
+    # Delivery safety: JSON list of extra Argo CD destination server URLs or cluster names
+    # that address this cluster. Applications deploying elsewhere never bind a local
+    # workload or resource (destination_remote).
+    GITOPS_LOCAL_CLUSTER_ALIASES: str = "[]"
 
     # --- Pull-request experience (roadmap J1-J5, docs/automation.md) ---
     # Public URL of the GreenKube UI, for deep links in PRs (/recommendations/{id},
@@ -695,6 +719,12 @@ class Config(BaseSettings):
         from greenkube.automation.pr_content.template import validate_template
 
         return validate_template(value)
+
+    @field_validator("GITOPS_LOCAL_CLUSTER_ALIASES", mode="after")
+    @classmethod
+    def _validate_local_cluster_aliases(cls, value: str) -> str:
+        parse_local_cluster_aliases(value)
+        return value
 
     @field_validator("GITOPS_HELM_CHART_HOSTS", mode="after")
     @classmethod
@@ -1159,6 +1189,11 @@ class Config(BaseSettings):
     @property
     def gitops_binding_ttl(self) -> timedelta:
         return timedelta(seconds=parse_gitops_duration_seconds(self.GITOPS_BINDING_TTL))
+
+    @property
+    def gitops_local_cluster_aliases(self) -> tuple[str, ...]:
+        """Extra Argo CD server URLs or cluster names of the local cluster (delivery safety)."""
+        return parse_local_cluster_aliases(self.GITOPS_LOCAL_CLUSTER_ALIASES)
 
     @property
     def intensity_max_age(self) -> timedelta:

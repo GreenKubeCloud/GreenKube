@@ -1039,20 +1039,73 @@ class MovedTouchedFileResolver(FakeGitBlobResolver):
         return GitBlobFile(path=path, content=DEPLOYMENT + "# edited\n", blob_sha="9" * 40)
 
 
+class ChangedPathsResolver(FakeGitBlobResolver):
+    """A blob resolver that also compares trees (the production resolver does)."""
+
+    def __init__(self, changed: list[str]) -> None:
+        super().__init__()
+        self.changed = changed
+        self.comparisons: list[tuple[str, str]] = []
+
+    async def changed_paths(self, source: WorkloadSource, base_revision: str, head_revision: str) -> list[str]:
+        self.comparisons.append((base_revision, head_revision))
+        return list(self.changed)
+
+
 @pytest.mark.asyncio
 async def test_approval_accepts_a_moved_head_when_touched_files_are_unchanged(monkeypatch: pytest.MonkeyPatch):
     """D7 / BUG-49: an unrelated commit on the source branch must not stale an approval."""
     repository = MemoryPlanRepository()
     source = _source()
-    blob_resolver = FakeGitBlobResolver()
+    blob_resolver = ChangedPathsResolver(["apps/other/configmap.yaml"])
     service = _service(repository, blob_resolver, revision_resolver=FakePlanRevisionResolver("c" * 40))
     plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
     assert plan.digest is not None
+    assert plan.file_plan is not None and plan.file_plan.validation.render_inputs
 
     approved = await service.approve_plan(plan.plan_id, plan.digest)
 
     assert approved.status is PlanStatus.APPROVED
     assert ("github-main", "apps/payments/deployment.yaml", "c" * 40) in blob_resolver.lookups
+    assert blob_resolver.comparisons == [(plan.file_plan.base_revision, "c" * 40)]
+
+
+@pytest.mark.asyncio
+async def test_approval_stales_a_moved_head_that_changes_a_render_input_the_plan_does_not_edit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Delivery safety (D7): a manifest added to the rendered directory changes the render."""
+    repository = MemoryPlanRepository()
+    source = _source()
+    service = _service(
+        repository,
+        ChangedPathsResolver(["apps/payments/extra-deployment.yaml"]),
+        revision_resolver=FakePlanRevisionResolver("c" * 40),
+    )
+    plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
+    assert plan.digest is not None
+
+    with pytest.raises(AutomationPlanError) as error:
+        await service.approve_plan(plan.plan_id, plan.digest)
+
+    assert error.value.code.value == "plan_stale"
+    stale = await repository.get_plan(plan.plan_id)
+    assert stale is not None and stale.status is PlanStatus.STALE
+
+
+@pytest.mark.asyncio
+async def test_approval_without_a_tree_comparison_cannot_accept_a_moved_head_with_render_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Fail closed: an added file in a render scope is only visible in a tree comparison."""
+    repository = MemoryPlanRepository()
+    source = _source()
+    service = _service(repository, FakeGitBlobResolver(), revision_resolver=FakePlanRevisionResolver("c" * 40))
+    plan = await service.create_plan(_action(), source, _archive_snapshot(monkeypatch, source))
+    assert plan.digest is not None
+
+    with pytest.raises(AutomationPlanError):
+        await service.approve_plan(plan.plan_id, plan.digest)
 
 
 @pytest.mark.asyncio

@@ -64,6 +64,7 @@ def _application() -> dict[str, Any]:
         },
         "status": {
             "sync": {"revision": "a" * 40},
+            "sourceType": "Directory",
             "resources": [{"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "apps", "name": "api"}],
         },
     }
@@ -882,6 +883,7 @@ async def test_discovered_freeze_label_evidence_blocks_policy_without_hiding_oth
             },
             "status": {
                 "sync": {"revision": "a" * 40},
+                "sourceType": "Directory",
                 "resources": [
                     {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "apps", "name": workload_name}
                 ],

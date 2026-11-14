@@ -2,7 +2,7 @@
   "flux_helm_release": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- a/clusters/prod/helmrelease.yaml\n+++ b/clusters/prod/helmrelease.yaml\n@@ -21,3 +21,30 @@\n         requests:\n           cpu: 100m\n           memory: 128Mi\n+  postRenderers:\n+    - kustomize:\n+        patches:\n+          - target:\n+              group: apps\n+              version: v1\n+              kind: Deployment\n+              name: payments\\-api\n+              namespace: prod\n+            patch: |-\n+              apiVersion: apps/v1\n+              kind: Deployment\n+              metadata:\n+                name: payments-api\n+                namespace: prod\n+                annotations:\n+                  greenkube.cloud/managed: 'true'\n+                  greenkube.cloud/action-id: act-1\n+              spec:\n+                template:\n+                  spec:\n+                    containers:\n+                    - name: api\n+                      resources:\n+                        requests:\n+                          cpu: 300m\n+                          memory: 256Mi\n",
-    "digest": "sha256:dedc3d7a6045d4ff3b650252be640b259444f7b86bf2124d6f4ee483f32e7d42",
+    "digest": "sha256:c9dbd8ce2820feb2abd54deda917a9aa05476234f4195070c388b6599e88b058",
     "files": [
       {
         "content": "# Preserve the release's user-owned comment.\napiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\nmetadata:\n  name: payments\n  namespace: flux-system\nspec:\n  releaseName: payments\n  targetNamespace: prod\n  chart:\n    spec:\n      chart: ./charts/payments\n      sourceRef:\n        kind: GitRepository\n        name: gitops\n        namespace: flux-system\n  values:\n    app:\n      replicas: 3\n      resources:\n        requests:\n          cpu: 100m\n          memory: 128Mi\n  postRenderers:\n    - kustomize:\n        patches:\n          - target:\n              group: apps\n              version: v1\n              kind: Deployment\n              name: payments\\-api\n              namespace: prod\n            patch: |-\n              apiVersion: apps/v1\n              kind: Deployment\n              metadata:\n                name: payments-api\n                namespace: prod\n                annotations:\n                  greenkube.cloud/managed: 'true'\n                  greenkube.cloud/action-id: act-1\n              spec:\n                template:\n                  spec:\n                    containers:\n                    - name: api\n                      resources:\n                        requests:\n                          cpu: 300m\n                          memory: 256Mi\n",
@@ -18,6 +18,16 @@
     "validation": {
       "output_digest": "sha256:023bbf21e1a8fd76d0e05635fc5ed449fe7518b78f8e559d7ea8545331bb5e48",
       "reason": null,
+      "render_inputs": {
+        "charts/payments/Chart.yaml": "48bc9bb8f8092c3fde419b634ea2926ecfed3c33",
+        "charts/payments/templates/deployment.yaml": "7881ef27374ef701da5a19e01b45fe41bf8663aa",
+        "charts/payments/values-prod.yaml": "0d385e24b1cda6819324e2ba3cef63bfd0a97091",
+        "charts/payments/values.yaml": "c64fd2eaae4f3f4e2d7be3b0f6ccd0600e1ab03f",
+        "clusters/prod/helmrelease.yaml": "3907255e54985668c81b84e4171cff5757be6237"
+      },
+      "render_scopes": [
+        "charts/payments"
+      ],
       "renderer": "helm_release",
       "requests_within_limits": true,
       "target_changed": true,
@@ -29,7 +39,7 @@
   "helm_values_same_repo": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- a/apps/prod/values.yaml\n+++ b/apps/prod/values.yaml\n@@ -2,4 +2,5 @@\n app:\n   resources:\n     requests:\n-      cpu: 100m\n+      cpu: 300m\n+      memory: 256Mi\n",
-    "digest": "sha256:026ec4a3886c11ce45b6d780b39db626ff7e9b333e269105cb2dfb81193b0267",
+    "digest": "sha256:253c95091a25531fc432abf983f898a856289c910bb941588e35c4390346087f",
     "files": [
       {
         "content": "# comment\napp:\n  resources:\n    requests:\n      cpu: 300m\n      memory: 256Mi\n",
@@ -45,6 +55,16 @@
     "validation": {
       "output_digest": "sha256:63bf716ba6ab1b8c0723e8f6b581009db4e6b71882d57b5a0a4741d61d158747",
       "reason": null,
+      "render_inputs": {
+        "apps/prod/values.yaml": "01406a5bfddec4391cd3fa6e63e3d4d657eeec03",
+        "charts/payments/Chart.yaml": "48bc9bb8f8092c3fde419b634ea2926ecfed3c33",
+        "charts/payments/templates/deployment.yaml": "7881ef27374ef701da5a19e01b45fe41bf8663aa",
+        "charts/payments/values-prod.yaml": "0d385e24b1cda6819324e2ba3cef63bfd0a97091",
+        "charts/payments/values.yaml": "c64fd2eaae4f3f4e2d7be3b0f6ccd0600e1ab03f"
+      },
+      "render_scopes": [
+        "charts/payments"
+      ],
       "renderer": "helm_values",
       "requests_within_limits": true,
       "target_changed": true,
@@ -56,7 +76,7 @@
   "kustomize_argo": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- /dev/null\n+++ b/apps/payments/overlays/prod/greenkube-patches/greenkube-deployment-api-5dd8670f56db.yaml\n@@ -0,0 +1,14 @@\n+apiVersion: apps/v1\n+kind: Deployment\n+metadata:\n+  name: api\n+  namespace: payments\n+spec:\n+  template:\n+    spec:\n+      containers:\n+        - name: api\n+          resources:\n+            requests:\n+              cpu: \"300m\"\n+              memory: \"256Mi\"\n--- a/apps/payments/overlays/prod/kustomization.yaml\n+++ b/apps/payments/overlays/prod/kustomization.yaml\n@@ -1,2 +1,10 @@\n resources:\n   - ../../base\n+patches:\n+  - path: greenkube-patches/greenkube-deployment-api-5dd8670f56db.yaml\n+    target:\n+      group: apps\n+      version: v1\n+      kind: Deployment\n+      name: api\n+      namespace: payments\n",
-    "digest": "sha256:23697e7de2f78c8f4621af8b045124075e6c54f3b0fdcaea5b09dcee2afe2290",
+    "digest": "sha256:f3e02e062a0c4c1c44893558721000ecd8fe8797bd3171e7fdec2e3f0bc77695",
     "files": [
       {
         "content": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  namespace: payments\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          resources:\n            requests:\n              cpu: \"300m\"\n              memory: \"256Mi\"\n",
@@ -78,6 +98,12 @@
     "validation": {
       "output_digest": "sha256:b360249f509549886f2d1a8b4f0c1a166a86610ba82a008fe67ef9dfcbfaca47",
       "reason": null,
+      "render_inputs": {
+        "apps/payments/base/deployment.yaml": "ce73072f6f97ad0a3f7b95d82ea1efe186742a2c",
+        "apps/payments/base/kustomization.yaml": "6d1374a18e3eb63f8bb827deb033ff4f2595348f",
+        "apps/payments/base/service.yaml": "0fbec929dfd4cfaddb656ab1ffb10609e4910299",
+        "apps/payments/overlays/prod/kustomization.yaml": "fb7dc8940de20ae9910aee45eec2ff3bf764f3b4"
+      },
       "renderer": "kustomize",
       "requests_within_limits": true,
       "target_changed": true,
@@ -89,7 +115,7 @@
   "kustomize_argo_multi_container": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- /dev/null\n+++ b/apps/payments/overlays/prod/greenkube-patches/greenkube-deployment-api-5dd8670f56db.yaml\n@@ -0,0 +1,18 @@\n+apiVersion: apps/v1\n+kind: Deployment\n+metadata:\n+  name: api\n+  namespace: payments\n+spec:\n+  template:\n+    spec:\n+      containers:\n+        - name: api\n+          resources:\n+            requests:\n+              cpu: \"300m\"\n+              memory: \"256Mi\"\n+        - name: sidecar\n+          resources:\n+            requests:\n+              memory: \"32Mi\"\n--- a/apps/payments/overlays/prod/kustomization.yaml\n+++ b/apps/payments/overlays/prod/kustomization.yaml\n@@ -1,2 +1,10 @@\n resources:\n   - ../../base\n+patches:\n+  - path: greenkube-patches/greenkube-deployment-api-5dd8670f56db.yaml\n+    target:\n+      group: apps\n+      version: v1\n+      kind: Deployment\n+      name: api\n+      namespace: payments\n",
-    "digest": "sha256:987a0f9b83aae7cd032756cf5b0b2bff66f1b456cc9214d350a738fdd74e9031",
+    "digest": "sha256:31b59488c968f02d17609999f6bcc71e3dd7be565b0614623a6d8e84b1245eb4",
     "files": [
       {
         "content": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  namespace: payments\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          resources:\n            requests:\n              cpu: \"300m\"\n              memory: \"256Mi\"\n        - name: sidecar\n          resources:\n            requests:\n              memory: \"32Mi\"\n",
@@ -111,6 +137,12 @@
     "validation": {
       "output_digest": "sha256:b47a2e7c85e4943cfed0662abe083bc47bca441d44fd9aeba74f79e7f7e3d2d8",
       "reason": null,
+      "render_inputs": {
+        "apps/payments/base/deployment.yaml": "ce73072f6f97ad0a3f7b95d82ea1efe186742a2c",
+        "apps/payments/base/kustomization.yaml": "6d1374a18e3eb63f8bb827deb033ff4f2595348f",
+        "apps/payments/base/service.yaml": "0fbec929dfd4cfaddb656ab1ffb10609e4910299",
+        "apps/payments/overlays/prod/kustomization.yaml": "fb7dc8940de20ae9910aee45eec2ff3bf764f3b4"
+      },
       "renderer": "kustomize",
       "requests_within_limits": true,
       "target_changed": true,
@@ -122,7 +154,7 @@
   "kustomize_argo_namespace_less": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- /dev/null\n+++ b/apps/worker/overlays/prod/greenkube-patches/greenkube-deployment-worker-9fa427259166.yaml\n@@ -0,0 +1,14 @@\n+apiVersion: apps/v1\n+kind: Deployment\n+metadata:\n+  name: worker\n+  namespace: worker-prod\n+spec:\n+  template:\n+    spec:\n+      containers:\n+        - name: worker\n+          resources:\n+            requests:\n+              cpu: \"50m\"\n+              memory: \"64Mi\"\n--- a/apps/worker/overlays/prod/kustomization.yaml\n+++ b/apps/worker/overlays/prod/kustomization.yaml\n@@ -1,2 +1,10 @@\n resources:\n   - ../../base\n+patches:\n+  - path: greenkube-patches/greenkube-deployment-worker-9fa427259166.yaml\n+    target:\n+      group: apps\n+      version: v1\n+      kind: Deployment\n+      name: worker\n+      namespace: default\n",
-    "digest": "sha256:9e0beb90d81e8143f271061abb2a98b9205170c2219b681f0ae36670de74d13d",
+    "digest": "sha256:833e18132fc8a0dd5673d2c2716e2bdc05fa96678104605a3be26f5c12a015c9",
     "files": [
       {
         "content": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: worker\n  namespace: worker-prod\nspec:\n  template:\n    spec:\n      containers:\n        - name: worker\n          resources:\n            requests:\n              cpu: \"50m\"\n              memory: \"64Mi\"\n",
@@ -144,6 +176,12 @@
     "validation": {
       "output_digest": "sha256:6e722072169a704d9e969cd3d34ddefea57d986e3eba8b8cab6ae4f16332f527",
       "reason": null,
+      "render_inputs": {
+        "apps/worker/base/deployment.yaml": "5d1ee092d370c1faa964a5688fadd852b080838e",
+        "apps/worker/base/kustomization.yaml": "6d1374a18e3eb63f8bb827deb033ff4f2595348f",
+        "apps/worker/base/service.yaml": "fdc7dcae63f57bdd2017ca8e912d3cd479c2729a",
+        "apps/worker/overlays/prod/kustomization.yaml": "fb7dc8940de20ae9910aee45eec2ff3bf764f3b4"
+      },
       "renderer": "kustomize",
       "requests_within_limits": true,
       "target_changed": true,
@@ -155,7 +193,7 @@
   "kustomize_existing_managed_patch": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- a/apps/payments/overlays/prod/greenkube-patches/greenkube-deployment-api-5dd8670f56db.yaml\n+++ b/apps/payments/overlays/prod/greenkube-patches/greenkube-deployment-api-5dd8670f56db.yaml\n@@ -12,3 +12,7 @@\n             requests:\n               cpu: \"300m\"\n               memory: \"256Mi\"\n+        - name: sidecar\n+          resources:\n+            requests:\n+              cpu: \"20m\"\n",
-    "digest": "sha256:341c3709cd9bf17d5c4915a9ffd5e2515f1d7fcde43248b371e98d601d9b6012",
+    "digest": "sha256:4d71b20b67df23aeab2533be798aea8985c84a027da862be171e0682c35a1926",
     "files": [
       {
         "content": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  namespace: payments\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          resources:\n            requests:\n              cpu: \"300m\"\n              memory: \"256Mi\"\n        - name: sidecar\n          resources:\n            requests:\n              cpu: \"20m\"\n",
@@ -171,6 +209,13 @@
     "validation": {
       "output_digest": "sha256:0018da230a053856a32a489297eb54e7536686ecb69d5f27d66d779617b88165",
       "reason": null,
+      "render_inputs": {
+        "apps/payments/base/deployment.yaml": "ce73072f6f97ad0a3f7b95d82ea1efe186742a2c",
+        "apps/payments/base/kustomization.yaml": "6d1374a18e3eb63f8bb827deb033ff4f2595348f",
+        "apps/payments/base/service.yaml": "0fbec929dfd4cfaddb656ab1ffb10609e4910299",
+        "apps/payments/overlays/prod/greenkube-patches/greenkube-deployment-api-5dd8670f56db.yaml": "58cacc1a5d6e3188157594b9960a7b07ab67ffe4",
+        "apps/payments/overlays/prod/kustomization.yaml": "c3f76c43345249fc32cc9c426457812bdcba05df"
+      },
       "renderer": "kustomize",
       "requests_within_limits": true,
       "target_changed": true,
@@ -182,7 +227,7 @@
   "kustomize_flux_name_prefix": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- /dev/null\n+++ b/apps/worker/overlays/prod/greenkube-patches/greenkube-deployment-eu-worker-e72290c710d2.yaml\n@@ -0,0 +1,14 @@\n+apiVersion: apps/v1\n+kind: Deployment\n+metadata:\n+  name: eu-worker\n+  namespace: worker-prod\n+spec:\n+  template:\n+    spec:\n+      containers:\n+        - name: worker\n+          resources:\n+            requests:\n+              cpu: \"50m\"\n+              memory: \"64Mi\"\n--- a/apps/worker/overlays/prod/kustomization.yaml\n+++ b/apps/worker/overlays/prod/kustomization.yaml\n@@ -1,2 +1,10 @@\n resources:\n   - ../../base\n+patches:\n+  - path: greenkube-patches/greenkube-deployment-eu-worker-e72290c710d2.yaml\n+    target:\n+      group: apps\n+      version: v1\n+      kind: Deployment\n+      name: worker\n+      namespace: default\n",
-    "digest": "sha256:6f77900c9acb7c2a519aa626fc95fbe4e626e3ab915269a46de245038040d707",
+    "digest": "sha256:ca1d56a60274198d006a7dceb413ef028e9a9e883a1c477e3053176fcbf3730e",
     "files": [
       {
         "content": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: eu-worker\n  namespace: worker-prod\nspec:\n  template:\n    spec:\n      containers:\n        - name: worker\n          resources:\n            requests:\n              cpu: \"50m\"\n              memory: \"64Mi\"\n",
@@ -204,6 +249,12 @@
     "validation": {
       "output_digest": "sha256:9565ca7c6b380ce51b197f56c79b9ab55e3dddc2afbe1cd8a6fc9f36f0f2fa4e",
       "reason": null,
+      "render_inputs": {
+        "apps/worker/base/deployment.yaml": "5d1ee092d370c1faa964a5688fadd852b080838e",
+        "apps/worker/base/kustomization.yaml": "6d1374a18e3eb63f8bb827deb033ff4f2595348f",
+        "apps/worker/base/service.yaml": "fdc7dcae63f57bdd2017ca8e912d3cd479c2729a",
+        "apps/worker/overlays/prod/kustomization.yaml": "fb7dc8940de20ae9910aee45eec2ff3bf764f3b4"
+      },
       "renderer": "kustomize",
       "requests_within_limits": true,
       "target_changed": true,
@@ -215,7 +266,7 @@
   "kustomize_flux_target_namespace": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- /dev/null\n+++ b/apps/worker/overlays/prod/greenkube-patches/greenkube-deployment-worker-9fa427259166.yaml\n@@ -0,0 +1,14 @@\n+apiVersion: apps/v1\n+kind: Deployment\n+metadata:\n+  name: worker\n+  namespace: worker-prod\n+spec:\n+  template:\n+    spec:\n+      containers:\n+        - name: worker\n+          resources:\n+            requests:\n+              cpu: \"50m\"\n+              memory: \"64Mi\"\n--- a/apps/worker/overlays/prod/kustomization.yaml\n+++ b/apps/worker/overlays/prod/kustomization.yaml\n@@ -1,2 +1,10 @@\n resources:\n   - ../../base\n+patches:\n+  - path: greenkube-patches/greenkube-deployment-worker-9fa427259166.yaml\n+    target:\n+      group: apps\n+      version: v1\n+      kind: Deployment\n+      name: worker\n+      namespace: default\n",
-    "digest": "sha256:ec34c648e29e7e6d18834d6619bd3b90e7df8af919caff1a7fa2750a4dddc0dc",
+    "digest": "sha256:9344ca4f7771bab3eac270b88038e1ebd4e7e3c67906df6536f9fa5edf529837",
     "files": [
       {
         "content": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: worker\n  namespace: worker-prod\nspec:\n  template:\n    spec:\n      containers:\n        - name: worker\n          resources:\n            requests:\n              cpu: \"50m\"\n              memory: \"64Mi\"\n",
@@ -237,6 +288,12 @@
     "validation": {
       "output_digest": "sha256:e0f339803ff1befe75175cd875e2bce5f50445a38c0308bba303d1c41d9ddbf8",
       "reason": null,
+      "render_inputs": {
+        "apps/worker/base/deployment.yaml": "5d1ee092d370c1faa964a5688fadd852b080838e",
+        "apps/worker/base/kustomization.yaml": "6d1374a18e3eb63f8bb827deb033ff4f2595348f",
+        "apps/worker/base/service.yaml": "fdc7dcae63f57bdd2017ca8e912d3cd479c2729a",
+        "apps/worker/overlays/prod/kustomization.yaml": "fb7dc8940de20ae9910aee45eec2ff3bf764f3b4"
+      },
       "renderer": "kustomize",
       "requests_within_limits": true,
       "target_changed": true,
@@ -248,7 +305,7 @@
   "raw_cronjob": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- a/apps/payments/cronjob.yaml\n+++ b/apps/payments/cronjob.yaml\n@@ -12,3 +12,7 @@\n           containers:\n             - name: api\n               image: example/api:v1\n+              resources:\n+                requests:\n+                  cpu: 300m\n+                  memory: 256Mi\n",
-    "digest": "sha256:37efbd7a8ff7f194d41073dff12ddc2beaf56da5071d3923125d86b23befd98b",
+    "digest": "sha256:4b28d59510bd1426e05d03a2105e386cab1e5525cb1552d15d54eb1061f1945a",
     "files": [
       {
         "content": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: api\n  namespace: payments\nspec:\n  schedule: \"*/5 * * * *\"\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n            - name: api\n              image: example/api:v1\n              resources:\n                requests:\n                  cpu: 300m\n                  memory: 256Mi\n",
@@ -264,6 +321,12 @@
     "validation": {
       "output_digest": "sha256:ecf52800a095477297416e3b8fd76dd30b73632cac345c8c8bfbef9518ca7c7c",
       "reason": null,
+      "render_inputs": {
+        "apps/payments/cronjob.yaml": "8c9e0da9cb2c5a14fbe0f4ccb8ac302d12f3764e"
+      },
+      "render_scopes": [
+        "apps/payments"
+      ],
       "renderer": "raw",
       "requests_within_limits": true,
       "target_changed": true,
@@ -275,7 +338,7 @@
   "raw_json": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- a/apps/payments/deployment.json\n+++ b/apps/payments/deployment.json\n@@ -14,7 +14,8 @@\n             \"image\": \"example/api:v1\",\n             \"resources\": {\n               \"requests\": {\n-                \"cpu\": \"100m\"\n+                \"cpu\": \"300m\",\n+                \"memory\": \"256Mi\"\n               }\n             }\n           }\n",
-    "digest": "sha256:aa6a95229353e90df66d0b5a565e7f6396e175c1a92da0fd561ac218058749ff",
+    "digest": "sha256:8ba169b11be681edd83c2684d31c1e26c1010c9c942a8471d0c0b8fe48fec117",
     "files": [
       {
         "content": "{\n  \"apiVersion\": \"apps/v1\",\n  \"kind\": \"Deployment\",\n  \"metadata\": {\n    \"name\": \"api\",\n    \"namespace\": \"payments\"\n  },\n  \"spec\": {\n    \"template\": {\n      \"spec\": {\n        \"containers\": [\n          {\n            \"name\": \"api\",\n            \"image\": \"example/api:v1\",\n            \"resources\": {\n              \"requests\": {\n                \"cpu\": \"300m\",\n                \"memory\": \"256Mi\"\n              }\n            }\n          }\n        ]\n      }\n    }\n  }\n}\n",
@@ -291,6 +354,12 @@
     "validation": {
       "output_digest": "sha256:9b7842685c210e4fb7b217ec4331f08332a1ce6b070414d960ff1034def995e3",
       "reason": null,
+      "render_inputs": {
+        "apps/payments/deployment.json": "0f2e16f9d2fef09054c12e3fdd3f54b844f6c2e1"
+      },
+      "render_scopes": [
+        "apps/payments"
+      ],
       "renderer": "raw",
       "requests_within_limits": true,
       "target_changed": true,
@@ -302,7 +371,7 @@
   "raw_list": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- a/apps/payments/list.yaml\n+++ b/apps/payments/list.yaml\n@@ -14,7 +14,8 @@\n               image: example/api:v1\n               resources:\n                 requests:\n-                  cpu: 100m\n+                  cpu: 300m\n+                  memory: 256Mi\n   - apiVersion: v1\n     kind: Service\n     metadata:\n",
-    "digest": "sha256:a3de947c45353f30059f310e7912cbab4cb655590891493eb7f978af1cedc1ae",
+    "digest": "sha256:ec53b0ea15ad9af279c713f58022e3cabc20cd46fd9c2f7502c0bb6be8b5b4b7",
     "files": [
       {
         "content": "apiVersion: v1\nkind: List\nitems:\n  - apiVersion: apps/v1\n    kind: Deployment\n    metadata:\n      name: api\n      namespace: payments\n    spec:\n      template:\n        spec:\n          containers:\n            - name: api\n              image: example/api:v1\n              resources:\n                requests:\n                  cpu: 300m\n                  memory: 256Mi\n  - apiVersion: v1\n    kind: Service\n    metadata:\n      name: api\n      namespace: payments\n",
@@ -318,6 +387,12 @@
     "validation": {
       "output_digest": "sha256:c29d82ab01bc1f9a80827b46c28156ebbb852e9a64078119e0cd30df7f88de87",
       "reason": null,
+      "render_inputs": {
+        "apps/payments/list.yaml": "bf807c803667bfcb286486a2dd2b269e219f36d6"
+      },
+      "render_scopes": [
+        "apps/payments"
+      ],
       "renderer": "raw",
       "requests_within_limits": true,
       "target_changed": true,
@@ -329,7 +404,7 @@
   "raw_yaml_multi_container_with_limits": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- a/apps/payments/deployment.yaml\n+++ b/apps/payments/deployment.yaml\n@@ -12,8 +12,8 @@\n           image: example/api:v1\n           resources:\n             requests:\n-              cpu: 100m # retain the inline comment\n-              memory: 128Mi\n+              cpu: 300m # retain the inline comment\n+              memory: 256Mi\n             limits:\n               cpu: 500m\n               memory: 512Mi\n@@ -21,4 +21,7 @@\n           image: example/sidecar:v1\n           resources:\n             requests:\n-              cpu: 50m\n+              cpu: 20m\n+              memory: 32Mi\n+            limits:\n+              memory: 64Mi\n",
-    "digest": "sha256:71b9f1cb2de5183ce80398530c7f20c375ce17592d01a12b01f36f7a286121e4",
+    "digest": "sha256:8802950203cb61e257f7e6cbdc326583063459ce135254bd8337b3d845a06d34",
     "files": [
       {
         "content": "# source comment\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  namespace: payments\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: example/api:v1\n          resources:\n            requests:\n              cpu: 300m # retain the inline comment\n              memory: 256Mi\n            limits:\n              cpu: 500m\n              memory: 512Mi\n        - name: sidecar\n          image: example/sidecar:v1\n          resources:\n            requests:\n              cpu: 20m\n              memory: 32Mi\n            limits:\n              memory: 64Mi\n",
@@ -345,6 +420,13 @@
     "validation": {
       "output_digest": "sha256:cf03bb8fb286cf610a6b227783dc3b5f82b8e7e4fe705bd96462af1ec40e3467",
       "reason": null,
+      "render_inputs": {
+        "apps/payments/deployment.yaml": "c99ff6a14c94d342a035b826e31660fbed3a8663",
+        "apps/payments/service.yaml": "7931ad0de99768cf4feb55b42b59dc3f2887ee2c"
+      },
+      "render_scopes": [
+        "apps/payments"
+      ],
       "renderer": "raw",
       "requests_within_limits": true,
       "target_changed": true,
@@ -356,7 +438,7 @@
   "raw_yaml_namespace_less": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- a/apps/payments/deployment.yaml\n+++ b/apps/payments/deployment.yaml\n@@ -11,8 +11,8 @@\n           image: example/api:v1\n           resources:\n             requests:\n-              cpu: 100m # retain the inline comment\n-              memory: 128Mi\n+              cpu: 300m # retain the inline comment\n+              memory: 256Mi\n             limits:\n               cpu: 500m\n               memory: 512Mi\n",
-    "digest": "sha256:fbfa9e0b3c805525f0f7a24f20a7afbffc3d484587855ef6a0b18595321a0207",
+    "digest": "sha256:0e5cf1c4999082eeb29fa7ad296e50897809d1e83cbfbf90a5e61ca7f167ef81",
     "files": [
       {
         "content": "# source comment\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: example/api:v1\n          resources:\n            requests:\n              cpu: 300m # retain the inline comment\n              memory: 256Mi\n            limits:\n              cpu: 500m\n              memory: 512Mi\n        - name: sidecar\n          image: example/sidecar:v1\n          resources:\n            requests:\n              cpu: 50m\n",
@@ -372,6 +454,12 @@
     "validation": {
       "output_digest": "sha256:0cea66df0c82ac38f9475d809bc6f7f7e288f64f816a21f469d28cfb5fa2e54d",
       "reason": null,
+      "render_inputs": {
+        "apps/payments/deployment.yaml": "62a672a5a847c8f0f33b1fe39ad6184e78f168b1"
+      },
+      "render_scopes": [
+        "apps/payments"
+      ],
       "renderer": "raw",
       "requests_within_limits": true,
       "target_changed": true,
@@ -383,7 +471,7 @@
   "raw_yaml_single": {
     "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "diff": "--- a/apps/payments/deployment.yaml\n+++ b/apps/payments/deployment.yaml\n@@ -12,8 +12,8 @@\n           image: example/api:v1\n           resources:\n             requests:\n-              cpu: 100m # retain the inline comment\n-              memory: 128Mi\n+              cpu: 300m # retain the inline comment\n+              memory: 256Mi\n             limits:\n               cpu: 500m\n               memory: 512Mi\n",
-    "digest": "sha256:71beaa11954824dfdfdf86d2f443238c6da8d091b1c87b694e45daa22b3c7ff7",
+    "digest": "sha256:b44560cc45280cccbaf1d7df5417ad641c5b3a5315af91766a64e827ca0a10a9",
     "files": [
       {
         "content": "# source comment\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  namespace: payments\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: example/api:v1\n          resources:\n            requests:\n              cpu: 300m # retain the inline comment\n              memory: 256Mi\n            limits:\n              cpu: 500m\n              memory: 512Mi\n        - name: sidecar\n          image: example/sidecar:v1\n          resources:\n            requests:\n              cpu: 50m\n",
@@ -399,6 +487,12 @@
     "validation": {
       "output_digest": "sha256:61ee00bb159366acaf537d8c70e12b773e40300bad99fa729c4fd25d05428d53",
       "reason": null,
+      "render_inputs": {
+        "apps/payments/deployment.yaml": "c99ff6a14c94d342a035b826e31660fbed3a8663"
+      },
+      "render_scopes": [
+        "apps/payments"
+      ],
       "renderer": "raw",
       "requests_within_limits": true,
       "target_changed": true,
@@ -409,7 +503,7 @@
   },
   "rollback_kustomize": {
     "diff": "--- a/apps/payments/overlays/prod/greenkube-patches/greenkube-deployment-api-5dd8670f56db.yaml\n+++ /dev/null\n@@ -1,14 +0,0 @@\n-apiVersion: apps/v1\n-kind: Deployment\n-metadata:\n-  name: api\n-  namespace: payments\n-spec:\n-  template:\n-    spec:\n-      containers:\n-        - name: api\n-          resources:\n-            requests:\n-              cpu: \"300m\"\n-              memory: \"256Mi\"\n--- a/apps/payments/overlays/prod/kustomization.yaml\n+++ b/apps/payments/overlays/prod/kustomization.yaml\n@@ -1,10 +1,2 @@\n resources:\n   - ../../base\n-patches:\n-  - path: greenkube-patches/greenkube-deployment-api-5dd8670f56db.yaml\n-    target:\n-      group: apps\n-      version: v1\n-      kind: Deployment\n-      name: api\n-      namespace: payments\n",
-    "digest": "sha256:9a9e5882f649032c835167ea130255c32245a93a0fda11b7f0e3af34b3094958",
+    "digest": "sha256:6430bfe5fb07b3eec4ca80ab5c194fc2fe8307b205fa43b35b1d2d07c1fd6c31",
     "files": [
       {
         "content": null,
@@ -424,14 +518,14 @@
         "path": "apps/payments/overlays/prod/kustomization.yaml"
       }
     ],
-    "plan_id": "rbk-f3ebfbd74ba6442ebdf49b31",
+    "plan_id": "rbk-6814ed0578ddc37b97b23d63",
     "rendered_after_digest": "sha256:4f8ad6ffcc90dade0ff1160fde5e7733810128b98e3a3caa84f5c05089f03151",
     "rendered_before_digest": "sha256:b360249f509549886f2d1a8b4f0c1a166a86610ba82a008fe67ef9dfcbfaca47",
     "rendered_diff": "--- rendered-before\n+++ rendered-after\n@@ -26,8 +26,8 @@\n                     \"memory\": \"512Mi\"\n                   },\n                   \"requests\": {\n-                    \"cpu\": \"300m\",\n-                    \"memory\": \"256Mi\"\n+                    \"cpu\": \"100m\",\n+                    \"memory\": \"128Mi\"\n                   }\n                 }\n               },\n"
   },
   "rollback_raw": {
     "diff": "--- a/apps/payments/deployment.yaml\n+++ b/apps/payments/deployment.yaml\n@@ -12,8 +12,8 @@\n           image: example/api:v1\n           resources:\n             requests:\n-              cpu: 300m # retain the inline comment\n-              memory: 256Mi\n+              cpu: 100m # retain the inline comment\n+              memory: 128Mi\n             limits:\n               cpu: 500m\n               memory: 512Mi\n",
-    "digest": "sha256:db325de19117baa331a1fd68d58bb8dc0935ce2c454fba0be852e4a8123a7722",
+    "digest": "sha256:65e5c450e4e9617bb1e943ccd2ba0deb37aa2c4339b15d6c6ec7db65b4af5922",
     "files": [
       {
         "content": "# source comment\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  namespace: payments\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: example/api:v1\n          resources:\n            requests:\n              cpu: 100m # retain the inline comment\n              memory: 128Mi\n            limits:\n              cpu: 500m\n              memory: 512Mi\n        - name: sidecar\n          image: example/sidecar:v1\n          resources:\n            requests:\n              cpu: 50m\n",
@@ -440,7 +534,7 @@
         "path": "apps/payments/deployment.yaml"
       }
     ],
-    "plan_id": "rbk-35665ed9eaaf0e171ca9bfe9",
+    "plan_id": "rbk-2965c53b27e7dbc20ee8a1fa",
     "rendered_after_digest": "sha256:97b4d6b0706f821c0dd18415ecd3e42e032cad1726bfbe3e8f0cf05e234f438d",
     "rendered_before_digest": "sha256:61ee00bb159366acaf537d8c70e12b773e40300bad99fa729c4fd25d05428d53",
     "rendered_diff": "--- rendered-before\n+++ rendered-after\n@@ -26,8 +26,8 @@\n                     \"memory\": \"512Mi\"\n                   },\n                   \"requests\": {\n-                    \"cpu\": \"300m\",\n-                    \"memory\": \"256Mi\"\n+                    \"cpu\": \"100m\",\n+                    \"memory\": \"128Mi\"\n                   }\n                 }\n               },\n"

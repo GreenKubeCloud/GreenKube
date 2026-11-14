@@ -28,7 +28,7 @@ from pydantic import (
     model_validator,
 )
 
-from greenkube.gitops.sha import SHA256_DIGEST
+from greenkube.gitops.sha import GIT_OBJECT_SHA, SHA256_DIGEST
 
 _QUANTITY_PATTERN = re.compile(r"^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+|(?:n|u|m|k|K|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei))?$")
 _SCP_REPOSITORY_PATTERN = re.compile(r"^(?:[^/@:\s]+@)?(?P<host>[^:/\s]+):(?P<path>[^?#\s]+)$")
@@ -551,6 +551,10 @@ class FileEdit(ContractModel):
         return self
 
 
+def _not_recorded(value: Any) -> bool:
+    return not value
+
+
 class ValidationResult(ContractModel):
     target_changed: bool
     unrelated_changes: bool
@@ -559,11 +563,35 @@ class ValidationResult(ContractModel):
     output_digest: str
     warnings: list[str] = Field(default_factory=list)
     reason: str | None = None
+    #: Every repository file the render read (Kustomize bases and patches, values files,
+    #: chart files, raw manifests in scope) with its Git blob ID at the base revision.
+    #: A moved branch head is accepted only while all of them are unchanged (D7).
+    #: Omitted from the digest and the JSON form when empty (plans created before it).
+    render_inputs: dict[str, str] = Field(default_factory=dict, exclude_if=_not_recorded)
+    #: Directories where any added or changed file changes the render (a raw manifest
+    #: directory, a chart directory), checked like ``render_inputs``.
+    render_scopes: list[str] = Field(default_factory=list, exclude_if=_not_recorded)
 
     @field_validator("output_digest")
     @classmethod
     def validate_output_digest(cls, value: str) -> str:
         return _validate_digest(value)
+
+    @field_validator("render_inputs")
+    @classmethod
+    def validate_render_inputs(cls, value: dict[str, str]) -> dict[str, str]:
+        validated: dict[str, str] = {}
+        for path, blob_sha in value.items():
+            canonical = _repository_path(path, allow_root=False)
+            if not isinstance(blob_sha, str) or GIT_OBJECT_SHA.fullmatch(blob_sha) is None:
+                raise ValueError("render input blob IDs must be full Git object IDs")
+            validated[canonical] = blob_sha.lower()
+        return dict(sorted(validated.items()))
+
+    @field_validator("render_scopes")
+    @classmethod
+    def validate_render_scopes(cls, value: list[str]) -> list[str]:
+        return sorted({_repository_path(path, allow_root=True) for path in value})
 
     @property
     def passed(self) -> bool:

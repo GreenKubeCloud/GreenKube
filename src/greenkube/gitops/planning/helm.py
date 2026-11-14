@@ -76,6 +76,7 @@ from greenkube.gitops.planning.raw_manifest import (
     _validate_operation_resources,
     _validate_rendered_change,
 )
+from greenkube.gitops.planning.render_inputs import files_in_scope, workspace_blob_shas
 from greenkube.gitops.renderers.charts import (
     ChartFetchError,
     ChartHostNotAllowedError,
@@ -226,6 +227,7 @@ class _FluxHelmReleaseContext:
     spec: Mapping[str, Any]
     helm: _HelmContext
     temporary_values: Mapping[str, str]
+    input_paths: tuple[str, ...] = ()
 
 
 class _RemoteChartSupport:
@@ -357,6 +359,7 @@ class HelmValuesPlanner:
                 remote=self._remote,
                 stack=stack,
             )
+            render_inputs = _helm_render_inputs(context, base_revision, HelmValuesPlanError)
             before = _render_chart(
                 self.renderer,
                 snapshot,
@@ -418,6 +421,7 @@ class HelmValuesPlanner:
             after=after,
             edits=[file_edit],
             originals={values_path: original_values},
+            render_inputs=render_inputs,
         )
 
 
@@ -531,6 +535,12 @@ class FluxHelmReleasePlanner:
         parsed_release = prepared.release
         spec = prepared.spec
         context = prepared.helm
+        render_inputs = _helm_render_inputs(
+            context,
+            base_revision,
+            FluxHelmReleasePlanError,
+            extra_paths=(parsed_release.path, *prepared.input_paths),
+        )
 
         with _stage(root, snapshot_files, prepared.temporary_values, FluxHelmReleaseUnsupportedError):
             before_chart = _render_chart(
@@ -633,6 +643,7 @@ class FluxHelmReleasePlanner:
             after=after,
             edits=[file_edit],
             originals={parsed_release.path: parsed_release.content},
+            render_inputs=render_inputs,
         )
 
 
@@ -696,7 +707,7 @@ def _prepare_flux_helm_release_context(
         chart_path = flux_chart.chart_path
     else:  # pragma: no cover - _flux_chart_context returns a path or a reference
         raise FluxHelmReleaseUnsupportedError("the Flux chart location could not be resolved")
-    values_from = _load_flux_values_from(root, snapshot_files, source, spec, base_revision)
+    values_from, values_from_paths = _load_flux_values_from(root, snapshot_files, source, spec, base_revision)
     inline_values = spec.get("values")
     if inline_values is None:
         inline_values = {}
@@ -740,6 +751,9 @@ def _prepare_flux_helm_release_context(
         spec=spec,
         helm=helm,
         temporary_values=temporary_values,
+        input_paths=tuple(
+            sorted({*(path for path in chart_values_files if path in snapshot_files), *values_from_paths})
+        ),
     )
 
 
@@ -1881,6 +1895,7 @@ def _file_plan(
     after: RawRenderResult,
     edits: list[FileEdit],
     originals: Mapping[str, str],
+    render_inputs: Mapping[str, Any],
 ) -> FilePlan:
     edits = sorted(edits, key=lambda item: item.path)
     diff = _file_diff(edits, originals)
@@ -1899,6 +1914,7 @@ def _file_plan(
         renderer=renderer,
         output_digest=after.output_digest,
         warnings=warnings,
+        **render_inputs,
     )
     plan_id = _plan_identifier(action, source, base_revision)
     digest = plan_digest(
@@ -1927,6 +1943,34 @@ def _file_plan(
         warnings=warnings,
         digest=digest,
     )
+
+
+def _helm_render_inputs(
+    context: _HelmContext,
+    base_revision: str,
+    error_type: type[HelmPlanError],
+    *,
+    extra_paths: Sequence[str] = (),
+) -> dict[str, Any]:
+    """The repository files a Helm render reads (D7 render inputs).
+
+    A chart in the repository is read whole (Chart.yaml, templates, its values and
+    vendored dependencies), so its directory is a render scope; a remote chart is pinned
+    by version and digest in the binding. The values files and ``extra_paths`` (the Flux
+    HelmRelease manifest) are read from the repository in both cases.
+    """
+    paths = {path for path in (*context.values_files, *extra_paths) if path in context.files}
+    scopes: list[str] = []
+    if context.remote_chart is None:
+        # Local ``file://`` dependencies, schema references and subcharts resolve inside the
+        # chart directory (the renderer refuses ``..``), so the chart scope covers them.
+        paths.update(files_in_scope(context.files, context.chart_path))
+        scopes.append(context.chart_path)
+    try:
+        shas = workspace_blob_shas(context.root, paths, base_revision)
+    except OSError as exc:
+        raise error_type("snapshot render inputs could not be read") from exc
+    return {"render_inputs": shas, "render_scopes": scopes}
 
 
 def _validate_flux_manifest_owner(source: WorkloadSource, base_revision: str) -> Mapping[str, Any]:
@@ -2314,14 +2358,15 @@ def _load_flux_values_from(
     source: WorkloadSource,
     spec: Mapping[str, Any],
     base_revision: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """The merged Git-managed ``valuesFrom`` values and the manifest paths they were read from."""
     raw_values_from = spec.get("valuesFrom", [])
     if raw_values_from is None:
         raw_values_from = []
     if not isinstance(raw_values_from, list):
         raise FluxHelmReleaseUnsupportedError("HelmRelease spec.valuesFrom must be a list")
     if not raw_values_from:
-        return {}
+        return {}, ()
     if len(raw_values_from) > _MAX_FLUX_VALUES_FILES:
         raise FluxHelmReleaseUnsupportedError("HelmRelease spec.valuesFrom exceeds the supported reference-count limit")
 
@@ -2333,6 +2378,7 @@ def _load_flux_values_from(
         )
 
     merged: dict[str, Any] = {}
+    manifest_paths: list[str] = []
     total_bytes = 0
     release_namespace = source.controller_namespace
     for index, (raw_reference, raw_discovered) in enumerate(zip(raw_values_from, discovered_refs, strict=True)):
@@ -2404,7 +2450,7 @@ def _load_flux_values_from(
             raise FluxHelmReleaseUnsupportedError(
                 "valuesFrom Kustomization targetNamespace does not match the HelmRelease namespace"
             )
-        document = _find_flux_values_manifest(
+        manifest_path, document = _find_flux_values_manifest(
             root,
             snapshot_files,
             path,
@@ -2413,6 +2459,7 @@ def _load_flux_values_from(
             namespace=namespace,
             target_namespace=target_namespace,
         )
+        manifest_paths.append(manifest_path)
         value = _flux_values_from_document(
             document,
             kind=kind,
@@ -2435,7 +2482,7 @@ def _load_flux_values_from(
                     f"Flux valuesFrom {kind}/{name} valuesKey must contain a YAML mapping"
                 )
             merged = _merge_flux_value_maps(merged, _plain_flux_values(parsed))
-    return merged
+    return merged, tuple(manifest_paths)
 
 
 def _find_flux_values_manifest(
@@ -2447,7 +2494,8 @@ def _find_flux_values_manifest(
     name: str,
     namespace: str,
     target_namespace: Any,
-) -> Mapping[str, Any]:
+) -> tuple[str, Mapping[str, Any]]:
+    """The one Git manifest (path and document) that defines the ``valuesFrom`` object."""
     if scope in snapshot_files:
         candidate_paths = [scope]
     else:
@@ -2456,7 +2504,7 @@ def _find_flux_values_manifest(
             for path in sorted(snapshot_files)
             if _is_in_scope(path, scope) and PurePosixPath(path).suffix.lower() in {".yaml", ".yml", ".json"}
         ]
-    matches: list[Mapping[str, Any]] = []
+    matches: list[tuple[str, Mapping[str, Any]]] = []
     for path in candidate_paths:
         if PurePosixPath(path).suffix.lower() not in {".yaml", ".yml", ".json"}:
             continue
@@ -2475,7 +2523,7 @@ def _find_flux_values_manifest(
                     f"Flux valuesFrom {kind}/{name} has no explicit or Kustomization target namespace"
                 )
             if manifest_namespace == namespace:
-                matches.append(document)
+                matches.append((path, document))
     if not matches:
         raise FluxHelmReleaseUnsupportedError(
             f"Flux valuesFrom {kind}/{name} manifest is not present in the immutable repository snapshot"

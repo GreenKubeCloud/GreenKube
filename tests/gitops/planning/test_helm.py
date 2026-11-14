@@ -39,6 +39,7 @@ from greenkube.gitops.planning.helm import (
     _new_managed_patch,
     _target_selector,
 )
+from greenkube.gitops.planning.render_inputs import changed_render_inputs, git_blob_sha
 from greenkube.gitops.renderers.helm import HelmRenderer
 from greenkube.gitops.renderers.sandbox import SandboxResult
 from greenkube.gitops.snapshots import RepositorySnapshot, snapshot_from_files
@@ -1676,3 +1677,120 @@ def test_flux_helmrelease_planner_renders_current_and_restored_release_sources()
             restored_snapshot.close()
     finally:
         original_snapshot.close()
+
+
+def _values_from_config() -> dict[str, Any]:
+    reference = {
+        "values_key": None,
+        "target_path": None,
+        "optional": False,
+        "git_managed": True,
+        "provider_id": PROVIDER_ID,
+        "repo_url": REPO_URL,
+        "ref": "main",
+        "revision": BASE_REVISION,
+    }
+    return {
+        **_flux_source().renderer_config,
+        "release_name": "prod-payments",
+        "values_from": [
+            {
+                **reference,
+                "kind": "ConfigMap",
+                "name": "payments-values",
+                "namespace": "flux-system",
+                "path": "clusters/prod/payments-values.yaml",
+            },
+            {
+                **reference,
+                "kind": "Secret",
+                "name": "payments-secret-values",
+                "namespace": "flux-system",
+                "values_key": "values.yaml",
+                "path": "clusters/prod/payments-secrets.yaml",
+            },
+        ],
+    }
+
+
+def test_flux_helmrelease_plan_records_git_managed_valuesfrom_manifests_as_render_inputs():
+    release = _safe_load(_fixture("flux-helmrelease-values-from.yaml"))
+    release["spec"]["values"] = {"app": {"resources": {"requests": {"cpu": "275m"}}}}
+    snapshot = _snapshot(
+        {
+            **_CHART,
+            "clusters/prod/helmrelease.yaml": _safe_dump(release),
+            "clusters/prod/payments-values.yaml": _fixture("flux-values-configmap.yaml"),
+            "clusters/prod/payments-secrets.yaml": _fixture("flux-values-secret.yaml"),
+            "clusters/prod/unrelated.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: other\n",
+        }
+    )
+
+    try:
+        plan = FluxHelmReleasePlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _action(), _flux_source(renderer_config=_values_from_config()), snapshot, BASE_REVISION
+        )
+    finally:
+        snapshot.close()
+
+    inputs = plan.validation.render_inputs
+    assert {"clusters/prod/payments-values.yaml", "clusters/prod/payments-secrets.yaml"} <= set(inputs)
+    assert inputs["clusters/prod/payments-values.yaml"] == git_blob_sha(
+        _fixture("flux-values-configmap.yaml"), BASE_REVISION
+    )
+    # A moved head that only changes a valuesFrom manifest changes the render: the plan goes stale.
+    assert changed_render_inputs(plan.validation, ["clusters/prod/payments-values.yaml"]) == [
+        "clusters/prod/payments-values.yaml"
+    ]
+    assert changed_render_inputs(plan.validation, ["clusters/prod/unrelated.yaml"]) == []
+
+
+def test_flux_helmrelease_plan_records_values_files_outside_the_chart_as_render_inputs():
+    release = _safe_load(_release_manifest())
+    release["spec"].pop("values")
+    release["spec"]["chart"]["spec"]["valuesFiles"] = ["values/prod.yaml"]
+    source_config = {**_flux_source().renderer_config, "chart_values_files": ["values/prod.yaml"]}
+    values = "app:\n  resources:\n    requests:\n      cpu: 250m\n      memory: 80Mi\n"
+    snapshot = _snapshot({**_CHART, "clusters/prod/helmrelease.yaml": _safe_dump(release), "values/prod.yaml": values})
+
+    try:
+        plan = FluxHelmReleasePlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _action(requests={"cpu": "300m"}), _flux_source(renderer_config=source_config), snapshot, BASE_REVISION
+        )
+    finally:
+        snapshot.close()
+
+    assert plan.validation.render_inputs["values/prod.yaml"] == git_blob_sha(values, BASE_REVISION)
+    assert changed_render_inputs(plan.validation, ["values/prod.yaml"]) == ["values/prod.yaml"]
+
+
+def test_helm_values_plan_watches_local_file_dependency_charts_through_the_chart_scope():
+    # Chart.yaml dependencies are refused by the planners and the renderer refuses a
+    # file:// reference that leaves the chart, so a renderable local dependency (here an
+    # apiVersion v1 requirements.yaml) lives in the chart directory, a render scope.
+    common = {
+        "charts/payments/charts/common/Chart.yaml": "apiVersion: v2\nname: common\nversion: 0.1.0\ntype: library\n",
+        "charts/payments/charts/common/templates/_helpers.tpl": '{{- define "common.name" -}}x{{- end -}}\n',
+    }
+    requirements = "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://charts/common\n"
+    files = {
+        **_CHART,
+        **common,
+        "charts/payments/Chart.yaml": "apiVersion: v1\nname: payments\nversion: 1.0.0\n",
+        "charts/payments/requirements.yaml": requirements,
+        "apps/prod/values.yaml": "app:\n  resources:\n    requests:\n      cpu: 100m\n",
+    }
+    snapshot = _snapshot(files)
+
+    try:
+        plan = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _action(), _values_source(), snapshot, BASE_REVISION, mapping=_values_mapping()
+        )
+    finally:
+        snapshot.close()
+
+    assert plan.validation.render_scopes == ["charts/payments"]
+    assert {*common, "charts/payments/requirements.yaml"} <= set(plan.validation.render_inputs)
+    assert changed_render_inputs(plan.validation, ["charts/payments/charts/common/templates/new.yaml"]) == [
+        "charts/payments/charts/common/templates/new.yaml"
+    ]

@@ -11,6 +11,9 @@ from greenkube.gitops.discovery.argo import discover_argo_application
 from greenkube.gitops.discovery.common import (
     WORKLOAD_KINDS,
     as_mapping,
+    flux_destination_evidence,
+    flux_targets_remote_cluster,
+    mark_destination_remote,
     text,
     workload_source,
 )
@@ -182,10 +185,26 @@ class KubernetesDiscoverySource:
     The custom-object API is injected so callers own Kubernetes configuration
     and client lifecycle. ``resources`` supplies live workload objects used by
     the Flux HelmRelease adapter; this source itself only lists GitOps CRDs.
+
+    Controllers that deploy to another cluster (an Argo CD destination other than the
+    in-cluster address and ``local_cluster_aliases``, a Flux object with
+    ``spec.kubeConfig``) never bind a local workload or resource
+    (``destination_remote``). ``local_cluster_aliases`` defaults to
+    ``GITOPS_LOCAL_CLUSTER_ALIASES``.
     """
 
-    def __init__(self, custom_objects_api: Any) -> None:
+    def __init__(self, custom_objects_api: Any, *, local_cluster_aliases: Iterable[str] | None = None) -> None:
         self._custom_objects_api = custom_objects_api
+        self._local_cluster_aliases = tuple(local_cluster_aliases) if local_cluster_aliases is not None else None
+
+    @property
+    def local_cluster_aliases(self) -> tuple[str, ...]:
+        """Extra Argo CD server URLs or cluster names of the local cluster."""
+        if self._local_cluster_aliases is None:
+            from greenkube.core.config import get_config
+
+            return get_config().gitops_local_cluster_aliases
+        return self._local_cluster_aliases
 
     async def check_availability(
         self,
@@ -240,6 +259,7 @@ class KubernetesDiscoverySource:
         ]
         source_objects.extend(items_by_capability[_HELM_CHARTS.capability])
         live_resources = [resource for resource in resources if isinstance(resource, Mapping)]
+        local_cluster_aliases = self.local_cluster_aliases
         candidates: list[WorkloadSource] = []
 
         for application in items_by_capability[_APPLICATIONS.capability]:
@@ -250,6 +270,7 @@ class KubernetesDiscoverySource:
                         cluster=cluster,
                         provider_id=provider_id,
                         live_resources=live_resources,
+                        local_cluster_aliases=local_cluster_aliases,
                     )
                 )
             except Exception:
@@ -263,11 +284,14 @@ class KubernetesDiscoverySource:
 
         for kustomization in items_by_capability[_KUSTOMIZATIONS.capability]:
             candidates.extend(
-                discover_flux_kustomization(
+                _flux_destination_checked(
                     kustomization,
-                    source_objects,
-                    cluster=cluster,
-                    provider_id=provider_id,
+                    discover_flux_kustomization(
+                        kustomization,
+                        source_objects,
+                        cluster=cluster,
+                        provider_id=provider_id,
+                    ),
                 )
             )
 
@@ -285,21 +309,24 @@ class KubernetesDiscoverySource:
                 provider_id=provider_id,
             )
             candidates.extend(
-                discover_flux_helm_release(
+                _flux_destination_checked(
                     helm_release,
-                    live_resources,
-                    source_objects,
-                    cluster=cluster,
-                    provider_id=provider_id,
-                    manifest_source=manifest_source,
-                    git_managed_values=git_managed_values,
+                    discover_flux_helm_release(
+                        helm_release,
+                        live_resources,
+                        source_objects,
+                        cluster=cluster,
+                        provider_id=provider_id,
+                        manifest_source=manifest_source,
+                        git_managed_values=git_managed_values,
+                    ),
                 )
             )
 
         candidates = [_with_live_workload_evidence(candidate, live_resources) for candidate in candidates]
         resource_index = ResourceBindingIndex()
         for application in items_by_capability[_APPLICATIONS.capability]:
-            resource_index.add_argo_application(application)
+            resource_index.add_argo_application(application, local_cluster_aliases)
         for kustomization in items_by_capability[_KUSTOMIZATIONS.capability]:
             resource_index.add_flux_kustomization(kustomization)
         return KubernetesDiscoveryResult(
@@ -328,6 +355,15 @@ class KubernetesDiscoverySource:
             plural=resource.plural,
             **options,
         )
+
+
+def _flux_destination_checked(controller: Mapping[str, Any], candidates: list[WorkloadSource]) -> list[WorkloadSource]:
+    """Block the candidates of a Flux object that applies to another cluster (``spec.kubeConfig``)."""
+    spec = as_mapping(controller.get("spec")) or {}
+    if not flux_targets_remote_cluster(spec):
+        return candidates
+    evidence = flux_destination_evidence(spec)
+    return [mark_destination_remote(candidate, evidence) for candidate in candidates]
 
 
 def _items(response: Any) -> list[Mapping[str, Any]]:

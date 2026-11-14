@@ -18,6 +18,8 @@ Step                What it does                                        Cadence
 ``pr_polling``      Poll one page of open PRs, then branch cleanup      ``GITOPS_PR_POLL_INTERVAL``
 ``recovery``        Quarantine stale pending PR attempts                once per process
 ``retention``       Prune plan history (90 d) and worker heartbeats     daily
+``deletion_recheck`` Re-check open deletion PRs (H6); invalidate the     every 5 min
+                    ones whose resource is in use again
 ==================  ==================================================  =============================
 
 The business logic of each step is unchanged and lives where it did (plan service,
@@ -87,6 +89,9 @@ STEP_RECOVERY = "recovery"
 STEP_RETENTION = "retention"
 #: Links pull requests opened from the plan branch of approved patch/ci plans (F4).
 STEP_EXTERNAL_DELIVERY = "external_delivery"
+#: Re-checks open deletion pull requests and invalidates those whose resource is used again (H6).
+STEP_DELETION_RECHECK = "deletion_recheck"
+DELETION_RECHECK_INTERVAL_SECONDS = 300.0
 _FAILURE_REASONS = {STEP_WEBHOOKS: "webhook", STEP_PR_POLLING: "polling", STEP_RECOVERY: "worker"}
 
 
@@ -188,6 +193,7 @@ class AutomationController:
             STEP_RETENTION: float(retention_interval_seconds),
         }
         self.intervals[STEP_EXTERNAL_DELIVERY] = self.intervals[STEP_PR_POLLING]
+        self.intervals[STEP_DELETION_RECHECK] = DELETION_RECHECK_INTERVAL_SECONDS
         self._clock = clock
         self._monotonic = monotonic
         self._last_run: dict[str, float] = {}
@@ -260,6 +266,8 @@ class AutomationController:
                 steps.append((STEP_RECOVERY, self._recover_pending_pull_requests))
             if callable(getattr(self.plan_worker, "link_external_deliveries", None)):
                 steps.append((STEP_EXTERNAL_DELIVERY, self._link_external_deliveries))
+            if callable(getattr(self.plan_worker, "recheck_open_deletions", None)):
+                steps.append((STEP_DELETION_RECHECK, self._recheck_open_deletions))
         steps.append((STEP_RETENTION, self._retention))
         return steps
 
@@ -308,6 +316,12 @@ class AutomationController:
             await self._trailer_linker.link_once()
         except Exception as error:  # best effort: the branch linkage above already ran
             logger.info("Trailer linkage pass failed (%s).", type(error).__name__)
+        return True
+
+    async def _recheck_open_deletions(self, _lease: PullRequestPollingLease) -> bool:
+        invalidated = await cast(Any, self.plan_worker).recheck_open_deletions()
+        if invalidated:
+            logger.warning("Invalidated %d open deletion pull requests whose resource is in use again.", invalidated)
         return True
 
     async def _recover_pending_pull_requests(self, _lease: PullRequestPollingLease) -> bool:

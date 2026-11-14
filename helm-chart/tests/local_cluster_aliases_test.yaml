@@ -1,0 +1,27 @@
+suite: local cluster aliases (delivery safety)
+templates:
+  - templates/configmap.yaml
+
+tests:
+  - it: has no extra local cluster alias by default
+    asserts:
+      - equal:
+          path: data.GITOPS_LOCAL_CLUSTER_ALIASES
+          value: "[]"
+
+  - it: passes the Argo CD server URLs and cluster names of this cluster as JSON
+    set:
+      automation.localClusterAliases:
+        - https://10.0.0.1:6443
+        - hub
+    asserts:
+      - equal:
+          path: data.GITOPS_LOCAL_CLUSTER_ALIASES
+          value: '["https://10.0.0.1:6443","hub"]'
+
+  - it: rejects an empty alias
+    set:
+      automation.localClusterAliases:
+        - ""
+    asserts:
+      - failedTemplate: {}

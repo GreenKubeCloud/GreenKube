@@ -5,3 +5,5 @@ tests/api/test_gitops_router.py:generic-api-key:438
 tests/api/test_security.py:generic-api-key:125
 tests/gitops/discovery/fixtures/flux-values-secret.yaml:kubernetes-secret-yaml:2
 tests/storage/test_gitops_repository.py:generic-api-key:431
+# Git blob ID of a render input whose path contains "api" (golden plan output).
+tests/automation/actions/golden_plans.json:generic-api-key:216

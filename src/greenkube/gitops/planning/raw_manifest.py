@@ -50,6 +50,7 @@ from greenkube.gitops.contracts import (
 )
 from greenkube.gitops.discovery.inventory import source_matches_target, target_namespace
 from greenkube.gitops.planning.digest import plan_digest
+from greenkube.gitops.planning.render_inputs import contents_blob_shas
 from greenkube.gitops.renderers import RawRenderError, RawRenderResult, RenderedResource, render_raw
 
 _MANIFEST_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
@@ -202,6 +203,7 @@ class RawManifestPlanner:
             renderer=RendererKind.RAW,
             output_digest=after.output_digest,
             warnings=warnings,
+            **_render_inputs(scope_sources, snapshot, source, base_revision),
         )
         plan_id = _plan_identifier(action, source, base_revision)
         digest = plan_digest(
@@ -301,6 +303,19 @@ def _sources_in_binding_scope(
     if not sources:
         raise RawManifestPlanError("no exact target resource was found in binding scope")
     return dict(sorted(sources.items()))
+
+
+def _render_inputs(
+    scope_sources: Mapping[str, str | bytes],
+    snapshot: RepositorySnapshot,
+    source: WorkloadSource,
+    base_revision: str,
+) -> dict[str, Any]:
+    """Every manifest of the rendered directory, and the directory itself (D7 render inputs)."""
+    return {
+        "render_inputs": contents_blob_shas(scope_sources, base_revision, snapshot.original_blob_shas),
+        "render_scopes": [source.path],
+    }
 
 
 def _is_in_scope(path: str, scope: str) -> bool:
@@ -731,6 +746,7 @@ def _plan_deletion(
         renderer=RendererKind.RAW,
         output_digest=after.output_digest,
         warnings=warnings,
+        **_render_inputs(scope_sources, snapshot, source, base_revision),
     )
     plan_id = _plan_identifier(action, source, base_revision)
     digest = plan_digest(

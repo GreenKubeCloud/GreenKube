@@ -31,6 +31,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from greenkube.collectors.k8s_object_reader import KubernetesObjectReader, ObjectList
+from greenkube.collectors.lb_collector import ORPHAN, ORPHAN_IN_USE, ORPHAN_UNKNOWN, OrphanCheck
 from greenkube.collectors.opencost_collector import OpenCostCollector
 from greenkube.core.deletion_safety import opt_out_reason
 from greenkube.utils.k8s_utils import parse_storage_request
@@ -38,6 +39,8 @@ from greenkube.utils.k8s_utils import parse_storage_request
 logger = logging.getLogger(__name__)
 
 _CANDIDATE_PHASES = frozenset({"released", "failed"})
+#: Start of the reason of a volume whose evidence could not be read.
+UNPROVEN_PREFIX = "cannot prove it is unused"
 
 
 @dataclass
@@ -181,7 +184,7 @@ class PVCollector:
         claim_name = claim_ref.get("name") or ""
 
         def unproven(listing: ObjectList) -> str:
-            return f"cannot prove it is unused: {listing.kind} unreadable ({listing.detail})"
+            return f"{UNPROVEN_PREFIX}: {listing.kind} unreadable ({listing.detail})"
 
         if (claim_namespace, claim_name) in existing:
             return None, f"a PVC {claim_namespace}/{claim_name} exists again and may rebind it"
@@ -230,6 +233,27 @@ class PVCollector:
             ),
             "",
         )
+
+
+async def check_persistent_volume(reader: Any, pv: Mapping[str, Any]) -> OrphanCheck:
+    """The full orphan check of one live PersistentVolume, as the collector runs it (H6 re-check).
+
+    A volume that is ``Bound`` or ``Available`` again, opted out, local, whose claim
+    exists again, belongs to a StatefulSet replica or backs a snapshot is ``in_use``;
+    an unreadable dependency (claims, StatefulSets, snapshots) is ``unknown``.
+    """
+    reason = static_exclusion(pv)
+    if reason:
+        return OrphanCheck(ORPHAN_IN_USE, reason)
+    claim_ref = (pv.get("spec") or {}).get("claimRef") or {}
+    claims = await reader.list("persistentvolumeclaims", claim_ref.get("namespace") or None)
+    if claims.status != "ok":
+        return OrphanCheck(ORPHAN_UNKNOWN, f"{UNPROVEN_PREFIX}: {claims.kind} unreadable ({claims.detail})")
+    existing = {(_metadata(claim).get("namespace"), _metadata(claim).get("name")) for claim in claims.items}
+    candidate, reason = await PVCollector(reader)._evaluate(reader, pv, existing)
+    if candidate is not None:
+        return OrphanCheck(ORPHAN)
+    return OrphanCheck(ORPHAN_UNKNOWN if reason.startswith(UNPROVEN_PREFIX) else ORPHAN_IN_USE, reason)
 
 
 async def enrich_orphaned_pv_costs(
