@@ -160,6 +160,25 @@ The code exports no gauge of pending measurements yet, so the measurement backlo
 
 The ledger alert sits in its own group, `greenkube.ledger`, rendered whenever `monitoring.serviceMonitor.enabled` is set, even with `controllerAlerts: false` or `controller.metricsPort: 0`, because the hash-chain verification may run in the API as well as in the controller.
 
+## Operations alerts
+
+`monitoring.prometheusRule.operations` (on by default with `monitoring.prometheusRule.enabled`) adds the group
+`greenkube.operations`. Thresholds are Helm values under the same key; `helm-chart/tests/promtool/operations-alerts.yaml`
+unit-tests every rule.
+
+| Alert | Rendered when | Expression (simplified) | Meaning |
+| --- | --- | --- | --- |
+| `GreenKubeAPIDown` (critical, 5 min) | `serviceMonitor.enabled` | `sum(up{job="<release>-api"}) or vector(0)` < 1 | No API pod answers its scrape, including when none exists: UI, API and webhooks are down. |
+| `GreenKubeDatabaseUnavailable` (critical, 5 min) | controller ServiceMonitor | `greenkube_loop_consecutive_failures{loop="controller-heartbeat"}` >= 3 | Every controller replica writes a heartbeat row every 30 s; repeated failures mean the database refuses writes. Works for the bundled and an external PostgreSQL. |
+| `GreenKubeAPIUnavailable` (critical, 10 min) | `operations.kubeStateMetrics` | `kube_deployment_status_replicas_available{deployment="<release>-api"}` < 1 | API pods exist but none is ready: pending migrations, database unreachable at startup, or a wedged loop. |
+| `GreenKubePostgresDown` (critical, 5 min) | bundled PostgreSQL and `kubeStateMetrics` | `kube_statefulset_status_replicas_ready{statefulset="<release>-postgres"}` < 1 | The bundled database is not ready. |
+| `GreenKubeBackupMissing` (warning, 30 min) | `postgres.backup.enabled` and `kubeStateMetrics` | last successful run of `<release>-postgres-backup` older than `backupMaxAgeHours` (36), or none since the CronJob exists | Backups are failing. |
+| `GreenKubeDataVolumeLow` (warning, 15 min) | a bundled or backup claim | `kubelet_volume_stats_available_bytes / capacity` < `volumeFreeRatio` (0.15) | Expand the claim or bound the retention ([Sizing](installation.md#sizing)). |
+| `GreenKubeDataVolumeFillingUp` (warning, 1 h) | a bundled or backup claim | under 40% free and `predict_linear(available[6h], volumeFullWithinHours)` < 0 | Full within 4 days at the current growth. |
+
+kube-state-metrics and the kubelet volume statistics ship with kube-prometheus-stack; set
+`operations.kubeStateMetrics: false` when kube-state-metrics is not scraped, since its alerts would never fire.
+
 ## Collection telemetry
 
 The metric collection job publishes, on the control-loop registry:
