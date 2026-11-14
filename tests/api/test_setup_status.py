@@ -96,6 +96,8 @@ def inputs(monkeypatch):
     monkeypatch.setattr(setup, "_capabilities", rows)
     monkeypatch.setattr(setup, "_executor_heartbeat", heartbeat)
     monkeypatch.setattr(setup, "_earliest_sample", earliest)
+    # A cloud provider with a bundled price catalog (the OpenCost check is then optional).
+    monkeypatch.setattr(setup, "_provider_has_price_catalog", lambda: True)
     return state
 
 
@@ -127,6 +129,27 @@ def test_complete_when_everything_is_ok_or_optional(client, inputs):
     assert checks["opencost"]["status"] == "not_applicable"
     assert checks["git_credentials"]["status"] == "ok"
     assert body["capabilities"]["delivery"] == {"state": "active", "reason": None}
+
+
+def test_missing_opencost_without_a_price_catalog_needs_action(client, monkeypatch, inputs):
+    """On-premises (no bundled catalog), configured rates are never trusted: no verified cost saving."""
+    monkeypatch.setattr(setup, "_provider_has_price_catalog", lambda: False)
+
+    body = client.get("/api/v1/setup/status").json()
+
+    check = _checks(body)["opencost"]
+    assert check["status"] == "action_needed"
+    assert "never verified" in check["reason"]
+    assert "Install OpenCost" in check["fix"]["text"]
+    assert body["complete"] is False
+
+
+def test_provider_catalog_detection(monkeypatch):
+    from greenkube.core import config as config_module
+
+    for provider, expected in (("aws", True), ("ovhcloud", True), ("on-prem", False), ("unknown", False)):
+        monkeypatch.setattr(config_module.get_config(), "CLOUD_PROVIDER", provider)
+        assert setup._provider_has_price_catalog() is expected
 
 
 def test_missing_credentials_offer_the_one_secret_fix(client, inputs):

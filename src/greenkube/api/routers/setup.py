@@ -159,6 +159,17 @@ async def _safe(loader: Callable[[], Awaitable[Any]], what: str) -> tuple[Any, b
 # --------------------------------------------------------------------------- checks
 
 
+def _provider_has_price_catalog() -> bool:
+    """True when the configured cloud provider has a bundled list-price catalog."""
+    try:
+        from greenkube.core.config import get_config
+        from greenkube.impact.pricing import CATALOG_PROVIDERS, normalize_provider
+
+        return normalize_provider(str(get_config().CLOUD_PROVIDER or "")) in CATALOG_PROVIDERS
+    except Exception:
+        return False
+
+
 def _data_source_checks(services: Optional[Dict[str, Any]], available: bool) -> List[SetupCheck]:
     if not available or services is None:
         return [
@@ -189,17 +200,34 @@ def _data_source_checks(services: Optional[Dict[str, Any]], available: bool) -> 
         )
     )
     opencost = _service_status(services.get("opencost"))
+    has_catalog = _provider_has_price_catalog()
+    if opencost == "healthy":
+        opencost_status: CheckStatus = "ok"
+        opencost_reason = "OpenCost answers: observed costs are used."
+    elif has_catalog:
+        opencost_status = "not_applicable"
+        opencost_reason = (
+            "OpenCost is not detected: costs use the bundled list prices of your cloud provider "
+            "(strongly recommended for an observed allocation)."
+        )
+    else:
+        # Without OpenCost and without a bundled catalog (on-premises, kubeadm, k3s, bare
+        # metal, unknown provider), costs use configured rates, which change measurement
+        # never trusts: no cost saving can be verified.
+        opencost_status = "action_needed"
+        opencost_reason = (
+            "OpenCost is not detected and this cluster has no bundled price catalog: costs use "
+            "configured rates, so cost savings are projected but never verified."
+        )
     checks.append(
         _check(
             "opencost",
             "data_sources",
             "OpenCost",
-            "ok" if opencost == "healthy" else "not_applicable",
-            "OpenCost answers: observed costs are used."
-            if opencost == "healthy"
-            else "OpenCost is not detected: costs use the bundled list prices (optional).",
-            "Install OpenCost, or set config.opencost.url, for observed costs.",
-            "configuration.md#prometheus--opencost-integration-configprometheus-configopencost",
+            opencost_status,
+            opencost_reason,
+            "Install OpenCost (strongly recommended), or set config.opencost.url, for observed and verifiable costs.",
+            "installation.md#install",
         )
     )
     provider = "wattnet" if "wattnet" in services and not _inactive(services.get("wattnet")) else "electricity_maps"

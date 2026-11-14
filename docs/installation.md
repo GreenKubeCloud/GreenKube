@@ -6,8 +6,19 @@ Everything after [Install](#install) is optional and additive.
 
 ## Install
 
-You need a Kubernetes cluster you administer, Helm 3.10+ and `kubectl`. Prometheus is strongly recommended
-(GreenKube discovers it in the cluster).
+You need a Kubernetes cluster you administer, Helm 3.10+ and `kubectl`. Prometheus and
+[OpenCost](https://www.opencost.io/docs/installation/install) are strongly recommended (GreenKube discovers both in
+the cluster).
+
+**Why OpenCost.** Without it, GreenKube still prices every pod: it charges the pod's reservation at its node's list
+price (bundled catalogs for AWS, GCP, Azure, OVHcloud and Scaleway, `cost_source: pricing_catalog`) or at the rates
+you configure (`impact.pricing.cpuCoreHour` / `ramGiBHour`, `cost_source: custom_rate`). Those are estimates, not
+an observed allocation. OpenCost observes the allocation itself (the larger of request and usage, idle and shared
+costs, and the asset costs of volumes and load balancers) and is what change measurements trust first. On clusters
+without a bundled catalog (on-premises, kubeadm, k3s, bare metal and unknown providers), configured rates are never
+trusted for measurement, so **without OpenCost no cost saving is ever verified there**: recommendations, projections
+and PRs work, but measurements end `inconclusive` for cost. On cloud providers with a catalog, OpenCost is still
+recommended for an observed rather than list-price allocation. See [Impact model](methodology/impact-model.md).
 
 ```bash
 helm repo add greenkube https://GreenKubeCloud.github.io/GreenKube && helm repo update
@@ -238,6 +249,7 @@ The defaults fit an evaluation cluster. Before running GreenKube in production:
 
 | Topic | What to set | Reference |
 |---|---|---|
+| Cost allocation | Install OpenCost (required for verified cost savings on-premises and on providers without a bundled catalog) | [Why OpenCost](#install) |
 | Backups | `postgres.backup.enabled: true` (daily `pg_dump` to its own volume), plus an off-cluster copy | [Backup and restore](operations/backup-restore.md) |
 | Upgrades | Back up first; `helm upgrade --wait --timeout 15m` | [Upgrading](upgrading.md#before-every-upgrade-back-up-the-database) |
 | Availability | `api.replicas: 2`, `controller.replicas: 2` (PDBs and anti-affinity follow) | [High availability](#optional-high-availability) |

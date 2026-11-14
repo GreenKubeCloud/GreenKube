@@ -33,14 +33,14 @@
     },
     {
       "category": "data_sources",
-      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/configuration.md#prometheus--opencost-integration-configprometheus-configopencost",
+      "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/installation.md#install",
       "fix": {
         "snippet": null,
-        "text": "Install OpenCost, or set config.opencost.url, for observed costs.",
+        "text": "Install OpenCost (strongly recommended), or set config.opencost.url, for observed and verifiable costs.",
         "ui_action": null
       },
       "id": "opencost",
-      "reason": "OpenCost is not detected: costs use the bundled list prices (optional).",
+      "reason": "OpenCost is not detected: costs use the bundled list prices of your cloud provider (strongly recommended for an observed allocation).",
       "status": "not_applicable",
       "title": "OpenCost"
     },

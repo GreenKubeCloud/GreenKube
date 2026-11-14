@@ -193,6 +193,7 @@ def _fake_setup_inputs(monkeypatch, scenario: dict[str, Any]) -> None:
     monkeypatch.setattr(setup, "_capabilities", rows)
     monkeypatch.setattr(setup, "_executor_heartbeat", heartbeat)
     monkeypatch.setattr(setup, "_earliest_sample", earliest)
+    monkeypatch.setattr(setup, "_provider_has_price_catalog", lambda: True)
 
 
 @pytest.mark.parametrize("name", sorted(SCENARIOS))

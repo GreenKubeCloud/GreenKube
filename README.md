@@ -136,7 +136,7 @@ approval of a plan digest. The
 |---|---|---|
 | Prometheus | Usage, restarts, evidence and verification | Strongly recommended |
 | Metrics Server | Per-container usage evidence | Recommended |
-| OpenCost | Cost allocation, used for cost savings | Recommended |
+| OpenCost | Observed per-pod cost allocation; required for **verified** cost savings on clusters without a bundled price catalog (on-premises, bare metal) | Strongly recommended |
 | VPA, Goldilocks, Karpenter, KRR, Kubecost, Polaris, GKE recommender, Azure Advisor | Additional recommendation sources | Optional (detected or configured) |
 | Argo CD or Flux | Pull request delivery and sync verification | Required for pull requests |
 | Electricity Maps or Wattnet | Real-time grid carbon intensity | Optional (regional defaults otherwise) |
