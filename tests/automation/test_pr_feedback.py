@@ -10,6 +10,7 @@ import pytest
 
 from greenkube.automation.git.base import CommentUpsertResult, GitProviderCapability, GitRepository
 from greenkube.automation.pr_content import LIFECYCLE_MARKER, PullRequestRenderSettings
+from greenkube.automation.pr_content.formatting import timestamp
 from greenkube.automation.pr_feedback import (
     FeedbackOutcome,
     PullRequestFeedbackPublisher,
@@ -20,6 +21,7 @@ from greenkube.core.config import Config
 from greenkube.gitops.contracts import PlanStatus
 from greenkube.models.metrics import PullRequestRecord, PullRequestStatus, RecommendationRecord
 from greenkube.verify.model import (
+    DECISION_GRACE,
     ChangeEvent,
     ChangeMeasurement,
     ChangeOutcome,
@@ -250,6 +252,9 @@ async def test_each_lifecycle_step_edits_the_same_comment():
     body = provider.comments[17][0]
     assert "Rollout completed at" in body
     assert "Measuring savings. Results expected around" in body
+    # The outcome is decided one grace hour after the post-window ends (late samples).
+    decided = NOW + timedelta(days=7) + DECISION_GRACE
+    assert f"Results expected around {timestamp(decided)}." in body
 
     changes.status = changes.status.model_copy(update={"state": MeasurementState.REALIZED})
     changes.measurements = [_measurement(ChangeOutcome.REALIZED)]
