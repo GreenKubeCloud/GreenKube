@@ -35,6 +35,16 @@ class BootstrapInterval:
     samples: int
     block: int
 
+    def scaled(self, factor: float) -> "BootstrapInterval":
+        """The interval of ``factor × value`` (``factor > 0``, e.g. a per-replica rate times replicas)."""
+        return BootstrapInterval(
+            mean=self.mean * factor,
+            low=self.low * factor if self.low is not None else None,
+            high=self.high * factor if self.high is not None else None,
+            samples=self.samples,
+            block=self.block,
+        )
+
 
 def seed_for(*parts: object) -> int:
     """Deterministic 64-bit seed from the measurement identity."""

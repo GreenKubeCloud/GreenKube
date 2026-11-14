@@ -83,6 +83,8 @@ class StrategyResult:
     reasons: List[str]
     coverage: float
     counterfactual_params: Dict[str, Any] = field(default_factory=dict)
+    #: The version recorded on the measurement when it differs from the strategy's (e.g. the rate provenance).
+    strategy_version: Optional[str] = None
 
 
 class SavingsMeasurementStrategy(Protocol):
@@ -103,6 +105,7 @@ class SavingsMeasurementStrategy(Protocol):
         projections: Mapping[str, Optional[float]],
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
+        rate_sources: Sequence[str] = (),
     ) -> StrategyResult: ...
 
 
@@ -129,10 +132,21 @@ class RequestRightsizingStrategy:
     :mod:`greenkube.verify.regression`) when a load driver exists and the fit's
     diagnostics pass, otherwise the hour-of-week MVP; ``method`` and the
     diagnostics are recorded.
+
+    **Per replica (2.1).** A request change moves what each replica is
+    charged, not how many replicas run. Every quantity is measured *per
+    replica* (each hour's value over its mean replica count), and the per-replica
+    saving is multiplied by the replicas that actually ran in the post-window:
+    ``saving = Δ(per-replica rate) × post replica-hours``, the roadmap's
+    ``Σ Δrequest × replica-hours``. A replica count that drops for another
+    reason (4 → 2 during the post-window) is therefore never credited to the
+    change; it is reported by the ``replica_shift`` confounder. Hours without
+    a replica count are left out. Measurements decided before 2.1 compared
+    workload totals.
     """
 
     key = "request_rightsizing"
-    version = "2.0"
+    version = "2.1"
     primary = "allocated_cost"
 
     QUANTITIES = (
@@ -167,7 +181,9 @@ class RequestRightsizingStrategy:
         projections: Mapping[str, Optional[float]],
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
+        rate_sources: Sequence[str] = (),
     ) -> StrategyResult:
+        del rate_sources  # measured from the workload's own trusted rows
         expected_hours = len(window_hours(plan.post)) or 1
         estimates: List[SavingsEstimate] = []
         methods: Dict[str, str] = {}
@@ -249,6 +265,9 @@ class RequestRightsizingStrategy:
         else:
             pre_values = quantity_series(pre, spec.quantity)
             post_values = quantity_series(post, spec.quantity)
+        post_replicas = quantity_series(post, "replicas")
+        pre_values = _per_replica(pre_values, quantity_series(pre, "replicas"))
+        post_values = _per_replica(post_values, post_replicas)
         base: Dict[str, Any] = {
             "quantity": spec.quantity,
             "unit": spec.unit,
@@ -309,8 +328,11 @@ class RequestRightsizingStrategy:
                 mvp,
                 diagnostics,
             )
-        counterfactual = math.fsum(item.counterfactual for item in aligned) / len(aligned)
-        actual = math.fsum(item.actual for item in aligned) / len(aligned)
+        # Per-replica rates times the replicas that ran: the saving of the post-window's replica-hours.
+        replicas = math.fsum(post_replicas[item.hour] for item in aligned) / len(aligned)
+        interval = interval.scaled(replicas)
+        counterfactual = math.fsum(item.counterfactual for item in aligned) / len(aligned) * replicas
+        actual = math.fsum(item.actual for item in aligned) / len(aligned) * replicas
         epsilon = settings.epsilon_ratio * abs(counterfactual)
         if coverage < settings.min_coverage:
             outcome = ChangeOutcome.INCONCLUSIVE
@@ -341,6 +363,15 @@ class RequestRightsizingStrategy:
             mvp,
             diagnostics,
         )
+
+
+def _per_replica(values: Mapping[datetime, float], replicas: Mapping[datetime, float]) -> Dict[datetime, float]:
+    """``{hour: value / replicas}`` over the hours with a positive replica count."""
+    return {
+        hour: value / replicas[hour]
+        for hour, value in values.items()
+        if replicas.get(hour) is not None and replicas[hour] > 0 and math.isfinite(replicas[hour])
+    }
 
 
 @dataclass
