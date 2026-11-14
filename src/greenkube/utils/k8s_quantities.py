@@ -10,19 +10,12 @@ recommendation connectors (VPA targets, lower/upper bounds):
 Every quantity GreenKube writes to Git goes through :func:`format_cpu_quantity`
 and :func:`format_memory_quantity`: canonical, human units (``250m``, ``2``,
 ``23Mi``, ``1Gi``), never a raw byte count such as ``24114500``.
-:func:`quantize_cpu_millicores` and :func:`quantize_memory_bytes` round a
-proposed request up to a step of about 5% of its value in such units, so usage
-jitter between scans does not move the proposal by a few bytes.
 """
 
 import math
 from typing import Optional
 
 MIB = 1024**2
-#: Largest relative quantization step of a proposed request (a step is at most 5% of the value).
-QUANTIZATION_STEP_RATIO = 0.05
-#: CPU quantization steps (millicores): the largest one within 5% of the value is used.
-_CPU_STEPS = (1, 2, 5, 10, 20, 25, 50, 100, 250, 500, 1000)
 #: Binary units of formatted memory quantities, largest first.
 _MEMORY_UNITS = (
     ("Ei", 1024**6),
@@ -128,21 +121,3 @@ def format_memory_quantity(byte_count: int, *, exact: bool = False) -> str:
         if value and value % factor == 0:
             return f"{value // factor}{suffix}"
     return str(value)
-
-
-def quantize_cpu_millicores(millicores: float) -> int:
-    """``millicores`` rounded up to the largest CPU step within 5% of it (100m → 5m steps, 1000m → 50m)."""
-    value = max(int(math.ceil(float(millicores) - 1e-9)), 1)
-    limit = value * QUANTIZATION_STEP_RATIO
-    step = max((candidate for candidate in _CPU_STEPS if candidate <= limit), default=1)
-    return int(math.ceil(value / step)) * step
-
-
-def quantize_memory_bytes(byte_count: float) -> int:
-    """``byte_count`` rounded up to a power-of-two MiB step within 5% of it (23Mi → 1Mi, 300Mi → 8Mi, 3Gi → 128Mi)."""
-    # The epsilon absorbs float noise (900MiB x 1.1 is 990.0000000001MiB, not 991MiB).
-    mib = max(float(byte_count) / MIB - 1e-6, 0.0)
-    step = 1
-    while step * 2 <= mib * QUANTIZATION_STEP_RATIO:
-        step *= 2
-    return max(int(math.ceil(mib / step)) * step, 1) * MIB

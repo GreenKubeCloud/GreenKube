@@ -81,31 +81,3 @@ class TestFormatQuantities:
 
         assert format_memory_quantity(24114500, exact=True) == "24114500"
         assert format_memory_quantity(23549 * 1024, exact=True) == "23549Ki"
-
-
-class TestQuantize:
-    def test_memory_steps_are_about_five_percent_and_round_up(self):
-        from greenkube.utils.k8s_quantities import quantize_memory_bytes
-
-        mib = 1024**2
-        assert quantize_memory_bytes(24114500) == 23 * mib
-        assert quantize_memory_bytes(22 * mib + 4096) == 23 * mib
-        assert quantize_memory_bytes(300 * mib - 5) == 304 * mib
-        assert quantize_memory_bytes(3 * 1024 * mib) == 3 * 1024 * mib
-        assert quantize_memory_bytes(3 * 1024 * mib + 4096) == 3200 * mib
-        assert quantize_memory_bytes(1) == mib
-
-    def test_byte_jitter_does_not_move_the_quantized_value(self):
-        from greenkube.utils.k8s_quantities import quantize_memory_bytes
-
-        values = {quantize_memory_bytes(301 * 1024**2 + jitter) for jitter in range(0, 4096, 97)}
-        assert values == {304 * 1024**2}
-
-    def test_cpu_steps(self):
-        from greenkube.utils.k8s_quantities import quantize_cpu_millicores
-
-        assert quantize_cpu_millicores(37) == 37
-        assert quantize_cpu_millicores(101) == 105
-        assert quantize_cpu_millicores(243.2) == 250
-        assert quantize_cpu_millicores(1010) == 1050
-        assert quantize_cpu_millicores(0.2) == 1
