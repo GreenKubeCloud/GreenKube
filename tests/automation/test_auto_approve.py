@@ -113,6 +113,45 @@ def test_contested_consensus_is_a_hard_stop_even_with_many_agreeing_votes():
     ]
 
 
+def test_pushed_votes_of_a_stored_consensus_never_count_as_two_independent_votes():
+    """A record scored before pushed votes were merged still says independent_votes=2 (security hardening)."""
+
+    def vote(source_id: str, *, pushed: bool | None = None, counted: bool = True) -> dict[str, Any]:
+        entry: dict[str, Any] = {"source_id": source_id, "family": source_id, "counted": counted}
+        if pushed is not None:
+            entry["pushed"] = pushed
+        return entry
+
+    stale = _record(
+        source="push:a",
+        evidence=None,
+        consensus={"chosen_from": ["push:a"], "independent_votes": 2, "votes": [vote("push:a"), vote("push:b")]},
+    )
+    report_and_client = _record(
+        source="krr",
+        evidence=None,
+        consensus={"chosen_from": ["krr"], "independent_votes": 2, "votes": [vote("krr"), vote("push:ci")]},
+    )
+    flagged = _record(
+        source="custom",
+        evidence=None,
+        consensus={
+            "chosen_from": ["custom"],
+            "independent_votes": 2,
+            "votes": [vote("custom", pushed=True), vote("other", pushed=True)],
+        },
+    )
+    corroborated = _record(
+        source="krr",
+        evidence=None,
+        consensus={"chosen_from": ["krr", "vpa"], "independent_votes": 2, "votes": [vote("krr"), vote("vpa")]},
+    )
+
+    for record in (stale, report_and_client, flagged):
+        assert auto_approve_blockers([record], POLICY, expected=1) == ["decrease_without_native_evidence"]
+    assert auto_approve_blockers([corroborated], POLICY, expected=1) == []
+
+
 def test_a_decrease_from_external_sources_needs_two_independent_votes():
     one_vote = _record(source="krr", evidence=None, consensus={"chosen_from": ["krr"], "independent_votes": 1})
     two_votes = _record(source="krr", evidence=None, consensus={"chosen_from": ["krr", "vpa"], "independent_votes": 2})

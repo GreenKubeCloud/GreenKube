@@ -20,6 +20,7 @@ from greenkube.signals.model import (
     ContainerResourcesProposal,
     DeletionProposal,
     ResourceSpec,
+    SignalOrigin,
     SourceSignal,
     TargetRef,
 )
@@ -264,3 +265,42 @@ class TestEngineFamiliesAndPushCaps:
         assert consolidate(_ballots(deletion("push:a"), deletion("push:b"))) == []
         [outcome] = consolidate(_ballots(deletion("push:a"), deletion("greenkube.zombie")))
         assert set(outcome.consensus.source_ids) == {"push:a", "greenkube.zombie"}
+
+
+class TestPushedVoteIndependence:
+    """One signals:write key can push as several clients and upload KRR/Polaris reports:
+    every pushed ballot together is at most one independent vote (security hardening)."""
+
+    @staticmethod
+    def _pushed(source_id: str, proposed: int, family: str):
+        signal = _cpu_signal(source_id, proposed, current=1000, algorithm=family)
+        return signal.model_copy(
+            update={
+                "engine_family": family,
+                "provenance": signal.provenance.model_copy(update={"origin": SignalOrigin.PUSH}),
+            }
+        )
+
+    def test_two_push_clients_are_one_independent_vote(self):
+        outcome = combine(_ballots(self._pushed("push:a", 400, "a"), self._pushed("push:b", 400, "b")))
+
+        assert outcome.consensus.independent_votes == 1
+        # Both proposals still shape the value (safest keeps the highest).
+        assert {vote.source_id for vote in outcome.consensus.votes if vote.counted} == {"push:a", "push:b"}
+        assert all(vote.pushed for vote in outcome.consensus.votes)
+
+    def test_a_krr_report_and_a_push_client_are_one_independent_vote(self):
+        outcome = combine(_ballots(self._pushed("krr", 400, "krr"), self._pushed("push:a", 410, "a")))
+
+        assert outcome.consensus.independent_votes == 1
+
+    def test_a_pushed_vote_still_adds_to_a_non_pushed_source(self):
+        outcome = combine(
+            _ballots(
+                self._pushed("krr", 400, "krr"),
+                self._pushed("push:a", 410, "a"),
+                _cpu_signal("vpa", 420, current=1000, algorithm="vpa-recommender"),
+            )
+        )
+
+        assert outcome.consensus.independent_votes == 2

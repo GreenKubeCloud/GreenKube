@@ -186,8 +186,9 @@ async def test_every_connector_becomes_one_consolidated_recommendation_per_resou
         "kubecost": 250,
         "push:ci": 260,
     }
-    # Goldilocks and the user VPA run one engine: one vote, not two.
-    assert consensus.independent_votes == 4
+    # Goldilocks and the user VPA run one engine: one vote, not two. KRR's uploaded report
+    # and the push client are both pushed through the API: together one vote.
+    assert consensus.independent_votes == 3
     assert {vote.family for vote in consensus.votes if vote.source_id in ("goldilocks", "vpa")} == {"vpa"}
     assert sum(vote.counted for vote in consensus.votes if vote.family == "vpa") == 1
     assert consensus.agreement == round(1 - 50 / 300, 4)
@@ -195,13 +196,13 @@ async def test_every_connector_becomes_one_consolidated_recommendation_per_resou
     assert consensus.source_ids[0] == "goldilocks"
     assert set(consensus.source_ids) == {"goldilocks", "vpa", "krr", "kubecost", "push:ci"}
     # The consolidated value is projected again by the Impact Model, never copied from a source.
-    assert cpu.description.endswith("safest consensus of 4 sources.")
+    assert cpu.description.endswith("safest consensus of 3 sources.")
 
     memory = _on_target(recs, RecommendationType.RIGHTSIZING_MEMORY)
     memory_consensus = _consensus(memory)
     assert memory.recommended_memory_request_bytes == 512 * MIB
     assert memory_consensus.agreement == 1.0
-    assert memory_consensus.independent_votes == 4
+    assert memory_consensus.independent_votes == 3
     assert set(memory_consensus.source_ids) == {"goldilocks", "vpa", "krr", "kubecost", "push:ci"}
 
 
@@ -230,7 +231,8 @@ async def test_a_push_client_counts_once_whatever_engines_it_declares():
     consensus = _consensus(_on_target(recs, RecommendationType.RIGHTSIZING_CPU))
     counted = [vote.source_id for vote in consensus.votes if vote.counted]
     assert sorted(counted) == ["krr", "push:ci", "push:other"]
-    assert consensus.independent_votes == 3
+    # Pushed sources never corroborate each other: one key can push as every client.
+    assert consensus.independent_votes == 1
 
 
 async def test_a_push_client_relaying_vpa_cannot_replace_the_vpa_vote():
