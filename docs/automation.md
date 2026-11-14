@@ -407,6 +407,16 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
   request change as `evidence.limit_changes`:
   - an increase raises a CPU limit below the new request or throttled, and a memory limit below the request or
     110% of the observed maximum; it never lowers a limit;
+  - the kernel OOM-kills at the memory **limit**, so an OOM-driven memory increase (OOM kills or OOM restarts in
+    the window), or one whose new request reaches or exceeds the memory limit, also raises the limit above the new
+    request: `max(limit × the request's factor, 110% of the observed maximum)`, bounded by
+    `rightsizingMaxIncreaseFactor` × the old limit, and always at least 10% above the new request (reason
+    `oom_headroom` or `request_reaches_limit`). Example: request = limit = 24Mi, OOM-killed, becomes request 48Mi and
+    limit 53Mi. A non-OOM increase that stays well below the limit leaves it alone. When the limit cannot be raised
+    (under `memory_equals_request` the limit must equal the request), the recommendation says so and stays advisory:
+    the action builder refuses an OOM-driven increase that does not lift the limit above the new request, since its
+    pull request could not stop the kills (see [OOM kills and the memory
+    limit](recommendation.md#oom-kills-and-the-memory-limit));
   - `remove_cpu` removes the CPU limit (raw manifests: the key is deleted; Kustomize: a `cpu: null` strategic-merge
     deletion in the managed patch);
   - `memory_equals_request` sets the memory limit to the request (decreases) or raises it to at least 110% of the
@@ -424,7 +434,8 @@ What a pull request can change is defined by a registry of action kinds (see [Ar
   limits is reverted by reverting its pull request, and the PR says so.
 - **Measurement.** A memory increase is measured on reliability: the OOM-kill rate of that container after the
   rollout (OOM restarts, in the unit of the scan's evidence) is compared with the rate the recommendation observed
-  before it, and those OOM restarts no longer fail the restart gate; other containers and CPU-only increases
+  before it, and those OOM restarts no longer fail the restart gate; other containers, CPU-only increases and
+  memory increases that kept or lowered a known memory limit (they cannot cure kills that happen at the limit)
   keep the strict "any OOM kill fails" gate (see [Savings measurement: reliability
   increases](methodology/savings-measurement.md#reliability-increases-h1)).
 
