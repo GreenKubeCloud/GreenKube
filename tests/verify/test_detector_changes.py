@@ -142,6 +142,54 @@ async def test_one_change_per_rollout_with_a_frozen_baseline(stores):
     assert again == change.change_id
 
 
+class _MergedPullRequests:
+    def __init__(self, record):
+        self.record = record
+
+    async def get_pull_request_by_plan_id(self, plan_id):
+        return self.record if plan_id == "pln-fast" else None
+
+
+async def test_baseline_ends_at_the_provider_merge_when_the_rollout_beats_the_merge_poll(stores):
+    # Minikube e2e: Argo CD synced and rolled out 2 s after the Gitea merge, but the PR
+    # poll observed the merge 9 s after it. The baseline must end at the merge itself.
+    reco_repo, change_repo = stores
+    await reco_repo.save_recommendations(_records())
+    rollout_completed = hour_now() - timedelta(minutes=10)
+    merged = rollout_completed - timedelta(seconds=2)
+    pre_window = TimeWindow(start=hour_now() - timedelta(days=10), end=hour_now())
+    lifecycle, service = _service(reco_repo, change_repo, WindowedMetricsRepo(pod_rows=workload_rows(pre_window)))
+    service.pull_request_repo = _MergedPullRequests(
+        SimpleNamespace(
+            merged_at=merged,
+            sync_observed_at=rollout_completed + timedelta(seconds=5),
+            pr_url="http://gitea/pulls/3",
+            merge_commit_sha="abc",
+            sync_revision="abc",
+        )
+    )
+    records = await reco_repo.get_recommendations_by_statuses([RecommendationStatus.ACTIVE.value])
+    applied = [
+        await lifecycle.apply(
+            record.id, applied_at=rollout_completed, plan_id="pln-fast", application_method="pr_merge"
+        )
+        for record in records
+        if record.id is not None
+    ]
+
+    change = await service.record_change(
+        "change-fast",
+        applied,
+        snapshot=_snapshot(),
+        plan=SimpleNamespace(plan_id="pln-fast", pre_apply_baseline=None),
+        now=rollout_completed + timedelta(seconds=30),
+    )
+
+    assert change is not None
+    assert change.baseline_window_end == merged
+    assert change.rollout_completed_at == rollout_completed
+
+
 async def test_detector_reads_workloads_for_open_changes_without_candidates(stores):
     reco_repo, change_repo = stores
     lifecycle, service = _service(reco_repo, change_repo, WindowedMetricsRepo())
