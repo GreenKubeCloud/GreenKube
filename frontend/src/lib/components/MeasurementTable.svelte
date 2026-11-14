@@ -6,7 +6,8 @@
 
 	/** One decided measurement from GET /api/v2/changes/{id}/measurements. */
 	export let measurement;
-	export let currency = 'USD';
+	/** ISO 4217 code; undefined uses the pricing currency from GET /config. */
+	export let currency = undefined;
 
 	const OUTCOME_TONES = { realized: 'green', not_realized: 'yellow', inconclusive: 'dark', contaminated: 'yellow' };
 

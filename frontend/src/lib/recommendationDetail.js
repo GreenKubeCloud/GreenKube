@@ -4,6 +4,7 @@
  * sources (Recommendation v2, shown only when the server returns it) and
  * measured outcome. Projected and measured values stay in separate blocks.
  */
+import { currencyOrDefault } from '$lib/utils/format.js';
 
 function finite(value) {
 	const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
@@ -46,7 +47,7 @@ export function impactOf(rec) {
 	return {
 		modelVersion: typeof impact.model_version === 'string' ? impact.model_version : null,
 		kind: impact.kind ?? null,
-		currency: typeof impact.currency === 'string' ? impact.currency : 'USD',
+		currency: currencyOrDefault(impact.currency),
 		allocatedCostAnnual: finite(impact.allocated_cost_annual),
 		expectedCostAnnual: finite(impact.expected_billable_cost_annual),
 		realizationFactor: finite(impact.realization_factor),
@@ -76,7 +77,7 @@ export function valueOf(rec) {
 	const value = rec?.value;
 	if (!value || typeof value !== 'object') return null;
 	return {
-		currency: typeof value.currency === 'string' ? value.currency : 'USD',
+		currency: currencyOrDefault(value.currency),
 		ev: finite(value.ev),
 		valueAnnual: finite(value.value_annual),
 		pSuccess: finite(value.p_success),

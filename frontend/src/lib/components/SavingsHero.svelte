@@ -9,7 +9,7 @@
 	/** Error message when the savings report could not be read. */
 	export let savingsError = '';
 
-	$: currency = overview?.currency ?? 'USD';
+	$: currency = overview?.currency;
 	$: realized = overview?.realized;
 	$: pending = overview?.pending;
 	$: opportunity = overview?.opportunity;

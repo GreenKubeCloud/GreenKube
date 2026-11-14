@@ -76,4 +76,5 @@ async def get_config_endpoint():
         prometheus_query_range_step=cfg.PROMETHEUS_QUERY_RANGE_STEP,
         api_host=cfg.API_HOST,
         api_port=cfg.API_PORT,
+        currency=str(getattr(cfg, "IMPACT_PRICING_CURRENCY", "USD") or "USD"),
     )

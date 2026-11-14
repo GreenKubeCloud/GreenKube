@@ -105,7 +105,7 @@
 	}
 
 	function money(value) {
-		return formatMoney(value ?? 0, 'USD');
+		return formatMoney(value ?? 0, savings?.currency);
 	}
 
 	$: blocks = savings

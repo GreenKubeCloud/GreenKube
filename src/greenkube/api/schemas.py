@@ -381,6 +381,9 @@ class ConfigResponse(BaseModel):
     prometheus_query_range_step: str
     api_host: str
     api_port: int
+    currency: str = Field(
+        "USD", description="Pricing currency (ISO 4217) of every cost and savings amount (impact.pricing.currency)."
+    )
 
 
 class PaginatedMetricsResponse(BaseModel):

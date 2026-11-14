@@ -100,7 +100,7 @@
 	$: requests = requestRows(rec);
 	$: timeline = groupConsecutiveEvents(events);
 	$: planIds = [...new Set(pullRequests.map((pr) => pr.plan_id).filter(Boolean))];
-	$: currency = value?.currency ?? impact?.currency ?? 'USD';
+	$: currency = value?.currency ?? impact?.currency;
 
 	function pct(value) {
 		return value === null || value === undefined ? '—' : `${Math.round(value * 100)}%`;

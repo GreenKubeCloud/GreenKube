@@ -14,6 +14,7 @@
  * None of the returned objects carries a total across kinds, by design.
  */
 import { eligibilityOf, expectedValue } from '$lib/utils/decision.js';
+import { getDisplayCurrency } from '$lib/utils/format.js';
 
 function finite(value) {
 	const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
@@ -33,13 +34,13 @@ function block(raw) {
 	};
 }
 
-/** The pricing currency of the recommendations (all share one), USD by default. */
+/** The pricing currency of the recommendations (all share one), else the configured pricing currency. */
 export function currencyOf(recommendations = []) {
 	for (const rec of recommendations) {
 		const currency = rec?.value?.currency ?? rec?.impact?.currency;
 		if (typeof currency === 'string' && /^[A-Z]{3}$/.test(currency)) return currency;
 	}
-	return 'USD';
+	return getDisplayCurrency();
 }
 
 /**
