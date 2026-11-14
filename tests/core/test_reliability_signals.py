@@ -317,3 +317,11 @@ def test_container_kinds_from_pod_specs_mark_native_sidecars_and_init_containers
     assert snapshot.summaries[API]["web"].container_kind == "container"
     assert snapshot.summaries[API]["proxy"].container_kind == "sidecar"
     assert snapshot.summaries[API][""].container_kind is None
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``END``/``START`` for each test: a wall-clock window taken at import ages during a long suite."""
+    end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    monkeypatch.setitem(globals(), "END", end)
+    monkeypatch.setitem(globals(), "START", end - timedelta(days=14))

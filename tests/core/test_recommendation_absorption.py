@@ -99,3 +99,9 @@ def test_other_recommendation_types_are_never_absorbed():
         applied_at=NOW,
     )
     assert not absorbs_regenerated_recommendation(recorded, recorded, NOW)
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc))

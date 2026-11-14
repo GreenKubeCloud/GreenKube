@@ -152,16 +152,17 @@ def _pv(first_seen: Optional[datetime], evidence=("phase Released",)) -> Orphane
 
 class TestAssetDeletionAge:
     @pytest.mark.parametrize(
-        "first_seen,days,expected",
+        "unused_for,days,expected",
         [
-            (NOW - timedelta(days=8), None, 1),  # default 7 days
-            (NOW - timedelta(days=2), None, 0),  # not long enough
+            (timedelta(days=8), None, 1),  # default 7 days
+            (timedelta(days=2), None, 0),  # not long enough
             (None, None, 0),  # duration not proven (no database)
-            (NOW - timedelta(days=8), 14.0, 0),  # configurable
-            (NOW - timedelta(hours=1), 0.0, 1),
+            (timedelta(days=8), 14.0, 0),  # configurable
+            (timedelta(hours=1), 0.0, 1),
         ],
     )
-    def test_load_balancer_needs_a_proven_unused_period(self, first_seen, days, expected):
+    def test_load_balancer_needs_a_proven_unused_period(self, unused_for, days, expected):
+        first_seen = NOW - unused_for if unused_for is not None else None
         recs = NativeRecommender(_config(days)).generate_recommendations(
             _rows("legacy", "web", joules=1e9), load_balancers=[_lb(first_seen)]
         )
@@ -177,10 +178,9 @@ class TestAssetDeletionAge:
         )
         assert _types(recs, RecommendationType.ORPHANED_LOAD_BALANCER) == []
 
-    @pytest.mark.parametrize(
-        "first_seen,expected", [(NOW - timedelta(days=8), 1), (NOW - timedelta(days=1), 0), (None, 0)]
-    )
-    def test_persistent_volume_needs_a_proven_unused_period(self, first_seen, expected):
+    @pytest.mark.parametrize("unused_for,expected", [(timedelta(days=8), 1), (timedelta(days=1), 0), (None, 0)])
+    def test_persistent_volume_needs_a_proven_unused_period(self, unused_for, expected):
+        first_seen = NOW - unused_for if unused_for is not None else None
         recs = NativeRecommender(_config()).generate_recommendations(
             _rows("legacy", "web", joules=1e9), persistent_volumes=[_pv(first_seen)]
         )
@@ -377,3 +377,9 @@ class TestAttachFirstSeen:
         repo.observe = AsyncMock(side_effect=RuntimeError("db down"))
         items = await attach_first_seen(repo, LOAD_BALANCER_KIND, [_lb(None)], NOW)
         assert items is not None and items[0].first_seen_at is None
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0))

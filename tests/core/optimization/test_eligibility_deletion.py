@@ -165,3 +165,9 @@ async def test_unreadable_resource_bindings_fail_closed() -> None:
             raise RuntimeError("database is down")
 
     assert await load_resource_bindings(_Gitops(_Broken()), "prod") is None
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc))

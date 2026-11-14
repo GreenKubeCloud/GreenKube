@@ -468,3 +468,9 @@ def test_factory_makes_feedback_read_only_in_patch_and_ci_modes(mode, read_only)
     )
     assert publisher is not None
     assert publisher.writes_allowed(fx.plan(status=PlanStatus.MERGED)) is (not read_only)
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc).replace(microsecond=0))

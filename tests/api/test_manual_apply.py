@@ -243,3 +243,9 @@ async def test_a_recommendation_with_a_plan_in_flight_cannot_be_marked_applied(m
         ActionStatus.PLAN_READY, [SimpleNamespace(status=PlanStatus.VALIDATED)]
     )
     assert client.post(f"/api/v1/recommendations/{cpu.id}/manual/applied").status_code == 200
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``EXPIRES`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "EXPIRES", datetime.now(timezone.utc) + timedelta(days=14))

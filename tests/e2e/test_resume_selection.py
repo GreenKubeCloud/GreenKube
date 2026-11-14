@@ -79,3 +79,9 @@ def test_an_open_pull_request_is_resumed_and_the_newest_wins():
 def test_loop_uses_the_filter():
     script = LOOP.read_text()
     assert "resumable-pr.jq" in script and "E2E_RESUME_MAX_AGE" in script
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc).replace(microsecond=0))

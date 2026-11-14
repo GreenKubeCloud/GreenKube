@@ -154,3 +154,11 @@ async def test_idle_rows_upsert_per_node_and_step(repo):
     # Half-open range.
     assert await repo.read_idle_metrics(later, later) == []
     assert len(await repo.read_idle_metrics(later, later + timedelta(minutes=5))) == 1
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``T0`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(
+        globals(), "T0", datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    )

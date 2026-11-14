@@ -294,3 +294,9 @@ class TestTrackRecordEndpoint:
         )
         after = {r["id"]: r["value"]["p_success"] for r in decision_client.get("/api/v1/recommendations/active").json()}
         assert all(after[rec_id] < before[rec_id] for rec_id in before)
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc))

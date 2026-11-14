@@ -577,3 +577,9 @@ class TestWarmUpSinceInstall:
             observation_window_seconds=6 * 86400,
         )
         assert coverage_since_history(evidence, NOW - timedelta(hours=1)) == pytest.approx(0.1)
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_at_test_time(monkeypatch):
+    """Re-read ``NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
+    monkeypatch.setitem(globals(), "NOW", datetime.now(timezone.utc))
