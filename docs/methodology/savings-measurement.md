@@ -130,9 +130,11 @@ The fitted elasticities and the number of matched hours of the week are stored i
 
 ## 5. Quantities
 
-The `request_rightsizing` strategy (version 2.1) measures, per hour:
+The `request_rightsizing` strategy (version 2.2) measures, per hour:
 
 **Per replica.** A request change moves what each replica is charged, not how many replicas run. Every quantity below is fitted *per replica* (each hour's value over its replica count) and the per-replica saving is multiplied by the mean replica count of the aligned post-window hours: `saving = Δ(per-replica rate) × post replica-hours`, which is `Σ Δrequest × replica-hours` for requested capacity. A replica count that drops for another reason (an HPA scaling 4 → 2 during the post-window) is therefore never credited to the change: it saves nothing per replica. It is reported by the `replica_shift` confounder (moderate). Hours without a replica count are left out. The interval and counterfactual are scaled by the same replica count, so the outcome rule decides exactly as it would per replica. Measurements decided by version 2.0 compared workload totals (stated by `strategy_version`).
+
+**Both bases, the smaller claim (2.2).** Per-replica scaling alone fails in the mirror direction: a CPU-request cut that makes an HPA scale out (2 pods at $0.01/h → 4 pods at $0.005/h) halves the per-pod cost while the workload total stays $0.02/h, and per-replica scaling would credit $0.02/h. Every quantity is therefore fitted twice, per replica and on workload totals, and the estimate with the **smaller mean saving** is kept; it stays `realized` only when both bases are realized, otherwise it is `inconclusive` with the reason. A replica drop (the per-replica basis is smaller) and a replica rise the change caused (the workload total is smaller) are both left out, so neither direction is credited. The basis kept for each quantity is recorded in `counterfactual_params.replica_basis` (`per_replica` or `workload_total`). Measurements decided by version 2.1 used the per-replica basis alone.
 
 | Quantity | Unit | Claimed | Role |
 |---|---|---|---|

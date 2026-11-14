@@ -3,7 +3,7 @@
 - **Deletion rate provenance (H6, C3).** Deletion estimates carry `rate_source`; the measurement's `strategy_version` (`resource_deletion` `1.1:<method>:<rate source>`) becomes the ledger v2 `method_version`.
 
 ### Changed
-- **Request rightsizing is measured per replica (C3, strategy `request_rightsizing` 2.1).** Every quantity is fitted per replica and multiplied by the post-window replica-hours (`Σ Δrequest × replica-hours`), so a replica count that drops for another reason is never credited to the change.
+- **Request rightsizing is measured per replica (C3, strategy `request_rightsizing` 2.1).** Every quantity is fitted per replica and multiplied by the post-window replica-hours (`Σ Δrequest × replica-hours`), so a replica count that drops for another reason is never credited to the change. Version 2.2 also fits workload totals and keeps the smaller saving (`counterfactual_params.replica_basis`; `realized` only when both bases are), so a replica rise the change itself caused (an HPA scaling out after a CPU-request cut) is not credited either.
 - **Projection accuracy compares with the allocated projection (C4, B).** Change measurements (and the per-recommendation rows) compare the measured allocated saving with the Impact Model's `allocated_cost_annual` and the allocated CO₂e of the measured components, not with the realization-scaled billable projection; projected shares split by allocated projection too.
 - **Savings ledger v2 currency (C6).** Each v1 accrual is stamped with its recommendation's projection currency (`impact.currency`) instead of today's configured currency, and the ledger summary keeps one total per method, quantity and currency.
 
