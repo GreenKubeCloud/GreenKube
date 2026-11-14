@@ -4,8 +4,11 @@
  * Principle 3: projected ≠ allocated ≠ realized. The Overview shows three
  * kinds of saving side by side and never adds them together:
  *
- * - realized: measured savings from the ledger (`realized_to_date`, accrued,
- *   and the measured annual `run_rate_annual`);
+ * - measured allocated (`realized` key, kept for compatibility): what the
+ *   changed workloads stop being charged, measured and accrued in the ledger
+ *   (`realized_to_date`), and its annual run rate (`run_rate_annual`), with
+ *   the realization factor that relates it to the bill. "Realized" in the UI
+ *   is reserved for billed savings (`realized_billed`, when the server has it);
  * - pending verification: the projected annual savings of applied changes
  *   that have not been measured yet (`projected_annual`);
  * - opportunity: the projected annual savings of active recommendations that
@@ -15,6 +18,7 @@
  */
 import { eligibilityOf, expectedValue } from '$lib/utils/decision.js';
 import { getDisplayCurrency } from '$lib/utils/format.js';
+import { savingsFigures } from '$lib/savingsVocabulary.js';
 
 function finite(value) {
 	const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
@@ -78,15 +82,20 @@ export function opportunityOf(recommendations = []) {
  * and the active recommendations.
  */
 export function buildSavingsOverview(savings, recommendations = []) {
-	const realized = block(savings?.realized_to_date);
-	const runRate = block(savings?.run_rate_annual);
-	const pending = block(savings?.projected_annual);
+	const figures = savingsFigures(savings);
+	const realized = block(figures.measuredAllocatedToDate);
+	const runRate = block(figures.measuredAllocatedAnnual);
+	const pending = block(figures.projectedAnnual);
+	const billed = block(figures.realizedBilledToDate);
 	return {
 		currency: currencyOf(recommendations),
 		realized: {
 			toDate: realized,
 			runRateAnnual: runRate,
 			verifiedCount: finite(savings?.verified_count) ?? 0,
+			realizationFactor: figures.realizationFactor,
+			expectedBilledCostAnnual: figures.expectedBilledCostAnnual,
+			realizedBilledToDate: billed,
 			hasMeasurement: Boolean((realized && (realized.cost || realized.co2eGrams)) || (runRate && (runRate.cost || runRate.co2eGrams)))
 		},
 		pending: {

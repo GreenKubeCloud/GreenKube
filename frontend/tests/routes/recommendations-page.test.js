@@ -788,7 +788,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		]);
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: /Realized Savings/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Measured savings/ }));
 		await fireEvent.click(await screen.findByText('oversized-web'));
 
 		const change = await screen.findByTestId('request-change-cpu');
@@ -816,7 +816,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		]);
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: /Realized Savings/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Measured savings/ }));
 		await fireEvent.click(await screen.findByText('oversized-web'));
 
 		const change = await screen.findByTestId('request-change-memory');
@@ -845,7 +845,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		]);
 
 		render(RecommendationsPage);
-		await fireEvent.click(await screen.findByRole('button', { name: /Realized Savings/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Measured savings/ }));
 		const summary = await screen.findByTestId('request-summary-cpu');
 		expect(summary).toHaveTextContent('400m → 10m (proposed)');
 

@@ -44,6 +44,7 @@
 	} from '$lib/utils/decision.js';
 	import DataState from '$lib/components/DataState.svelte';
 	import { etaFrom } from '$lib/overview.js';
+	import { SAVINGS_TERMS, realizationText, savingsFigures } from '$lib/savingsVocabulary.js';
 
 	// --- State ---
 	let activeRecs = [];
@@ -379,6 +380,7 @@
 	$: totalSavingsCO2 = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
 	$: totalSavingsCost = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_cost ?? 0), 0);
 	$: potentialSavingsPeriod = 'per year';
+	$: savingsTabFigures = savingsFigures(savings);
 
 	function switchTab(tab) {
 		activeTab = tab;
@@ -1952,7 +1954,7 @@
 			       {activeTab === 'savings' ? 'bg-dark-700 text-dark-100' : 'text-dark-500 hover:text-dark-300'}"
 			on:click={() => switchTab('savings')}
 		>
-			💰 Realized Savings
+			💰 Measured savings
 			{#if savings?.applied_count}
 				<span class="ml-1.5 text-xs px-1.5 py-0.5 rounded-full bg-blue-600/20 text-blue-400">
 					{savings.applied_count}
@@ -1974,23 +1976,29 @@
 								<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">{savings.verified_count} verified</p>
 							{/if}
 						</div>
-						<div class="card-compact text-center">
-							<p class="stat-label">CO₂ Avoided</p>
-							<p class="stat-value text-2xl text-green-400">{formatCO2(savings.total_carbon_saved_co2e_grams)}</p>
+						<div class="card-compact text-center" data-testid="savings-tab-co2e">
+							<p class="stat-label">{SAVINGS_TERMS.allocatedCo2e}</p>
+							<p class="stat-value text-2xl text-green-400">{formatCO2(savingsTabFigures.measuredAllocatedToDate?.co2e_grams ?? savings.measured_carbon_saved_co2e_grams ?? 0)}</p>
 							<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">
-								measured {formatCO2(savings.measured_carbon_saved_co2e_grams ?? 0)} ·
-								projected {formatCO2(savings.prorated_carbon_saved_co2e_grams ?? 0)}
+								measured, to date · projected separately {formatCO2(savingsTabFigures.projectedToDate?.co2e_grams ?? savings.prorated_carbon_saved_co2e_grams ?? 0)}
 							</p>
 						</div>
-						<div class="card-compact text-center">
-							<p class="stat-label">Cost Saved</p>
-							<p class="stat-value text-2xl text-blue-400">{formatCost(savings.total_cost_saved)}</p>
+						<div class="card-compact text-center" data-testid="savings-tab-cost">
+							<p class="stat-label">{SAVINGS_TERMS.measuredAllocated}</p>
+							<p class="stat-value text-2xl text-blue-400">{formatCost(savingsTabFigures.measuredAllocatedToDate?.cost ?? savings.measured_cost_saved ?? 0)}</p>
 							<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">
-								measured {formatCost(savings.measured_cost_saved ?? 0)} ·
-								projected {formatCost(savings.prorated_cost_saved ?? 0)}
+								measured, to date · projected separately {formatCost(savingsTabFigures.projectedToDate?.cost ?? savings.prorated_cost_saved ?? 0)}
 							</p>
 						</div>
 					</div>
+					{#if realizationText(savingsTabFigures.realizationFactor)}
+						<p class="text-xs text-dark-400" data-testid="savings-tab-realization">{realizationText(savingsTabFigures.realizationFactor)}</p>
+					{/if}
+					{#if savingsTabFigures.realizedBilledToDate}
+						<p class="text-xs text-green-300" data-testid="savings-tab-billed">
+							{SAVINGS_TERMS.realizedBilled}: {formatCost(savingsTabFigures.realizedBilledToDate.cost ?? 0)} · {formatCO2(savingsTabFigures.realizedBilledToDate.co2e_grams ?? 0)} CO₂e
+						</p>
+					{/if}
 
 					{#if appliedRecs.length}
 						<div class="space-y-2">

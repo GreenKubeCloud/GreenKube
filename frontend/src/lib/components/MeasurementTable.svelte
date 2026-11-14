@@ -3,6 +3,7 @@
 	import { formatMoney } from '$lib/utils/decision.js';
 	import { measurementRows } from '$lib/changes.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
+	import { outcomeLabel } from '$lib/savingsVocabulary.js';
 
 	/** One decided measurement from GET /api/v2/changes/{id}/measurements. */
 	export let measurement;
@@ -23,7 +24,7 @@
 
 <div class="space-y-2" data-testid="measurement">
 	<div class="flex flex-wrap items-center gap-2 text-xs text-dark-400">
-		<StatusPill label={String(measurement?.outcome ?? 'unknown').replaceAll('_', ' ')} tone={OUTCOME_TONES[measurement?.outcome] ?? 'dark'} />
+		<StatusPill label={measurement?.outcome ? outcomeLabel(measurement.outcome) : 'unknown'} tone={OUTCOME_TONES[measurement?.outcome] ?? 'dark'} />
 		<span>Decided <time datetime={measurement?.decided_at}>{formatDate(measurement?.decided_at)}</time></span>
 		{#if measurement?.strategy_key}<span>· {measurement.strategy_key} {measurement.strategy_version ?? ''}</span>{/if}
 		{#if measurement?.impact_model_version}<span>· Impact Model {measurement.impact_model_version}</span>{/if}
@@ -50,14 +51,15 @@
 							<td class={row.claimed ? 'text-dark-100' : ''}>{amount(row, row.annualized)}</td>
 							<td>{row.ciLow === null ? '—' : `${amount(row, row.ciLow)} … ${amount(row, row.ciHigh)}`}</td>
 							<td>{amount(row, row.projectedAnnual)}</td>
-							<td>{row.outcome ? row.outcome.replaceAll('_', ' ') : '—'}</td>
+							<td>{outcomeLabel(row.outcome)}</td>
 						</tr>
 					{/each}
 				</tbody>
 			</table>
 		</div>
 		<p class="text-[11px] text-dark-500">
-			Measured values are the realized savings; the projected column is the original estimate, shown for comparison only.
+			Measured values are allocated savings (what the workload stops being charged; the bill drops only when
+			capacity is removed). The projected column is the original estimate, shown for comparison only.
 		</p>
 	{/if}
 	{#if measurement?.reasons?.length}

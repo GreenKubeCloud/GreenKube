@@ -17,8 +17,10 @@ import {
 export const CHANGE_STATES = {
 	applied: { label: 'Applied, waiting for measurement', tone: 'blue' },
 	measuring: { label: 'Measuring', tone: 'blue' },
-	realized: { label: 'Realized', tone: 'green' },
-	not_realized: { label: 'Not realized', tone: 'yellow' },
+	// "Realized" is reserved for billed savings (principle 3): a measurement outcome says
+	// whether an allocated saving was measured.
+	realized: { label: 'Saving measured', tone: 'green' },
+	not_realized: { label: 'No saving measured', tone: 'yellow' },
 	inconclusive: { label: 'Inconclusive', tone: 'dark' },
 	contaminated: { label: 'Contaminated', tone: 'yellow' },
 	regressed: { label: 'Regressed (rollback review)', tone: 'red' },
@@ -140,7 +142,7 @@ export const BOARD_STAGES = [
 	{ id: 'synced', label: 'Synced', description: 'Synced; waiting for the workload to roll out.' },
 	{ id: 'applied', label: 'Applied', description: 'Rolled out; measurement starts after the warm-up.' },
 	{ id: 'measuring', label: 'Measuring', description: 'The measurement window is open.' },
-	{ id: 'outcome', label: 'Outcome', description: 'Realized, not realized, rollback review or closed.' }
+	{ id: 'outcome', label: 'Outcome', description: 'Saving measured, no saving measured, rollback review or closed.' }
 ];
 
 const STAGE_IDS = new Set(BOARD_STAGES.map((stage) => stage.id));

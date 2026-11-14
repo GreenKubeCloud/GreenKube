@@ -7,6 +7,7 @@
 	import { safeHttpUrl } from '$lib/recommendationDetail.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
 	import MeasurementTable from '$lib/components/MeasurementTable.svelte';
+	import { SAVINGS_TERMS, realizationText, savingsFigures } from '$lib/savingsVocabulary.js';
 
 	/** @type {{change: string|null}} */
 	export let data;
@@ -110,12 +111,17 @@
 
 	$: blocks = savings
 		? [
-				{ id: 'realized', title: 'Realized to date', pill: 'Measured', tone: 'green', block: savings.realized_to_date, unit: '', note: 'Measured savings accrued in the ledger.' },
-				{ id: 'run-rate', title: 'Measured run rate', pill: 'Measured', tone: 'green', block: savings.run_rate_annual, unit: '/yr', note: 'Current yearly rate of verified changes.' },
-				{ id: 'pending', title: 'Pending verification', pill: 'Projected', tone: 'blue', block: savings.projected_annual, unit: '/yr', note: 'Projection for applied changes not measured yet.' },
-				{ id: 'declared', title: 'User declared', pill: 'Declared', tone: 'dark', block: savings.user_declared_annual, unit: '/yr', note: 'Declared on manual applies; never counted as measured.' }
+				{ id: 'realized', title: SAVINGS_TERMS.measuredAllocatedToDate, pill: 'Measured', tone: 'green', block: figures.measuredAllocatedToDate, unit: '', note: 'What the changed workloads stopped being charged, accrued in the ledger.' },
+				{ id: 'run-rate', title: SAVINGS_TERMS.measuredAllocatedRunRate, pill: 'Measured', tone: 'green', block: figures.measuredAllocatedAnnual, unit: '/yr', note: 'Current yearly allocated rate of verified changes.' },
+				...(figures.realizedBilledToDate
+					? [{ id: 'billed', title: SAVINGS_TERMS.realizedBilled, pill: 'Realized', tone: 'green', block: figures.realizedBilledToDate, unit: '', note: 'Savings seen on the bill (capacity removed).' }]
+					: []),
+				{ id: 'pending', title: SAVINGS_TERMS.pendingVerification, pill: 'Projected', tone: 'blue', block: figures.projectedAnnual, unit: '/yr', note: 'Projection for applied changes not measured yet.' },
+				{ id: 'declared', title: SAVINGS_TERMS.userDeclared, pill: 'Declared', tone: 'dark', block: figures.userDeclaredAnnual, unit: '/yr', note: 'Declared on manual applies; never counted as measured.' }
 			]
 		: [];
+	$: figures = savingsFigures(savings);
+	$: realization = realizationText(figures.realizationFactor);
 	$: current = latestMeasurement(selectedMeasurements);
 	$: history = selectedMeasurements.filter((item) => item !== current).reverse();
 </script>
@@ -125,7 +131,7 @@
 <div class="p-4 sm:p-6 lg:p-8 space-y-6 max-w-[1400px] mx-auto">
 	<header>
 		<h1 class="text-2xl font-bold text-dark-100">Savings ledger</h1>
-		<p class="text-sm text-dark-500 mt-1">Applied changes, their measurements and the savings they realized</p>
+		<p class="text-sm text-dark-500 mt-1">Applied changes, their measurements and the allocated savings measured on them</p>
 	</header>
 
 	<!-- Totals per method, never summed -->
@@ -148,6 +154,9 @@
 				{/each}
 			</div>
 			<p class="text-xs text-dark-500">Each figure is a different kind of saving; they are never added together.</p>
+			{#if realization}
+				<p class="text-xs text-dark-400" data-testid="ledger-realization-factor">{realization}</p>
+			{/if}
 		{/if}
 	</section>
 
