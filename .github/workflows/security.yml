@@ -1,4 +1,4 @@
-name: Security — Trivy Scan
+name: Security — Trivy and CodeQL
 
 # Runs on every push/PR and weekly to catch newly disclosed CVEs.
 on:
@@ -162,3 +162,42 @@ jobs:
 
       - name: Run npm audit
         run: npm audit --audit-level=high
+
+  # ── Static analysis of the Python backend and the SvelteKit frontend ──
+  # CodeQL's security-extended suite (injection, SSRF, path traversal, unsafe
+  # deserialization, XSS...). Results go to GitHub Security > Code scanning;
+  # see docs/security-model.md for the threat model they are triaged against.
+  codeql:
+    name: CodeQL — ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9418214df1f2c4b8128c770156c409013b07d6b9 # v3.39.3
+        with:
+          languages: ${{ matrix.language }}
+          # Interpreted languages: no build step, the source is analysed as is.
+          build-mode: none
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - tests
+              - frontend/tests
+              - frontend/build
+              - frontend/node_modules
+              - docs
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@9418214df1f2c4b8128c770156c409013b07d6b9 # v3.39.3
+        with:
+          category: /language:${{ matrix.language }}
