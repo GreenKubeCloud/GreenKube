@@ -270,8 +270,11 @@ class LedgerProjector:
         if drift:
             reverses = await self._first_reversed(identity, rec_id, row, pending)
         measured = method == METHOD_MEASURED_ALLOCATED
+        # The currency the recommendation was priced in, not today's configuration (a later currency
+        # change must not relabel past accruals); the configured currency only when it is unknown.
+        currency_of_row = source.currency or self.currency
         for quantity, amount, unit, currency in (
-            (QUANTITY_COST, row.get("cost_saved_dollars"), self.currency, self.currency),
+            (QUANTITY_COST, row.get("cost_saved_dollars"), currency_of_row, currency_of_row),
             (QUANTITY_CO2E, row.get("co2e_saved_grams"), CO2E_UNIT, None),
         ):
             value = float(amount or 0.0)
