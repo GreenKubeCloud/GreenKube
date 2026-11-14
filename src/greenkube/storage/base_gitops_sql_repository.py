@@ -36,11 +36,14 @@ from greenkube.storage.base_gitops_repository import (
     WorkloadBindingEvent,
     WorkloadBindingEventType,
     WorkloadBindingPage,
+    WorkloadPlanConflictError,
+    WorkloadPlanGuard,
     _binding_identity_cursor,
     _binding_identity_from_cursor,
     _validate_binding_page,
     freshen_workload_binding,
     freshen_workload_source,
+    workload_identity,
 )
 from greenkube.storage.gitops_mapper import (
     PLAN_PRE_APPLY_BASELINE_POLICY_KEY,
@@ -1305,6 +1308,66 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
     ) -> Plan:
         return await self._save_plan(plan, policy_result=policy_result, insert_only=True, actor=actor)
 
+    async def save_plan_if_workload_idle(
+        self,
+        plan: Plan,
+        guard: WorkloadPlanGuard,
+        *,
+        policy_result: dict[str, Any] | None = None,
+        actor: str = "system",
+    ) -> Plan:
+        return await self._save_plan(plan, policy_result=policy_result, insert_only=True, actor=actor, guard=guard)
+
+    async def _lock_workload(self, connection: Any, identity: tuple[str, str, str, str]) -> None:
+        """Serialize plan writes of one workload until the transaction ends.
+
+        SQLite transactions are already serialized by the database manager's operation
+        lock; PostgreSQL takes a transaction-scoped advisory lock on the workload identity.
+        """
+        if not self._postgres:
+            return
+        key = "greenkube-plan-workload:" + "/".join(identity)
+        await self._fetchrow(connection, "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", (key,))
+
+    async def _raise_if_workload_busy_on_connection(
+        self,
+        connection: Any,
+        plan_id: str,
+        identity: tuple[str, str, str, str],
+        guard: WorkloadPlanGuard,
+    ) -> None:
+        statuses = sorted(guard.blocking_statuses, key=lambda status: status.value)
+        if not statuses:
+            return
+        if self._postgres:
+            identity_columns = (
+                "source_snapshot->>'cluster'",
+                "source_snapshot->>'namespace'",
+                "source_snapshot->>'workload_kind'",
+                "source_snapshot->>'workload_name'",
+            )
+        else:
+            identity_columns = (
+                "json_extract(source_snapshot, '$.cluster')",
+                "json_extract(source_snapshot, '$.namespace')",
+                "json_extract(source_snapshot, '$.workload_kind')",
+                "json_extract(source_snapshot, '$.workload_name')",
+            )
+        clauses = [f"{column} = ?" for column in identity_columns]
+        clauses.append(f"status IN ({', '.join('?' for _ in statuses)})")
+        clauses.append("plan_id <> ?")
+        rows = await self._fetch(
+            connection,
+            "SELECT plan_id, status FROM automation_plans WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY created_at, plan_id",
+            [*identity, *(status.value for status in statuses), plan_id],
+        )
+        for row in rows:
+            status = PlanStatus(str(row["status"]))
+            if guard.blocks(str(row["plan_id"]), status):
+                raise WorkloadPlanConflictError(str(row["plan_id"]), status)
+
     async def set_plan_policy_result(
         self,
         plan_id: str,
@@ -1389,6 +1452,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         policy_result: dict[str, Any] | None,
         insert_only: bool,
         actor: str,
+        guard: WorkloadPlanGuard | None = None,
     ) -> Plan:
         actor = _validated_audit_actor(actor)
         file_plan = plan.file_plan
@@ -1432,12 +1496,18 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             """
         )
         async with self._transaction() as connection:
+            if guard is not None:
+                await self._lock_workload(connection, workload_identity(plan.source))
             row_lock = " FOR UPDATE" if self._postgres else ""
             existing_row = await self._fetchrow(
                 connection,
                 f"SELECT policy_result FROM automation_plans WHERE plan_id = ?{row_lock}",
                 (plan.plan_id,),
             )
+            if guard is not None and existing_row is None:
+                await self._raise_if_workload_busy_on_connection(
+                    connection, plan.plan_id, workload_identity(plan.source), guard
+                )
             policy_payload = dict(policy_result) if policy_result is not None else dict(plan.policy_result)
             if existing_row is not None:
                 existing_policy = json_value(existing_row["policy_result"], {})
@@ -1969,6 +2039,27 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             )
         return deleted
 
+    async def set_plan_status_if_workload_idle(
+        self,
+        plan_id: str,
+        status: PlanStatus,
+        guard: WorkloadPlanGuard,
+        *,
+        expected_statuses: Sequence[PlanStatus] | None = None,
+        expected_digest: str | None = None,
+        actor: str = "system",
+        reason_code: str | None = None,
+    ) -> Plan | None:
+        return await self.set_plan_status(
+            plan_id,
+            status,
+            expected_statuses=expected_statuses,
+            expected_digest=expected_digest,
+            actor=actor,
+            reason_code=reason_code,
+            _guard=guard,
+        )
+
     async def set_plan_status(
         self,
         plan_id: str,
@@ -1978,6 +2069,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
         expected_digest: str | None = None,
         actor: str = "system",
         reason_code: str | None = None,
+        _guard: WorkloadPlanGuard | None = None,
     ) -> Plan | None:
         actor = _validated_audit_actor(actor)
         conditions = ["plan_id = ?"]
@@ -1994,6 +2086,23 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             params.append(expected_digest)
 
         async with self._transaction() as connection:
+            identity: tuple[str, str, str, str] | None = None
+            if _guard is not None:
+                # Take the workload lock before the row lock (same order as plan creation).
+                snapshot_row = await self._fetchrow(
+                    connection, "SELECT source_snapshot FROM automation_plans WHERE plan_id = ?", (plan_id,)
+                )
+                if snapshot_row is None:
+                    return None
+                snapshot = json_value(snapshot_row["source_snapshot"], {})
+                snapshot = snapshot if isinstance(snapshot, dict) else {}
+                identity = (
+                    str(snapshot.get("cluster")),
+                    str(snapshot.get("namespace")),
+                    str(snapshot.get("workload_kind")),
+                    str(snapshot.get("workload_name")),
+                )
+                await self._lock_workload(connection, identity)
             row_lock = " FOR UPDATE" if self._postgres else ""
             previous = await self._fetchrow(
                 connection,
@@ -2006,6 +2115,8 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             )
             if previous is None:
                 return None
+            if _guard is not None and identity is not None:
+                await self._raise_if_workload_busy_on_connection(connection, plan_id, identity, _guard)
             previous_status = str(previous["status"])
             if expected and previous_status not in {item.value for item in expected}:
                 return None

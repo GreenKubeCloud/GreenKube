@@ -1,4 +1,7 @@
-"""POST /automation/plans/{id}/abandon fails a stuck APPLYING plan (operator or admin, audited)."""
+"""Plan API resilience: the busy check repeated at approval, and the operator abandon action.
+
+POST /automation/plans/{id}/abandon fails a stuck APPLYING plan (operator or admin, audited).
+"""
 
 from __future__ import annotations
 
@@ -7,7 +10,20 @@ from typing import Any
 from greenkube.automation.plans import AutomationPlanError
 from greenkube.gitops.contracts import AutomationErrorCode, PlanStatus
 from tests.api.auth_support import VIEWER_PASSWORD, auth_harness  # pyrefly: ignore[missing-import]
-from tests.api.test_plans_router import _plan, plan_api  # noqa: F401  # pyrefly: ignore[missing-import]
+from tests.api.test_plans_router import _DIGEST, _plan, plan_api  # noqa: F401  # pyrefly: ignore[missing-import]
+
+
+def test_approval_repeats_the_workload_busy_check(plan_api):  # noqa: F811
+    """Another plan of the workload opened its pull request after this preview was created."""
+    client, _, repository, _, queue = plan_api
+    repository.plans["delivering"] = _plan(status=PlanStatus.PR_OPEN).model_copy(update={"plan_id": "delivering"})
+
+    response = client.post("/api/v1/automation/plans/plan-1/approve", json={"digest": _DIGEST})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "workload_plan_already_exists"
+    assert repository.plans["plan-1"].status is PlanStatus.VALIDATED
+    assert queue.keys == []
 
 
 def _install_abandon(api_service: Any, repository: Any, calls: list[tuple[str, str, str | None]]) -> None:
