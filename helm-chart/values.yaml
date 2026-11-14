@@ -626,7 +626,8 @@ sources:
       prometheusUrl: ""
       # Extra KRR arguments, e.g. ["--namespace", "shop", "--history_duration", "168"].
       extraArgs: []
-      # Secret holding a GreenKube API key with scope signals:write (required).
+      # Secret holding a GreenKube API key with scope signals:report (required; a
+      # signals:write key is still accepted, deprecated).
       apiKeySecret:
         name: ""
         key: api-key
@@ -660,7 +661,8 @@ sources:
       # true: each audit replaces every earlier Polaris finding. Set false when
       # extraArgs narrows the audit (one namespace): findings are added or refreshed.
       complete: true
-      # Secret holding a GreenKube API key with scope signals:write (required).
+      # Secret holding a GreenKube API key with scope signals:report (required; a
+      # signals:write key is still accepted, deprecated).
       apiKeySecret:
         name: ""
         key: api-key

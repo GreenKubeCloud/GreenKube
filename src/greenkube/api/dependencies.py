@@ -20,7 +20,16 @@ from fastapi import Depends, HTTPException, Query, Request
 
 from greenkube.auth.http import CSRF_HEADER, from_trusted_proxy, is_same_origin, peer_address
 from greenkube.auth.metrics import record_auth_failure
-from greenkube.auth.principal import ALL_SCOPES, ANONYMOUS, SAFE_METHODS, Principal, Role, Scope, required_scope
+from greenkube.auth.principal import (
+    ALL_SCOPES,
+    ANONYMOUS,
+    DEPRECATED_SCOPE_FALLBACKS,
+    SAFE_METHODS,
+    Principal,
+    Role,
+    Scope,
+    required_scope,
+)
 from greenkube.auth.proxy import UntrustedProxyHeader, read_proxy_identity
 from greenkube.auth.service import AuthError, AuthService, api_key_principal, user_principal
 from greenkube.auth.settings import AUTH_MODES, AuthSettings
@@ -358,8 +367,12 @@ async def authenticate(request: Request) -> None:
 
     scope = required_scope(request.method, path)
     if scope is not None and not principal.has_scope(scope):
-        record_auth_failure("forbidden_scope")
-        raise _forbidden("INSUFFICIENT_SCOPE", f"This credential lacks the '{scope}' scope.")
+        fallback = DEPRECATED_SCOPE_FALLBACKS.get(scope)
+        if fallback is None or not principal.has_scope(fallback):
+            record_auth_failure("forbidden_scope")
+            raise _forbidden("INSUFFICIENT_SCOPE", f"This credential lacks the '{scope}' scope.")
+        # Accepted for one minor release; the route answers with a Deprecation header.
+        request.state.deprecated_scope = (fallback, scope)
 
     if principal.kind == "user" and request.method.upper() not in SAFE_METHODS:
         # A user principal without a session (proxy identity before GET /auth/me) has no
