@@ -9,11 +9,14 @@ metadata:
     "helm.sh/hook": test
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
+  {{- with include "greenkube.imagePullSecrets" . }}
+  {{- . | nindent 2 }}
+  {{- end }}
   securityContext:
     {{- toYaml .Values.tests.podSecurityContext | nindent 4 }}
   containers:
     - name: wget
-      image: busybox:1.36
+      image: {{ include "greenkube.helperImage" .Values.initContainer.image | quote }}
       imagePullPolicy: IfNotPresent
       securityContext:
         {{- toYaml .Values.tests.containerSecurityContext | nindent 8 }}

@@ -13,6 +13,11 @@
 # the SQLite values are still accepted for this minor release, mapped onto the
 # keys below and reported in the install notes (docs/upgrading.md).
 
+global:
+  # Pull secrets of every GreenKube pod (names, or {name: ...} entries), for a
+  # private registry or mirror.
+  imagePullSecrets: []
+
 # Scratch space for archive snapshots and renderer request streaming.
 tmp:
   sizeLimit: 768Mi
@@ -30,6 +35,21 @@ api:
     limits:
       cpu: 500m
       memory: 512Mi
+  # Scheduling (all optional). With more than one replica and no affinity,
+  # replicas prefer distinct nodes (podAntiAffinity: soft | hard | none).
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAntiAffinity: soft
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
+  # Rendered only with more than one replica: voluntary disruptions (node
+  # drains) keep at least one pod running.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
   # Liveness: process heartbeat only, never restarts the API for a slow dependency.
   livenessProbe:
     enabled: true
@@ -62,6 +82,26 @@ controller:
     limits:
       cpu: '1'
       memory: 1Gi
+  # Scheduling (all optional). With more than one replica and no affinity,
+  # replicas prefer distinct nodes (podAntiAffinity: soft | hard | none).
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAntiAffinity: soft
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
+  # Rendered only with more than one replica: voluntary disruptions (node
+  # drains) keep at least one pod running.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # Recreate: the old release stops before the new one migrates the schema,
+  # so two versions never write side by side. Set RollingUpdate only if a
+  # short controller gap matters more than that guarantee.
+  strategy:
+    type: Recreate
   # Port of the controller's /prometheus/metrics, /healthz, /readyz and /loops
   # listener. The probes use it; 0 disables it (process probes then).
   metricsPort: 9102
@@ -104,6 +144,16 @@ renderer:
     limits:
       cpu: 500m
       memory: 1Gi
+  # Scheduling (all optional). With more than one replica and no affinity,
+  # replicas prefer distinct nodes (podAntiAffinity: soft | hard | none).
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAntiAffinity: soft
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
   # Defense in depth for CNIs that do not enforce NetworkPolicy: an init
   # container installs a deny-all egress firewall (needs NET_ADMIN).
   egressFirewall:
@@ -122,6 +172,21 @@ worker:
     limits:
       cpu: 250m
       memory: 256Mi
+  # Scheduling (all optional). With more than one replica and no affinity,
+  # replicas prefer distinct nodes (podAntiAffinity: soft | hard | none).
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAntiAffinity: soft
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
+  # Recreate: the old release stops before the new one migrates the schema,
+  # so two versions never write side by side. Set RollingUpdate only if a
+  # short controller gap matters more than that guarantee.
+  strategy:
+    type: Recreate
 
 # ---------------------------------------------------------------------------
 # GitOps automation (always on; see docs/automation.md)
@@ -286,7 +351,10 @@ image:
 initContainer:
   image:
     repository: busybox
-    tag: '1.37'
+    # Tag pinned to the multi-arch index digest of busybox:1.37: a re-pushed
+    # tag cannot change it. Overriding the tag drops the pin; an explicit
+    # "digest" key pins any tag.
+    tag: '1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec'
     pullPolicy: IfNotPresent
 
 serviceAccount:
@@ -901,7 +969,12 @@ postgres:
     # Remaining CVEs (libcrypto3 CVE-2026-28390, zlib CVE-2026-22184, gosu Go stdlib)
     # are upstream-only: not yet patched in Alpine 3.23.3 or gosu binary.
     # Tracked in .trivyignore; will auto-resolve on next Alpine package update.
-    tag: 18-alpine
+    # Tag pinned to the multi-arch index digest of postgres:18-alpine
+    # (2026-11-12): every node runs the same build and a re-pushed tag cannot
+    # change the database under a running release. Bump both together
+    # (Renovate understands "tag@digest"). Overriding the tag (e.g.
+    # "18-alpine") drops the pin; an explicit "digest" key pins any tag.
+    tag: 18-alpine@sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
@@ -926,6 +999,51 @@ postgres:
     requests:
       cpu: 100m
       memory: 128Mi
+  # Memory-backed /dev/shm for parallel query workers (the container runtime
+  # default is 64Mi). Pages in use count against the memory limit above.
+  # '' keeps the runtime default.
+  shmSizeLimit: 128Mi
+  terminationGracePeriodSeconds: 60
+  # Scheduling (all optional): pin the database to nodes whose storage class
+  # the claim needs, keep it off spot nodes, give it a priority class.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ''
+  podAnnotations: {}
+  podLabels: {}
+  # Scheduled logical backup (docs/operations/backup-restore.md): a CronJob
+  # runs pg_dump of the GreenKube schema (custom format, checked with
+  # pg_restore --list) into its own PersistentVolumeClaim and keeps the last
+  # "keep" dumps. Works for the bundled and for an external PostgreSQL (it
+  # reads DB_CONNECTION_STRING). A dump on a volume of the same cluster does
+  # not survive the loss of the cluster: copy it off-site (the guide shows an
+  # object-store variant).
+  backup:
+    enabled: false
+    schedule: '17 3 * * *'
+    keep: 7
+    # Abort a dump that runs longer than this.
+    activeDeadlineSeconds: 3600
+    persistence:
+      # Claim of the dumps; '' creates <release>-postgres-backup.
+      existingClaim: ''
+      size: 20Gi
+      storageClassName: ''
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    priorityClassName: ''
+    podAnnotations: {}
+    podLabels: {}
 
 # Prometheus → GreenKube monitoring integration (optional).
 # This controls whether Prometheus scrapes GreenKube's own /prometheus/metrics endpoint.
@@ -958,6 +1076,22 @@ monitoring:
       # Age of the last successful recommendation-lifecycle tick (apply
       # detection, verification and change measurement; runs every 5 minutes).
       measurementStaleSeconds: 1800
+    # Operations alerts (group greenkube.operations): GreenKubeAPIDown (API
+    # ServiceMonitor), GreenKubeDatabaseUnavailable (controller ServiceMonitor:
+    # the controller heartbeat cannot be written), GreenKubeAPIUnavailable,
+    # GreenKubePostgresDown and GreenKubeBackupMissing (kube-state-metrics),
+    # GreenKubeDataVolumeLow and GreenKubeDataVolumeFillingUp (kubelet volume
+    # stats of the bundled PostgreSQL and backup claims).
+    operations:
+      enabled: true
+      # false when kube-state-metrics is not scraped (its alerts would never fire).
+      kubeStateMetrics: true
+      # Free-space ratio under which a data volume alerts.
+      volumeFreeRatio: 0.15
+      # Alert when the last 6 hours' growth fills a volume within this horizon.
+      volumeFullWithinHours: 96
+      # Age of the last successful backup (postgres.backup.enabled) that alerts.
+      backupMaxAgeHours: 36
 
   serviceMonitor:
     # Create a ServiceMonitor for Prometheus Operator to discover GreenKube metrics.

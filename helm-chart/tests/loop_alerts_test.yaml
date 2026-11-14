@@ -12,7 +12,7 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.groups
-          count: 4
+          count: 5
       - equal:
           path: spec.groups[2].name
           value: greenkube.loop
@@ -129,7 +129,7 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.groups
-          count: 1
+          count: 2
       - equal:
           path: spec.groups[0].name
           value: greenkube.automation
@@ -142,7 +142,7 @@ tests:
     asserts:
       - lengthEqual:
           path: spec.groups
-          count: 2
+          count: 3
       - equal:
           path: spec.groups[1].name
           value: greenkube.ledger

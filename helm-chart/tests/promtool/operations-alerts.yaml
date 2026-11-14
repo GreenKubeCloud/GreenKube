@@ -1,0 +1,226 @@
+# promtool unit tests of the greenkube.operations alerts (production readiness),
+# run by .github/scripts/promtool-check.sh against the rule file rendered from
+# templates/prometheusrule.yaml (release "greenkube" in namespace "default",
+# postgres.backup.enabled=true, default thresholds).
+rule_files:
+  - greenkube-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # API down: every target down, or no target at all.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'up{namespace="default",job="greenkube-api",instance="a:8000"}'
+        values: '1x5 0x15'
+      - series: 'up{namespace="default",job="greenkube-api",instance="b:8000"}'
+        values: '1x20'
+    alert_rule_test:
+      # One replica of two is down: still served.
+      - eval_time: 20m
+        alertname: GreenKubeAPIDown
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'up{namespace="default",job="greenkube-api",instance="a:8000"}'
+        values: '1x5 0x15'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GreenKubeAPIDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GreenKubeAPIDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: The GreenKube API is down
+              description: "No greenkube-api pod in namespace default answers its metrics scrape: the UI, the API and Git provider webhooks are unavailable. Check kubectl -n default get pods -l app.kubernetes.io/component=api and the API logs."
+
+  - interval: 1m
+    input_series:
+      # Another release's API is up; this one has no target at all.
+      - series: 'up{namespace="other",job="greenkube-api",instance="x:8000"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GreenKubeAPIDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: The GreenKube API is down
+              description: "No greenkube-api pod in namespace default answers its metrics scrape: the UI, the API and Git provider webhooks are unavailable. Check kubectl -n default get pods -l app.kubernetes.io/component=api and the API logs."
+
+  # ---------------------------------------------------------------------------
+  # Database unavailable: the controller heartbeat keeps failing.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_loop_consecutive_failures{job="c",instance="leader:9102",loop="controller-heartbeat"}'
+        values: '0x3 1 2 3 4 5 6 7 8 9 10 11 12'
+      - series: 'greenkube_loop_consecutive_failures{job="c",instance="leader:9102",loop="collection"}'
+        values: '0x15'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: GreenKubeDatabaseUnavailable
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GreenKubeDatabaseUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: GreenKube cannot write to its database
+              description: "The controller heartbeat has failed 9 times in a row; collection, scans, measurement and the ledger are stopped. Check the PostgreSQL pod or the external database, its disk and the controller logs (docs/operations/backup-restore.md)."
+
+  - interval: 1m
+    input_series:
+      # Another loop failing is not a database outage.
+      - series: 'greenkube_loop_consecutive_failures{job="c",instance="leader:9102",loop="collection"}'
+        values: '5x20'
+      - series: 'greenkube_loop_consecutive_failures{job="c",instance="leader:9102",loop="controller-heartbeat"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GreenKubeDatabaseUnavailable
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # kube-state-metrics: API without a ready replica, PostgreSQL down.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="default",deployment="greenkube-api"}'
+        values: '1x5 0x20'
+      - series: 'kube_statefulset_status_replicas_ready{namespace="default",statefulset="greenkube-postgres"}'
+        values: '1x5 0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GreenKubeAPIUnavailable
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GreenKubeAPIUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: default
+              deployment: greenkube-api
+            exp_annotations:
+              summary: No GreenKube API replica is ready
+              description: "Deployment greenkube-api has no available replica: readiness reports migrating (the controller has not finished the schema migrations), database_unavailable or degraded. See GET /api/v1/health and the controller logs."
+      - eval_time: 12m
+        alertname: GreenKubePostgresDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: default
+              statefulset: greenkube-postgres
+            exp_annotations:
+              summary: The bundled GreenKube PostgreSQL is not ready
+              description: "StatefulSet greenkube-postgres has no ready replica. Check its events, its volume (GreenKubeDataVolumeLow) and kubectl -n default logs greenkube-postgres-0."
+
+  # ---------------------------------------------------------------------------
+  # Backups
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Created at t=0, succeeded at 3h, then every run fails.
+      - series: 'kube_cronjob_created{namespace="default",cronjob="greenkube-postgres-backup"}'
+        values: '0x2600'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="default",cronjob="greenkube-postgres-backup"}'
+        values: '_x180 10800x2420'
+    alert_rule_test:
+      - eval_time: 30h
+        alertname: GreenKubeBackupMissing
+        exp_alerts: []
+      - eval_time: 41h
+        alertname: GreenKubeBackupMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The GreenKube database backup has not succeeded recently
+              description: "No successful greenkube-postgres-backup run for more than 36 hours. Check kubectl -n default get jobs and the logs of the last job (docs/operations/backup-restore.md)."
+
+  - interval: 1m
+    input_series:
+      # Never succeeded since its creation.
+      - series: 'kube_cronjob_created{namespace="default",cronjob="greenkube-postgres-backup"}'
+        values: '0x2600'
+    alert_rule_test:
+      - eval_time: 20h
+        alertname: GreenKubeBackupMissing
+        exp_alerts: []
+      - eval_time: 40h
+        alertname: GreenKubeBackupMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The GreenKube database backup has not succeeded recently
+              description: "No successful greenkube-postgres-backup run for more than 36 hours. Check kubectl -n default get jobs and the logs of the last job (docs/operations/backup-restore.md)."
+
+  # ---------------------------------------------------------------------------
+  # Data volumes
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="default",persistentvolumeclaim="data-greenkube-postgres-0"}'
+        values: '100x40'
+      - series: 'kubelet_volume_stats_available_bytes{namespace="default",persistentvolumeclaim="data-greenkube-postgres-0"}'
+        values: '10x40'
+      # An unrelated claim of the namespace is ignored.
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="default",persistentvolumeclaim="other-app"}'
+        values: '100x40'
+      - series: 'kubelet_volume_stats_available_bytes{namespace="default",persistentvolumeclaim="other-app"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GreenKubeDataVolumeLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: default
+              persistentvolumeclaim: data-greenkube-postgres-0
+            exp_annotations:
+              summary: A GreenKube data volume is almost full
+              description: "Volume data-greenkube-postgres-0 has 10% free (threshold 0.15). Expand the claim or shorten retention (docs/installation.md#sizing)."
+
+  - interval: 1m
+    input_series:
+      # 54% free at first, losing 2% of the capacity per hour: below 40% after
+      # 7 hours, full after 27.
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="default",persistentvolumeclaim="greenkube-postgres-backup"}'
+        values: '100x660'
+      - series: 'kubelet_volume_stats_available_bytes{namespace="default",persistentvolumeclaim="greenkube-postgres-backup"}'
+        values: '54-0.0333333333x660'
+    alert_rule_test:
+      - eval_time: 10h
+        alertname: GreenKubeDataVolumeFillingUp
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: default
+              persistentvolumeclaim: greenkube-postgres-backup
+            exp_annotations:
+              summary: A GreenKube data volume will fill up
+              description: "At the growth rate of the last 6 hours, volume greenkube-postgres-backup is full within 96 hours. Expand the claim or shorten retention (docs/installation.md#sizing)."
+      - eval_time: 10h
+        alertname: GreenKubeDataVolumeLow
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # Plenty of room and stable: nothing fires.
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="default",persistentvolumeclaim="data-greenkube-postgres-0"}'
+        values: '100x660'
+      - series: 'kubelet_volume_stats_available_bytes{namespace="default",persistentvolumeclaim="data-greenkube-postgres-0"}'
+        values: '80x660'
+    alert_rule_test:
+      - eval_time: 10h
+        alertname: GreenKubeDataVolumeFillingUp
+        exp_alerts: []
