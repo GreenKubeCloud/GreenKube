@@ -85,6 +85,22 @@ tests:
       - equal:
           path: spec.endpoints[0].path
           value: /prometheus/metrics
+      # The controller gets the metrics:read scrape token, never the admin API key.
+      - equal:
+          path: spec.endpoints[0].authorization
+          value:
+            type: Bearer
+            credentials:
+              name: RELEASE-NAME-greenkube
+              key: GREENKUBE_METRICS_TOKEN
+
+  - it: keeps the controller ServiceMonitor without credentials when an existing Secret has no scrape token
+    set:
+      monitoring.serviceMonitor.enabled: true
+      secrets.existingSecret: my-secret
+    templates:
+      - templates/controller-servicemonitor.yaml
+    asserts:
       - notExists:
           path: spec.endpoints[0].authorization
 

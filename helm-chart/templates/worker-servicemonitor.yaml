@@ -24,10 +24,9 @@ spec:
       path: /prometheus/metrics
       interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
-      # The worker metrics endpoint uses the same bearer key as the API metrics endpoint.
+      # The worker accepts the scrape token (or, without one, the deprecated bootstrap key).
       authorization:
         type: Bearer
         credentials:
-          name: {{ include "greenkube.secretNameFor" (dict "context" . "key" "GREENKUBE_API_KEY") }}
-          key: GREENKUBE_API_KEY
+          {{- include "greenkube.scrapeCredentials" . | nindent 10 }}
 {{- end }}

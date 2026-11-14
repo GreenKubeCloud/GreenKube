@@ -414,6 +414,7 @@
         },
         "login": {"type": "object", "properties": {"rateLimit": {"type": "string"}}},
         "localLogin": {"type": "boolean"},
+        "legacyApiKey": {"type": "string", "enum": ["admin", "metrics", "disabled"]},
         "roles": {
           "type": "object",
           "properties": {
@@ -452,7 +453,13 @@
         }
       }
     },
-    "secrets": {"type": "object"},
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "metricsToken": {"type": "string"},
+        "existingSecretHasMetricsToken": {"type": "boolean"}
+      }
+    },
     "hooks": {"type": "object"},
     "tests": {"type": "object"},
     "postgres": {

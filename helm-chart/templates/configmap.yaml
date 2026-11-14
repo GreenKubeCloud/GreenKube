@@ -150,6 +150,7 @@ data:
   AUTH_LOGIN_RATE_LIMIT: {{ ($auth.login | default dict).rateLimit | default "5/minute" | quote }}
   AUTH_ADMIN_USERNAME: {{ $admin.username | default "admin" | quote }}
   AUTH_INITIAL_ADMIN_SECRET: {{ include "greenkube.initialAdminSecretName" . | quote }}
+  AUTH_LEGACY_API_KEY: {{ include "greenkube.legacyApiKeyAccess" . | quote }}
 
   # --- Single sign-on and roles (F16) ---
   {{- $mode := .Values.config.apiAuthMode | default "session" }}

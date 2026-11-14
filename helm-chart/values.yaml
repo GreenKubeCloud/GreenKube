@@ -743,9 +743,17 @@ auth:
     absoluteLifetime: 7d
     rememberLifetime: 30d
   login:
-    # Failed sign-ins allowed per username (4x per client IP) before an
-    # exponential lockout.
+    # Failed sign-ins allowed per username and client IP before an exponential
+    # lockout of that pair; each client IP also gets 4x this budget across
+    # usernames (no escalation). The client IP is read from X-Forwarded-For only
+    # from config.trustedProxyIps: behind an Ingress, list its controller pods.
     rateLimit: 5/minute
+  # What the deprecated bootstrap key GREENKUBE_API_KEY may do: admin (the
+  # historical full-admin key; required with config.apiAuthMode=api_key),
+  # metrics (Prometheus scrape only) or disabled (rejected). New session, oidc
+  # and proxy installs generate no bootstrap key; installs upgraded with one keep
+  # it as admin until you migrate (docs/authentication.md#the-bootstrap-api-key).
+  legacyApiKey: admin
   # --- Single sign-on and roles (F16) ---
   # Roles: viewer (read), operator (approve plans, ignore/restore, mark
   # applied), admin (settings, users, API keys, repository allowlist).
@@ -833,11 +841,21 @@ secrets:
   # Boavizta API Token (optional)
   boaviztaToken: ''
 
-  # Deprecated bootstrap API key (GREENKUBE_API_KEY): accepted as an admin
-  # Bearer key for one more minor release. Prefer scoped API keys created in
-  # Settings > API keys. Left empty, a key is generated once by the
-  # credentials bootstrap Job.
+  # Deprecated bootstrap API key (GREENKUBE_API_KEY): a full-admin Bearer key
+  # (see auth.legacyApiKey) kept for one more minor release. Prefer scoped API
+  # keys created in Settings > API keys. Left empty, a key is generated once by
+  # the credentials bootstrap Job only for config.apiAuthMode=api_key; an
+  # existing generated key is kept on upgrade.
   apiKey: ''
+
+  # Prometheus scrape token (GREENKUBE_METRICS_TOKEN): metrics:read only, sent by
+  # the ServiceMonitors to the API, controller and worker metrics endpoints.
+  # Left empty, it is generated once by the credentials bootstrap Job.
+  metricsToken: ''
+  # With secrets.existingSecret: true when that Secret holds a
+  # GREENKUBE_METRICS_TOKEN key. Otherwise the ServiceMonitors keep scraping
+  # with its GREENKUBE_API_KEY (deprecated).
+  existingSecretHasMetricsToken: false
 
   # PostgreSQL connection string, only used with postgres.enabled=false
   # (bring your own PostgreSQL instance)

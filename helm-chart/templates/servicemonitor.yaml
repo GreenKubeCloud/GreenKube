@@ -23,11 +23,11 @@ spec:
       path: /prometheus/metrics
       interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
-      # An API key protects /prometheus/metrics. The referenced Secret must
+      # A bearer token protects /prometheus/metrics. The referenced Secret must
       # exist in the ServiceMonitor namespace (monitoring.serviceMonitor.namespace)
-      # for Prometheus to read it. Prefer a key with only the metrics:read scope
-      # (monitoring.serviceMonitor.bearerTokenSecret); otherwise the deprecated
-      # bootstrap key GREENKUBE_API_KEY is used.
+      # for Prometheus to read it. monitoring.serviceMonitor.bearerTokenSecret (a
+      # metrics:read API key) wins; otherwise the generated metrics:read scrape token
+      # GREENKUBE_METRICS_TOKEN, or, without one, the deprecated GREENKUBE_API_KEY.
       authorization:
         type: Bearer
         credentials:
@@ -36,8 +36,7 @@ spec:
           name: {{ .name }}
           key: {{ .key | default "token" }}
           {{- else }}
-          name: {{ include "greenkube.secretNameFor" (dict "context" $ "key" "GREENKUBE_API_KEY") }}
-          key: GREENKUBE_API_KEY
+          {{- include "greenkube.scrapeCredentials" $ | nindent 10 }}
           {{- end }}
           {{- end }}
       metricRelabelings:
