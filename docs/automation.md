@@ -274,7 +274,9 @@ branch is linked automatically too: at the PR poll interval the controller lists
 the base branch of each approved `patch` plan (50 most recent per repository and branch), reads their descriptions
 and, for at most 10 requests per pass, their commit messages, and records a request whose description or commits
 carry the `GreenKube-Plan` trailer (or whose description carries the GreenKube footer) through the same
-verification as a report. A request that does not verify is not retried until its head changes. The link-back (the
+verification as a report. The verification accepts the trailer in the description or in any commit message of the
+request (first page of its commits), so a request whose only link is the commit trailer kept by `git am` is linked
+too. A request that does not verify is not retried until its head changes. The link-back (the
 **I opened PR** field of the plan dialog, or `report-delivery`) works for any request. The patch is served only when the stored diff
 reproduces the original file blobs exactly; otherwise the API answers `409 patch_unavailable`.
 
@@ -439,7 +441,21 @@ recreated by its own controller.
 checks the manifest in Git again (an opted-out resource, a Service that is not a `LoadBalancer` or an infrastructure
 namespace is refused), and the plan worker reads the live object before any Git write: a resource already gone fails
 the plan with `no_effective_change`; an opted-out one, a `PersistentVolume` that is `Bound` again or a Service that is
-no longer of type `LoadBalancer` fails it.
+no longer of type `LoadBalancer` fails it. It then runs the collectors' **full orphan check** again
+(`deletion_target_in_use`): for a LoadBalancer Service its endpoints (Endpoints and EndpointSlices), pods and workload
+templates matching its selector, Gateway, Ingress and Gateway API route references, owner references and gateway or
+mesh labels; for a volume its phase, claim, StatefulSet and snapshot dependencies. A dependency that cannot be read
+(RBAC, timeout) is never read as unused: the operation is retried and no branch is created.
+
+**Open deletion pull requests are re-checked.** Every 5 minutes the automation controller (step `deletion_recheck`)
+runs the same full check for each `pr_open` deletion plan (20 per pass, rotating). When the resource is in use again,
+for example a LoadBalancer that gained an `HTTPRoute` reference or endpoints, GreenKube posts a comment on the pull
+request (marker `<!-- greenkube:deletion-recheck -->`, "do not merge", with the reason), closes the pull request when
+the Git provider adapter can close one (none of the built-in adapters does yet: close it by hand), marks the plan
+`stale` (`deletion_target_in_use`), resets the action status and retires the recommendation (`stale`, audit event
+`retired`). In `patch` and `ci` delivery modes the token is read-only, so only the plan and the recommendation change.
+A re-check that cannot read the cluster leaves the pull request as it is, logs a warning and is repeated on the next
+pass.
 
 **Where the resource lives in Git.** Discovery persists the Argo CD `status.resources` and Flux `status.inventory`
 entries of the kinds registered action kinds target (table `resource_bindings`, migration 0087) with the managing
@@ -451,6 +467,8 @@ request. A cluster-scoped binding is stored with the empty namespace; its plan s
 At delivery, the plan worker reads the binding again and marks the plan `stale` when it moved, is no longer resolved,
 is older than `automation.bindingTtl`, or when the controller stopped pruning since approval; without a binding reader
 the delivery is retried, never skipped.
+A controller that deploys to another cluster never binds a resource of this cluster (`destination_remote`, see
+[Destination cluster](#destination-cluster)): its inventory entries only make a same-named local resource ambiguous.
 
 **The edit.**
 
@@ -521,6 +539,19 @@ CPU and memory rightsizing recommendations (the `container_resources` kind) and 
 | Flux HelmRelease with a HelmRepository chart (HTTP or `type: oci`), or `chartRef` to an OCIRepository | Yes | The deployed chart version (and, for an OCIRepository, its digest) is pre-fetched, verified and rendered offline; the managed post-renderer patch is written to the Git-owned HelmRelease. Chart `valuesFiles` of a remote chart fail closed (`remote-chart-values-files`). |
 | Flux `valuesFrom` that is runtime-only, cross-repository, cross-revision, or uses `targetPath` | No | Fails closed with a typed reason. |
 | Manual binding resolution | Yes | An operator can select one server-provided candidate for an ambiguous/unresolved binding. |
+| Argo CD Application without a reported source type | No | When `status.sourceType` is missing (a ComparisonError) and the spec names no renderer (`helm`, `kustomize`, `directory`, `chart`), the binding stays unresolved (`source_type_unknown`) instead of being read as raw manifests; it resolves once Argo CD reports the type again. |
+| Argo CD Application or Flux object deploying to another cluster | No | Blocked (`destination_remote`), see below. |
+
+### Destination cluster
+
+GreenKube only changes workloads and resources of the cluster it runs in. An Argo CD Application binds only when its
+`spec.destination` is this cluster: `server: https://kubernetes.default.svc` (or `name: in-cluster`), or one of the
+server URLs or cluster names listed in `automation.localClusterAliases` (`GITOPS_LOCAL_CLUSTER_ALIASES`) when Argo CD
+registers this cluster under another address. A Flux Kustomization or HelmRelease with `spec.kubeConfig` applies to
+another cluster. Their workload candidates are `blocked` with the reason `destination_remote` and the destination as
+evidence, and their inventory never resolves a resource binding, deletions included. A hub cluster running Argo CD for
+spoke clusters therefore never opens a pull request for a spoke workload that happens to share a namespace and name
+with a local one; install GreenKube in each spoke instead.
 
 ### Helm support
 
@@ -586,7 +617,7 @@ A plan request accepts recommendation IDs only. Repository URLs, file paths, pro
 2. The server resolves the workload binding, snapshots the immutable provider revision, and renders the before/after state.
 3. Raw YAML/JSON, Kustomize, and the supported Helm layouts are validated. Any unrelated rendered change fails the plan.
 4. A successful preview contains a `sha256:` digest, changed files, source and rendered diffs, the renderer's warnings (credentials redacted), validation state, and an expiry. Previewing the same workload again supersedes its previous `draft`/`validated` plan instead of returning `409`. Closing a preview calls `DELETE /api/v1/automation/plans/{plan_id}`, which marks it `superseded`.
-5. Approval must present that exact digest. Unrelated commits on the target branch do not stale a plan: when every file the plan touches is unchanged between the planned base revision and the current head, the plan is committed on the moved head. That head is recorded as `committed_on_revision`, next to the planned `base_revision`, and the pull-request body lists both. Rollback plans follow the same rule; their identity stays derived from the planned base revision. A change to a touched file or a stale digest returns `409` and requires a new preview.
+5. Approval must present that exact digest. Unrelated commits on the target branch do not stale a plan: when every file the plan touches **and every render input** is unchanged between the planned base revision and the current head, the plan is committed on the moved head. The render inputs are recorded with the plan (`validation.render_inputs`, bound by the digest): every file the render read with its Git blob ID (the Kustomization files, resources and patch files of the overlay and its bases, the Helm values files, the files of a repository chart, the manifests of a raw directory), plus the directories where an added file changes the render (`validation.render_scopes`: a raw manifest directory, a repository chart). Approval and the worker compare them with a tree comparison of the base and the moved head; a change to a base, a patch, a values file, `Chart.yaml` or a template the plan does not edit makes the plan `stale` and needs a new preview. A plan created before render inputs were recorded is `stale` on any moved head. That head is recorded as `committed_on_revision`, next to the planned `base_revision`, and the pull-request body lists both. Rollback plans follow the same rule; their identity stays derived from the planned base revision. A change to a touched file or a stale digest returns `409` and requires a new preview.
 6. The durable worker revalidates the source, creates one atomic multi-file commit on a deterministic branch, and opens or adopts a matching PR. Repeated requests reuse the open PR instead of creating duplicates. When a worker reclaims an operation whose previous worker lost its lease, it first adopts an open PR on the plan's deterministic branch (`pr_open`), before any staleness check. Opening a PR costs a bounded number of provider calls that does not depend on repository size (see [Provider API cost](#provider-api-cost)).
 7. After merge, linked recommendation actions enter `sync_pending` and the plan moves to `merged`. GreenKube records the commit that landed on the base branch: the merge commit, or for GitLab merges without one the squash commit, or the merge request head for fast-forward projects (the plan's audit reason is `pull_request_merged`, `pull_request_merged_squash_commit` or `pull_request_merged_fast_forward_head`). A PR closed without merging moves the plan to `closed`; GitHub's leftover test-merge SHA is ignored.
 8. The controller observes the Argo CD/Flux source revision and readiness. The plan moves to `synced` when the healthy controller runs the landed commit (`sync_confirmed`), or a later commit that contains it and still carries the planned values, for example after another PR or an image write-back landed first (`sync_confirmed_descendant`). For a later commit GreenKube asks the provider two questions, each cached per commit:
@@ -799,7 +830,7 @@ All automation runs in the controller process (roadmap M8, F8). The API only han
 The controller runs two leader-gated loops:
 
 - `plan-executor` claims and executes queued plan operations (at most 10 per 5-second tick).
-- `automation-controller` runs one tick every 5 seconds under a single database lease. The tick drains the webhook outbox, polls open pull requests every `automation.prPollIntervalSeconds`, then cleans up branches, reconciles exhausted operations, expires plans (every 60 s) and runs retention (daily).
+- `automation-controller` runs one tick every 5 seconds under a single database lease. The tick drains the webhook outbox, polls open pull requests every `automation.prPollIntervalSeconds`, then cleans up branches, reconciles exhausted operations, expires plans (every 60 s), re-checks open deletion pull requests (every 5 minutes, [Deleting orphaned resources](#deleting-orphaned-resources)) and runs retention (daily).
 
 | Mode | When | Behaviour |
 |---|---|---|
