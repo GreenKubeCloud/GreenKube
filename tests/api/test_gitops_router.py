@@ -654,7 +654,7 @@ def test_binding_redacts_unrecognized_reason_values(gitops_client):
 
 @pytest.mark.parametrize(
     "reason",
-    ("invalid-helm-values-mapping", "helm-values-mapping-source-index-required"),
+    ("invalid-helm-values-mapping", "helm-values-mapping-source-index-required", "destination_remote"),
 )
 def test_binding_preserves_supported_helm_mapping_reasons(gitops_client, reason):
     client, repository, _ = gitops_client
