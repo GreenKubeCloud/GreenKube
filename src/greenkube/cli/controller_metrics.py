@@ -13,26 +13,29 @@ controller serves no UI, so nothing collides with it).
 The listener is started for every controller replica, leader or standby:
 counters stay correct under ``sum()`` because only the Lease holder scans.
 
-Access model: the Helm chart keeps the API key out of the controller (least
-privilege), so the endpoint is reachable on the pod network only (ClusterIP
-Service, no Ingress; restrict it to Prometheus with
-``monitoring.networkPolicy``). It serves bounded, non-sensitive operational
-counters. When an API key *is* configured in the controller's environment, a
-matching bearer token is required.
+Access model: the Helm chart keeps the admin API key out of the controller
+(least privilege) and gives it the dedicated scrape token
+``GREENKUBE_METRICS_TOKEN`` instead, which the controller ServiceMonitor sends
+as a bearer token (:mod:`greenkube.auth.scrape`). The endpoint is reachable on
+the pod network only (ClusterIP Service, no Ingress; restrict it to Prometheus
+with ``monitoring.networkPolicy``). Without any configured credential (an
+install whose ``secrets.existingSecret`` holds no scrape token) it stays open,
+as before the scrape token existed: it serves bounded, non-sensitive
+operational counters.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
+from greenkube.auth.scrape import verify_scrape_request
 from greenkube.cli.worker_metrics import EmbeddedMetricsServer
 from greenkube.core.observability import generate_latest_observability
 
@@ -48,19 +51,8 @@ STARTUP_TIMEOUT_SECONDS = 10.0
 
 
 def verify_scrape_token(request: Request) -> None:
-    """Require the API key as a bearer token only when the controller has one."""
-    from greenkube.core.config import get_config
-
-    api_key = get_config().API_KEY
-    if not api_key:
-        return
-    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
-    if scheme.lower() != "bearer" or not token or not secrets.compare_digest(token, api_key):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or missing API key.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    """Require the scrape token (or the bootstrap key, unless disabled) when the controller has one."""
+    verify_scrape_request(request, require_configured=False)
 
 
 class LoopHealth(Protocol):
@@ -78,7 +70,7 @@ def create_controller_metrics_app(health: LoopHealth | None = None) -> FastAPI:
     fresh heartbeat; 503 otherwise) are unauthenticated probe endpoints that reveal
     nothing but a verdict. ``/loops`` returns the per-loop snapshot (state, last
     success, duration, consecutive failures, last error code) and, like the metrics,
-    requires the API key when the controller has one.
+    requires the scrape token when the controller has one.
     """
     app = FastAPI(
         title="GreenKube controller metrics",

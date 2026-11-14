@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import uvicorn
-from fastapi import Depends, FastAPI, Response
+from fastapi import Depends, FastAPI, Request, Response
 
-from greenkube.api.dependencies import verify_api_key
+from greenkube.auth.scrape import verify_scrape_request
 from greenkube.core.observability import generate_latest_observability
 
 
+def verify_worker_scrape(request: Request) -> None:
+    """The scrape token, or the bootstrap key unless disabled; a production worker without either fails closed."""
+    verify_scrape_request(request, require_configured=True)
+
+
 def create_worker_metrics_app() -> FastAPI:
-    """Expose only this process's control-loop registry using API auth behavior."""
+    """Expose only this process's control-loop registry, behind the scrape token."""
     app = FastAPI(
         title="GreenKube automation worker metrics",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(verify_api_key)],
+        dependencies=[Depends(verify_worker_scrape)],
     )
 
     @app.get("/prometheus/metrics", include_in_schema=False)

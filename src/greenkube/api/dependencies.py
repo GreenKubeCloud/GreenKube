@@ -31,6 +31,7 @@ from greenkube.auth.principal import (
     required_scope,
 )
 from greenkube.auth.proxy import UntrustedProxyHeader, read_proxy_identity
+from greenkube.auth.scrape import METRICS_SCRAPE_ACTOR
 from greenkube.auth.service import AuthError, AuthService, api_key_principal, user_principal
 from greenkube.auth.settings import AUTH_MODES, AuthSettings
 from greenkube.auth.tokens import constant_time_equals, sha256_hex
@@ -172,26 +173,43 @@ def _bearer_unauthorized() -> HTTPException:
     return HTTPException(status_code=401, detail=_INVALID_KEY, headers={"WWW-Authenticate": "Bearer"})
 
 
-def _legacy_principal(token: str) -> Principal:
+def _legacy_principal(token: str, access: str = "admin") -> Principal:
+    """The deprecated bootstrap key: full admin, or ``metrics:read`` only with ``AUTH_LEGACY_API_KEY=metrics``."""
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    admin = access == "admin"
     return Principal(
         kind="apikey",
         name="legacy",
-        role=Role.ADMIN.value,
-        scopes=ALL_SCOPES,
+        role=Role.ADMIN.value if admin else None,
+        scopes=ALL_SCOPES if admin else frozenset({Scope.METRICS_READ.value}),
         legacy=True,
         actor_override=f"api-key:{digest}",
     )
 
 
+#: The dedicated Prometheus scrape token: ``metrics:read`` and nothing else.
+METRICS_TOKEN_PRINCIPAL = Principal(
+    kind="apikey",
+    name="metrics-token",
+    scopes=frozenset({Scope.METRICS_READ.value}),
+    actor_override=METRICS_SCRAPE_ACTOR,
+)
+
+
 async def _bearer_principal(request: Request, settings: AuthSettings, service: AuthService | None) -> Principal:
-    """Resolve ``Authorization: Bearer``: the deprecated bootstrap key, then a scoped key."""
+    """Resolve ``Authorization: Bearer``: the deprecated bootstrap key, the scrape token, then a scoped key."""
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
     token = token.strip()
     if scheme.lower() == "bearer" and token:
         # Compare digests so that neither the content nor the length of the key leaks through timing.
-        if settings.legacy_api_key and constant_time_equals(sha256_hex(token), sha256_hex(settings.legacy_api_key)):
-            return _legacy_principal(token)
+        if (
+            settings.legacy_api_key
+            and settings.legacy_api_key_access != "disabled"
+            and constant_time_equals(sha256_hex(token), sha256_hex(settings.legacy_api_key))
+        ):
+            return _legacy_principal(token, settings.legacy_api_key_access)
+        if settings.metrics_token and constant_time_equals(sha256_hex(token), sha256_hex(settings.metrics_token)):
+            return METRICS_TOKEN_PRINCIPAL
         if service is not None and token.startswith("gk_"):
             key = await service.resolve_api_key(token)
             if key is not None:
@@ -298,10 +316,10 @@ async def _proxy_principal(
 async def _open_access(settings: AuthSettings, service: AuthService | None) -> bool:
     """Whether an unauthenticated request is served anonymously.
 
-    Only a development instance with no bootstrap API key and no account is
-    open, as before sessions existed. Production never is.
+    Only a development instance with no bootstrap API key, no scrape token and
+    no account is open, as before sessions existed. Production never is.
     """
-    if settings.legacy_api_key or settings.environment == "production":
+    if settings.machine_credentials_configured or settings.environment == "production":
         return False
     if settings.mode == "api_key" or service is None:
         return True
@@ -353,7 +371,7 @@ async def authenticate(request: Request) -> None:
             return
         if await _open_access(settings, service):
             principal = ANONYMOUS
-        elif settings.environment == "production" and not settings.legacy_api_key and service is None:
+        elif settings.environment == "production" and not settings.machine_credentials_configured and service is None:
             raise HTTPException(status_code=503, detail="API authentication is not configured.")
         else:
             raise HTTPException(status_code=401, detail=_UNAUTHORIZED, headers={"WWW-Authenticate": "Bearer"})

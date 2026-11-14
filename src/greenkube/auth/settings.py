@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Any
 
 from greenkube.auth.roles import normalize_default_role, parse_role_groups
+from greenkube.auth.scrape import legacy_api_key_access
 
 _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 
@@ -58,6 +59,10 @@ class AuthSettings:
     login_rate_limit: str = "5/minute"
     admin_username: str = "admin"
     legacy_api_key: str = ""
+    #: What the bootstrap key may do: admin, metrics (scrape only) or disabled (AUTH_LEGACY_API_KEY).
+    legacy_api_key_access: str = "admin"
+    #: Dedicated Prometheus scrape token (GREENKUBE_METRICS_TOKEN): metrics:read only.
+    metrics_token: str = ""
     trusted_proxy_ips: str = ""
     cors_origins: str = ""
     # --- single sign-on and roles (F16) ---
@@ -75,6 +80,11 @@ class AuthSettings:
     oidc_groups_claim: str = "groups"
     oidc_redirect_url: str = ""
     oidc_provider_name: str = "SSO"
+
+    @property
+    def machine_credentials_configured(self) -> bool:
+        """A bootstrap key (even disabled) or a scrape token is configured: the instance is not open."""
+        return bool(self.legacy_api_key or self.metrics_token)
 
     @property
     def sessions_enabled(self) -> bool:
@@ -111,6 +121,8 @@ class AuthSettings:
             login_rate_limit=str(getattr(cfg, "AUTH_LOGIN_RATE_LIMIT", "5/minute") or "5/minute"),
             admin_username=str(getattr(cfg, "AUTH_ADMIN_USERNAME", "admin") or "admin").strip().lower(),
             legacy_api_key=str(getattr(cfg, "API_KEY", "") or ""),
+            legacy_api_key_access=legacy_api_key_access(cfg),
+            metrics_token=str(getattr(cfg, "METRICS_TOKEN", "") or "").strip(),
             trusted_proxy_ips=str(getattr(cfg, "TRUSTED_PROXY_IPS", "") or ""),
             cors_origins=str(getattr(cfg, "CORS_ORIGINS", "") or ""),
             local_login=bool(getattr(cfg, "AUTH_LOCAL_LOGIN", True)),
