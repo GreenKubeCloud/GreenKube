@@ -307,7 +307,7 @@ tests:
           value: wait-for-postgres
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
-          pattern: nc -z RELEASE-NAME-greenkube-postgres 5432
+          pattern: nc -z -w 2 RELEASE-NAME-greenkube-postgres 5432
 
   - it: does not wait for PostgreSQL when it is external
     set:

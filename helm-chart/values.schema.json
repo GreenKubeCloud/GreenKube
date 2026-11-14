@@ -540,5 +540,151 @@
     "rendererSandbox": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "object"}]},
     "resources": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"$ref": "#/definitions/resources"}]},
     "apiResources": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"$ref": "#/definitions/resources"}]}
-  }
+  },
+  "allOf": [
+    {
+      "description": "Scheduling, availability, helper images, backup and operations alerts (production readiness; docs/configuration.md).",
+      "definitions": {
+        "stringMap": {"type": "object", "additionalProperties": {"type": "string"}},
+        "objectList": {"type": "array", "items": {"type": "object"}},
+        "helperImage": {
+          "type": "object",
+          "properties": {
+            "repository": {"type": "string", "minLength": 1},
+            "tag": {"type": "string"},
+            "digest": {"type": "string", "pattern": "^$|^sha256:[0-9a-fA-F]{64}$"},
+            "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]}
+          }
+        },
+        "scheduledPod": {
+          "type": "object",
+          "properties": {
+            "nodeSelector": {"$ref": "#/allOf/0/definitions/stringMap"},
+            "tolerations": {"$ref": "#/allOf/0/definitions/objectList"},
+            "affinity": {"type": "object"},
+            "topologySpreadConstraints": {"$ref": "#/allOf/0/definitions/objectList"},
+            "priorityClassName": {"type": "string"},
+            "podAnnotations": {"$ref": "#/allOf/0/definitions/stringMap"},
+            "podLabels": {"$ref": "#/allOf/0/definitions/stringMap"}
+          }
+        },
+        "replicatedPod": {
+          "allOf": [
+            {"$ref": "#/allOf/0/definitions/scheduledPod"},
+            {"properties": {"podAntiAffinity": {"type": "string", "enum": ["soft", "hard", "none"]}}}
+          ]
+        },
+        "podDisruptionBudget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "minAvailable": {"type": ["integer", "string"]}
+          }
+        },
+        "strategy": {
+          "type": "object",
+          "properties": {
+            "type": {"type": "string", "enum": ["Recreate", "RollingUpdate"]},
+            "rollingUpdate": {"type": "object"}
+          }
+        }
+      },
+      "properties": {
+        "global": {
+          "type": "object",
+          "properties": {
+            "imagePullSecrets": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {"type": "string", "minLength": 1},
+                  {"type": "object", "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1}}}
+                ]
+              }
+            }
+          }
+        },
+        "api": {
+          "allOf": [
+            {"$ref": "#/allOf/0/definitions/replicatedPod"},
+            {"properties": {"podDisruptionBudget": {"$ref": "#/allOf/0/definitions/podDisruptionBudget"}}}
+          ]
+        },
+        "controller": {
+          "allOf": [
+            {"$ref": "#/allOf/0/definitions/replicatedPod"},
+            {
+              "properties": {
+                "podDisruptionBudget": {"$ref": "#/allOf/0/definitions/podDisruptionBudget"},
+                "strategy": {"$ref": "#/allOf/0/definitions/strategy"}
+              }
+            }
+          ]
+        },
+        "worker": {
+          "allOf": [
+            {"$ref": "#/allOf/0/definitions/replicatedPod"},
+            {"properties": {"strategy": {"$ref": "#/allOf/0/definitions/strategy"}}}
+          ]
+        },
+        "renderer": {"$ref": "#/allOf/0/definitions/replicatedPod"},
+        "initContainer": {"type": "object", "properties": {"image": {"$ref": "#/allOf/0/definitions/helperImage"}}},
+        "postgres": {
+          "allOf": [
+            {"$ref": "#/allOf/0/definitions/scheduledPod"},
+            {
+              "properties": {
+                "image": {"$ref": "#/allOf/0/definitions/helperImage"},
+                "shmSizeLimit": {"$ref": "#/definitions/quantity"},
+                "terminationGracePeriodSeconds": {"type": "integer", "minimum": 0},
+                "backup": {
+                  "allOf": [
+                    {"$ref": "#/allOf/0/definitions/scheduledPod"},
+                    {
+                      "type": "object",
+                      "properties": {
+                        "enabled": {"type": "boolean"},
+                        "schedule": {"type": "string", "minLength": 9},
+                        "keep": {"type": "integer", "minimum": 1, "maximum": 365},
+                        "activeDeadlineSeconds": {"type": "integer", "minimum": 60},
+                        "persistence": {
+                          "type": "object",
+                          "properties": {
+                            "existingClaim": {"$ref": "#/definitions/k8sName"},
+                            "size": {"$ref": "#/definitions/quantity"},
+                            "storageClassName": {"type": "string"}
+                          }
+                        },
+                        "resources": {"$ref": "#/definitions/resources"}
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "monitoring": {
+          "properties": {
+            "prometheusRule": {
+              "properties": {
+                "operations": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {"type": "boolean"},
+                    "kubeStateMetrics": {"type": "boolean"},
+                    "volumeFreeRatio": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+                    "volumeFullWithinHours": {"type": "integer", "minimum": 1},
+                    "backupMaxAgeHours": {"type": "integer", "minimum": 1}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

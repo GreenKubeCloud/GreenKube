@@ -31,10 +31,19 @@ spec:
   template:
     metadata:
       labels:
-        {{- $selectorLabels | nindent 8 }}
-        app.kubernetes.io/component: {{ $component }}
+        {{- include "greenkube.podLabels" (dict "context" $root "cfg" $renderer "component" $component) | nindent 8 }}
+      {{- with $renderer.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       automountServiceAccountToken: false
+      {{- with include "greenkube.imagePullSecrets" $root }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with include "greenkube.podScheduling" (dict "context" $root "cfg" $renderer "component" $component "replicas" $renderer.replicas) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 20002

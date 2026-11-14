@@ -31,11 +31,11 @@ tests:
   # --------------------------------------------------------------------------
   # Image
   # --------------------------------------------------------------------------
-  - it: should use the configured postgres image
+  - it: should use the configured postgres image, pinned by digest
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: "postgres:18-alpine"
+          value: "postgres:18-alpine@sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95"
 
   - it: should honour a custom postgres image tag
     set:

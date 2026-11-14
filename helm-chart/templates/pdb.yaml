@@ -1,0 +1,27 @@
+{{- /*
+PodDisruptionBudgets for the api and the controller (production readiness).
+Rendered only with more than one replica: a budget of minAvailable 1 on a
+single replica would block every node drain.
+*/ -}}
+{{- $root := . }}
+{{- $v := include "greenkube.values" $root | fromYaml }}
+{{- range $component := list "api" "controller" }}
+{{- $cfg := get $v $component }}
+{{- $pdb := $cfg.podDisruptionBudget | default dict }}
+{{- if and (gt (int ($cfg.replicas | default 0)) 1) (ne (toString $pdb.enabled) "false") }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "greenkube.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "greenkube.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  minAvailable: {{ $pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "greenkube.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+{{- end }}
+{{- end }}

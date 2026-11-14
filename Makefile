@@ -5,7 +5,7 @@
 # settings (all overridable from the environment). Every target refuses to run
 # unless kubectl points at E2E_KUBE_CONTEXT (default: minikube).
 
-.PHONY: quickstart e2e e2e-status e2e-clean e2e-test test-pg
+.PHONY: quickstart e2e e2e-status e2e-clean e2e-test test-pg upgrade-test
 
 ## Install GreenKube with the demo values next to the sample app, then stop:
 ## open the first pull request yourself. Deletes nothing.
@@ -56,3 +56,10 @@ test-pg:
 	rm -f .test-pg.log; \
 	if [ "$(TEST_PG_KEEP)" != "1" ]; then $(TEST_PG_COMPOSE) down -v; fi; \
 	exit $$status
+
+# --- Upgrade from the last release (production readiness) ----------------------
+## Install 0.3.1 on a kind cluster, seed it, helm upgrade to this checkout and
+## check readiness, schema version, row counts and the API key. Uses its own
+## kind cluster and kubeconfig (never the current kubectl context).
+upgrade-test:
+	hack/upgrade/upgrade-test.sh

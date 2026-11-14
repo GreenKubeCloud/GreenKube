@@ -90,3 +90,17 @@ tests:
           pattern: port-forward
       - matchRegexRaw:
           pattern: config.api.enabled is ignored
+
+  - it: reminds to back up before every upgrade
+    asserts:
+      - matchRegexRaw:
+          pattern: "Back up the database before every upgrade: migrations only move forward and a helm rollback"
+      - notMatchRegexRaw:
+          pattern: Scheduled backups
+
+  - it: names the backup CronJob when scheduled backups are on
+    set:
+      postgres.backup.enabled: true
+    asserts:
+      - matchRegexRaw:
+          pattern: "Scheduled backups: CronJob gk-greenkube-postgres-backup \\(17 3 \\* \\* \\*\\)"

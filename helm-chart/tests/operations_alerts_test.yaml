@@ -1,0 +1,139 @@
+suite: operations alerts (production readiness)
+# Behaviour of the expressions is tested with promtool
+# (helm-chart/tests/promtool/operations-alerts.yaml).
+templates:
+  - templates/prometheusrule.yaml
+
+tests:
+  - it: renders the operations group last with every alert when everything is scraped
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.serviceMonitor.enabled: true
+      postgres.backup.enabled: true
+    asserts:
+      - equal:
+          path: spec.groups[4].name
+          value: greenkube.operations
+      - lengthEqual:
+          path: spec.groups[4].rules
+          count: 7
+      - equal:
+          path: spec.groups[4].rules[0].alert
+          value: GreenKubeAPIDown
+      - equal:
+          path: spec.groups[4].rules[1].alert
+          value: GreenKubeDatabaseUnavailable
+      - equal:
+          path: spec.groups[4].rules[2].alert
+          value: GreenKubeAPIUnavailable
+      - equal:
+          path: spec.groups[4].rules[3].alert
+          value: GreenKubePostgresDown
+      - equal:
+          path: spec.groups[4].rules[4].alert
+          value: GreenKubeBackupMissing
+      - equal:
+          path: spec.groups[4].rules[5].alert
+          value: GreenKubeDataVolumeLow
+      - equal:
+          path: spec.groups[4].rules[6].alert
+          value: GreenKubeDataVolumeFillingUp
+      - matchRegex:
+          path: spec.groups[4].rules[0].expr
+          pattern: 'up\{namespace="NAMESPACE",job="RELEASE-NAME-greenkube-api"\}'
+      - matchRegex:
+          path: spec.groups[4].rules[1].expr
+          pattern: 'greenkube_loop_consecutive_failures\{namespace="NAMESPACE",loop="controller-heartbeat"\}'
+      - matchRegex:
+          path: spec.groups[4].rules[5].expr
+          pattern: 'persistentvolumeclaim=~"data-RELEASE-NAME-greenkube-postgres-\[0-9\]\+\|RELEASE-NAME-greenkube-postgres-backup"'
+
+  - it: keeps the kube-state-metrics and volume alerts without any GreenKube scrape
+    set:
+      monitoring.prometheusRule.enabled: true
+    asserts:
+      - equal:
+          path: spec.groups[1].name
+          value: greenkube.operations
+      - lengthEqual:
+          path: spec.groups[1].rules
+          count: 4
+      - equal:
+          path: spec.groups[1].rules[0].alert
+          value: GreenKubeAPIUnavailable
+      - equal:
+          path: spec.groups[1].rules[1].alert
+          value: GreenKubePostgresDown
+      - equal:
+          path: spec.groups[1].rules[2].alert
+          value: GreenKubeDataVolumeLow
+      - equal:
+          path: spec.groups[1].rules[3].alert
+          value: GreenKubeDataVolumeFillingUp
+
+  - it: drops the kube-state-metrics alerts on request
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.operations.kubeStateMetrics: false
+      postgres.backup.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.groups[1].rules
+          count: 2
+      - equal:
+          path: spec.groups[1].rules[0].alert
+          value: GreenKubeDataVolumeLow
+      - equal:
+          path: spec.groups[1].rules[1].alert
+          value: GreenKubeDataVolumeFillingUp
+
+  - it: has no PostgreSQL or volume alert for an external database without backup claim
+    set:
+      monitoring.prometheusRule.enabled: true
+      postgres.enabled: false
+      secrets.dbConnectionString: postgresql://u:p@db:5432/greenkube
+    asserts:
+      - lengthEqual:
+          path: spec.groups[1].rules
+          count: 1
+      - equal:
+          path: spec.groups[1].rules[0].alert
+          value: GreenKubeAPIUnavailable
+
+  - it: applies the thresholds
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.operations.volumeFreeRatio: 0.25
+      monitoring.prometheusRule.operations.volumeFullWithinHours: 24
+      monitoring.prometheusRule.operations.backupMaxAgeHours: 50
+      postgres.backup.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.groups[1].rules[2].expr
+          pattern: '> 180000\)'
+      - matchRegex:
+          path: spec.groups[1].rules[3].expr
+          pattern: '< 0.25'
+      - matchRegex:
+          path: spec.groups[1].rules[4].expr
+          pattern: '\[6h\], 86400\) < 0'
+
+  - it: can be turned off
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.operations.enabled: false
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 1
+
+  - it: renders no empty group when no operations alert applies
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.operations.kubeStateMetrics: false
+      postgres.enabled: false
+      secrets.dbConnectionString: postgresql://u:p@db:5432/greenkube
+    asserts:
+      - lengthEqual:
+          path: spec.groups
+          count: 1

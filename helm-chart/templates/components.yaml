@@ -25,6 +25,12 @@ metadata:
     app.kubernetes.io/component: {{ $component }}
 spec:
   replicas: {{ $cfg.replicas | int }}
+  {{- with $cfg.strategy }}
+  # The controller (and the worker) default to Recreate: the new release migrates
+  # the schema at startup, so old and new code must never write side by side.
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "greenkube.selectorLabels" $root | nindent 6 }}
@@ -32,12 +38,18 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "greenkube.selectorLabels" $root | nindent 8 }}
-        app.kubernetes.io/component: {{ $component }}
+        {{- include "greenkube.podLabels" (dict "context" $root "cfg" $cfg "component" $component) | nindent 8 }}
       annotations:
-        checksum/config: {{ include "greenkube.configChecksum" $root | quote }}
+        {{- $annotations := mergeOverwrite (deepCopy ($cfg.podAnnotations | default dict)) (dict "checksum/config" (include "greenkube.configChecksum" $root)) }}
+        {{- toYaml $annotations | nindent 8 }}
     spec:
       serviceAccountName: {{ include "greenkube.componentServiceAccountName" (dict "context" $root "component" $component) }}
+      {{- with include "greenkube.imagePullSecrets" $root }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with include "greenkube.podScheduling" (dict "context" $root "cfg" $cfg "component" $component "replicas" $cfg.replicas) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       # Every component reads the Kubernetes API (inventory, discovery, Lease).
       automountServiceAccountToken: true
       securityContext:
@@ -51,7 +63,7 @@ spec:
       # crash-loop while the database initializes.
       initContainers:
         - name: wait-for-postgres
-          image: {{ $root.Values.initContainer.image.repository }}:{{ $root.Values.initContainer.image.tag }}
+          image: {{ include "greenkube.helperImage" $root.Values.initContainer.image | quote }}
           imagePullPolicy: {{ $root.Values.initContainer.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -67,9 +79,12 @@ spec:
           command:
             - sh
             - -c
+            # -w bounds each probe: without it a SYN dropped while the PostgreSQL
+            # pod is replaced (upgrade, node drain) waits for the kernel TCP
+            # timeout (minutes) instead of retrying every two seconds.
             - >-
               for attempt in $(seq 1 150); do
-                if nc -z {{ include "greenkube.fullname" $root }}-postgres 5432; then exit 0; fi;
+                if nc -z -w 2 {{ include "greenkube.fullname" $root }}-postgres 5432; then exit 0; fi;
                 echo "waiting for postgres";
                 sleep 2;
               done;

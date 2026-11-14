@@ -19,6 +19,7 @@ trap 'rm -rf "${work}"' EXIT
 helm template greenkube "${CHART_DIR}" \
   --set monitoring.prometheusRule.enabled=true \
   --set monitoring.serviceMonitor.enabled=true \
+  --set postgres.backup.enabled=true \
   --show-only templates/prometheusrule.yaml >"${work}/prometheusrule.yaml"
 
 # Keep only .spec (the "groups:" document promtool reads). The rule file is

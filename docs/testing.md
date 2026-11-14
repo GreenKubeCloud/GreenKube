@@ -99,9 +99,35 @@ stub `kubectl`, `helm` and `curl` binaries, it checks that the harness scripts r
 ### Nightly in CI
 
 `.github/workflows/e2e-nightly.yml` runs `make e2e` every night, on demand (`workflow_dispatch`, with an option to
-skip the Flux variant) and on pull requests that touch `automation/`, `gitops/`, `verify/`, `hack/e2e/` or the
-quickstart assets. `.github/e2e/bootstrap-minikube.sh` first installs the prerequisites on a fresh Minikube at pinned
+skip the Flux variant), on pull requests that touch `src/greenkube/`, `helm-chart/`, `frontend/`, the Dockerfile,
+`hack/e2e/` or the quickstart assets, and from the release workflow (`workflow_call`): a release tag publishes
+nothing unless the loop passes. GitHub schedules only the workflow file of the default branch (`main`), so the
+nightly run checks out the integration branch `dev` (`E2E_NIGHTLY_REF`); the file must be present on `main` for
+the schedule to fire.
+
+After the verdict, the loop checks the v0.4 exit criterion: for each recommendation, the latest decided
+measurement of its change (`GET /api/v2/changes/{id}/measurements`) must give a measured allocated cost within
+`E2E_PROJECTION_TOLERANCE` (20%) of the projected one. `steps.jsonl` records the ratio (`projection_accuracy`); an
+inconclusive or contaminated measurement is recorded as a `warning` instead of a pass or a failure. `.github/e2e/bootstrap-minikube.sh` first installs the prerequisites on a fresh Minikube at pinned
 versions (metrics-server, kube-prometheus-stack with 30-second scrapes, Argo CD, Flux, Gitea with an admin user
 `greenkube` and an API token). The evidence directory (`steps.jsonl` and the saved API responses), pod logs, events
 and the GitOps objects are uploaded as the `e2e-evidence` artifact on every run, and the job summary lists each step.
 The bootstrap script refuses to run outside GitHub Actions unless `E2E_BOOTSTRAP_ALLOW=1`.
+
+## Upgrade from the last release
+
+`make upgrade-test` (`hack/upgrade/upgrade-test.sh`) installs the 0.3.1 chart and image on a throwaway kind
+cluster with its own kubeconfig, seeds the database, upgrades it to the working tree with
+`helm upgrade --reset-then-reuse-values --wait` and checks readiness, the schema version, the seeded row counts and
+the API key ([Upgrading](upgrading.md#checking-an-upgrade-on-kind)). It then rolls back the documented way
+(restore of the dump taken before the upgrade, `helm rollback`) and checks the 0.3.1 schema version, the rows and a
+Ready 0.3.1 release; `UPGRADE_ROLLBACK=0` skips that phase.
+
+The restore procedure is also tested on PostgreSQL by `tests/integration/test_upgrade_from_v031.py`. It needs
+`pg_dump`, `pg_restore` and `psql` at least as new as the server: from the `PATH`, or through a wrapper in
+`GREENKUBE_TEST_PG_CLIENT` (CI: `docker run --rm -i --network host postgres:18.0-alpine3.22`), with
+`GREENKUBE_TEST_PG_CLIENT_DSN` when the wrapper reaches the server under another address (Docker Desktop:
+`host.docker.internal`). Without them the test is skipped.
+
+`.github/workflows/upgrade-test.yml` runs it on
+pull requests that touch migrations or the chart, and the release workflow requires it.

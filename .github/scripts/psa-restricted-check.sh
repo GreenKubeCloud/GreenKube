@@ -52,6 +52,7 @@ scenarios=(
   "external-postgres|--set postgres.enabled=false --set secrets.dbConnectionString=postgresql://u:p@db:5432/greenkube"
   "ingress|--set ingress.enabled=true --set ingress.hosts[0]=greenkube.example.com"
   "network-policy|--set monitoring.networkPolicy.enabled=true"
+  "postgres-backup|--set postgres.backup.enabled=true"
 )
 
 failed=0

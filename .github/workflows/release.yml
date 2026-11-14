@@ -1,7 +1,9 @@
 name: Release — Build, Publish & GitHub Release
 
 # Triggered when a semver tag is pushed (e.g. v0.3.0).
-# 1. Runs the full test suite.
+# 1. Runs the full test suite, the frontend tests, the end-to-end loop
+#    (e2e-nightly.yml) and the 0.3.1 upgrade test (upgrade-test.yml): nothing
+#    is built or published unless all four pass.
 # 2. Builds and pushes Docker image tagged with the version + "latest", then
 #    signs it with cosign (keyless, GitHub OIDC), attaches a syft SPDX SBOM as
 #    a signed attestation and publishes SLSA build provenance (O6).
@@ -46,6 +48,8 @@ jobs:
           --health-retries 10
     env:
       GREENKUBE_TEST_POSTGRES_DSN: postgresql://greenkube:greenkube_password@localhost:5432/greenkube_test
+      # pg_dump/pg_restore matching the server, for the backup restore test.
+      GREENKUBE_TEST_PG_CLIENT: docker run --rm -i --network host postgres:18.0-alpine3.22
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -122,11 +126,23 @@ jobs:
       - name: Build the frontend
         run: npm run build
 
+  # ── Gate: the end-to-end loop on Minikube (Argo CD + Flux), on this tag ──
+  e2e:
+    name: End-to-end loop
+    uses: ./.github/workflows/e2e-nightly.yml
+    with:
+      flux: true
+
+  # ── Gate: upgrade a seeded 0.3.1 release to this tag on kind ──
+  upgrade:
+    name: Upgrade test
+    uses: ./.github/workflows/upgrade-test.yml
+
   # ── Build multi-arch Docker image and push to Docker Hub ──
   build-and-push:
     name: Docker Build & Push
     runs-on: ubuntu-latest
-    needs: [test, frontend-test]
+    needs: [test, frontend-test, e2e, upgrade]
     timeout-minutes: 30
     permissions:
       contents: read

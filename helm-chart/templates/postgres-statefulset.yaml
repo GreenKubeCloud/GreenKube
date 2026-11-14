@@ -23,9 +23,20 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "greenkube.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: postgres
+        {{- include "greenkube.podLabels" (dict "context" . "cfg" .Values.postgres "component" "postgres") | nindent 8 }}
+      {{- with .Values.postgres.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
+      {{- with include "greenkube.imagePullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with include "greenkube.podScheduling" (dict "context" . "cfg" .Values.postgres "component" "postgres" "replicas" 1) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      # Room for a clean shutdown checkpoint before SIGKILL.
+      terminationGracePeriodSeconds: {{ .Values.postgres.terminationGracePeriodSeconds | default 60 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 70
@@ -38,7 +49,7 @@ spec:
       # official entrypoint ignores its own failed "chmod" on that directory.
       containers:
         - name: postgres
-          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          image: {{ include "greenkube.helperImage" .Values.postgres.image | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -101,6 +112,12 @@ spec:
               mountPath: /var/run/postgresql
             - name: pg-tmp
               mountPath: /tmp
+            {{- if .Values.postgres.shmSizeLimit }}
+            # Parallel query workers use POSIX shared memory; the runtime default
+            # /dev/shm (64Mi) makes large aggregations fail with "No space left on device".
+            - name: dshm
+              mountPath: /dev/shm
+            {{- end }}
       {{- if not .Values.postgres.persistence.enabled }}
       volumes:
         - name: data
@@ -111,6 +128,12 @@ spec:
         - name: pg-tmp
           emptyDir:
             sizeLimit: 64Mi
+        {{- if .Values.postgres.shmSizeLimit }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.postgres.shmSizeLimit }}
+        {{- end }}
       {{- else }}
       volumes:
         - name: pg-run
@@ -119,6 +142,12 @@ spec:
         - name: pg-tmp
           emptyDir:
             sizeLimit: 64Mi
+        {{- if .Values.postgres.shmSizeLimit }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.postgres.shmSizeLimit }}
+        {{- end }}
       {{- end }}
   {{- if .Values.postgres.persistence.enabled }}
   volumeClaimTemplates:

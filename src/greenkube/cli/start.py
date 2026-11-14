@@ -13,7 +13,7 @@ import signal
 import traceback
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
 import typer
 from typing_extensions import Annotated
@@ -606,6 +606,27 @@ def _create_gitops_sync_runtime(plan_runtime, db_manager):
     )
 
 
+class _StartupHealth:
+    """Controller probe view: not ready until migrations are done and the loops started."""
+
+    def __init__(self, registry) -> None:
+        self._registry = registry
+        self._started = False
+
+    def mark_started(self) -> None:
+        self._started = True
+
+    def ready(self) -> bool:
+        return self._started and bool(self._registry.ready())
+
+    def snapshot(self) -> dict[str, Any]:
+        snapshot = dict(self._registry.snapshot())
+        if not self._started:
+            snapshot["ready"] = False
+            snapshot["starting"] = True
+        return snapshot
+
+
 class _DiscoveryTracker:
     """Serializes discovery runs (loop and readiness-triggered) and keeps the CRD availability."""
 
@@ -881,34 +902,41 @@ async def _async_start(last: Optional[str]):
     # relied on lazy initialization which caused race conditions where tasks
     # would query tables before setup_postgres() had created them.
     from ..core.db import get_db_manager
-
-    await get_db_manager().connect()
-    logger.info("✅ Database connection successful and schema is ready (%s).", cfg.DB_TYPE)
-
-    from ..automation.plan_runtime import initialize_gitops_provider_configs
-
-    await initialize_gitops_provider_configs(db_manager=get_db_manager())
-
-    from ..gitops.discovery.runtime import create_gitops_discovery_runtime
-
-    discovery_runtime = _DiscoveryTracker(await create_gitops_discovery_runtime(db_manager=get_db_manager()))
     from ..core.loops import LoopRegistry
+    from .controller_metrics import start_controller_metrics_server, stop_controller_metrics_server
+
+    registry = LoopRegistry(role="controller")
+    # Serve the controller's own telemetry (loops, scans, verification, collection,
+    # provenance mix; A12, BUG-14, M8) and loop health on every replica, leader or standby.
+    # It starts before the migrations so that /healthz answers while a long upgrade
+    # migration runs (the startup probe would otherwise restart the pod mid-migration);
+    # /readyz stays not-ready until the loops start.
+    startup_health = _StartupHealth(registry)
+    metrics_endpoint = await start_controller_metrics_server(
+        getattr(cfg, "CONTROLLER_METRICS_PORT", 0), health=startup_health
+    )
+    try:
+        await get_db_manager().connect()
+        logger.info("✅ Database connection successful and schema is ready (%s).", cfg.DB_TYPE)
+
+        from ..automation.plan_runtime import initialize_gitops_provider_configs
+
+        await initialize_gitops_provider_configs(db_manager=get_db_manager())
+
+        from ..gitops.discovery.runtime import create_gitops_discovery_runtime
+
+        discovery_runtime = _DiscoveryTracker(await create_gitops_discovery_runtime(db_manager=get_db_manager()))
+    except BaseException:
+        await stop_controller_metrics_server(metrics_endpoint)
+        raise
 
     controller_stop_event = asyncio.Event()
-    registry = LoopRegistry(role="controller")
     leader_election_task = None
     initial_work_task = None
     processor = None
     plan_executor = None
-    metrics_endpoint = None
+    leader_election = None
     try:
-        # Serve the controller's own telemetry (loops, scans, verification, collection,
-        # provenance mix; A12, BUG-14, M8) and loop health on every replica, leader or standby.
-        from .controller_metrics import start_controller_metrics_server
-
-        metrics_endpoint = await start_controller_metrics_server(
-            getattr(cfg, "CONTROLLER_METRICS_PORT", 0), health=registry
-        )
         leader_election = _create_controller_leader_election(cfg)
         if leader_election is None:
             should_run = None
@@ -973,6 +1001,7 @@ async def _async_start(last: Optional[str]):
         registry.register(LoopHeartbeatPublisher(registry, get_controller_heartbeat_repository()).spec())
         logger.info("📈 Starting %d controller loops: %s", len(registry.names), ", ".join(registry.names))
         registry.start()
+        startup_health.mark_started()
         logger.info("\nGreenKube is running. Press CTRL+C to exit.")
 
         initial_tasks = (
@@ -1024,14 +1053,22 @@ async def _async_start(last: Optional[str]):
             tasks = [task for task in (leader_election_task, initial_work_task) if task is not None]
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            if plan_executor is not None:
-                plan_executor.close()
-            if processor is not None:
-                await processor.close()
-            from .controller_metrics import stop_controller_metrics_server
-
-            await stop_controller_metrics_server(metrics_endpoint)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                try:
+                    if plan_executor is not None:
+                        plan_executor.close()
+                    if processor is not None:
+                        await processor.close()
+                finally:
+                    # Hand the Lease over only now that every leader loop and the deferred
+                    # initial work have stopped, so a standby never overlaps with them. The
+                    # release is a compare-and-set on this replica's identity, so it is also
+                    # safe when the election task ended abnormally.
+                    if leader_election_task is not None and leader_election is not None and results[0] is not False:
+                        await leader_election.release()
+            finally:
+                await stop_controller_metrics_server(metrics_endpoint)
             logger.info("🛑 Shutting down GreenKube service gracefully.")
 
 

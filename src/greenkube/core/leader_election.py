@@ -136,19 +136,60 @@ class KubernetesLeaseElector:
                 self._log_api_error("request", error)
                 return False
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Continuously renew or contend until stopped."""
+    async def run(self, stop_event: asyncio.Event) -> bool:
+        """Continuously renew or contend until stopped.
+
+        Returns whether this replica held the Lease when it stopped. The Lease is NOT
+        released here: leader work may still be running or unwinding, so the caller
+        calls :meth:`release` only once all of it has stopped.
+        """
+        held = False
         try:
             while not stop_event.is_set():
                 await self.try_acquire_or_renew()
                 if stop_event.is_set():
-                    return
+                    break
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=self.retry_period_seconds)
                 except TimeoutError:
                     continue
         finally:
+            held = self._leader
             self._lose_leadership()
+        return held
+
+    async def release(self, timeout_seconds: float = 5.0) -> bool:
+        """Hand the Lease over on shutdown so a standby takes over without waiting for expiry.
+
+        Call it only after every piece of leader work has stopped: once the holder is
+        cleared, a standby can acquire within one retry period. Clearing is a
+        compare-and-set on this replica's identity. Best effort: any error leaves the
+        Lease to expire as before.
+        """
+        self._lose_leadership()
+        try:
+            return await asyncio.wait_for(self._release_once(), timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._log_api_error("release", error)
+            return False
+
+    async def _release_once(self) -> bool:
+        async with self._attempt_lock:
+            api = await self._get_api()
+            if api is None:
+                return False
+            lease = await api.read_namespaced_lease(name=self.name, namespace=self.namespace)
+            spec = getattr(lease, "spec", None)
+            if spec is None or getattr(spec, "holder_identity", None) != self.identity:
+                return False
+            body = deepcopy(lease)
+            body.spec.holder_identity = None
+            body.spec.renew_time = self._now()
+            await api.replace_namespaced_lease(name=self.name, namespace=self.namespace, body=body)
+            logger.info("Released Kubernetes Lease %s/%s on shutdown.", self.namespace, self.name)
+            return True
 
     async def _get_api(self) -> Any | None:
         if self._api_provider is not None:

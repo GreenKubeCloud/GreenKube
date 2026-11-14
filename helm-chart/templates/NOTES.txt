@@ -127,4 +127,10 @@ Welcome to
    For accurate data, set: secrets.electricityMapsToken
    Or switch the provider to Wattnet (EU-only, free): config.electricityProvider=wattnet + secrets.wattnetEmail/wattnetPassword
 
+* Back up the database before every upgrade: migrations only move forward and a helm rollback
+  does not undo them (docs/operations/backup-restore.md).
+{{- if (.Values.postgres.backup | default dict).enabled }}
+  Scheduled backups: CronJob {{ include "greenkube.fullname" . }}-postgres-backup ({{ .Values.postgres.backup.schedule }}).
+{{- end }}
+
 * https://github.com/GreenKubeCloud/GreenKube

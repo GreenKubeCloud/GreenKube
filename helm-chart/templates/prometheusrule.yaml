@@ -181,4 +181,120 @@ spec:
             summary: Savings accruals are missing from the GreenKube savings ledger v2
             description: {{ `{{ $value }} row(s) of {{ $labels.source_table }} have no savings ledger v2 entry after full sweeps for 3 hours; the v2 totals do not reconcile with GET /api/v1/recommendations/savings. See greenkube_ledger_write_errors_total and the controller logs.` | quote }}
     {{- end }}
+    {{- $ops := .Values.monitoring.prometheusRule.operations | default dict }}
+    {{- if ne (toString $ops.enabled) "false" }}
+    {{- $ns := .Release.Namespace }}
+    {{- $fullname := include "greenkube.fullname" . }}
+    {{- $ksm := ne (toString $ops.kubeStateMetrics) "false" }}
+    {{- $freeRatio := $ops.volumeFreeRatio | default 0.15 | float64 }}
+    {{- $fullWithin := int ($ops.volumeFullWithinHours | default 96) }}
+    {{- $backupMaxAge := int ($ops.backupMaxAgeHours | default 36) }}
+    {{- $backup := (.Values.postgres | default dict).backup | default dict }}
+    {{- $claims := list }}
+    {{- if and (include "greenkube.bundledPostgres" .) .Values.postgres.persistence.enabled }}
+    {{- $claims = append $claims (printf "data-%s-postgres-[0-9]+" $fullname) }}
+    {{- end }}
+    {{- if and $backup.enabled (not ($backup.persistence | default dict).existingClaim) }}
+    {{- $claims = append $claims (printf "%s-postgres-backup" $fullname) }}
+    {{- end }}
+    {{- $volumeSelector := printf "namespace=%q,persistentvolumeclaim=~%q" $ns (join "|" $claims) }}
+    {{- if or .Values.monitoring.serviceMonitor.enabled $ksm $claims }}
+    # Operations (production readiness): API and database availability, the
+    # data volumes and the scheduled backup. Series from the GreenKube scrapes,
+    # kube-state-metrics and the kubelet (kube-prometheus-stack ships both).
+    - name: greenkube.operations
+      rules:
+        {{- if .Values.monitoring.serviceMonitor.enabled }}
+        - alert: GreenKubeAPIDown
+          # No scraped API target is up, including when every API pod is gone.
+          expr: (sum(up{namespace="{{ $ns }}",job="{{ $fullname }}-api"}) or vector(0)) < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: The GreenKube API is down
+            description: {{ printf "No %s-api pod in namespace %s answers its metrics scrape: the UI, the API and Git provider webhooks are unavailable. Check kubectl -n %s get pods -l app.kubernetes.io/component=api and the API logs." $fullname $ns $ns | quote }}
+        {{- end }}
+        {{- if and .Values.monitoring.serviceMonitor.enabled (gt (int (include "greenkube.controllerMetricsPort" .)) 0) }}
+        - alert: GreenKubeDatabaseUnavailable
+          # Every controller replica writes a heartbeat row every 30 s, leader or
+          # standby: repeated failures mean the database refuses writes.
+          expr: max(greenkube_loop_consecutive_failures{namespace="{{ $ns }}",loop="controller-heartbeat"}) >= 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: GreenKube cannot write to its database
+            description: {{ `The controller heartbeat has failed {{ $value }} times in a row; collection, scans, measurement and the ledger are stopped. Check the PostgreSQL pod or the external database, its disk and the controller logs (docs/operations/backup-restore.md).` | quote }}
+        {{- end }}
+        {{- if $ksm }}
+        - alert: GreenKubeAPIUnavailable
+          # Pods exist but none is ready: migrations pending or a wedged loop.
+          expr: kube_deployment_status_replicas_available{namespace="{{ $ns }}",deployment="{{ $fullname }}-api"} < 1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: No GreenKube API replica is ready
+            description: {{ printf "Deployment %s-api has no available replica: readiness reports migrating (the controller has not finished the schema migrations), database_unavailable or degraded. See GET /api/v1/health and the controller logs." $fullname | quote }}
+        {{- if include "greenkube.bundledPostgres" . }}
+        - alert: GreenKubePostgresDown
+          expr: kube_statefulset_status_replicas_ready{namespace="{{ $ns }}",statefulset="{{ $fullname }}-postgres"} < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: The bundled GreenKube PostgreSQL is not ready
+            description: {{ printf "StatefulSet %s-postgres has no ready replica. Check its events, its volume (GreenKubeDataVolumeLow) and kubectl -n %s logs %s-postgres-0." $fullname $ns $fullname | quote }}
+        {{- end }}
+        {{- if $backup.enabled }}
+        - alert: GreenKubeBackupMissing
+          # Last success too old, or never succeeded since the CronJob was created.
+          expr: |
+            (time() - max(kube_cronjob_status_last_successful_time{namespace="{{ $ns }}",cronjob="{{ $fullname }}-postgres-backup"}) > {{ mul $backupMaxAge 3600 }})
+            or
+            (
+              time() - max(kube_cronjob_created{namespace="{{ $ns }}",cronjob="{{ $fullname }}-postgres-backup"}) > {{ mul $backupMaxAge 3600 }}
+              unless on ()
+              max(kube_cronjob_status_last_successful_time{namespace="{{ $ns }}",cronjob="{{ $fullname }}-postgres-backup"})
+            )
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: The GreenKube database backup has not succeeded recently
+            description: {{ printf "No successful %s-postgres-backup run for more than %d hours. Check kubectl -n %s get jobs and the logs of the last job (docs/operations/backup-restore.md)." $fullname $backupMaxAge $ns | quote }}
+        {{- end }}
+        {{- end }}
+        {{- if $claims }}
+        - alert: GreenKubeDataVolumeLow
+          expr: |
+            kubelet_volume_stats_available_bytes{ {{- $volumeSelector -}} }
+            /
+            kubelet_volume_stats_capacity_bytes{ {{- $volumeSelector -}} }
+            < {{ $freeRatio }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A GreenKube data volume is almost full
+            description: {{ printf "Volume {{ $labels.persistentvolumeclaim }} has {{ $value | humanizePercentage }} free (threshold %v). Expand the claim or shorten retention (docs/installation.md#sizing)." $freeRatio | quote }}
+        - alert: GreenKubeDataVolumeFillingUp
+          expr: |
+            (
+              kubelet_volume_stats_available_bytes{ {{- $volumeSelector -}} }
+              /
+              kubelet_volume_stats_capacity_bytes{ {{- $volumeSelector -}} }
+            ) < 0.4
+            and
+            predict_linear(kubelet_volume_stats_available_bytes{ {{- $volumeSelector -}} }[6h], {{ mul $fullWithin 3600 }}) < 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: A GreenKube data volume will fill up
+            description: {{ printf "At the growth rate of the last 6 hours, volume {{ $labels.persistentvolumeclaim }} is full within %d hours. Expand the claim or shorten retention (docs/installation.md#sizing)." $fullWithin | quote }}
+        {{- end }}
+    {{- end }}
+    {{- end }}
 {{- end }}

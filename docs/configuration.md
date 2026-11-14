@@ -24,7 +24,7 @@ install notes; see [Upgrading](upgrading.md).
 | `controller.metricsPort` | `9102` | Port of `/prometheus/metrics`, `/healthz` (liveness) and `/readyz` (loop registry readiness). `0` disables the listener; the probes then fall back to a process check. |
 | `controller.leaderElection.leaseName` | `""` | Lease name; empty uses `<release>-leader`. The Lease is always rendered. |
 | `controller.leaderElection.leaseDurationSeconds` | `30` | Handover time when the leader dies. |
-| `controller.startupProbe` | 60 x 10 s | Budget for migrations at startup (`DB_RUN_MIGRATIONS=true` in the controller only). |
+| `controller.startupProbe` | 60 x 10 s | Startup budget. `/healthz` answers while the migrations run (`DB_RUN_MIGRATIONS=true` in the controller only), so a long migration is not restarted; `/readyz` stays not-ready until the loops start. |
 | `renderer.replicas` | `1` | Isolated Helm/Kustomize renderer, always deployed. |
 | `renderer.resources` | 25m / 96Mi requests, 500m / 1Gi limits | Renderer resources. |
 | `renderer.servicePort`, `renderer.tmpSizeLimit` | `8090`, `768Mi` | Renderer port and workspace size. |
@@ -32,10 +32,44 @@ install notes; see [Upgrading](upgrading.md).
 | `worker.replicas` | `0` | Optional dedicated plan executors for very large installations. |
 | `worker.metricsPort`, `worker.resources` | `8001`, 50m / 64Mi | Worker metrics port and resources. |
 | `tmp.sizeLimit` | `768Mi` | Scratch space of the api, controller and worker. |
-| `initContainer.image` | `busybox:1.37` | Image of the `wait-for-postgres` init container (bundled PostgreSQL only). |
+| `initContainer.image` | `busybox:1.37@sha256:a7dbc319…` | Image of the `wait-for-postgres` init container (bundled PostgreSQL only) and of the Helm test pod, pinned by digest. |
 
 Default requests total about 325m CPU and 600 MiB with PostgreSQL. High availability is `api.replicas: 2` and
 `controller.replicas: 2`.
+
+### Scheduling and availability
+
+Each workload has its own block: `api`, `controller`, `worker`, `renderer`, `postgres` and `postgres.backup`.
+
+| Key (per block) | Default | Description |
+|-----|---------|-------------|
+| `nodeSelector` | `{}` | Pod `nodeSelector`. |
+| `tolerations` | `[]` | Pod tolerations. |
+| `affinity` | `{}` | Pod affinity; when set, it replaces the default anti-affinity. |
+| `podAntiAffinity` | `soft` | `api`, `controller`, `worker`, `renderer` only: with more than one replica and no `affinity`, `soft` prefers one replica per node (`kubernetes.io/hostname`), `hard` requires it, `none` renders nothing. |
+| `topologySpreadConstraints` | `[]` | Pod topology spread constraints (not on `postgres.backup`). |
+| `priorityClassName` | `""` | Pod priority class. |
+| `podAnnotations` | `{}` | Added to the pod template (the config checksum annotation is kept). |
+| `podLabels` | `{}` | Added to the pod template; the selector labels always win. |
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `global.imagePullSecrets` | `[]` | Pull secrets of every pod the chart renders except the credentials bootstrap Job: names (`[regcred]`) or entries (`[{name: regcred}]`). |
+| `api.podDisruptionBudget`, `controller.podDisruptionBudget` | `{enabled: true, minAvailable: 1}` | Rendered only with more than one replica (a budget on a single replica would block node drains). |
+| `controller.strategy`, `worker.strategy` | `{type: Recreate}` | The old release stops before the new controller migrates the schema, so two versions never write side by side. `RollingUpdate` (e.g. `maxSurge: 0`) trades that guarantee for a shorter gap. |
+| `postgres.shmSizeLimit` | `128Mi` | Memory-backed `/dev/shm` for parallel query workers (the runtime default is 64Mi); counts against the memory limit when used. `""` keeps the runtime default. |
+| `postgres.terminationGracePeriodSeconds` | `60` | Time for a clean shutdown checkpoint. |
+| `postgres.backup.enabled` | `false` | Daily `pg_dump` CronJob `<release>-postgres-backup` into the claim `<release>-postgres-backup` ([Backup and restore](operations/backup-restore.md)). |
+| `postgres.backup.schedule` | `17 3 * * *` | Cron schedule (cluster time zone). |
+| `postgres.backup.keep` | `7` | Dumps kept on the volume; older ones are deleted after each successful run. |
+| `postgres.backup.activeDeadlineSeconds` | `3600` | Deadline of one run. |
+| `postgres.backup.persistence.existingClaim` | `""` | Write to this claim instead of creating `<release>-postgres-backup` (kept by `helm uninstall`). |
+| `postgres.backup.persistence.size`, `.storageClassName` | `20Gi`, `""` | Size and class of the created claim. |
+| `postgres.backup.resources` | 50m / 64Mi requests, 500m / 512Mi limits | Backup container resources. |
+
+Helper images are pinned by their multi-arch index digest in the default tag (`postgres.image.tag:
+18-alpine@sha256:…`, `initContainer.image.tag: 1.37@sha256:…`), so a re-pushed tag cannot change what runs.
+Overriding the tag replaces the pin; set `digest: sha256:<64 hex>` next to a plain tag to pin your own.
 
 ### Image
 
@@ -487,6 +521,12 @@ monitoring:
       collectionLagSeconds: 1800
       recommendationScanStaleSeconds: 10800
       measurementStaleSeconds: 1800
+    operations:          # Operations alerts (group greenkube.operations)
+      enabled: true
+      kubeStateMetrics: true    # false when kube-state-metrics is not scraped
+      volumeFreeRatio: 0.15
+      volumeFullWithinHours: 96
+      backupMaxAgeHours: 36
     namespace: monitoring
     additionalLabels: {}
   serviceMonitor:
@@ -502,7 +542,7 @@ monitoring:
 
 The controller's own metrics endpoint is configured with `controller.metricsPort` (see [Controller metrics endpoint](#controller-metrics-endpoint-controllermetricsport)); `serviceMonitor.enabled` also adds its ServiceMonitor.
 
-`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. With `prometheusRule.controllerAlerts` (default `true`) it also installs the controller loop alerts `GreenKubeControllerLoopFailing` (a loop failed 3 ticks in a row for 10 minutes), `GreenKubeAutomationLoopStale` (the automation controller loop has not succeeded for 10 minutes) and `GreenKubeNoActiveController` (no controller holds the Lease, or none is scraped, for 5 minutes); they read the controller metrics endpoint, so they render only together with the controller ServiceMonitor (`serviceMonitor.enabled` and `collector.metricsPort` > 0). Together with the controller loop alerts it installs the loop health alerts (group `greenkube.loop`, roadmap N7): `GreenKubeCollectionLagging` (the leader's `greenkube_collection_watermark_lag_seconds{source}` above `thresholds.collectionLagSeconds` for 15 minutes), `GreenKubeRecommendationScanFailing` (every scan of the last hour failed), `GreenKubeRecommendationSourceFailing` (a source failed during scans for over an hour), `GreenKubeRecommendationScanStale` (no successful scan for `thresholds.recommendationScanStaleSeconds`), `GreenKubeMeasurementStalled` (the `recommendation-lifecycle` loop, which runs apply detection, verification and change measurement, has not succeeded for `thresholds.measurementStaleSeconds`) and, whenever a GreenKube process is scraped, the ledger alerts (group `greenkube.ledger`) `GreenKubeLedgerChainVerificationFailed` (critical: `greenkube_ledger_chain_ok{cluster_uid}` is 0) and `GreenKubeLedgerProjectionBacklog` (v1 accrual rows still missing from the ledger v2 after 3 hours). See [Observability and SLOs](observability-slos.md#chart-alerts). The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
+`prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. With `prometheusRule.controllerAlerts` (default `true`) it also installs the controller loop alerts `GreenKubeControllerLoopFailing` (a loop failed 3 ticks in a row for 10 minutes), `GreenKubeAutomationLoopStale` (the automation controller loop has not succeeded for 10 minutes) and `GreenKubeNoActiveController` (no controller holds the Lease, or none is scraped, for 5 minutes); they read the controller metrics endpoint, so they render only together with the controller ServiceMonitor (`serviceMonitor.enabled` and `collector.metricsPort` > 0). Together with the controller loop alerts it installs the loop health alerts (group `greenkube.loop`, roadmap N7): `GreenKubeCollectionLagging` (the leader's `greenkube_collection_watermark_lag_seconds{source}` above `thresholds.collectionLagSeconds` for 15 minutes), `GreenKubeRecommendationScanFailing` (every scan of the last hour failed), `GreenKubeRecommendationSourceFailing` (a source failed during scans for over an hour), `GreenKubeRecommendationScanStale` (no successful scan for `thresholds.recommendationScanStaleSeconds`), `GreenKubeMeasurementStalled` (the `recommendation-lifecycle` loop, which runs apply detection, verification and change measurement, has not succeeded for `thresholds.measurementStaleSeconds`) and, whenever a GreenKube process is scraped, the ledger alerts (group `greenkube.ledger`) `GreenKubeLedgerChainVerificationFailed` (critical: `greenkube_ledger_chain_ok{cluster_uid}` is 0) and `GreenKubeLedgerProjectionBacklog` (v1 accrual rows still missing from the ledger v2 after 3 hours). `prometheusRule.operations` (default on) adds the group `greenkube.operations`: `GreenKubeAPIDown` (no API target up, with the ServiceMonitor), `GreenKubeDatabaseUnavailable` (the controller heartbeat cannot be written, with the controller ServiceMonitor), `GreenKubeAPIUnavailable` and `GreenKubePostgresDown` (kube-state-metrics; `operations.kubeStateMetrics: false` leaves them out), `GreenKubeBackupMissing` (with `postgres.backup.enabled`), and `GreenKubeDataVolumeLow` / `GreenKubeDataVolumeFillingUp` (kubelet volume stats of the bundled PostgreSQL and backup claims); details in [Operations alerts](observability-slos.md#operations-alerts). See [Observability and SLOs](observability-slos.md#chart-alerts). The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
 
 When enabled, the chart applies policies to standalone app/worker pods or production API/controller/worker pods. It allows DNS and the bundled PostgreSQL connection, plus Prometheus and the ready-check ingress paths; other external egress requires an explicit `additionalEgress` rule. No unrestricted internet egress is added.
 
@@ -534,7 +574,7 @@ postgres:
   enabled: true
   image:
     repository: postgres
-    tag: 18-alpine
+    tag: 18-alpine@sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
@@ -564,7 +604,9 @@ There is no production profile: the default topology is production-grade. For pr
 - create the database credentials in a Kubernetes Secret and set `secrets.existingSecret` (with the bundled
   PostgreSQL it must contain `POSTGRES_PASSWORD` and `DB_CONNECTION_STRING`; with an external one,
   `DB_CONNECTION_STRING`), and `auth.admin.existingSecret` for a fully declarative install;
-- serve the UI over HTTPS (see [Ingress and TLS](installation.md#optional-ingress-and-tls)).
+- serve the UI over HTTPS (see [Ingress and TLS](installation.md#optional-ingress-and-tls));
+- turn on `postgres.backup.enabled` and the alerts, and size the data volume: the
+  [production checklist](installation.md#production-checklist) lists every item.
 
 See the [Installation guide](installation.md#credentials-and-gitops-argo-cd-flux).
 

@@ -1,0 +1,146 @@
+suite: postgres backup CronJob (production readiness)
+templates:
+  - templates/postgres-backup.yaml
+
+tests:
+  - it: renders nothing by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a claim kept across uninstall and a nightly CronJob
+    set:
+      postgres.backup.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - documentIndex: 0
+        isKind:
+          of: PersistentVolumeClaim
+      - documentIndex: 0
+        equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+      - documentIndex: 0
+        equal:
+          path: spec.resources.requests.storage
+          value: 20Gi
+      - documentIndex: 1
+        isKind:
+          of: CronJob
+      - documentIndex: 1
+        equal:
+          path: spec.schedule
+          value: "17 3 * * *"
+      - documentIndex: 1
+        equal:
+          path: spec.concurrencyPolicy
+          value: Forbid
+      - documentIndex: 1
+        equal:
+          path: spec.jobTemplate.spec.template.spec.volumes[0].persistentVolumeClaim.claimName
+          value: RELEASE-NAME-greenkube-postgres-backup
+
+  - it: dumps the GreenKube schema with the PostgreSQL image and the connection Secret
+    set:
+      postgres.backup.enabled: true
+      postgres.backup.keep: 14
+      config.db.schema: greenkube
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          value: "postgres:18-alpine@sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95"
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.key
+          value: DB_CONNECTION_STRING
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: DB_SCHEMA
+            value: greenkube
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BACKUP_KEEP
+            value: "14"
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PGSSLMODE
+            value: disable
+
+  - it: uses the application's TLS mode for pg_dump
+    set:
+      postgres.backup.enabled: true
+      config.db.sslMode: verify-full
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PGSSLMODE
+            value: verify-full
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command[2]
+          pattern: 'pg_dump --dbname="\$DB_CONNECTION_STRING" --schema="\$DB_SCHEMA"'
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].command[2]
+          pattern: 'pg_restore --list'
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+
+  - it: reads the connection string from an existing Secret
+    set:
+      postgres.backup.enabled: true
+      secrets.existingSecret: my-db
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.name
+          value: my-db
+
+  - it: writes to an existing claim without creating one
+    set:
+      postgres.backup.enabled: true
+      postgres.backup.persistence.existingClaim: nfs-backups
+      postgres.backup.schedule: "0 */6 * * *"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.volumes[0].persistentVolumeClaim.claimName
+          value: nfs-backups
+      - equal:
+          path: spec.schedule
+          value: "0 */6 * * *"
+
+  - it: schedules the backup pod with its own settings and the global pull secrets
+    set:
+      postgres.backup.enabled: true
+      postgres.backup.nodeSelector:
+        pool: system
+      postgres.backup.podAnnotations:
+        team: platform
+      global.imagePullSecrets: [regcred]
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.nodeSelector.pool
+          value: system
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.annotations.team
+          value: platform
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.imagePullSecrets[0].name
+          value: regcred
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["app.kubernetes.io/component"]
+          value: postgres-backup

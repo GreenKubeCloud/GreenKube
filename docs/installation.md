@@ -215,8 +215,111 @@ controller:
 ```
 
 API replicas are stateless and share sessions through PostgreSQL. Only the controller holding the
-`greenkube-leader` Lease runs the loops. For very large installations, `worker.replicas` adds dedicated plan
-executors next to the controller.
+`greenkube-leader` Lease runs the loops; a stopping leader releases the Lease once its loops have stopped, so a standby
+takes over at once instead of after its expiry. For very large installations, `worker.replicas` adds dedicated plan executors next
+to the controller.
+
+With more than one replica the chart also renders, for the api and the controller:
+
+- a PodDisruptionBudget with `minAvailable: 1` (`api.podDisruptionBudget`, `controller.podDisruptionBudget`), so a
+  node drain never evicts every replica at once;
+- a soft pod anti-affinity on `kubernetes.io/hostname` (`podAntiAffinity: soft`; `hard` requires distinct nodes,
+  `none` turns it off; an explicit `affinity` replaces it).
+
+The controller (and the optional worker) use the `Recreate` strategy: during an upgrade the old pods stop before
+the new controller migrates the schema, so two versions never write side by side. The API rolls as usual.
+
+## Production checklist
+
+The defaults fit an evaluation cluster. Before running GreenKube in production:
+
+| Topic | What to set | Reference |
+|---|---|---|
+| Backups | `postgres.backup.enabled: true` (daily `pg_dump` to its own volume), plus an off-cluster copy | [Backup and restore](operations/backup-restore.md) |
+| Upgrades | Back up first; `helm upgrade --wait --timeout 15m` | [Upgrading](upgrading.md#before-every-upgrade-back-up-the-database) |
+| Availability | `api.replicas: 2`, `controller.replicas: 2` (PDBs and anti-affinity follow) | [High availability](#optional-high-availability) |
+| Alerts | `monitoring.prometheusRule.enabled: true` with the ServiceMonitor: API down, database unavailable, PostgreSQL down, volume filling up, backup missing, loop and ledger alerts | [Observability](observability-slos.md#operations-alerts) |
+| Capacity | Size the data volume for your pod count and retention; expand it before it fills | [Sizing](#sizing) |
+| Scheduling | Per component (`api`, `controller`, `worker`, `renderer`, `postgres`, `postgres.backup`): `nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints`, `priorityClassName`, `podAnnotations`, `podLabels` | [Configuration](configuration.md#scheduling-and-availability) |
+| Private registry | `global.imagePullSecrets`, and mirror the images (helper images are pinned by digest) | [Configuration](configuration.md#scheduling-and-availability) |
+| Credentials | `secrets.existingSecret` and `auth.admin.existingSecret` under GitOps | [Credentials](#credentials-and-gitops-argo-cd-flux) |
+| Exposure | Ingress or HTTPRoute with TLS (needed for `Secure` session cookies) | [Ingress and TLS](#optional-ingress-and-tls) |
+
+```yaml
+# production-values.yaml (example)
+api:
+  replicas: 2
+  priorityClassName: platform-high
+controller:
+  replicas: 2
+postgres:
+  persistence:
+    size: 50Gi
+    storageClassName: gp3     # a class with allowVolumeExpansion: true
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: '1', memory: 1Gi}
+  backup:
+    enabled: true
+monitoring:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+```
+
+## Sizing
+
+The database grows with the number of pods running at the same time (not with their churn) and with the retention
+of the hourly aggregates. Raw samples (every 5 minutes, one row per pod and one per container) are kept
+`config.metricsRawRetentionDays` (7 days) and then compressed into hourly rows, kept
+`config.metricsAggregatedRetentionDays` (unbounded by default).
+
+Measured on PostgreSQL 18 with the current schema and its indexes, a raw pod row takes about 450 bytes and a raw
+container row about 350 bytes; hourly rows are of the same order. Allowing for populated provenance columns,
+per-workload rollups, recommendations, changes and the ledger, plan for:
+
+| Per 100 concurrent pods (about 1.5 containers each) | Size |
+|---|---|
+| Raw samples (7 days, steady state, does not grow) | about 0.3 GB |
+| Hourly aggregates, per year of retention | about 1.5 to 2 GB |
+| Recommendations, plans, changes, measurements, ledger | tens of MB per year |
+| PostgreSQL overhead (WAL up to `max_wal_size`, 1 GB by default; dead rows between autovacuum runs) | about 1.5 GB |
+
+So the default 10 GiB volume holds roughly three years of history for 100 pods, or one year for 300 pods. For
+1,000 pods and one year, plan about 25 GiB; for multi-year history, multiply the hourly line by the years kept.
+Keep at least 30% free: a migration that backfills a table, and `VACUUM`, temporarily need room. The
+`GreenKubeDataVolumeLow` and `GreenKubeDataVolumeFillingUp` alerts watch the volume
+(`monitoring.prometheusRule.operations`), and the size of the database is one query away:
+
+```bash
+kubectl -n greenkube exec greenkube-postgres-0 -c postgres -- sh -c \
+  'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc \
+   "SELECT pg_size_pretty(pg_database_size(current_database()))"'
+```
+
+**Aggregated retention.** The default stays unbounded (`-1`): a finite default would silently delete the history
+of existing installations at upgrade, and the hourly aggregates are what year-over-year reports and
+re-measurements read. For large clusters, bound it explicitly, for example `config.metricsAggregatedRetentionDays:
+400` (13 months, enough for a year-over-year comparison). The savings ledger, recommendations and measurements
+are never pruned by this setting.
+
+**Expand the volume.** The bundled claim `data-<release>-postgres-0` can grow in place when its StorageClass has
+`allowVolumeExpansion: true` (`kubectl get storageclass`). A StatefulSet's `volumeClaimTemplates` cannot be
+changed, so expand the claim itself, then keep the chart value in step for future installs:
+
+```bash
+kubectl -n greenkube patch pvc data-greenkube-postgres-0 \
+  -p '{"spec":{"resources":{"requests":{"storage":"50Gi"}}}}'
+kubectl -n greenkube get pvc data-greenkube-postgres-0 -w      # wait for the new capacity
+# Some drivers finish the filesystem resize only when the pod restarts:
+kubectl -n greenkube rollout restart statefulset/greenkube-postgres
+```
+
+Changing `postgres.persistence.size` alone has no effect on an existing claim (and `helm upgrade` refuses to
+change a StatefulSet's claim template: leave it at the old size, or recreate the StatefulSet object with
+`kubectl delete statefulset greenkube-postgres --cascade=orphan` before the upgrade, which keeps the pod and its
+volume). Without volume expansion, back up, install on a larger volume and [restore](operations/backup-restore.md#restore).
 
 ## Optional: SSO and accounts
 
@@ -259,8 +362,10 @@ as an optional volume, into the API, the controller and the workers; never into 
 ## Upgrades and uninstallation
 
 Upgrading from 0.3.x (profiles, `automation.enabled`, SQLite) is covered in [Upgrading](upgrading.md). Within
-0.4, `helm upgrade` with your values file is enough: the controller migrates the schema at startup and the API
-replicas report ready once it is current.
+0.4, back up the database first ([Upgrading](upgrading.md#before-every-upgrade-back-up-the-database)), then
+`helm upgrade` with your values file: the controller migrates the schema at startup and the API replicas report
+ready once it is current. To go back after a migration, restore the backup: `helm rollback` alone does not undo
+migrations ([Backup and restore](operations/backup-restore.md#roll-back-an-upgrade)).
 
 ```bash
 helm uninstall greenkube --namespace greenkube
