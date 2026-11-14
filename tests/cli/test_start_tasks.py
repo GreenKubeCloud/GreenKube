@@ -630,3 +630,109 @@ def test_start_raises_typer_exit_on_unexpected_error():
                 start_module.start(ctx)
 
     assert exc_info.value.exit_code == 1
+
+
+# -- Upgrade safety: the controller answers its probes while it migrates --------------
+# Migrations run at controller startup. The startup probe targets /healthz on the
+# controller metrics listener; when that listener only started after the migrations, a
+# migration longer than the probe budget (10 minutes by default) got the pod restarted,
+# the migration transaction rolled back, and the upgrade crash-looped.
+
+
+class _ReadyRegistry(_CapturingRegistry):
+    def ready(self):
+        return True
+
+    def snapshot(self):
+        return {"role": self.role, "ready": True, "loops": []}
+
+
+@pytest.mark.asyncio
+async def test_metrics_listener_serves_before_migrations_and_reports_not_ready(monkeypatch):
+    events: list[str] = []
+    captured: dict = {}
+
+    async def fake_start_metrics(port, *args, health=None, **kwargs):
+        events.append("metrics-started")
+        captured["health"] = health
+        return "endpoint"
+
+    async def fake_stop_metrics(handle):
+        events.append(f"metrics-stopped:{handle}")
+
+    async def connect():
+        events.append("migrations")
+        # While migrating, the probe listener is up but the controller is not ready.
+        assert captured["health"].ready() is False
+        assert captured["health"].snapshot()["ready"] is False
+
+    db_manager = MagicMock()
+    db_manager.connect = AsyncMock(side_effect=connect)
+    stop_event = MagicMock()
+
+    async def wait():
+        # Loops have started by the time the controller waits for a signal.
+        assert captured["health"].ready() is True
+        events.append("running")
+
+    stop_event.wait = AsyncMock(side_effect=wait)
+    monkeypatch.setattr("greenkube.automation.plan_runtime.initialize_gitops_provider_configs", AsyncMock())
+    monkeypatch.setattr(
+        "greenkube.gitops.discovery.runtime.create_gitops_discovery_runtime",
+        AsyncMock(return_value=SimpleNamespace(run_once=AsyncMock(), interval_seconds=300.0)),
+    )
+    monkeypatch.setattr("greenkube.core.loops.LoopRegistry", _ReadyRegistry)
+    monkeypatch.setattr("greenkube.cli.controller_metrics.start_controller_metrics_server", fake_start_metrics)
+    monkeypatch.setattr("greenkube.cli.controller_metrics.stop_controller_metrics_server", fake_stop_metrics)
+    monkeypatch.setattr(start_module, "_create_controller_plan_runtime", AsyncMock(return_value=None))
+    monkeypatch.setattr(start_module, "_create_session_purge", lambda _db: AsyncMock())
+
+    initial_tasks = (
+        "collect_carbon_intensity_for_all_zones",
+        "analyze_nodes",
+        "async_write_combined_metrics_to_database",
+        "attribute_recommendation_savings",
+        "compress_metrics",
+        "refresh_dashboard_summary",
+        "run_recommendation_lifecycle",
+        "run_recommendation_scan",
+    )
+    for name in initial_tasks:
+        monkeypatch.setattr(start_module, name, AsyncMock())
+
+    with (
+        patch("greenkube.cli.start.get_config", return_value=_controller_config(CONTROLLER_METRICS_PORT=9091)),
+        patch("greenkube.core.db.get_db_manager", return_value=db_manager),
+        patch("greenkube.cli.start.asyncio.Event", return_value=stop_event),
+        patch("greenkube.cli.start.asyncio.get_running_loop", return_value=MagicMock()),
+    ):
+        await start_module._async_start(last=None)
+
+    assert events == ["metrics-started", "migrations", "running", "metrics-stopped:endpoint"]
+
+
+@pytest.mark.asyncio
+async def test_failed_migration_stops_the_metrics_listener(monkeypatch):
+    events: list[str] = []
+
+    async def fake_start_metrics(port, *args, health=None, **kwargs):
+        events.append("metrics-started")
+        return "endpoint"
+
+    async def fake_stop_metrics(handle):
+        events.append(f"metrics-stopped:{handle}")
+
+    db_manager = MagicMock()
+    db_manager.connect = AsyncMock(side_effect=RuntimeError("migration failed"))
+    monkeypatch.setattr("greenkube.core.loops.LoopRegistry", _ReadyRegistry)
+    monkeypatch.setattr("greenkube.cli.controller_metrics.start_controller_metrics_server", fake_start_metrics)
+    monkeypatch.setattr("greenkube.cli.controller_metrics.stop_controller_metrics_server", fake_stop_metrics)
+
+    with (
+        patch("greenkube.cli.start.get_config", return_value=_controller_config(CONTROLLER_METRICS_PORT=9091)),
+        patch("greenkube.core.db.get_db_manager", return_value=db_manager),
+    ):
+        with pytest.raises(RuntimeError, match="migration failed"):
+            await start_module._async_start(last=None)
+
+    assert events == ["metrics-started", "metrics-stopped:endpoint"]
