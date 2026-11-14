@@ -8,7 +8,11 @@
 #   3. helm upgrade --reset-then-reuse-values --wait to ./helm-chart with the
 #      image built from this checkout;
 #   4. assert: api and controller Ready, schema at the latest shipped migration,
-#      every seeded row kept, API key unchanged and still accepted.
+#      every seeded row kept, API key unchanged and still accepted;
+#   5. roll back as docs/operations/backup-restore.md says: stop the writers,
+#      restore the dump taken before the upgrade into an emptied schema, helm
+#      rollback; assert the 0.3.1 schema version, the seeded rows and a Ready
+#      0.3.1 release (UPGRADE_ROLLBACK=0 skips it).
 #
 # It only ever talks to a kind cluster, through its own kubeconfig file: it never
 # reads or changes the current kubectl context (a shared Minikube stays untouched).
@@ -22,6 +26,7 @@
 #   UPGRADE_FROM_TAG     released version to upgrade from (default v0.3.1)
 #   UPGRADE_STATE_DIR    kubeconfig, logs and evidence (default $TMPDIR/greenkube-upgrade-test)
 #   UPGRADE_TIMEOUT      helm --timeout of install and upgrade (default 15m)
+#   UPGRADE_ROLLBACK     1 (default) runs the backup-restore rollback phase
 set -euo pipefail
 
 UPGRADE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +39,7 @@ REPO_ROOT="$(cd "${UPGRADE_DIR}/../.." && pwd)"
 : "${UPGRADE_STATE_DIR:=${TMPDIR:-/tmp}/greenkube-upgrade-test}"
 : "${UPGRADE_TIMEOUT:=15m}"
 : "${UPGRADE_CHART_REPO:=https://GreenKubeCloud.github.io/GreenKube}"
+: "${UPGRADE_ROLLBACK:=1}"
 NAMESPACE="greenkube"
 RELEASE="greenkube"
 FROM_VERSION="${UPGRADE_FROM_TAG#v}"
@@ -164,6 +170,13 @@ api_key_before="$(kc -n "${NAMESPACE}" get secret "${RELEASE}" -o jsonpath='{.da
 [[ -n "${api_key_before}" ]] || fail seed "no GREENKUBE_API_KEY in Secret ${RELEASE}"
 evidence seed ok "$(tr '\n' ' ' <"${EVIDENCE}/counts-before.txt")"
 
+# The mandatory pre-upgrade backup (docs/upgrading.md): the GreenKube schema, custom format.
+kc -n "${NAMESPACE}" exec "${RELEASE}-postgres-0" -c postgres -- sh -c \
+  'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" --schema=public --format=custom --no-owner' \
+  >"${work}/before-upgrade.dump" || fail backup "pg_dump of the ${FROM_VERSION} schema failed"
+[[ -s "${work}/before-upgrade.dump" ]] || fail backup "empty pre-upgrade dump"
+evidence backup ok "$(wc -c <"${work}/before-upgrade.dump" | tr -d ' ') bytes"
+
 # --- 3. Upgrade ------------------------------------------------------------------------
 log "Upgrading to the working tree (${UPGRADE_IMAGE})..."
 hc upgrade "${RELEASE}" "${REPO_ROOT}/helm-chart" --namespace "${NAMESPACE}" --reset-then-reuse-values \
@@ -209,5 +222,45 @@ anonymous="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${local_po
 [[ "${anonymous}" == "401" || "${anonymous}" == "403" ]] ||
   fail api_key "an anonymous request answered HTTP ${anonymous}: the key check proves nothing"
 evidence api_key ok "unchanged and accepted (anonymous: HTTP ${anonymous})"
+kill "${port_forward_pid}" >/dev/null 2>&1 || true
+port_forward_pid=""
+
+# --- 5. Roll back: restore the pre-upgrade dump, then helm rollback ----------------------
+if [[ "${UPGRADE_ROLLBACK}" == "1" ]]; then
+  log "Rolling back to ${FROM_VERSION} by restoring the pre-upgrade dump..."
+  for deployment in $(kc -n "${NAMESPACE}" get deployments -o name); do
+    kc -n "${NAMESPACE}" scale "${deployment}" --replicas=0 >/dev/null
+  done
+  kc -n "${NAMESPACE}" wait --for=delete pod -l app.kubernetes.io/component=controller --timeout 180s >/dev/null 2>&1 || true
+  kc -n "${NAMESPACE}" wait --for=delete pod -l app.kubernetes.io/component=api --timeout 180s >/dev/null 2>&1 || true
+  # The documented restore (docs/operations/backup-restore.md#restore), verbatim.
+  kc -n "${NAMESPACE}" exec -i "${RELEASE}-postgres-0" -c postgres -- sh -c '
+    { printf "DROP SCHEMA IF EXISTS \"%s\" CASCADE;\n" "$1"; pg_restore --no-owner --file=-; } |
+      PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+        --single-transaction -v ON_ERROR_STOP=1 -q -o /dev/null' sh public \
+    <"${work}/before-upgrade.dump" >"${EVIDENCE}/restore.txt" 2>&1 ||
+    fail restore "restore of the pre-upgrade dump failed: $(grep -m 3 ERROR "${EVIDENCE}/restore.txt" | tr '\n' ' ')"
+  restored_version="$(schema_version)"
+  [[ "${restored_version}" == "${old_version}" ]] ||
+    fail restore "schema version ${restored_version} after the restore, expected ${old_version}"
+  psql_exec -f - <"${UPGRADE_DIR}/counts.sql" >"${EVIDENCE}/counts-restored.txt"
+  diff -u "${EVIDENCE}/counts-before.txt" "${EVIDENCE}/counts-restored.txt" >"${EVIDENCE}/counts-restored.diff" ||
+    fail restore "row counts differ after the restore: $(tr '\n' ' ' <"${EVIDENCE}/counts-restored.diff")"
+  evidence restore ok "schema version ${new_version} -> ${restored_version}, rows kept"
+
+  hc rollback "${RELEASE}" 1 --namespace "${NAMESPACE}" --wait --timeout "${UPGRADE_TIMEOUT}" \
+    >"${EVIDENCE}/rollback.txt" 2>&1 || fail rollback "helm rollback failed: $(tail -n 5 "${EVIDENCE}/rollback.txt" | tr '\n' ' ')"
+  for deployment in $(kc -n "${NAMESPACE}" get deployments -o name); do
+    replicas="$(kc -n "${NAMESPACE}" get "${deployment}" -o jsonpath='{.spec.replicas}')"
+    [[ "${replicas}" == "0" ]] && continue
+    kc -n "${NAMESPACE}" rollout status "${deployment}" --timeout 300s >/dev/null ||
+      fail rollback "${deployment} is not Ready after the rollback"
+  done
+  [[ "$(schema_version)" == "${old_version}" ]] || fail rollback "the ${FROM_VERSION} release changed the schema version"
+  psql_exec -f - <"${UPGRADE_DIR}/counts.sql" >"${EVIDENCE}/counts-rolled-back.txt"
+  diff -u "${EVIDENCE}/counts-before.txt" "${EVIDENCE}/counts-rolled-back.txt" >/dev/null ||
+    fail rollback "row counts changed after the rollback"
+  evidence rollback ok "${FROM_VERSION} Ready on schema version ${old_version}"
+fi
 
 log "Upgrade ${FROM_VERSION} -> working tree passed. Evidence: ${EVIDENCE}"
