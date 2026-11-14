@@ -14,19 +14,56 @@ from greenkube.collectors.discovery.opencost import OpenCostDiscovery
 from ..core.config import config
 from ..core.observability import elapsed, record_collection_request, start_timer
 from ..models.metrics import CostMetric
+from ..models.provenance import CostSource
 from ..utils.http_client import get_async_http_client
 from .base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
 
 
-def _number(value: Any) -> float:
-    """Return a finite float from an OpenCost JSON value (``None``/NaN become 0)."""
+def _optional_number(value: Any) -> Optional[float]:
+    """A finite float from an OpenCost JSON value; ``None`` when missing, NaN, infinite or not a number."""
+    if value is None or isinstance(value, bool):
+        return None
     try:
         number = float(value)
     except (TypeError, ValueError):
-        return 0.0
-    return number if math.isfinite(number) else 0.0
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _number(value: Any) -> float:
+    """Return a finite float from an OpenCost JSON value (``None``/NaN become 0)."""
+    number = _optional_number(value)
+    return 0.0 if number is None else number
+
+
+def untrusted_cost_reason(item: dict) -> Optional[str]:
+    """Why an OpenCost allocation's cost must not back a measurement (``None`` when it can).
+
+    A missing cost is missing, never a zero (fail closed): ``totalCost``,
+    ``cpuCost`` or ``ramCost`` present but NaN, infinite or not a number, a
+    total that is neither reported nor derivable from the CPU and RAM costs,
+    and a zero total for a pod that ran (``minutes > 0``) with non-zero
+    requests (OpenCost had no price for it yet) are all untrusted. Rows built
+    from such an allocation carry ``cost_source = none``, so a NaN never
+    becomes a measured saving.
+    """
+    for key in ("totalCost", "cpuCost", "ramCost"):
+        if key in item and item[key] is not None and _optional_number(item[key]) is None:
+            return f"OpenCost {key} is not a finite number ({item[key]!r})"
+    total = _optional_number(item.get("totalCost"))
+    if total is None and (
+        _optional_number(item.get("cpuCost")) is None or _optional_number(item.get("ramCost")) is None
+    ):
+        return "OpenCost reported no total, CPU or RAM cost"
+    minutes = _optional_number(item.get("minutes"))
+    requested = any(
+        (_optional_number(item.get(key)) or 0.0) > 0 for key in ("cpuCoreRequestAverage", "ramByteRequestAverage")
+    )
+    if total is not None and total == 0 and minutes is not None and minutes > 0 and requested:
+        return "OpenCost reported a zero cost for a running pod with non-zero requests"
+    return None
 
 
 def _parse_time(value: Any) -> Optional[datetime]:
@@ -68,6 +105,9 @@ def _allocation_to_cost_metric(resource_id: str, item: Any, timestamp: datetime)
 
     window = item.get("window") if isinstance(item.get("window"), dict) else {}
     minutes = item.get("minutes")
+    untrusted = untrusted_cost_reason(item)
+    if untrusted is not None:
+        logger.debug("Cost of %s/%s is not trusted: %s", namespace, pod_name, untrusted)
     return CostMetric(
         pod_name=pod_name,
         namespace=namespace,
@@ -82,7 +122,7 @@ def _allocation_to_cost_metric(resource_id: str, item: Any, timestamp: datetime)
         window_start=_parse_time(window.get("start")),
         window_end=_parse_time(window.get("end")),
         minutes=_number(minutes) if minutes is not None else None,
-        source="opencost",
+        source=CostSource.NONE.value if untrusted is not None else CostSource.OPENCOST.value,
     )
 
 

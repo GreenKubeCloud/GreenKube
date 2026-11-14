@@ -16,6 +16,7 @@ from ..models.metrics import CombinedMetric, CostMetric, EnergyMetric, PodMetric
 from ..models.node import NodeZoneContext
 from ..models.provenance import (
     INTENSITY_FALLBACK_REASON_PREFIX,
+    CostSource,
     IntensitySource,
     PowerSource,
     UsageSource,
@@ -35,8 +36,14 @@ _DEFAULTED_INTENSITY = {
 
 
 def cost_fields(cost: Optional[CostMetric], share: float, default_cost: float) -> Dict[str, Any]:
-    """Return the cost columns of a row from an allocation and the share of it the row covers."""
-    if cost is None:
+    """Return the cost columns of a row from an allocation and the share of it the row covers.
+
+    An allocation whose cost the collector found untrusted (``source = none``:
+    NaN, missing, or a zero total for a running pod with requests) is treated
+    as no allocation: the row gets the default placeholder with
+    ``cost_source = none``, never a trusted zero.
+    """
+    if cost is None or cost.source == CostSource.NONE.value:
         return {
             "total_cost": default_cost,
             "cost_cpu": None,
@@ -145,7 +152,13 @@ class MetricAssembler:
             )
 
         cost_total = getattr(cost_metric, "total_cost", None) if cost_metric else None
-        if not cost_metric:
+        if cost_metric is not None and getattr(cost_metric, "source", None) == CostSource.NONE.value:
+            is_estimated = True
+            estimation_reasons.append(
+                f"OpenCost cost of pod '{energy_metric.pod_name}' is missing or not finite. "
+                f"Used default cost {self._config.DEFAULT_COST}"
+            )
+        elif not cost_metric:
             is_estimated = True
             estimation_reasons.append(
                 f"No cost data for pod '{energy_metric.pod_name}'. Used default cost {self._config.DEFAULT_COST}"

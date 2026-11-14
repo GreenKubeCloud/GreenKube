@@ -106,7 +106,10 @@ def is_cost_trusted(row: Any, *, allowed: Iterable[str] = TRUSTED_COST_SOURCES) 
 
     The row must name an allowed ``cost_source`` and carry a finite,
     non-negative ``total_cost`` (OpenCost occasionally returns negative
-    adjustments that must not be presented as savings).
+    adjustments that must not be presented as savings). A zero total on a row
+    that requested CPU or memory is not trusted either: OpenCost had no price
+    for it (a missing cost read as zero), and a zero after a change would be
+    measured as the whole cost saved.
     """
     source = _normalized(_value(row, "cost_source"))
     if source is None or source not in {str(item) for item in allowed}:
@@ -118,7 +121,23 @@ def is_cost_trusted(row: Any, *, allowed: Iterable[str] = TRUSTED_COST_SOURCES) 
         total_value = float(total)
     except (TypeError, ValueError):
         return False
-    return math.isfinite(total_value) and total_value >= 0
+    if not math.isfinite(total_value) or total_value < 0:
+        return False
+    if total_value == 0 and _requested(row):
+        return False
+    return True
+
+
+def _requested(row: Any) -> bool:
+    """Whether a row requested CPU or memory (``cpu_request`` millicores, ``memory_request`` bytes)."""
+    for field in ("cpu_request", "memory_request"):
+        try:
+            value = float(_value(row, field) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0:
+            return True
+    return False
 
 
 def is_usage_trusted(row: Any, *, allowed: Iterable[str] = TRUSTED_USAGE_SOURCES) -> bool:
