@@ -61,7 +61,7 @@ from greenkube.api.routers import setup as setup_router
 from greenkube.api.routers import signals as signals_router
 from greenkube.api.routers import sources as sources_router
 from greenkube.api.routers import webhooks as webhooks_router
-from greenkube.auth.http import client_ip
+from greenkube.auth.http import client_ip, is_https
 from greenkube.auth.lifecycle import start_auth_runtime
 from greenkube.auth.settings import AuthSettings
 from greenkube.automation.plan_runtime import PlanRuntimeConfigurationError, build_plan_api_service
@@ -89,6 +89,27 @@ def _cors_policy(raw_origins: str) -> tuple[list[str], bool]:
     return origins, bool(origins)
 
 
+def _hsts_header(request: Request) -> str | None:
+    """``Strict-Transport-Security`` value for this response, or None.
+
+    Sent when the browser reached GreenKube over HTTPS (directly, or per
+    ``X-Forwarded-Proto`` from ``TRUSTED_PROXY_IPS``) and whenever the deployment
+    declares HTTPS with ``SESSION_COOKIE_SECURE=always``: browsers ignore the
+    header on plain-HTTP responses, so the latter is harmless on a port-forward.
+    """
+    cfg = get_config()
+    max_age = getattr(cfg, "HSTS_MAX_AGE", 0)
+    if not isinstance(max_age, int) or isinstance(max_age, bool) or max_age <= 0:
+        return None
+    settings = AuthSettings.from_config(cfg)
+    if settings.cookie_secure != "always" and not is_https(request, settings):
+        return None
+    value = f"max-age={max_age}"
+    if getattr(cfg, "HSTS_INCLUDE_SUBDOMAINS", False) is True:
+        value += "; includeSubDomains"
+    return value
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add standard security headers to every HTTP response.
 
@@ -106,6 +127,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Common security headers for all responses
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        hsts = _hsts_header(request)
+        if hsts:
+            response.headers.setdefault("Strict-Transport-Security", hsts)
 
         # Document-only headers — only meaningful for HTML pages, not for
         # JSON API responses or static assets.  Setting them on every response

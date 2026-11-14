@@ -399,6 +399,14 @@
           "type": "object",
           "properties": {
             "secureCookie": {"type": "string", "enum": ["auto", "always", "never"]},
+            "hsts": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "maxAge": {"type": "integer", "minimum": 0},
+                "includeSubdomains": {"type": "boolean"}
+              }
+            },
             "idleTimeout": {"$ref": "#/definitions/longDuration"},
             "absoluteLifetime": {"$ref": "#/definitions/longDuration"},
             "rememberLifetime": {"$ref": "#/definitions/longDuration"}

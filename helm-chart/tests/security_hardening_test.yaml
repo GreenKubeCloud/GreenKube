@@ -1,0 +1,87 @@
+suite: security hardening (session cookie, HSTS)
+templates:
+  - templates/configmap.yaml
+release:
+  name: gk
+  namespace: greenkube
+
+tests:
+  - it: keeps the cookie automatic and HSTS on by default without an HTTPS exposure
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: auto
+      - equal:
+          path: data.HSTS_MAX_AGE
+          value: "31536000"
+      - equal:
+          path: data.HSTS_INCLUDE_SUBDOMAINS
+          value: "false"
+
+  - it: renders a Secure cookie behind an Ingress with TLS even without trusted proxies
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      ingress.tls:
+        - secretName: greenkube-tls
+          hosts: [greenkube.example.com]
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: always
+
+  - it: keeps auto behind a plain-HTTP Ingress
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: auto
+
+  - it: renders a Secure cookie behind an https HTTPRoute
+    set:
+      httpRoute.enabled: true
+      httpRoute.parentRefs:
+        - name: gateway
+      httpRoute.hostnames: [greenkube.example.com]
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: always
+
+  - it: keeps auto behind an http HTTPRoute
+    set:
+      httpRoute.enabled: true
+      httpRoute.parentRefs:
+        - name: gateway
+      httpRoute.hostnames: [greenkube.example.com]
+      httpRoute.scheme: http
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: auto
+
+  - it: never overrides an explicit secureCookie choice
+    set:
+      auth.session.secureCookie: never
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      ingress.tls:
+        - secretName: greenkube-tls
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: never
+
+  - it: configures or disables HSTS
+    set:
+      auth.session.hsts.maxAge: 0
+      auth.session.hsts.includeSubdomains: true
+    asserts:
+      - equal:
+          path: data.HSTS_MAX_AGE
+          value: "0"
+      - equal:
+          path: data.HSTS_INCLUDE_SUBDOMAINS
+          value: "true"

@@ -310,6 +310,10 @@ class Config(BaseSettings):
     # auto: Secure when the request is HTTPS (directly or via X-Forwarded-Proto
     # from TRUSTED_PROXY_IPS); always; never (local plain-HTTP testing only).
     SESSION_COOKIE_SECURE: str = "auto"
+    # Strict-Transport-Security on HTTPS responses (and on every response when
+    # SESSION_COOKIE_SECURE=always); 0 disables the header.
+    HSTS_MAX_AGE: int = Field(default=31_536_000, ge=0)
+    HSTS_INCLUDE_SUBDOMAINS: bool = False
     AUTH_SESSION_IDLE_TIMEOUT: str = "12h"
     AUTH_SESSION_ABSOLUTE_LIFETIME: str = "7d"
     AUTH_SESSION_REMEMBER_LIFETIME: str = "30d"

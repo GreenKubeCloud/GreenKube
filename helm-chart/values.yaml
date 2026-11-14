@@ -727,7 +727,14 @@ auth:
   session:
     # auto: Secure cookie when the browser uses HTTPS (directly, or through a
     # proxy listed in config.trustedProxyIps); always; never (plain-HTTP tests).
+    # With an HTTPS exposure (ingress.enabled with ingress.tls, or httpRoute.enabled
+    # with scheme https) auto renders "always".
     secureCookie: auto
+    # Strict-Transport-Security sent on HTTPS responses (and on every response
+    # when the cookie is always Secure). maxAge 0 disables the header.
+    hsts:
+      maxAge: 31536000
+      includeSubdomains: false
     # Sign out after this much inactivity (sliding).
     idleTimeout: 12h
     # Maximum session lifetime, and with "Keep me signed in".

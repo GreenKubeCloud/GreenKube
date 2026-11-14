@@ -35,6 +35,20 @@ in pull requests, commit statuses and status comments (J1):
 {{- end -}}
 
 
+{{/*
+"true" when the chart exposes GreenKube over HTTPS: an enabled Ingress with a
+tls entry, or an enabled HTTPRoute whose scheme is https. auth.session.secureCookie
+"auto" then renders SESSION_COOKIE_SECURE=always (security hardening).
+*/}}
+{{- define "greenkube.httpsExposure" -}}
+{{- $ingress := .Values.ingress | default dict -}}
+{{- $route := .Values.httpRoute | default dict -}}
+{{- if or (and $ingress.enabled $ingress.tls) (and $route.enabled (eq ($route.scheme | default "https") "https")) -}}
+true
+{{- end -}}
+{{- end -}}
+
+
 {{/* Path prefix routed to the api Service: config.rootPath ("/greenkube"), or "/". */}}
 {{- define "greenkube.exposurePath" -}}
 {{- $root := (.Values.config | default dict).rootPath | default "" | trimSuffix "/" -}}
