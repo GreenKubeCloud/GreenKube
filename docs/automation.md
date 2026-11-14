@@ -825,6 +825,17 @@ A rate-limited provider response is transient, never an authorization failure:
 
 GreenKube reads the reset time from `Retry-After` (seconds or HTTP date), `X-RateLimit-Reset` or `RateLimit-Reset` (epoch seconds), plus one second; without one it waits 60 seconds, and never more than an hour. A wait of up to 2 seconds is retried inside the request (repository archive downloads included); a longer one, or a `403` secondary limit that announces no reset time (fast retries extend that penalty), ends the request with a typed `provider-rate-limited` error. A plan operation is then rescheduled at the reset time without consuming one of its attempts, the plan keeps its status, and the provider is never marked `permission_denied` (the preflight reports `provider-rate-limited`). Every rate-limited response increments `greenkube_git_provider_rate_limited_total{provider}`; the `GreenKubeGitProviderRateLimited` alert (group `greenkube.loop`) fires when a provider keeps rate-limiting for more than 30 minutes. Lower the request volume (a GitHub App has a higher quota than a personal token) or raise the provider quota.
 
+### A repository removed from the allowlist (detached pull requests)
+
+When a repository leaves the provider allowlist (or the provider credentials stop authorizing it), PR polling, plan branch cleanup and the lifecycle comment can no longer reach its pull requests. They no longer retry those records on every tick: each plan pull-request record keeps a capped exponential backoff (10 s, then doubling up to 1 hour), stored with the record (`provider_retry_failures`, `provider_retry_at`, `provider_detached_reason`).
+
+- **Repository no longer allowlisted** (`ProviderAuthorizationError`, `repository-not-allowed`): the records are marked detached (`provider_detached_reason = repository_not_allowed`). The controller logs one warning naming the repository, the provider and the record ids, and emits the audit event `pull_request_records_detached` on the `greenkube.audit` logger. Polling then stops; a detached record is rechecked only at the backoff cadence (at most hourly) and without a new warning.
+- **Credentials refused** (HTTP `401`/`403` that is not a rate limit) or provider removed or disabled: the same backoff, with one warning per backoff step. The records are not detached.
+- **Rate limit**: unchanged (see [Provider rate limits](#provider-rate-limits)). The record waits until the provider's reset time, and the backoff step does not grow.
+- Other transient failures (`5xx`, timeouts) are still retried on the next cycle.
+
+To resume, add the repository (or a matching pattern) back to the provider allowlist, through `gitops.providers[].repositories` or the discovered-repository allowlist. Adding a pattern makes the detached records of that provider due at once. The next poll reattaches them, logs `... are reattached` and emits `pull_request_records_reattached`. After fixing credentials, the records resume at their next backoff step (within an hour). If a repository was removed on purpose, close its open plan PRs on the provider: the detached records then stay idle.
+
 ### A plan stuck in `applying`
 
 The worker writes a `pending` pull-request record before it pushes the branch. When the operation then exhausts its retries (for example the worker crashed after opening the PR and its last lease expired), the controller's operation reconciler checks the deterministic plan branch on the provider:

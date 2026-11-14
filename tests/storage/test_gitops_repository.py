@@ -1886,3 +1886,62 @@ async def test_provider_feature_notes_keep_the_provider_verified(gitops_store):
     await repository.record_provider_feature_note("github-main", "comments", None)
     remaining = await repository.list_provider_feature_notes("github-main")
     assert [note["feature"] for note in remaining] == ["pull_request_metadata"]
+
+
+@pytest.mark.asyncio
+async def test_provider_backoff_is_stored_with_the_record_and_released_by_a_new_allowlist_pattern(gitops_store):
+    repository, manager, backend = gitops_store
+    pull_requests = (
+        PostgresPullRequestRepository(manager) if backend == "postgres" else SQLitePullRequestRepository(manager)
+    )
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="github-main", provider_type="github", status="ready")
+    )
+    await repository.add_provider_allowlist("github-main", "acme/platform")
+    detached, other = [
+        await pull_requests.save_pull_request(
+            PullRequestRecord(
+                recommendation_id=recommendation_id,
+                provider="github",
+                provider_id="github-main",
+                repo=repo,
+                pr_number=recommendation_id,
+                plan_id=f"plan-{recommendation_id}",
+                status=PullRequestStatus.OPEN,
+            )
+        )
+        for recommendation_id, repo in ((801, "acme/removed"), (802, "acme/platform"))
+    ]
+    assert detached.provider_retry_failures == 0 and detached.provider_retry_at is None
+    retry_at = datetime(2026, 1, 5, 12, 0, 40, tzinfo=timezone.utc)
+    assert detached.id is not None and other.id is not None
+    await pull_requests.set_provider_retry_state(
+        [detached.id], failures=3, retry_at=retry_at, detached_reason="repository_not_allowed"
+    )
+    await pull_requests.set_provider_retry_state([other.id], failures=0, retry_at=retry_at, detached_reason=None)
+
+    stored = await pull_requests.get_pull_request_by_id(detached.id)
+    assert stored is not None
+    assert stored.provider_retry_failures == 3
+    assert stored.provider_retry_at == retry_at
+    assert stored.provider_detached_reason == "repository_not_allowed"
+    assert stored.updated_at == detached.updated_at
+
+    # Re-adding an existing pattern changes nothing; a new pattern releases detached records only.
+    await repository.add_provider_allowlist("github-main", "acme/platform")
+    assert (await pull_requests.get_pull_request_by_id(detached.id)).provider_retry_at == retry_at  # type: ignore[union-attr]
+    await repository.add_provider_allowlist("github-main", "acme/removed")
+    released = await pull_requests.get_pull_request_by_id(detached.id)
+    assert released is not None
+    assert released.provider_retry_at is None
+    assert (released.provider_retry_failures, released.provider_detached_reason) == (3, "repository_not_allowed")
+    assert (await pull_requests.get_pull_request_by_id(other.id)).provider_retry_at == retry_at  # type: ignore[union-attr]
+
+    await pull_requests.set_provider_retry_state([detached.id], failures=0, retry_at=None, detached_reason=None)
+    cleared = await pull_requests.get_pull_request_by_id(detached.id)
+    assert cleared is not None
+    assert (cleared.provider_retry_failures, cleared.provider_retry_at, cleared.provider_detached_reason) == (
+        0,
+        None,
+        None,
+    )

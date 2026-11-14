@@ -2,6 +2,7 @@
 """Builds review-grade evidence blocks for generated recommendations."""
 
 import logging
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, List, Literal, Optional, Sequence
 
 from greenkube.core.optimization.statistics import latest_request_value, percentile, usage_stats
@@ -14,6 +15,8 @@ from greenkube.models.evidence import (
     UtilizationStats,
 )
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
+from greenkube.models.workload_usage import BaselineMetric
+from greenkube.utils.time import ensure_utc
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -327,6 +330,7 @@ def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optio
         observation_window_start=context.window_start,
         observation_window_end=context.window_end,
         observation_window_seconds=window,
+        first_observed_at=first_observed_at(series, summary, context, step),
         sample_count=sample_count,
         coverage_ratio=coverage or 1.0,
         current=current,
@@ -348,6 +352,53 @@ def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optio
         limit_changes=limit_changes,
         container_kind=_container_kind(summary),
     )
+
+
+def first_observed_at(
+    series: Sequence[CombinedMetric], summary: Any, context: "OptimizationContext", step_seconds: int
+) -> Optional[datetime]:
+    """First sample of the target inside the evidence window, or None when unknown (H1).
+
+    The OOM baseline of a reliability increase is a rate over the time the
+    workload was observed, not over the cluster's data window: a workload created
+    40 minutes before the scan was never exposed for the hours before it. With a
+    usage summary, the first sample lies in its first observed hour; the observed
+    collection steps (``step_count`` x step, counted back from the window end)
+    place it within that hour, never outside it (collection gaps or compressed rows
+    that overcount steps). Raw series give their first sample time; rollup rows,
+    whose timestamp is not a sample time, give nothing. The result never precedes
+    the window start nor follows its end.
+    """
+    start = ensure_utc(context.window_start) if context.window_start is not None else None
+    end = ensure_utc(context.window_end) if context.window_end is not None else None
+    first: Optional[datetime] = None
+    first_hour = getattr(summary, "first_hour", None)
+    if isinstance(first_hour, datetime):
+        first = ensure_utc(first_hour)
+        steps = getattr(summary, "step_count", None)
+        if (
+            end is not None
+            and isinstance(steps, int)
+            and not isinstance(steps, bool)
+            and steps > 0
+            and step_seconds > 0
+        ):
+            counted_back = end - timedelta(seconds=steps * step_seconds)
+            first = min(max(counted_back, first), first + timedelta(hours=1))
+    else:
+        samples = [
+            ensure_utc(metric.timestamp)
+            for metric in series
+            if not isinstance(metric, BaselineMetric) and metric.timestamp is not None
+        ]
+        first = min(samples) if samples else None
+    if first is None:
+        return None
+    if start is not None and first < start:
+        first = start
+    if end is not None and first > end:
+        return None
+    return first
 
 
 def _positive_int(value: Any) -> Optional[int]:

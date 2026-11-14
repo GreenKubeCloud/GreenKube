@@ -526,6 +526,9 @@ class ReliabilityOutcome:
     post_events: Optional[int] = None
     post_hours: Optional[float] = None
     p_value: Optional[float] = None
+    #: Where ``baseline_hours`` comes from: ``workload_first_observed`` (from the workload's first
+    #: observation in the evidence window) or ``evidence_window`` (fallback: the whole window).
+    baseline_exposure_source: Optional[str] = None
 
     @property
     def baseline_rate_per_day(self) -> Optional[float]:
@@ -547,6 +550,7 @@ class ReliabilityOutcome:
             "baseline_rate_per_day": self.baseline_rate_per_day,
             "post_rate_per_day": self.post_rate_per_day,
             "p_value": self.p_value,
+            "baseline_exposure_source": self.baseline_exposure_source,
         }
 
 
@@ -570,6 +574,7 @@ def oom_rate_outcome(
     post_seconds: Optional[float],
     *,
     alpha: float = RELIABILITY_ALPHA,
+    baseline_exposure_source: Optional[str] = None,
 ) -> ReliabilityOutcome:
     """Did the OOM-kill rate drop after the increase? (exact conditional test, see :class:`ReliabilityOutcome`)."""
     baseline_hours = baseline_seconds / 3600.0 if baseline_seconds and baseline_seconds > 0 else None
@@ -580,6 +585,7 @@ def oom_rate_outcome(
         "baseline_hours": round(baseline_hours, 4) if baseline_hours is not None else None,
         "post_events": post_events,
         "post_hours": round(post_hours, 4) if post_hours is not None else None,
+        "baseline_exposure_source": baseline_exposure_source,
     }
     if baseline_events is None or baseline_hours is None:
         return ReliabilityOutcome(
@@ -710,22 +716,65 @@ def _limit_cannot_cure_oom(member: Any) -> bool:
     return proposed is None or proposed <= current
 
 
-def _oom_baseline(group: Sequence[Any]) -> tuple[Optional[int], Optional[float]]:
-    """OOM kills observed before the change by the memory increases of one container (and their window)."""
+#: Baseline exposure of the OOM rate: from the workload's first observation in the evidence window.
+EXPOSURE_FIRST_OBSERVED = "workload_first_observed"
+#: Fallback when the first observation is unknown: the whole evidence window (the cluster's data span).
+EXPOSURE_EVIDENCE_WINDOW = "evidence_window"
+
+
+def _number(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _baseline_exposure(evidence: Any) -> tuple[Optional[float], str]:
+    """Seconds the target was observed before the change, and where they come from.
+
+    The evidence window starts at the cluster's data start, not at the workload's:
+    a workload created 40 minutes before the scan was never exposed for the hours
+    before it. Its exposure runs from its first observation (bounded by the window)
+    to the window end. Without a usable first observation, the whole window.
+    """
+    window = _number(getattr(evidence, "observation_window_seconds", None))
+    window = window if window is not None and window > 0 else None
+    first = getattr(evidence, "first_observed_at", None)
+    end = getattr(evidence, "observation_window_end", None)
+    start = getattr(evidence, "observation_window_start", None)
+    if isinstance(first, datetime):
+        if not isinstance(end, datetime) and isinstance(start, datetime) and window is not None:
+            end = ensure_utc(start) + timedelta(seconds=window)
+        if isinstance(end, datetime):
+            exposure = (ensure_utc(end) - ensure_utc(first)).total_seconds()
+            if window is not None:
+                exposure = min(exposure, window)
+            if exposure > 0:
+                return exposure, EXPOSURE_FIRST_OBSERVED
+    return window, EXPOSURE_EVIDENCE_WINDOW
+
+
+def _oom_baseline(group: Sequence[Any]) -> tuple[Optional[int], Optional[float], Optional[str]]:
+    """OOM kills observed before the change by the memory increases of one container (and their exposure).
+
+    Returns the kills, the seconds the container was observed before the change
+    (the longest of its members, see :func:`_baseline_exposure`) and the source of
+    that exposure (``workload_first_observed`` or the ``evidence_window`` fallback).
+    """
     events: Optional[int] = None
     seconds: Optional[float] = None
+    source: Optional[str] = None
     for member in group:
         if not raises_memory_request(member):
             continue
         evidence = getattr(member, "evidence", None)
         count = getattr(evidence, "oom_events", None)
-        window = getattr(evidence, "observation_window_seconds", None)
         if not isinstance(count, int) or isinstance(count, bool):
             continue
         events = max(count, events or 0)
-        if isinstance(window, (int, float)) and not isinstance(window, bool) and window > 0:
-            seconds = max(float(window), seconds or 0.0)
-    return events, seconds
+        exposure, exposure_source = _baseline_exposure(evidence)
+        if exposure is not None and exposure > (seconds or 0.0):
+            seconds, source = exposure, exposure_source
+    return events, seconds, source
 
 
 def _judge_container(
@@ -743,13 +792,14 @@ def _judge_container(
     """
     if not any(raises_memory_request(member) for member in group):
         return list(gates), None, False
-    baseline_events, baseline_seconds = _oom_baseline(group)
+    baseline_events, baseline_seconds, exposure_source = _oom_baseline(group)
     post_events = oom_restarts if isinstance(oom_restarts, int) and not isinstance(oom_restarts, bool) else None
     outcome = oom_rate_outcome(
         baseline_events,
         baseline_seconds,
         post_events,
         (ensure_utc(post_end) - ensure_utc(post_start)).total_seconds(),
+        baseline_exposure_source=exposure_source,
     )
     if any(_lowers_memory_request(member) or _limit_cannot_cure_oom(member) for member in group):
         return list(gates), outcome, False
@@ -875,10 +925,15 @@ def increase_reliability(
         return result, next(iter(outcomes.values()))
     baselines = [outcome.baseline_events for outcome in outcomes.values()]
     posts = [outcome.post_events for outcome in outcomes.values()]
-    hours = [outcome.baseline_hours for outcome in outcomes.values() if outcome.baseline_hours]
+    longest = max(
+        (outcome for outcome in outcomes.values() if outcome.baseline_hours),
+        key=lambda outcome: outcome.baseline_hours or 0.0,
+        default=None,
+    )
     return result, oom_rate_outcome(
         sum(value for value in baselines if value is not None) if any(v is not None for v in baselines) else None,
-        max(hours) * 3600.0 if hours else None,
+        longest.baseline_hours * 3600.0 if longest is not None and longest.baseline_hours else None,
         None if any(value is None for value in posts) else sum(value for value in posts if value is not None),
         (ensure_utc(post_end) - ensure_utc(post_start)).total_seconds(),
+        baseline_exposure_source=longest.baseline_exposure_source if longest is not None else None,
     )

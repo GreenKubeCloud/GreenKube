@@ -17,11 +17,13 @@ How an increase is sized (USER BUG 2, docs/recommendation.md):
   usage percentiles exclude the warm-up after a container (re)start;
 * the observed maximum (x 1.1) only raises a memory target when OOM kills or
   limit pressure show that peaks matter; a single startup spike does not;
-* an OOM kill proves the container reached its memory limit (its request when
+* an OOM kill proves the container passed its memory limit (its request when
   it has none), even when the spike was shorter than the scrape and the
   observed maximum stayed small (wave-4 e2e): the target is at least that
-  limit x 1.1, bounded by ``RIGHTSIZING_MAX_INCREASE_FACTOR`` x the request
-  (basis ``oom_limit``);
+  limit x ``RIGHTSIZING_MAX_INCREASE_FACTOR`` when the observed maximum reached
+  90% of it (killed at the limit, true need unknown), or x 1.5 after a short
+  spike, bounded by ``RIGHTSIZING_MAX_INCREASE_FACTOR`` x the request (basis
+  ``oom_limit``, :func:`oom_step_factor`);
 * one step is capped at ``RIGHTSIZING_MAX_INCREASE_FACTOR`` (default 2) x the
   current request unless OOM kills back it; the next scan re-evaluates;
 * a container OOM-killed or restarted within the window is never offered a
@@ -71,6 +73,11 @@ CPU_LIMIT_P99_FACTOR = 1.5
 MEMORY_MAX_FACTOR = 1.1
 #: Default cap of one increase step, as a multiple of the current request.
 DEFAULT_MAX_INCREASE_FACTOR = 2.0
+#: OOM step after a short spike (observed maximum below MEMORY_LIMIT_PRESSURE x the limit): limit x this.
+#: The kill proves usage passed the limit by an unknown amount, but the samples show the working set
+#: usually far below it. 1.1 crept (live e2e: 32Mi -> 36Mi -> 40Mi, one pull request per step);
+#: 1.5 is half way to the 2x cap, and two such steps cover a spike of 2.25x the limit.
+OOM_SPIKE_LIMIT_FACTOR = 1.5
 
 #: Limit advice reason: the memory limit needs headroom the limits policy forbids (advisory only).
 OOM_HEADROOM_FORBIDDEN = "oom_headroom_forbidden"
@@ -390,6 +397,26 @@ def oom_proven_usage(summary: "WorkloadUsageSummary") -> int:
     return limit if limit > 0 else request
 
 
+def oom_step_factor(config: "Config", summary: "WorkloadUsageSummary", observed_max: float) -> float:
+    """Multiple of the OOM-proven usage (:func:`oom_proven_usage`) an OOM-driven increase is sized to.
+
+    * The observed maximum reached ``MEMORY_LIMIT_PRESSURE`` (90%) of that usage: the
+      container was killed at its limit, so its true need is unknown and above it. One
+      decisive step of ``RIGHTSIZING_MAX_INCREASE_FACTOR`` (default 2) x, the largest a
+      single step may take.
+    * Otherwise a short spike the samples missed: :data:`OOM_SPIKE_LIMIT_FACTOR` (1.5) x,
+      never above the configured factor.
+
+    The OOM count does not scale the step: it measures how often the spike happens,
+    not how far it goes above the limit.
+    """
+    factor = max_increase_factor(config)
+    proven = oom_proven_usage(summary)
+    if proven > 0 and observed_max >= proven * MEMORY_LIMIT_PRESSURE:
+        return factor
+    return min(OOM_SPIKE_LIMIT_FACTOR, factor)
+
+
 def memory_proposal(
     config: "Config",
     summary: "WorkloadUsageSummary",
@@ -419,8 +446,10 @@ def memory_proposal(
             if peak > target:
                 target, basis = peak, "observed_max"
         if "oom_kills" in triggers:
-            # The kill proves usage reached the limit, even when the 30 s samples missed the spike.
-            floor = min(oom_proven_usage(summary) * MEMORY_MAX_FACTOR, request * max_increase_factor(config))
+            # The kill proves usage passed the limit, even when the 30 s samples missed the spike:
+            # one decisive step (oom_step_factor), never a 1.1x creep, within factor x the request.
+            step = oom_step_factor(config, summary, increase_stats.max)
+            floor = min(oom_proven_usage(summary) * step, request * max_increase_factor(config))
             if floor > target:
                 target, basis = floor, "oom_limit"
         raw = _round_up_mib(target)
