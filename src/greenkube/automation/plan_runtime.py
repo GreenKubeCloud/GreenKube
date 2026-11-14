@@ -58,6 +58,7 @@ from greenkube.automation.policy import (
     AutomationPolicyConfig,
     AutomationPolicyEvaluator,
     AutomationPolicyResult,
+    ControllerStatusReader,
     PolicyPlanRepository,
 )
 from greenkube.automation.rollback import (
@@ -377,6 +378,7 @@ class RuntimePlanService:
         policy_repository: PolicyPlanRepository | None = None,
         policy_clock=None,
         resource_binding_repository: PlanResourceBindingReader | None = None,
+        controller_status_reader: ControllerStatusReader | None = None,
     ) -> None:
         self._recommendation_repository = recommendation_repository
         self._binding_repository = binding_repository
@@ -407,6 +409,7 @@ class RuntimePlanService:
             config=policy_config or AutomationPolicyConfig(),
             plan_repository=cast(PolicyPlanRepository | None, selected_policy_repository),
             clock=selected_policy_clock or (lambda: datetime.now(timezone.utc)),
+            controller_status_reader=controller_status_reader,
         )
 
     async def prepare_plan(
@@ -1951,6 +1954,7 @@ async def create_plan_runtime(
         policy_config=selected_policy_config,
         policy_repository=gitops_repository,
         resource_binding_repository=resource_bindings,
+        controller_status_reader=argo_application_status_reader(),
     )
     return PlanRuntime(
         providers=providers,
@@ -1966,6 +1970,47 @@ async def create_plan_runtime(
         plan_service=api_plan_service,
         worker=worker,
     )
+
+
+def argo_application_status_reader(custom_objects_api: Any = None) -> ControllerStatusReader:
+    """Read an Argo CD ``Application.status`` live, for the controller health gate.
+
+    Used only when the binding evidence already reports the Application unhealthy; any
+    failure returns ``None`` and the gate keeps failing closed.
+    """
+
+    async def read(source: WorkloadSource) -> Mapping[str, Any] | None:
+        if source.controller_kind is not ControllerKind.ARGOCD:
+            return None
+        api = custom_objects_api
+        if api is None:
+            from greenkube.core.k8s_client import get_custom_objects_api
+
+            api = await get_custom_objects_api()
+        if api is None:
+            return None
+        try:
+            application = await api.get_namespaced_custom_object(
+                "argoproj.io", "v1alpha1", source.controller_namespace, "applications", source.controller_name
+            )
+        except Exception as exc:
+            logger.info(
+                "Argo CD Application %s/%s status unavailable: %s",
+                source.controller_namespace,
+                source.controller_name,
+                type(exc).__name__,
+            )
+            return None
+        if not isinstance(application, Mapping):
+            return None
+        metadata = application.get("metadata")
+        uid = metadata.get("uid") if isinstance(metadata, Mapping) else None
+        if source.controller_uid and uid != source.controller_uid:
+            return None
+        status = application.get("status")
+        return status if isinstance(status, Mapping) else None
+
+    return read
 
 
 def kustomize_rollback_renderer(

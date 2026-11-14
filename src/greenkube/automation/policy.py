@@ -15,11 +15,12 @@ from greenkube.automation.actions import operation_kind_of
 from greenkube.gitops.contracts import (
     AddHorizontalPodAutoscaler,
     AutomationErrorCode,
+    ControllerKind,
     Plan,
     PlanStatus,
     WorkloadSource,
 )
-from greenkube.models.metrics import RecommendationRecord, RiskLevel
+from greenkube.models.metrics import RecommendationRecord, RecommendationType, RiskLevel
 from greenkube.storage.base_gitops_repository import AutomationPlanRecord
 from greenkube.utils.time import ensure_utc
 
@@ -381,10 +382,14 @@ class AutomationPolicyEvaluator:
         clock=lambda: datetime.now(timezone.utc),
         history_start=None,
         step_seconds: int | None = None,
+        controller_status_reader: ControllerStatusReader | None = None,
     ) -> None:
         self.config = config
         self.plan_repository = plan_repository
         self.clock = clock
+        #: Reads the owning controller's live status (Argo CD ``Application.status``) when its
+        #: binding evidence reports it unhealthy, to tell a self-caused health problem apart.
+        self.controller_status_reader = controller_status_reader
         #: First collected sample of the installation (F7): an async callable, a datetime, or
         #: None for the process-wide cached reader.
         self.history_start = history_start
@@ -562,6 +567,7 @@ class AutomationPolicyEvaluator:
             add_warning,
             history_start=await self._history_start(),
             step_seconds=self._step_seconds(),
+            controller_health_exemption=await self._controller_health_exemption(source, records),
         )
 
         if self.plan_repository is None:
@@ -749,10 +755,53 @@ class AutomationPolicyEvaluator:
                 limit=list(configured_labels),
             )
 
-    def _evaluate_controller_health(self, evidence: Mapping[str, Any], add_check, add_missing_evidence) -> None:
+    async def _controller_health_exemption(
+        self, source: WorkloadSource, records: Sequence[RecommendationRecord]
+    ) -> str | None:
+        """Why an unhealthy controller must not block this plan, or ``None`` when it must.
+
+        An OOM-killed or CPU-starved workload makes its Argo CD Application Degraded or
+        Progressing; blocking its own request/limit increase would keep it broken forever.
+        The exemption applies only to an increase-only reliability plan, on a controller that
+        is not suspended, with no sync or comparison error, whose live status shows that
+        every unhealthy resource is the plan's target workload itself.
+        """
+        evidence = source.evidence
+        if _optional_bool(evidence, "controller_healthy") is not False:
+            return None
+        if _optional_bool(evidence, "controller_suspended") is True:
+            return None
+        if source.controller_kind is not ControllerKind.ARGOCD or self.controller_status_reader is None:
+            return None
+        if not _increase_only_reliability(records):
+            return None
+        try:
+            status = await self.controller_status_reader(source)
+        except Exception:
+            return None
+        if not isinstance(status, Mapping):
+            return None
+        return _argo_self_caused_health(status, source)
+
+    def _evaluate_controller_health(
+        self,
+        evidence: Mapping[str, Any],
+        add_check,
+        add_missing_evidence,
+        *,
+        exemption: str | None = None,
+    ) -> None:
         suspended = _optional_bool(evidence, "controller_suspended")
         healthy = _optional_bool(evidence, "controller_healthy")
-        if suspended is True or healthy is False:
+        if exemption is not None and suspended is not True and healthy is False:
+            add_check(
+                "controller_health",
+                PolicyCheckState.PASSED,
+                exemption,
+                observed={"suspended": suspended, "healthy": healthy, "self_caused": True},
+                limit={"suspended": False, "healthy": True},
+            )
+        elif suspended is True or healthy is False:
             add_check(
                 "controller_health",
                 PolicyCheckState.REJECTED,
@@ -787,6 +836,7 @@ class AutomationPolicyEvaluator:
         *,
         history_start: datetime | None = None,
         step_seconds: int = 300,
+        controller_health_exemption: str | None = None,
     ) -> None:
         evidence = source.evidence
         if _resource_bound(records):
@@ -826,7 +876,9 @@ class AutomationPolicyEvaluator:
                 "Refresh GitOps discovery so the workload rollout state can be checked before planning or approval.",
             )
 
-        self._evaluate_controller_health(evidence, add_check, add_missing_evidence)
+        self._evaluate_controller_health(
+            evidence, add_check, add_missing_evidence, exemption=controller_health_exemption
+        )
 
         if "hpa_targets" in evidence or "pdb_conflict" in evidence or "vpa_targets" in evidence:
             changes, adds_hpa = _planned_resource_changes(records)
@@ -1254,6 +1306,105 @@ def _planned_resource_changes(records: Sequence[RecommendationRecord]) -> tuple[
             elif isinstance(operation, AddHorizontalPodAutoscaler):
                 adds_hpa = True
     return changes, adds_hpa
+
+
+#: Reads the live status of a workload's owning controller (Argo CD ``Application.status``).
+ControllerStatusReader = Callable[[WorkloadSource], Awaitable[Mapping[str, Any] | None]]
+
+_SELF_CAUSED_HEALTH = frozenset({"Degraded", "Progressing"})
+_FAILED_OPERATION_PHASES = frozenset({"Failed", "Error"})
+_RELIABILITY_TYPES = frozenset({RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY})
+
+
+def _increase_only_reliability(records: Sequence[RecommendationRecord]) -> bool:
+    """Every record raises a container request and never lowers or tightens a limit."""
+    if not records:
+        return False
+    for record in records:
+        if record.type not in _RELIABILITY_TYPES:
+            return False
+        if record.type is RecommendationType.RIGHTSIZING_CPU:
+            current, proposed = record.current_cpu_request_millicores, record.recommended_cpu_request_millicores
+            resource = "cpu"
+        else:
+            current, proposed = record.current_memory_request_bytes, record.recommended_memory_request_bytes
+            resource = "memory"
+        if not isinstance(current, int) or not isinstance(proposed, int) or proposed <= current:
+            return False
+        for change in getattr(record.evidence, "limit_changes", None) or []:
+            if change.action == "remove":
+                # Removing a CPU limit only relaxes throttling; a memory limit is never removed.
+                if change.resource != "cpu":
+                    return False
+                continue
+            if change.proposed is None or (change.current is not None and change.proposed < change.current):
+                return False
+        if record.action is not None:
+            for operation in record.action.operations:
+                kind = operation_kind_of(operation)
+                if kind is None or getattr(kind, "kind", None) != "container_resources":
+                    return False
+            if resource not in {field for _, field in _record_changed_fields(record)}:
+                return False
+    return True
+
+
+def _record_changed_fields(record: RecommendationRecord) -> set[tuple[str, str]]:
+    action = record.action
+    if action is None:
+        return set()
+    changed: set[tuple[str, str]] = set()
+    for operation in action.operations:
+        spec = operation_kind_of(operation)
+        if spec is not None:
+            changed.update(spec.changed_fields([operation]))
+    return changed
+
+
+def _argo_self_caused_health(status: Mapping[str, Any], source: WorkloadSource) -> str | None:
+    """An explanation when the Application is unhealthy only because of the target workload."""
+    health = status.get("health")
+    app_health = health.get("status") if isinstance(health, Mapping) else None
+    if app_health not in _SELF_CAUSED_HEALTH:
+        return None
+    for condition in status.get("conditions") or []:
+        kind = condition.get("type") if isinstance(condition, Mapping) else None
+        if not isinstance(kind, str) or kind.endswith("Error"):
+            return None
+    operation = status.get("operationState")
+    if isinstance(operation, Mapping) and operation.get("phase") in _FAILED_OPERATION_PHASES:
+        return None
+    resources = status.get("resources")
+    if not isinstance(resources, list):
+        return None
+    target_health: str | None = None
+    target_message = ""
+    for resource in resources:
+        if not isinstance(resource, Mapping):
+            return None
+        resource_health = resource.get("health")
+        state = resource_health.get("status") if isinstance(resource_health, Mapping) else None
+        if state in (None, "Healthy"):
+            continue
+        is_target = (
+            resource.get("kind") == source.workload_kind
+            and resource.get("name") == source.workload_name
+            and (resource.get("namespace") or source.namespace) == source.namespace
+            and resource.get("group") in (None, "", "apps")
+        )
+        if not is_target or state not in _SELF_CAUSED_HEALTH:
+            return None
+        target_health = state
+        message = resource_health.get("message") if isinstance(resource_health, Mapping) else None
+        target_message = f" ({str(message)[:200]})" if message else ""
+    if target_health is None:
+        return None
+    return (
+        f"The owning Argo CD Application is {app_health} only because the target "
+        f"{source.workload_kind} {source.namespace}/{source.workload_name} is {target_health}{target_message}; "
+        "no sync error and no other resource is unhealthy. This increase-only reliability fix is the remedy, "
+        "so the controller health gate does not block it."
+    )
 
 
 def _optional_bool(evidence: Mapping[str, Any], key: str) -> bool | None:
