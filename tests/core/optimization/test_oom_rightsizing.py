@@ -15,7 +15,7 @@ from typing import Any
 
 from greenkube.core.config import Config
 from greenkube.core.optimization.analyzers import MemoryRightsizingAnalyzer
-from greenkube.core.optimization.analyzers.rightsizing import memory_proposal
+from greenkube.core.optimization.analyzers.rightsizing import cpu_proposal, memory_proposal
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.models.workload_usage import UsageSnapshot, UsageStats, WorkloadUsageSummary
 
@@ -122,6 +122,16 @@ def test_memory_decreases_are_whole_mebibytes() -> None:
     assert proposal is not None and proposal.direction == "decrease"
     assert proposal.proposed % MIB == 0
     assert proposal.proposed >= proposal.raw_proposed - MIB
+
+
+def test_a_crashlooping_container_is_never_offered_a_cpu_decrease() -> None:
+    """e2e: the CPU decrease shared the OOM fix's action, so the fix was not increase-only and stayed blocked."""
+    idle = {"cpu": _stats(avg=5, peak=8), "cpu_request": 300}
+    healthy = cpu_proposal(Config(), _summary(**idle))
+
+    assert healthy is not None and healthy.direction == "decrease"
+    assert cpu_proposal(Config(), _summary(**idle, oom_kill_count=2)) is None
+    assert cpu_proposal(Config(), _summary(**idle, restarts_in_window=3)) is None
 
 
 def test_the_analyzer_explains_the_limit_based_sizing() -> None:
