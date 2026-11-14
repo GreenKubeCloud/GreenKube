@@ -177,6 +177,11 @@ def evidence_eligible_at(
         samples = int(getattr(evidence, "sample_count", 0) or 0)
         first = end - timedelta(seconds=samples * step)
     eligible_at = first + timedelta(seconds=min_samples * step)
+    # A workload younger than the install (or than the window) has fewer samples than
+    # the steps since the first sample: the missing samples still accrue one per step.
+    samples = int(getattr(evidence, "sample_count", 0) or 0)
+    if samples < min_samples:
+        eligible_at = max(eligible_at, end + timedelta(seconds=(min_samples - samples) * step))
     since = coverage_since_history(evidence, history_start, step)
     if since < min_coverage:
         available = available_history_seconds(evidence, history_start, step) or 0.0
