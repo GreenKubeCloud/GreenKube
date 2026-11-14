@@ -37,7 +37,8 @@ from typing import Any
 
 import httpx
 
-from greenkube.automation.git.base import GitProviderError, GitProviderTransientError
+from greenkube.automation.git.base import GitProviderError, GitProviderTransientError, rate_limit_error
+from greenkube.automation.git.rate_limit import record_rate_limited
 
 GITHUB_APP_ID_KEY = "appId"
 GITHUB_APP_PRIVATE_KEY = "privateKey"
@@ -310,6 +311,7 @@ async def _json_list(
         response = await client.request("GET", path, headers=headers, params=params)
     except httpx.HTTPError as exc:
         raise GitProviderTransientError(f"GitHub App request failed ({type(exc).__name__}).") from None
+    _raise_if_rate_limited(response)
     if response.status_code in (429, 502, 503, 504):
         raise GitProviderTransientError(
             f"GitHub App request answered {response.status_code}; retry later.", status_code=response.status_code
@@ -325,6 +327,16 @@ async def _json_list(
     if not isinstance(payload, list):
         raise GitHubAppError("GitHub returned an invalid App response.")
     return payload
+
+
+def _raise_if_rate_limited(response: httpx.Response) -> None:
+    """A rate-limited App call (429, or 403 with an exhausted quota) is transient, never a permission error."""
+    if response.status_code not in (403, 429):
+        return
+    error = rate_limit_error("github", response, context="GitHub App request")
+    if error is not None:
+        record_rate_limited("github")
+        raise error
 
 
 def _headers(bearer: str) -> dict[str, str]:
@@ -349,6 +361,7 @@ async def _json(
         response = await client.request(method, path, headers=headers, json=body)
     except httpx.HTTPError as exc:
         raise GitProviderTransientError(f"GitHub App request failed ({type(exc).__name__}).") from None
+    _raise_if_rate_limited(response)
     if response.status_code in (502, 503, 504) or response.status_code == 429:
         raise GitProviderTransientError(
             f"GitHub App request answered {response.status_code}; retry later.", status_code=response.status_code

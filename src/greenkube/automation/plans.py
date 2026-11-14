@@ -58,7 +58,11 @@ from greenkube.gitops.snapshots.models import (
 from greenkube.gitops.snapshots.models import (
     SnapshotFile,
 )
-from greenkube.storage.base_gitops_repository import AutomationPlanRepository
+from greenkube.storage.base_gitops_repository import (
+    AutomationPlanRepository,
+    WorkloadPlanConflictError,
+    WorkloadPlanGuard,
+)
 from greenkube.utils.time import ensure_utc
 
 logger = logging.getLogger(__name__)
@@ -444,9 +448,28 @@ class AutomationPlanService:
             return plan
 
         # Compare-and-set insert: a concurrent request for the same deterministic plan ID must
-        # never overwrite a plan that already advanced (D12, BUG-56).
+        # never overwrite a plan that already advanced (D12, BUG-56). The busy check above is
+        # repeated atomically with the insert: two concurrent requests for one workload yield
+        # one plan, and a plan that became busy meanwhile refuses the new one.
+        guarded_insert = getattr(self.repository, "save_plan_if_workload_idle", None)
         insert_if_absent = getattr(self.repository, "save_plan_if_absent", None)
-        if callable(insert_if_absent):
+        if callable(guarded_insert):
+            guard = WorkloadPlanGuard(
+                blocking_statuses=_BUSY_STATUSES | _REPLACEABLE_STATUSES,
+                tolerated_plan_ids=frozenset(
+                    previous.plan_id for previous in previous_plans if previous.status in _REPLACEABLE_STATUSES
+                ),
+                tolerated_statuses=_REPLACEABLE_STATUSES,
+            )
+            try:
+                saved = await cast(Any, guarded_insert)(plan, guard, policy_result=policy_result, actor=actor)
+            except WorkloadPlanConflictError as exc:
+                raise AutomationPlanError(
+                    AutomationErrorCode.WORKLOAD_PLAN_ALREADY_EXISTS,
+                    f"another plan for this workload was created or started concurrently ({exc.plan_id}); "
+                    "read the workload's plans and retry",
+                ) from exc
+        elif callable(insert_if_absent):
             saved = await cast(Any, insert_if_absent)(plan, policy_result=policy_result, actor=actor)
         else:
             saved = await self.repository.save_plan(plan, policy_result=policy_result, actor=actor)
@@ -636,10 +659,27 @@ class AutomationPlanService:
                 AutomationErrorCode.ROLLBACK_NOT_READY,
                 "another plan is already applying or syncing the resolved workload source",
             )
-        saved = await self.repository.save_plan_if_absent(
-            plan,
-            policy_result=policy_result,
-        )
+        # The busy check is repeated atomically with the insert (one plan per workload); the
+        # original plan the rollback reverses is tolerated in any busy status.
+        guarded_insert = getattr(self.repository, "save_plan_if_workload_idle", None)
+        if callable(guarded_insert):
+            guard = WorkloadPlanGuard(
+                blocking_statuses=_BUSY_STATUSES,
+                tolerated_plan_ids=frozenset({original_plan.plan_id}),
+                tolerated_statuses=_BUSY_STATUSES,
+            )
+            try:
+                saved = await cast(Any, guarded_insert)(plan, guard, policy_result=policy_result)
+            except WorkloadPlanConflictError as exc:
+                raise AutomationPlanError(
+                    AutomationErrorCode.ROLLBACK_NOT_READY,
+                    f"another plan is already applying or syncing the resolved workload source ({exc.plan_id})",
+                ) from exc
+        else:
+            saved = await self.repository.save_plan_if_absent(
+                plan,
+                policy_result=policy_result,
+            )
         if (
             saved.digest != plan.digest
             or saved.rollback_of_plan_id != original_plan.plan_id
@@ -707,13 +747,38 @@ class AutomationPlanService:
 
         approved = plan
         if plan.status is PlanStatus.VALIDATED:
-            approved = await self.repository.set_plan_status(
-                plan.plan_id,
-                PlanStatus.APPROVED,
-                expected_statuses=(PlanStatus.VALIDATED,),
-                expected_digest=plan.digest,
-                actor=actor,
-            )
+            # The workload busy check is repeated at approval, atomically with the transition:
+            # a plan of the same workload that started delivering meanwhile refuses it.
+            guarded_transition = getattr(self.repository, "set_plan_status_if_workload_idle", None)
+            if callable(guarded_transition):
+                guard = WorkloadPlanGuard(
+                    blocking_statuses=_BUSY_STATUSES | {PlanStatus.APPROVED},
+                    tolerated_plan_ids=frozenset({plan.rollback_of_plan_id} if plan.rollback_of_plan_id else ()),
+                    tolerated_statuses=_BUSY_STATUSES,
+                )
+                try:
+                    approved = await cast(Any, guarded_transition)(
+                        plan.plan_id,
+                        PlanStatus.APPROVED,
+                        guard,
+                        expected_statuses=(PlanStatus.VALIDATED,),
+                        expected_digest=plan.digest,
+                        actor=actor,
+                    )
+                except WorkloadPlanConflictError as exc:
+                    raise AutomationPlanError(
+                        AutomationErrorCode.WORKLOAD_PLAN_ALREADY_EXISTS,
+                        f"another plan for this workload is {exc.status.value} ({exc.plan_id}); "
+                        "wait for it to finish or cancel it before approving",
+                    ) from exc
+            else:
+                approved = await self.repository.set_plan_status(
+                    plan.plan_id,
+                    PlanStatus.APPROVED,
+                    expected_statuses=(PlanStatus.VALIDATED,),
+                    expected_digest=plan.digest,
+                    actor=actor,
+                )
             if approved is None:
                 raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "plan changed during approval")
 

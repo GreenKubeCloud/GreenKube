@@ -583,8 +583,90 @@ def _workload_binding_identity(binding: WorkloadBinding) -> tuple[str, str, str,
     return binding.cluster, binding.namespace, binding.workload_kind, binding.workload_name
 
 
+@dataclass(frozen=True)
+class WorkloadPlanGuard:
+    """One plan per workload: refuse a plan write while another plan of the workload is busy.
+
+    Another plan of the same workload (cluster, namespace, kind, name) in
+    ``blocking_statuses`` refuses the write, unless its ID is in ``tolerated_plan_ids``
+    and its status in ``tolerated_statuses`` (a preview the caller supersedes, or the
+    original plan of a rollback).
+    """
+
+    blocking_statuses: frozenset[PlanStatus]
+    tolerated_plan_ids: frozenset[str] = frozenset()
+    tolerated_statuses: frozenset[PlanStatus] = frozenset()
+
+    def blocks(self, plan_id: str, status: PlanStatus) -> bool:
+        if status not in self.blocking_statuses:
+            return False
+        return not (plan_id in self.tolerated_plan_ids and status in self.tolerated_statuses)
+
+
+class WorkloadPlanConflictError(RuntimeError):
+    """Another plan of the same workload holds it (raised atomically with the plan write)."""
+
+    def __init__(self, plan_id: str, status: PlanStatus) -> None:
+        super().__init__(f"another plan of this workload is {status.value} ({plan_id})")
+        self.plan_id = plan_id
+        self.status = status
+
+
+def workload_identity(source: Any) -> tuple[str, str, str, str]:
+    return source.cluster, source.namespace, source.workload_kind, source.workload_name
+
+
 class AutomationPlanRepository(ABC):
     """Persistence port for automation plans, recommendation joins and action status."""
+
+    async def save_plan_if_workload_idle(
+        self,
+        plan: Plan,
+        guard: WorkloadPlanGuard,
+        *,
+        policy_result: dict[str, Any] | None = None,
+        actor: str = "system",
+    ) -> Plan:
+        """Insert a new plan only while ``guard`` finds no busy plan of its workload.
+
+        SQL repositories check and insert in one serialized transaction; this fallback for
+        in-memory adapters checks first.
+        """
+        if await self.get_plan(plan.plan_id) is None:
+            await self._raise_if_workload_busy(plan.plan_id, plan.source, guard)
+        return await self.save_plan_if_absent(plan, policy_result=policy_result, actor=actor)
+
+    async def set_plan_status_if_workload_idle(
+        self,
+        plan_id: str,
+        status: PlanStatus,
+        guard: WorkloadPlanGuard,
+        *,
+        expected_statuses: Sequence[PlanStatus] | None = None,
+        expected_digest: str | None = None,
+        actor: str = "system",
+        reason_code: str | None = None,
+    ) -> Plan | None:
+        """``set_plan_status`` that refuses while ``guard`` finds a busy plan of the same workload."""
+        plan = await self.get_plan(plan_id)
+        if plan is None:
+            return None
+        await self._raise_if_workload_busy(plan_id, plan.source, guard)
+        return await self.set_plan_status(
+            plan_id,
+            status,
+            expected_statuses=expected_statuses,
+            expected_digest=expected_digest,
+            actor=actor,
+            reason_code=reason_code,
+        )
+
+    async def _raise_if_workload_busy(self, plan_id: str, source: Any, guard: WorkloadPlanGuard) -> None:
+        identity = workload_identity(source)
+        for other in await self.list_plans():
+            if other.plan_id != plan_id and workload_identity(other.source) == identity:
+                if guard.blocks(other.plan_id, other.status):
+                    raise WorkloadPlanConflictError(other.plan_id, other.status)
 
     async def prune_automation_history(self, *, cutoff: datetime) -> dict[str, int]:
         """Prune retained payloads when supported by a durable backend."""

@@ -89,12 +89,13 @@ class MovedHeadProvider(FakeGitProvider):
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
         self.branch_creations.append((branch, from_ref))
         if branch not in self.branches:
-            self.branches[branch] = dict(self.trees[self.head])
+            # A commit SHA is immutable; a ref name resolves to wherever the branch points now.
+            self.branches[branch] = dict(self.trees[from_ref] if from_ref in self.trees else self.trees[self.head])
 
     async def create_commit(self, request: GitCommitRequest) -> GitCommitResult:
         self.commit_requests.append(request)
         branch_tree = self.branches[request.branch]
-        if request.base_revision != self.head or branch_tree != self.trees[self.head]:
+        if request.base_revision not in self.trees or branch_tree != self.trees[request.base_revision]:
             raise GitConflictError("branch head does not equal the requested parent")
         for edit in request.files:
             assert edit.content is not None
@@ -152,6 +153,31 @@ async def test_unrelated_commit_on_the_source_branch_does_not_stale_an_approved_
         (MANIFEST_PATH, MOVED_HEAD),
         (NEW_PATH, MOVED_HEAD),
     }
+
+
+@pytest.mark.asyncio
+async def test_plan_branch_starts_at_the_validated_commit_when_the_ref_moves_again():
+    """The branch was created from the moving ref: a commit landing after validation broke the plan."""
+    provider = MovedHeadProvider()
+    worker, operations, plans, _, _ = _recording_worker(provider=provider, revision=MOVED_HEAD)
+    original_find = provider.find_pull_request
+
+    async def find_then_move(repo, head, base):
+        # Another commit lands on the source branch between validation and branch creation.
+        if provider.head == MOVED_HEAD:
+            provider.advance_head("d" * 40, {"apps/third.yaml": GitFile("apps/third.yaml", "x\n", "7" * 40, "7" * 40)})
+        return await original_find(repo, head, base)
+
+    provider.find_pull_request = find_then_move  # type: ignore[method-assign]
+
+    assert await worker.process_once("worker-1")
+
+    branch = plan_branch_name(_plan())
+    assert provider.branch_creations == [(branch, MOVED_HEAD)]
+    assert operations.failures == []
+    assert plans.plans["plan-1"].status is PlanStatus.PR_OPEN
+    assert provider.commit_requests[0].base_revision == MOVED_HEAD
+    assert "apps/third.yaml" not in provider.branches[branch]
 
 
 @pytest.mark.asyncio

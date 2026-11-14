@@ -156,6 +156,29 @@ tests:
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
+  # Git provider rate limits (greenkube_git_provider_rate_limited_total counter)
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_git_provider_rate_limited_total{job="c",instance="leader:9102",provider="github"}'
+        values: '0+1x90'
+      - series: 'greenkube_git_provider_rate_limited_total{job="c",instance="leader:9102",provider="gitlab"}'
+        values: '0 1x89'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GreenKubeGitProviderRateLimited
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: GreenKubeGitProviderRateLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: github
+            exp_annotations:
+              summary: A Git provider keeps rate-limiting GreenKube
+              description: "Git provider github answered 30 rate-limited request(s) in the last 30 minutes, for more than 30 minutes: pull requests are delayed until its quota resets. Lower the request volume (fewer polling replicas, a GitHub App instead of a personal token) or raise the provider quota; see docs/automation.md (rate limits)."
+
+  # ---------------------------------------------------------------------------
   # Ledger hash chain (greenkube_ledger_chain_ok gauge, sticky per cluster)
   # ---------------------------------------------------------------------------
   - interval: 1m

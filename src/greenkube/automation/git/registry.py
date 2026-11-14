@@ -23,6 +23,7 @@ from greenkube.automation.git.base import (
     GitProviderCapability,
     GitProviderCapabilityError,
     GitProviderError,
+    GitProviderRateLimitError,
     GitProviderTransientError,
     GitRepository,
     GitTree,
@@ -235,6 +236,19 @@ class GitProviderRegistry:
 
             try:
                 repository_info = await provider._preflight_repository(repository)
+            except GitProviderRateLimitError:
+                # A rate limit proves nothing about the token: never a read or permission failure.
+                return GitProviderPreflightResult(
+                    provider_id=provider_id,
+                    provider_type=provider.name,
+                    repository=repository.full_name,
+                    capabilities=capabilities,
+                    required_capabilities=required,
+                    missing_capabilities=missing,
+                    authenticated=None,
+                    repository_readable=None,
+                    error_code=GitProviderRateLimitError.code,
+                )
             except GitProviderError as error:
                 authenticated = False if error.status_code == 401 else True if error.status_code == 403 else None
                 return GitProviderPreflightResult(
@@ -581,6 +595,8 @@ def _redact_provider_error(error: GitProviderError, token: str) -> GitProviderEr
         return ProviderCallBudgetExceededError(message, status_code=error.status_code)
     if isinstance(error, GitConflictError):
         return GitConflictError(message, status_code=error.status_code)
+    if isinstance(error, GitProviderRateLimitError):
+        return GitProviderRateLimitError(message, status_code=error.status_code, retry_at=error.retry_at)
     if isinstance(error, GitProviderTransientError):
         return GitProviderTransientError(message, status_code=error.status_code)
     return GitProviderError(message, status_code=error.status_code)

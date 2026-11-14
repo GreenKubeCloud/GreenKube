@@ -28,6 +28,7 @@ from greenkube.automation.git.base import (
     _git_response_object,
     _validate_full_commit_sha,
     _validate_git_path,
+    is_full_commit_sha,
     normalize_open_pull_request_branch_match,
     normalize_open_pull_request_match,
     normalize_pull_request,
@@ -212,13 +213,18 @@ class GitHubProvider(GitProvider):
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
         branch = validate_git_ref(branch, field="branch name")
-        from_ref = validate_git_ref(from_ref, field="base branch")
-        ref_response = await self._request(
-            "GET", f"/repos/{repo.owner}/{repo.name}/git/ref/heads/{quote(from_ref, safe='/')}"
-        )
-        if ref_response.status_code == 404:
-            raise GitProviderError(f"Base branch '{from_ref}' not found in {repo.full_name}.")
-        sha = ref_response.json()["object"]["sha"]
+        if is_full_commit_sha(from_ref):
+            # A plan branch starts at the exact commit the plan was validated on, never at a
+            # branch head that may have moved since.
+            sha = from_ref
+        else:
+            from_ref = validate_git_ref(from_ref, field="base branch")
+            ref_response = await self._request(
+                "GET", f"/repos/{repo.owner}/{repo.name}/git/ref/heads/{quote(from_ref, safe='/')}"
+            )
+            if ref_response.status_code == 404:
+                raise GitProviderError(f"Base branch '{from_ref}' not found in {repo.full_name}.")
+            sha = ref_response.json()["object"]["sha"]
 
         # Create first: an existing ref answers 422, so the common case costs one write.
         response = await self._request(

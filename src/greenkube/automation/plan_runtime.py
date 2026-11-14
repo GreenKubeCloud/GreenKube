@@ -22,6 +22,7 @@ from greenkube.automation.git.base import (
     GitProviderCapability,
     GitProviderCapabilityError,
     GitProviderError,
+    GitProviderTransientError,
     GitRepository,
     PullRequestOptions,
     parse_repo_url,
@@ -39,7 +40,11 @@ from greenkube.automation.git.registry import GitProviderRegistry
 from greenkube.automation.plan_worker import (
     PlanGitProvider,
     PlanWorker,
+    PlanWorkerError,
     RegistryPlanProviderResolver,
+    _plan_on_committed_revision,
+    _pull_request_head_sha,
+    plan_branch_name,
 )
 from greenkube.automation.plans import (
     SUPERSEDABLE_PREVIEW_STATUSES,
@@ -53,6 +58,7 @@ from greenkube.automation.policy import (
     AutomationPolicyConfig,
     AutomationPolicyEvaluator,
     AutomationPolicyResult,
+    ControllerStatusReader,
     PolicyPlanRepository,
 )
 from greenkube.automation.rollback import (
@@ -103,7 +109,7 @@ from greenkube.gitops.snapshots import (
     SnapshotLimits,
     extract_archive,
 )
-from greenkube.models.metrics import RecommendationRecord, RecommendationStatus
+from greenkube.models.metrics import PullRequestRecord, PullRequestStatus, RecommendationRecord, RecommendationStatus
 from greenkube.storage.base_gitops_repository import (
     GitOpsProviderConfig,
     GitOpsRepository,
@@ -372,6 +378,7 @@ class RuntimePlanService:
         policy_repository: PolicyPlanRepository | None = None,
         policy_clock=None,
         resource_binding_repository: PlanResourceBindingReader | None = None,
+        controller_status_reader: ControllerStatusReader | None = None,
     ) -> None:
         self._recommendation_repository = recommendation_repository
         self._binding_repository = binding_repository
@@ -402,6 +409,7 @@ class RuntimePlanService:
             config=policy_config or AutomationPolicyConfig(),
             plan_repository=cast(PolicyPlanRepository | None, selected_policy_repository),
             clock=selected_policy_clock or (lambda: datetime.now(timezone.utc)),
+            controller_status_reader=controller_status_reader,
         )
 
     async def prepare_plan(
@@ -1195,36 +1203,275 @@ class RuntimePlanService:
                 continue
             if operation is None or operation.status not in {OperationStatus.FAILED, OperationStatus.CANCELLED}:
                 continue
-            if await self._plan_has_pull_request(plan.plan_id):
+            records = await self._plan_pull_request_records(plan.plan_id)
+            if records is None:
                 continue
-            updated = await repository.set_plan_status(
-                plan.plan_id,
-                PlanStatus.FAILED,
-                expected_statuses=(PlanStatus.APPLYING,),
-                expected_digest=plan.digest,
-                actor="automation-reconciler",
-                reason_code="operation_retry_exhausted",
-            )
-            if updated is None:
+            if records:
+                # The worker wrote PENDING records before its last attempt (crash or retries
+                # exhausted after them): look the deterministic branch up on the provider and
+                # adopt its request, or fail the plan cleanly instead of leaving it APPLYING.
+                if not all(_pending_without_number(record) for record in records):
+                    continue
+                recovered = await self._recover_pending_delivery(plan, records)
+                if recovered is not None:
+                    reconciled.append(recovered)
                 continue
-            await repository.set_recommendation_action_status(
-                plan.recommendation_ids,
-                ActionStatus.FAILED,
-                expected_statuses=(ActionStatus.PLAN_READY, ActionStatus.PR_OPEN),
-                actor="automation-reconciler",
-                plan_id=plan.plan_id,
+            updated = await self._fail_applying_plan(
+                plan, actor="automation-reconciler", reason_code="operation_retry_exhausted"
             )
-            reconciled.append(updated)
+            if updated is not None:
+                reconciled.append(updated)
         return reconciled
 
-    async def _plan_has_pull_request(self, plan_id: str) -> bool:
+    async def _fail_applying_plan(
+        self,
+        plan: Plan,
+        *,
+        actor: str,
+        reason_code: str,
+        records: Sequence[PullRequestRecord] = (),
+        record_error: str | None = None,
+    ) -> Plan | None:
+        """APPLYING -> FAILED (audited), linked PENDING records -> ERROR, action -> FAILED (re-plannable)."""
+        repository = self._plan_service.repository
+        updated = await repository.set_plan_status(
+            plan.plan_id,
+            PlanStatus.FAILED,
+            expected_statuses=(PlanStatus.APPLYING,),
+            expected_digest=plan.digest,
+            actor=actor,
+            reason_code=reason_code,
+        )
+        if updated is None:
+            return None
+        pull_requests = getattr(self.worker, "pull_request_repository", None)
+        for record in records:
+            if pull_requests is None or record.id is None or record.pr_number is not None:
+                continue
+            try:
+                await pull_requests.update_pull_request(
+                    record.id,
+                    {"status": PullRequestStatus.ERROR, "error": (record_error or reason_code)[:500]},
+                    expected_statuses=(PullRequestStatus.PENDING.value, PullRequestStatus.ERROR.value),
+                    expected_plan_id=plan.plan_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not close pending pull-request record %s of plan %s: %s", record.id, plan.plan_id, exc
+                )
+        await repository.set_recommendation_action_status(
+            plan.recommendation_ids,
+            ActionStatus.FAILED,
+            expected_statuses=(ActionStatus.PLAN_READY, ActionStatus.PR_OPEN),
+            actor=actor,
+            plan_id=plan.plan_id,
+        )
+        return updated
+
+    async def _plan_pull_request_records(self, plan_id: str) -> list[Any] | None:
+        """Records linked to ``plan_id``; ``None`` when they cannot be read (try again later)."""
         repository = getattr(self.worker, "pull_request_repository", None)
         if repository is None:
-            return False
+            return []
         try:
-            return await repository.get_pull_request_by_plan_id(plan_id) is not None
+            lister = getattr(repository, "list_pull_requests_by_plan_id", None)
+            if callable(lister):
+                return list(await cast(Any, lister)(plan_id))
+            record = await repository.get_pull_request_by_plan_id(plan_id)
         except Exception:
-            return True
+            return None
+        return [record] if record is not None else []
+
+    async def _recover_pending_delivery(self, plan: Plan, records: Sequence[PullRequestRecord]) -> Plan | None:
+        """Adopt the deterministic branch's request when it holds the plan; otherwise fail the plan.
+
+        Returns the updated plan, or ``None`` when the provider could not be asked (retried
+        on the next sweep).
+        """
+        worker = cast(Any, self.worker)
+        resolver = getattr(worker, "provider_resolver", None)
+        if resolver is None:
+            return None
+        branch = plan_branch_name(plan)
+        try:
+            target = await resolver.resolve(plan.source)
+        except GitProviderTransientError:
+            return None
+        except (PlanWorkerError, GitProviderError) as exc:
+            # The provider is gone (removed, disabled, unsupported or misconfigured).
+            logger.warning("Plan %s: provider unavailable while recovering its delivery: %s", plan.plan_id, exc)
+            return await self._fail_applying_plan(
+                plan,
+                actor="automation-reconciler",
+                reason_code="delivery_recovery_provider_unavailable",
+                records=records,
+                record_error=(
+                    f"The provider could not be reached to check branch {branch}; a pull request opened from it "
+                    "is not tracked. Close it on the provider, then re-plan."
+                ),
+            )
+        except Exception as exc:
+            # Anything else (a storage hiccup reading the provider config) says nothing about
+            # the branch: keep the plan and its recommendations, retry on the next sweep.
+            logger.warning("Plan %s: could not resolve its provider, retrying later: %s", plan.plan_id, exc)
+            return None
+        try:
+            worker._validate_target(plan.source, target)
+            committed = _plan_on_committed_revision(plan)
+            pull_request = await target.provider.find_pull_request(target.repository, branch, plan.source.ref)
+            head_ref: str = branch
+            if pull_request is not None:
+                worker._validate_pull_request(pull_request, branch, plan.source.ref)
+            else:
+                finder = getattr(target.provider, "find_terminal_pull_request", None)
+                pull_request = (
+                    await cast(Any, finder)(target.repository, branch, plan.source.ref) if callable(finder) else None
+                )
+                head_sha = _pull_request_head_sha(pull_request) if pull_request is not None else None
+                if pull_request is not None and head_sha is not None:
+                    head_ref = head_sha
+                elif pull_request is not None:
+                    pull_request = None
+            if pull_request is not None and await worker._branch_state(None, target, head_ref, committed) == "applied":
+                await worker._record_open_pull_request(plan, target, branch, pull_request)
+                return await self._adopt_pending_delivery(plan, pull_request.number)
+            reason = (
+                "the pull request on the deterministic plan branch does not hold the planned files"
+                if pull_request is not None
+                else "no pull request was opened from the deterministic plan branch"
+            )
+        except GitProviderTransientError:
+            return None
+        except (GitProviderError, PlanWorkerError) as exc:
+            reason = f"the plan branch could not be verified: {exc}"
+        finally:
+            try:
+                await target.provider.close()
+            except Exception:
+                pass
+        logger.warning(
+            "Plan %s: operation exhausted after its pull-request record was written; %s.", plan.plan_id, reason
+        )
+        return await self._fail_applying_plan(
+            plan,
+            actor="automation-reconciler",
+            reason_code="operation_retry_exhausted",
+            records=records,
+            record_error=f"Plan operation retries were exhausted and {reason}; re-plan to retry.",
+        )
+
+    async def _adopt_pending_delivery(self, plan: Plan, number: int) -> Plan | None:
+        repository = self._plan_service.repository
+        updated = await repository.set_plan_status(
+            plan.plan_id,
+            PlanStatus.PR_OPEN,
+            expected_statuses=(PlanStatus.APPLYING,),
+            expected_digest=plan.digest,
+            actor="automation-reconciler",
+            reason_code="pull_request_adopted",
+        )
+        if updated is None:
+            return None
+        await repository.set_recommendation_action_status(
+            plan.recommendation_ids,
+            ActionStatus.PR_OPEN,
+            expected_statuses=(ActionStatus.PLAN_READY, ActionStatus.PR_OPEN),
+            actor="automation-reconciler",
+            plan_id=plan.plan_id,
+        )
+        logger.info("Plan %s: adopted pull request #%s after its operation was exhausted.", plan.plan_id, number)
+        return updated
+
+    async def abandon_plan(self, plan_id: str, *, actor: str, reason: str | None = None) -> Plan | None:
+        """Fail a stuck APPLYING plan on an operator's request (audited); ``None`` when unknown.
+
+        Refused while a worker holds a live lease on its operation, and when a pull request
+        was already recorded for it (close that request on the provider instead: the
+        pull-request lifecycle then closes the plan).
+        """
+        plan = await self._plan_service.read_plan(plan_id)
+        if plan is None:
+            return None
+        if plan.status is not PlanStatus.APPLYING:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                f"only an applying plan can be abandoned (status {plan.status.value})",
+            )
+        records = await self._plan_pull_request_records(plan_id)
+        if records is None:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY, "the plan's pull-request records cannot be read; retry"
+            )
+        numbered = [record for record in records if not _pending_without_number(record)]
+        if numbered:
+            number = getattr(numbered[0], "pr_number", None)
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                f"the plan already has pull request #{number}; close it on the provider instead",
+            )
+        if records:
+            # An earlier attempt may have opened a request it never recorded: refuse while the
+            # deterministic plan branch holds an open one, so the plan is not released with an
+            # untracked pull request a later plan would duplicate.
+            open_number = await self._open_pull_request_on_plan_branch(plan)
+            if open_number is not None:
+                raise AutomationPlanError(
+                    AutomationErrorCode.PLAN_STALE,
+                    f"pull request #{open_number} is open on plan branch {plan_branch_name(plan)}; "
+                    "close it on the provider, or wait for the reconciler to adopt it",
+                )
+        operations = getattr(self.worker, "operations", None)
+        canceller = getattr(operations, "cancel_unleased_operation", None)
+        if callable(canceller):
+            operation = await cast(Any, canceller)(plan_id, f"abandoned by {actor}")
+            if operation is not None and operation.status is OperationStatus.RUNNING:
+                raise AutomationPlanError(
+                    AutomationErrorCode.PLAN_STALE,
+                    "a worker is applying this plan right now; retry after its lease expires",
+                )
+        detail = f"Abandoned by {actor}" + (f": {reason}" if reason else "") + "."
+        logger.info("Plan %s: %s", plan_id, detail)
+        updated = await self._fail_applying_plan(
+            plan, actor=actor, reason_code="abandoned_by_operator", records=records, record_error=detail
+        )
+        if updated is None:
+            raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "the plan changed while it was being abandoned")
+        return updated
+
+    async def _open_pull_request_on_plan_branch(self, plan: Plan) -> int | None:
+        """Number of the open request on the plan's deterministic branch, or ``None``.
+
+        A provider that is gone cannot hold the branch any more (``None``); a transient
+        failure refuses the abandon so the operator retries once the provider answers.
+        """
+        resolver = getattr(self.worker, "provider_resolver", None)
+        if resolver is None:
+            return None
+        branch = plan_branch_name(plan)
+        try:
+            target = await resolver.resolve(plan.source)
+        except GitProviderTransientError:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                f"the provider could not be asked whether plan branch {branch} has a pull request; retry",
+            ) from None
+        except (PlanWorkerError, GitProviderError):
+            return None
+        try:
+            pull_request = await target.provider.find_pull_request(target.repository, branch, plan.source.ref)
+        except GitProviderTransientError:
+            raise AutomationPlanError(
+                AutomationErrorCode.PROVIDER_NOT_READY,
+                f"the provider could not be asked whether plan branch {branch} has a pull request; retry",
+            ) from None
+        except GitProviderError:
+            return None
+        finally:
+            try:
+                await target.provider.close()
+            except Exception:
+                pass
+        return pull_request.number if pull_request is not None else None
 
     async def supersede_plan(self, plan_id: str) -> Plan | None:
         return await self._plan_service.supersede_plan(plan_id)
@@ -1760,6 +2007,7 @@ async def create_plan_runtime(
         policy_config=selected_policy_config,
         policy_repository=gitops_repository,
         resource_binding_repository=resource_bindings,
+        controller_status_reader=argo_application_status_reader(),
     )
     return PlanRuntime(
         providers=providers,
@@ -1775,6 +2023,47 @@ async def create_plan_runtime(
         plan_service=api_plan_service,
         worker=worker,
     )
+
+
+def argo_application_status_reader(custom_objects_api: Any = None) -> ControllerStatusReader:
+    """Read an Argo CD ``Application.status`` live, for the controller health gate.
+
+    Used only when the binding evidence already reports the Application unhealthy; any
+    failure returns ``None`` and the gate keeps failing closed.
+    """
+
+    async def read(source: WorkloadSource) -> Mapping[str, Any] | None:
+        if source.controller_kind is not ControllerKind.ARGOCD:
+            return None
+        api = custom_objects_api
+        if api is None:
+            from greenkube.core.k8s_client import get_custom_objects_api
+
+            api = await get_custom_objects_api()
+        if api is None:
+            return None
+        try:
+            application = await api.get_namespaced_custom_object(
+                "argoproj.io", "v1alpha1", source.controller_namespace, "applications", source.controller_name
+            )
+        except Exception as exc:
+            logger.info(
+                "Argo CD Application %s/%s status unavailable: %s",
+                source.controller_namespace,
+                source.controller_name,
+                type(exc).__name__,
+            )
+            return None
+        if not isinstance(application, Mapping):
+            return None
+        metadata = application.get("metadata")
+        uid = metadata.get("uid") if isinstance(metadata, Mapping) else None
+        if source.controller_uid and uid != source.controller_uid:
+            return None
+        status = application.get("status")
+        return status if isinstance(status, Mapping) else None
+
+    return read
 
 
 def kustomize_rollback_renderer(
@@ -1920,6 +2209,17 @@ def _helm_values_mapping_options(
     if not container:
         return None
     return {"files": [file_path], "containers": [container]}
+
+
+def _pending_without_number(record: Any) -> bool:
+    """A PENDING (or already failed) pull-request record that never received a provider number."""
+    status = getattr(record, "status", None)
+    status = getattr(status, "value", status)
+    return (
+        hasattr(record, "pr_number")
+        and record.pr_number is None
+        and status in {PullRequestStatus.PENDING.value, PullRequestStatus.ERROR.value}
+    )
 
 
 def _same_workload_source_version(expected: WorkloadSource, current: WorkloadSource) -> bool:

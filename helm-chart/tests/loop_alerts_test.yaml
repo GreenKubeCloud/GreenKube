@@ -31,9 +31,12 @@ tests:
       - equal:
           path: spec.groups[2].rules[4].alert
           value: GreenKubeMeasurementStalled
+      - equal:
+          path: spec.groups[2].rules[5].alert
+          value: GreenKubeGitProviderRateLimited
       - lengthEqual:
           path: spec.groups[2].rules
-          count: 5
+          count: 6
       - equal:
           path: spec.groups[3].name
           value: greenkube.ledger
@@ -64,6 +67,9 @@ tests:
       - matchRegex:
           path: spec.groups[2].rules[4].expr
           pattern: greenkube_loop_last_success_timestamp_seconds\{loop="recommendation-lifecycle"\}
+      - matchRegex:
+          path: spec.groups[2].rules[5].expr
+          pattern: greenkube_git_provider_rate_limited_total
       - matchRegex:
           path: spec.groups[3].rules[0].expr
           pattern: greenkube_ledger_chain_ok

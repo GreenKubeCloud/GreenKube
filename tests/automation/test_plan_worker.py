@@ -281,7 +281,9 @@ class FakeOperationRepository:
         )
         return lease.operation.model_copy(update={"status": OperationStatus.SUCCEEDED})
 
-    async def mark_failed(self, lease: PlanOperationLease, error: str, *, retryable: bool = True) -> Operation:
+    async def mark_failed(
+        self, lease: PlanOperationLease, error: str, *, retryable: bool = True, retry_at: datetime | None = None
+    ) -> Operation:
         self.failures.append((error, retryable))
         return lease.operation.model_copy(
             update={
@@ -355,6 +357,9 @@ class FakePullRequestRepository:
 
     async def get_pull_requests_for_recommendation(self, recommendation_id: int) -> list[PullRequestRecord]:
         return [record for record in self.records if record.recommendation_id == recommendation_id]
+
+    async def list_pull_requests_by_plan_id(self, plan_id: str) -> list[PullRequestRecord]:
+        return [record for record in self.records if record.plan_id == plan_id]
 
     async def save_pull_request(self, record: PullRequestRecord) -> PullRequestRecord:
         saved = record.model_copy(update={"id": self._next_id})
@@ -473,7 +478,8 @@ class FakeGitProvider:
             self.mutation_baselines.append(plan.pre_apply_baseline if plan is not None else None)
         self.branch_creations.append((branch, from_ref))
         if branch not in self.branches:
-            if from_ref != "main":
+            # Plan branches start at the validated base commit, never at the moving ref.
+            if from_ref != BASE_REVISION:
                 raise GitConflictError("unexpected branch base")
             self.branches[branch] = dict(self.base_tree)
 
@@ -708,7 +714,7 @@ async def test_commits_all_file_plan_edits_atomically_and_records_one_pr_per_act
     assert await worker.process_once("worker-1")
 
     branch = plan_branch_name(_plan())
-    assert provider.branch_creations == [(branch, "main")]
+    assert provider.branch_creations == [(branch, BASE_REVISION)]
     assert len(provider.commit_requests) == 1
     commit = provider.commit_requests[0]
     assert commit.branch == branch
@@ -1213,7 +1219,7 @@ async def test_unexpected_preexisting_branch_fails_closed_without_commit_or_pr()
 
     assert await worker.process_once("worker-1")
 
-    assert provider.branch_creations == [(branch, "main")]
+    assert provider.branch_creations == [(branch, BASE_REVISION)]
     assert provider.commit_requests == []
     assert provider.pull_request_creations == []
     assert operations.failures and operations.failures[0][1] is False

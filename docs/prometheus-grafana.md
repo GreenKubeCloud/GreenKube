@@ -288,6 +288,7 @@ the finite values described below.
 | `greenkube_git_provider_requests_total` | Counter; `provider` (`github`, `gitlab`, `gitea`, `other`), `operation` (`plan_apply`, `plan_rollback`, `plan_unknown`, `sync_ancestry`, `sync_planned_change`, `unscoped`) | HTTP requests sent to Git provider APIs, retries included |
 | `greenkube_git_provider_operation_calls` | Histogram; `operation` | Provider requests made by one budgeted operation (a plan apply, a rollback, one sync ancestry or planned-change check) |
 | `greenkube_git_provider_budget_exhausted_total` | Counter; `operation` | Operations stopped because they reached their provider call budget |
+| `greenkube_git_provider_rate_limited_total` | Counter; `provider` | Git provider responses that signalled a rate limit (`429`, or a `403` with an exhausted quota or a secondary limit); the operation is rescheduled at the reset time |
 
 These values are process-local. In production worker mode, the dedicated
 automation worker also serves `/prometheus/metrics` on

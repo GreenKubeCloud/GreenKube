@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Iterable, List, Literal, Optional
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
@@ -25,6 +26,12 @@ import httpx
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from greenkube.automation.git.budget import charge_provider_call
+from greenkube.automation.git.rate_limit import (
+    MAX_INLINE_RATE_LIMIT_WAIT_SECONDS,
+    announced_wait_seconds,
+    rate_limit_retry_at,
+    record_rate_limited,
+)
 from greenkube.gitops.sha import GIT_OBJECT_SHA
 from greenkube.gitops.sha import is_full_commit_sha as is_full_commit_sha  # re-exported for the adapters
 
@@ -98,6 +105,31 @@ class GitProviderError(RuntimeError):
 
 class GitProviderTransientError(GitProviderError):
     """A provider failure which may succeed when retried."""
+
+
+class GitProviderRateLimitError(GitProviderTransientError):
+    """The provider rate-limited the token; the request may be retried at ``retry_at``.
+
+    Never an authorization failure: the provider must not be marked ``permission_denied``.
+    """
+
+    code = "provider-rate-limited"
+
+    def __init__(self, message: str, *, status_code: int | None = None, retry_at: datetime | None = None) -> None:
+        super().__init__(message, status_code=status_code)
+        self.retry_at = retry_at
+
+
+def rate_limit_error(provider: str, response: httpx.Response, *, context: str) -> GitProviderRateLimitError | None:
+    """A typed rate-limit error for ``response`` (counted once), or ``None`` when it is not one."""
+    retry_at = rate_limit_retry_at(response)
+    if retry_at is None:
+        return None
+    return GitProviderRateLimitError(
+        f"{provider} rate limit reached on {context} (HTTP {response.status_code}); retry after {retry_at.isoformat()}",
+        status_code=response.status_code,
+        retry_at=retry_at,
+    )
 
 
 class GitProviderArchiveLimitError(GitProviderError):
@@ -729,8 +761,17 @@ class GitProvider(ABC):
                 raise GitProviderTransientError(f"{self.name} transient request failure: {exc}") from exc
             except httpx.HTTPError as exc:
                 raise GitProviderError(f"{self.name} request failed: {exc}") from exc
-            if retryable and response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
-                await asyncio.sleep(0.05 * (2**attempt))
+            if response.status_code in (403, 429):
+                rate_limited = rate_limit_error(self.name, response, context=f"{method} {path}")
+                if rate_limited is not None:
+                    record_rate_limited(self.name)
+                    wait = _inline_retry_wait(response, attempt)
+                    if retryable and attempt < 2 and wait is not None:
+                        await asyncio.sleep(wait)
+                        continue
+                    raise rate_limited
+            if retryable and response.status_code in (500, 502, 503, 504) and attempt < 2:
+                await asyncio.sleep(_inline_retry_wait(response, attempt) or 0.05 * (2**attempt))
                 continue
             break
 
@@ -776,6 +817,7 @@ class GitProvider(ABC):
             current_params = params
             current_headers = self._headers()
             retry_response = False
+            retry_wait = 0.05 * (2**attempt)
             try:
                 redirects = 0
                 while True:
@@ -789,8 +831,20 @@ class GitProvider(ABC):
                         timeout=self.timeout,
                         follow_redirects=False,
                     ) as response:
+                        if response.status_code in (403, 429):
+                            await response.aread()
+                            rate_limited = rate_limit_error(self.name, response, context="archive download")
+                            if rate_limited is not None:
+                                record_rate_limited(self.name)
+                                rate_limit_wait = _inline_retry_wait(response, attempt)
+                                if attempt >= 2 or rate_limit_wait is None:
+                                    raise rate_limited
+                                retry_wait = rate_limit_wait
+                                retry_response = True
+                                break
                         if response.status_code in retryable_statuses:
                             if attempt < 2:
+                                retry_wait = _inline_retry_wait(response, attempt) or 0.05 * (2**attempt)
                                 retry_response = True
                                 break
                             raise GitProviderTransientError(
@@ -851,7 +905,7 @@ class GitProvider(ABC):
                         return bytes(content)
 
                 if retry_response:
-                    await asyncio.sleep(0.05 * (2**attempt))
+                    await asyncio.sleep(retry_wait)
                     continue
             except (httpx.TimeoutException, httpx.NetworkError):
                 if attempt < 2:
@@ -1310,6 +1364,25 @@ class GitProvider(ABC):
 @dataclass(frozen=True, slots=True)
 class _CachedFile:
     file: Optional[GitFile]
+
+
+def _inline_retry_wait(response: httpx.Response, attempt: int) -> float | None:
+    """Seconds to sleep before retrying ``response`` within the same request, or ``None``.
+
+    A provider-announced wait longer than :data:`MAX_INLINE_RATE_LIMIT_WAIT_SECONDS` is not
+    slept through: the caller gets a typed error and reschedules at the reset time.
+    """
+    backoff = 0.05 * (2**attempt)
+    announced = announced_wait_seconds(response.headers, now=datetime.now(timezone.utc))
+    if announced is None:
+        if response.status_code == 403:
+            # A rate-limited 403 without reset headers is a secondary limit: GitHub asks
+            # clients to wait at least a minute, and fast retries extend the penalty.
+            return None
+        return backoff
+    if announced > MAX_INLINE_RATE_LIMIT_WAIT_SECONDS:
+        return None
+    return max(announced, backoff)
 
 
 def _error_detail(response: httpx.Response) -> str:

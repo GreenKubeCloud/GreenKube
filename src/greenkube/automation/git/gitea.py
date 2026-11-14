@@ -10,6 +10,8 @@ from typing import List, Literal, Optional
 from urllib.parse import quote
 from uuid import uuid4
 
+import httpx
+
 from greenkube.automation.git.base import (
     COMMENT_PAGE_SIZE,
     CommitStatusState,
@@ -332,23 +334,57 @@ class GiteaProvider(GitProvider):
 
     async def create_branch(self, repo: GitRepository, branch: str, from_ref: str) -> None:
         branch = validate_git_ref(branch, field="branch name")
+        from_commit = is_full_commit_sha(from_ref)
         from_ref = validate_git_ref(from_ref, field="base branch")
         # Create first: an existing branch answers 409, so the common case costs one write.
+        # ``old_ref_name`` creates the branch at an exact commit (a plan's validated base).
+        body = (
+            {"new_branch_name": branch, "old_ref_name": from_ref}
+            if from_commit
+            else {"new_branch_name": branch, "old_branch_name": from_ref}
+        )
         response = await self._request(
             "POST",
             f"/repos/{repo.owner}/{repo.name}/branches",
-            json_body={"new_branch_name": branch, "old_branch_name": from_ref},
+            json_body=body,
             ok_statuses=(200, 201, 409),
         )
         if response.status_code == 404:
             raise GitProviderError(f"Base branch '{from_ref}' not found in {repo.full_name}.", status_code=404)
         if response.status_code != 409:
+            if from_commit:
+                await self._ensure_branch_at_commit(repo, branch, from_ref, _created_branch_head(response))
             return
         exists = await self._request("GET", f"/repos/{repo.owner}/{repo.name}/branches/{quote(branch, safe='/')}")
         if exists.status_code == 200:
             logger.info("Branch %s already exists in %s; reusing it.", branch, repo.full_name)
             return
         raise GitProviderError(f"Gitea could not create branch '{branch}' in {repo.full_name}.", status_code=409)
+
+    async def _ensure_branch_at_commit(
+        self, repo: GitRepository, branch: str, commit: str, created_head: str | None
+    ) -> None:
+        """Fail closed when a Gitea without ``old_ref_name`` created the branch elsewhere.
+
+        An older Gitea ignores the field and branches from the default branch; the new
+        branch is removed again so the plan never commits on an unvalidated base. The
+        creation response names the new head; only a response without it costs a read.
+        """
+        head = created_head or await self._branch_head_sha(repo, branch)
+        if head.lower() == commit.lower():
+            return
+        try:
+            await self._request(
+                "DELETE",
+                f"/repos/{repo.owner}/{repo.name}/branches/{quote(branch, safe='/')}",
+                ok_statuses=(200, 204),
+            )
+        except GitProviderError:
+            logger.warning("Could not remove branch %s created at the wrong commit in %s.", branch, repo.full_name)
+        raise GitProviderError(
+            f"Gitea created branch '{branch}' at {head} instead of the requested commit {commit}; "
+            "this Gitea version cannot create a branch from a commit (old_ref_name)."
+        )
 
     async def _branch_head_sha(self, repo: GitRepository, branch: str) -> str:
         response = await self._request(
@@ -849,3 +885,14 @@ class GiteaProvider(GitProvider):
         )
         if response.status_code == 404:
             return
+
+
+def _created_branch_head(response: httpx.Response) -> str | None:
+    """The commit a Gitea branch-creation response reports, when it names one."""
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    commit = data.get("commit") if isinstance(data, dict) else None
+    head = commit.get("id") if isinstance(commit, dict) else None
+    return head if is_full_commit_sha(head) else None

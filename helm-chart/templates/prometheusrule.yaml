@@ -156,6 +156,16 @@ spec:
           annotations:
             summary: GreenKube measurements are not advancing
             description: {{ printf "The recommendation-lifecycle loop (apply detection, verification, change measurement) has not succeeded for more than %ds: applied changes wait unmeasured and the measurement backlog grows." $measurementStale | quote }}
+        - alert: GreenKubeGitProviderRateLimited
+          # Plan operations are rescheduled at the provider's reset time, so a short burst is
+          # harmless; a limit that persists delays every pull request of that provider.
+          expr: sum by (provider) (increase(greenkube_git_provider_rate_limited_total[30m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: A Git provider keeps rate-limiting GreenKube
+            description: {{ `Git provider {{ $labels.provider }} answered {{ $value | humanize }} rate-limited request(s) in the last 30 minutes, for more than 30 minutes: pull requests are delayed until its quota resets. Lower the request volume (fewer polling replicas, a GitHub App instead of a personal token) or raise the provider quota; see docs/automation.md (rate limits).` | quote }}
     {{- end }}
     {{- if .Values.monitoring.serviceMonitor.enabled }}
     # Ledger integrity (N7). Rendered whenever a GreenKube process is scraped,
