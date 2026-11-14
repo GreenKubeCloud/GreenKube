@@ -89,6 +89,7 @@ image:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `config.logLevel` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `config.logFormat` | `json` | `LOG_FORMAT`: `json` (structured, for Loki/Grafana) or `console` (human-readable). |
 | `config.environment` | `production` | Runtime environment. Production never serves anonymous requests. |
 | `config.apiAuthMode` | `session` | `API_AUTH_MODE`. `session`: account sign-in with server-side sessions plus scoped API keys; `api_key`: Bearer API keys only; `proxy`: single sign-on through an authentication proxy whose identity headers are trusted only from `config.trustedProxyIps` (required); `oidc`: native OpenID Connect sign-in (`auth.oidc.*`). See [Authentication](authentication.md). |
 | `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress) and, with `apiAuthMode: proxy`, the only peers whose identity headers are accepted. Behind an Ingress or a Gateway, list the controller or gateway Pods (often the pod CIDR, e.g. `10.244.0.0/16`): otherwise all clients share the proxy's address for rate limits and sign-in lockouts, and `helm install` prints a warning. |
@@ -97,6 +98,10 @@ image:
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |
 | `config.defaultZone` | `""` | Fallback Electricity Maps zone code for nodes whose zone or region cannot be mapped (e.g. `FR`, `DE`, `US-CAL-CISO`) |
 | `config.defaultIntensity` | `500.0` | Global fallback grid intensity in gCO₂e/kWh when no zone-specific intensity is available |
+| `config.defaults.pue` | `1.3` | `DEFAULT_PUE`: Power Usage Effectiveness used when the cloud provider has no specific value. |
+| `config.defaults.instance.vcores` | `1` | `DEFAULT_INSTANCE_VCORES`: vCPUs of the fallback power profile of an unknown instance type. |
+| `config.defaults.instance.minWatts` | `1.0` | `DEFAULT_INSTANCE_MIN_WATTS`: idle power (watts) of the fallback profile for `vcores` vCPUs, scaled to the node core count. |
+| `config.defaults.instance.maxWatts` | `10.0` | `DEFAULT_INSTANCE_MAX_WATTS`: full-load power (watts) of the fallback profile for `vcores` vCPUs, scaled likewise. |
 | `config.intensityMaxAge` | `6h` | `INTENSITY_MAX_AGE`. Maximum age of a stored grid intensity (`<number><ms\|s\|m\|h>`). An older value is stale: the zone default is used instead and rows are tagged `intensity_source=zone_default` (or `stale` when no zone default exists). Defaults are computed at read time and never written to the intensity history. |
 | `config.electricityProvider` | `electricity_maps` | Grid intensity data provider: `electricity_maps` (default) or `wattnet` (EU-only, free — see [docs/wattnet.md](wattnet.md)) |
 | `config.normalizationGranularity` | `hour` | Carbon intensity lookup granularity (`hour`, `day`, `none`) |
@@ -111,13 +116,14 @@ image:
 |-----|---------|-------------|
 | `config.api.host` | `0.0.0.0` | API bind address inside the container. |
 | `config.api.port` | `8000` | API/UI container and Service port. |
-
-The API is always deployed (it serves the UI); `config.api.enabled`, `config.api.livenessProbe` and
-`config.api.readinessProbe` of 0.3.x are mapped to `api.*` for one minor release.
 | `config.corsOrigins` | `""` | Comma-separated allowed CORS origins (`CORS_ORIGINS`). Empty (default) keeps the API same-origin. Credentials are allowed only for explicitly listed origins; `*` allows any origin without credentials. |
 | `config.apiRateLimit` | `60/minute` | `API_RATE_LIMIT`. Rate limit per client IP and per route template (`/api/v1/automation/plans/{plan_id}` is one route, whatever the id); several limits can be combined with `;`. The client IP is the rightmost `X-Forwarded-For` hop that is not in `config.trustedProxyIps`. |
 | `config.rootPath` | `""` | Sub-path prefix when served behind a reverse proxy. |
 | `config.metricsListMaxRangeDays` | `30` | Maximum raw `/metrics` listing window; wider ranges use report endpoints. |
+
+The API is always deployed (it serves the UI). The 0.3.x keys `config.api.enabled`, `config.api.livenessProbe` and
+`config.api.readinessProbe` are deprecated: they are mapped to `api.*` for one minor release
+([Upgrading](upgrading.md)).
 
 ### Data retention
 
@@ -162,6 +168,12 @@ config:
     url: "http://opencost.opencost.svc.cluster.local:9003"
 ```
 
+| Helm value | Environment variable | Default | Description |
+|---|---|---|---|
+| `config.prometheus.verifyCerts` | `PROMETHEUS_VERIFY_CERTS` | `true` | Verify the TLS certificate of Prometheus. |
+| `config.prometheus.nodeInstanceLabel` | `PROMETHEUS_NODE_INSTANCE_LABEL` | `label_node_kubernetes_io_instance_type` | kube-state-metrics node label that holds the instance type. |
+| `config.opencost.verifyCerts` | `OPENCOST_VERIFY_CERTS` | `true` | Verify the TLS certificate of OpenCost. |
+
 ### Metric collection (`config.prometheus`, `config.collection`)
 
 The controller collects half-open, step-aligned windows `[start, end)` and records, per source, the end of the last window it fully wrote (the *collection watermark*). Every run collects all missing windows oldest first, so a restart or a Prometheus outage is backfilled automatically instead of leaving a gap.
@@ -184,6 +196,24 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.minSamples` | `RECOMMENDATION_MIN_SAMPLES`, `VERIFICATION_MIN_SAMPLES`, policy `minSamples` | `36` | Raw samples of evidence required everywhere a sample count gates a decision: recommendation confidence, the plan policy gate and verification (one knob since 0.4). The deprecated `automation.policy.minSamples` and `config.recommendations.verification.minSamples` still override their gate for one minor release. |
 | `config.recommendations.lookbackDays` | `RECOMMENDATION_LOOKBACK_DAYS` | `14` | Lookback of recommendation scans (two weekly cycles). SQLite and PostgreSQL scans read per-target usage summaries from the `workload_usage_hourly` rollup, so memory grows with the number of workloads, not with the lookback. |
 | `config.recommendations.maxMetricRows` | `RECOMMENDATION_MAX_METRIC_ROWS` | `750000` | Hard bound on combined and container rows loaded by one recommendation scan on backends without the usage rollup (custom repositories). The lookback window is shortened automatically before loading above this bound. |
+| `config.recommendations.rightsizingCpuThreshold` | `RIGHTSIZING_CPU_THRESHOLD` | `0.3` | A CPU request decrease is considered when average CPU usage divided by the request is below this ratio. |
+| `config.recommendations.rightsizingMemoryThreshold` | `RIGHTSIZING_MEMORY_THRESHOLD` | `0.3` | Same ratio for memory requests. |
+| `config.recommendations.rightsizingHeadroom` | `RIGHTSIZING_HEADROOM` | `1.2` | Safety multiplier applied to the sizing percentile (p95 for decreases, p99 for increases) to get the target request. |
+| `config.recommendations.minCpuMillicores` | `RECOMMENDATION_MIN_CPU_MILLICORES` | `10` | Floor of a proposed CPU request; lower targets are raised to it. |
+| `config.recommendations.minMemoryBytes` | `RECOMMENDATION_MIN_MEMORY_BYTES` | `16777216` | Floor of a proposed memory request (16 MiB; quote it in values so YAML keeps an integer). |
+| `config.recommendations.applyTolerance` | `RECOMMENDATION_APPLY_TOLERANCE` | `0.25` | Relative deviation between the live request and the proposal still counted as applied by apply detection ([Recommendation lifecycle](recommendation.md)). |
+| `config.recommendations.zombieCostThreshold` | `ZOMBIE_COST_THRESHOLD` | `0.01` | A workload whose cost over the scan lookback exceeds this (pricing currency) while its energy stays below `zombieEnergyThreshold` is a zombie candidate. |
+| `config.recommendations.zombieEnergyThreshold` | `ZOMBIE_ENERGY_THRESHOLD` | `1000` | Energy (joules over the scan lookback) below which a costly workload is a zombie candidate. |
+| `config.recommendations.autoscalingCvThreshold` | `AUTOSCALING_CV_THRESHOLD` | `0.7` | Coefficient of variation of CPU usage above which a workload without an HPA is an autoscaling candidate. |
+| `config.recommendations.autoscalingSpikeRatio` | `AUTOSCALING_SPIKE_RATIO` | `3.0` | Max/mean CPU ratio required, with the coefficient of variation, for an autoscaling candidate. |
+| `config.recommendations.offPeakIdleThreshold` | `OFF_PEAK_IDLE_THRESHOLD` | `0.05` | Share of the daily CPU peak below which an hour counts as idle for off-peak scaling. |
+| `config.recommendations.offPeakMinIdleHours` | `OFF_PEAK_MIN_IDLE_HOURS` | `4` | Consecutive idle hours required for an off-peak scale-to-zero recommendation. |
+| `config.recommendations.idleNamespaceEnergyThreshold` | `IDLE_NAMESPACE_ENERGY_THRESHOLD` | `1000` | Namespace energy (joules) below which a namespace with a positive cost is idle. |
+| `config.recommendations.carbonAwareThreshold` | `CARBON_AWARE_THRESHOLD` | `1.5` | A workload whose average grid intensity exceeds this multiple of its zone average gets a carbon-aware scheduling recommendation. |
+| `config.recommendations.nodeUtilizationThreshold` | `NODE_UTILIZATION_THRESHOLD` | `0.2` | Average CPU (and memory, when known) utilization below which a node is over-provisioned. |
+| `config.recommendations.recommendSystemNamespaces` | `RECOMMEND_SYSTEM_NAMESPACES` | `false` | Include system namespaces (such as `kube-system`) in recommendations and the sustainability score. Zombie, idle-namespace and off-peak recommendations never target infrastructure namespaces, whatever this says. |
+| `config.recommendations.storageCostPerGibMonth` | `STORAGE_COST_PER_GIB_MONTH` | `0.1` | Assumed monthly cost per GiB of an orphaned PersistentVolume, for its deletion savings. |
+| `config.recommendations.loadBalancerCostPerMonth` | `LOAD_BALANCER_COST_PER_MONTH` | `18.0` | Assumed monthly cost of an orphaned cloud LoadBalancer, for its deletion savings. |
 | `config.recommendations.rightsizingIncreaseThreshold` | `RIGHTSIZING_INCREASE_THRESHOLD` | `0.9` | Recommend a request increase (reliability) when p99 usage exceeds this share of the request. |
 | `config.recommendations.rightsizingMaxIncreaseFactor` | `RIGHTSIZING_MAX_INCREASE_FACTOR` | `2.0` | Cap of one request increase step, as a multiple of the current request (must be above 1). OOM kills lift the cap. The reason states the cap and the uncapped target; the next scan re-evaluates. See [How GreenKube sizes increases](recommendation.md#how-greenkube-sizes-increases). |
 | `config.recommendations.rightsizingWarmupMinutes` | `RIGHTSIZING_WARMUP_MINUTES` | `10` | Minutes after a container restart (or a new replica) left out of usage percentiles, so startup spikes do not size requests. The maximum keeps every point. `0` disables it. |
@@ -226,7 +256,7 @@ Sources produce the signals recommendations are built from: one per native analy
 | `sources.settings` | `SOURCES_CONFIG` | `{}` | Per-source settings keyed by source id, rendered as a JSON object. `enabled` is `true`, `false` or `auto` (run when the source's prerequisites are detected, the default for `vpa` and `greenkube.nodepool`); other keys are validated by the source (unknown keys disable that source and are reported). Invalid JSON is rejected at startup. Do not put credentials here: the map is stored in the ConfigMap. The 0.3.x `config.recommendations.vpaEnabled`/`karpenterEnabled` flags are still honoured for one minor release. |
 | `sources.priority` | `RECOMMENDATION_SOURCE_PRIORITY` | `vpa,karpenter,greenkube` | Arbitration precedence (highest first). Replaces `config.recommendations.sourcePriority`. |
 
-| `sources.krr.job.enabled` | — | `false` | Run [Robusta KRR](sources/krr.md) as a CronJob that pushes its report to `POST /api/v1/sources/krr/reports`. Needs `sources.krr.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:report`; `signals:write` is accepted, deprecated) and `config.api.enabled`. |
+| `sources.krr.job.enabled` | — | `false` | Run [Robusta KRR](sources/krr.md) as a CronJob that pushes its report to `POST /api/v1/sources/krr/reports`. Needs `sources.krr.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:report`; `signals:write` is accepted, deprecated). The API is always deployed. |
 | `sources.krr.job.schedule` | — | `17 3 * * *` | Cron schedule of the KRR job. |
 | `sources.krr.job.strategy` | — | `simple` | KRR strategy (`krr <strategy>`). |
 | `sources.krr.job.image.*` | — | `robustadev/krr` v1.31.1 by digest | KRR image; `digest` is required (`sha256:<64 hex>`). |
@@ -234,7 +264,7 @@ Sources produce the signals recommendations are built from: one per native analy
 | `sources.krr.job.extraArgs` | — | `[]` | Extra KRR arguments (`--namespace`, `--history_duration`...). |
 | `sources.krr.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:report` API key. |
 | `sources.krr.job.resources`, `activeDeadlineSeconds` | — | `100m`/`512Mi` requests, `2Gi` limit; `3600` | KRR container resources and job deadline. |
-| `sources.polaris.job.enabled` | — | `false` | Run [Fairwinds Polaris](sources/polaris.md) as a CronJob that pushes its audit to `POST /api/v1/sources/polaris/reports`. Needs `sources.polaris.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:report`; `signals:write` is accepted, deprecated) and `config.api.enabled`. |
+| `sources.polaris.job.enabled` | — | `false` | Run [Fairwinds Polaris](sources/polaris.md) as a CronJob that pushes its audit to `POST /api/v1/sources/polaris/reports`. Needs `sources.polaris.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:report`; `signals:write` is accepted, deprecated). The API is always deployed. |
 | `sources.polaris.job.schedule` | — | `37 3 * * *` | Cron schedule of the Polaris job. |
 | `sources.polaris.job.image.*` | — | `quay.io/fairwinds/polaris` 10.1.8 by digest | Polaris image; `digest` is required (`sha256:<64 hex>`). |
 | `sources.polaris.job.extraArgs` | — | `[]` | Extra `polaris audit` arguments. |
@@ -554,7 +584,7 @@ The controller's own metrics endpoint is configured with `controller.metricsPort
 
 `prometheusRule.enabled` installs alerts for stuck plan operations, plans awaiting controller sync, failed syncs, non-terminal webhook deliveries, and stale worker heartbeats. With `prometheusRule.controllerAlerts` (default `true`) it also installs the controller loop alerts `GreenKubeControllerLoopFailing` (a loop failed 3 ticks in a row for 10 minutes), `GreenKubeAutomationLoopStale` (the automation controller loop has not succeeded for 10 minutes) and `GreenKubeNoActiveController` (no controller holds the Lease, or none is scraped, for 5 minutes); they read the controller metrics endpoint, so they render only together with the controller ServiceMonitor (`serviceMonitor.enabled` and `collector.metricsPort` > 0). Together with the controller loop alerts it installs the loop health alerts (group `greenkube.loop`, roadmap N7): `GreenKubeCollectionLagging` (the leader's `greenkube_collection_watermark_lag_seconds{source}` above `thresholds.collectionLagSeconds` for 15 minutes), `GreenKubeRecommendationScanFailing` (every scan of the last hour failed), `GreenKubeRecommendationSourceFailing` (a source failed during scans for over an hour), `GreenKubeRecommendationScanStale` (no successful scan for `thresholds.recommendationScanStaleSeconds`), `GreenKubeMeasurementStalled` (the `recommendation-lifecycle` loop, which runs apply detection, verification and change measurement, has not succeeded for `thresholds.measurementStaleSeconds`), `GreenKubeGitProviderRateLimited` (a Git provider kept rate-limiting GreenKube for 30 minutes) and, whenever a GreenKube process is scraped, the ledger alerts (group `greenkube.ledger`) `GreenKubeLedgerChainVerificationFailed` (critical: `greenkube_ledger_chain_ok{cluster_uid}` is 0) and `GreenKubeLedgerProjectionBacklog` (v1 accrual rows still missing from the ledger v2 after 3 hours). `prometheusRule.operations` (default on) adds the group `greenkube.operations`: `GreenKubeAPIDown` (no API target up, with the ServiceMonitor), `GreenKubeDatabaseUnavailable` (the controller heartbeat cannot be written, with the controller ServiceMonitor), `GreenKubeAPIUnavailable` and `GreenKubePostgresDown` (kube-state-metrics; `operations.kubeStateMetrics: false` leaves them out), `GreenKubeBackupMissing` (with `postgres.backup.enabled`), and `GreenKubeDataVolumeLow` / `GreenKubeDataVolumeFillingUp` (kubelet volume stats of the bundled PostgreSQL and backup claims); details in [Operations alerts](observability-slos.md#operations-alerts). See [Observability and SLOs](observability-slos.md#chart-alerts). The corresponding `greenkube_automation_backlog{queue,state}` gauges and heartbeat age are exposed on `/prometheus/metrics`; enable `serviceMonitor` separately to scrape them.
 
-When enabled, the chart applies policies to standalone app/worker pods or production API/controller/worker pods. It allows DNS and the bundled PostgreSQL connection, plus Prometheus and the ready-check ingress paths; other external egress requires an explicit `additionalEgress` rule. No unrestricted internet egress is added.
+When enabled, the chart applies policies to the API, controller and (optional) worker pods. It allows DNS and the bundled PostgreSQL connection, plus Prometheus and the ready-check ingress paths; other external egress requires an explicit `additionalEgress` rule. No unrestricted internet egress is added.
 
 ### Exposure (`ingress`, `httpRoute`)
 
