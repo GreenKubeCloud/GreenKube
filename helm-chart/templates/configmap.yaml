@@ -39,6 +39,7 @@ data:
   GITOPS_PR_POLL_INTERVAL: {{ $prPollInterval | quote }}
   GITOPS_DISCOVERY_INTERVAL: {{ .Values.automation.discoveryInterval | default "5m" | quote }}
   GITOPS_BINDING_TTL: {{ .Values.automation.bindingTtl | default "30m" | quote }}
+  GITOPS_LOCAL_CLUSTER_ALIASES: {{ .Values.automation.localClusterAliases | default list | toJson | quote }}
   GITOPS_SYNC_POLL_INTERVAL: {{ $syncPollInterval | quote }}
   GITOPS_SYNC_TIMEOUT: {{ $syncTimeout | quote }}
   GITOPS_POLICY_JSON: {{ $policy | toJson | quote }}

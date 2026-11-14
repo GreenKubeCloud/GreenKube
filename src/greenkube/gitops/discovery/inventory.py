@@ -15,6 +15,11 @@ name)``. A resource listed by exactly one controller is bound; one listed by sev
 ambiguous and an unlisted one is unmanaged, so callers fail closed (or fall back to an
 advisory) instead of guessing. The binding carries the controller's resolved Git
 location when discovery resolved one of its workloads.
+
+A controller that deploys to another cluster (an Argo CD destination that is not the local
+cluster, a Flux object with ``spec.kubeConfig``) lists resources of that cluster: its
+entries still make a same-named local resource ambiguous, but never resolve one
+(``destination_remote``), so no plan, deletion included, is bound through it.
 """
 
 from __future__ import annotations
@@ -25,7 +30,13 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from greenkube.gitops.contracts import BindingStatus, ControllerKind, ResourceTarget, WorkloadSource
-from greenkube.gitops.discovery.common import as_mapping, text
+from greenkube.gitops.discovery.common import (
+    DESTINATION_REMOTE_REASON,
+    argo_destination_is_local,
+    as_mapping,
+    flux_targets_remote_cluster,
+    text,
+)
 from greenkube.gitops.discovery.flux import parse_flux_inventory_id
 
 ControllerIdentity = tuple[ControllerKind, str, str]
@@ -296,6 +307,8 @@ class ResourceBindingIndex:
     _resources: dict[tuple[str, str, str, str], list[ManagedResource]] = field(default_factory=dict)
     _locations: dict[ControllerIdentity, WorkloadSource] = field(default_factory=dict)
     _prune: dict[ControllerIdentity, bool | None] = field(default_factory=dict)
+    #: Controllers that deploy to another cluster (never resolve a local resource).
+    _remote: set[ControllerIdentity] = field(default_factory=set)
 
     def add_inventory(self, resources: Iterable[ManagedResource]) -> None:
         for resource in resources:
@@ -304,17 +317,24 @@ class ResourceBindingIndex:
             if all(entry.controller != resource.controller for entry in entries):
                 entries.append(resource)
 
-    def add_argo_application(self, application: Mapping[str, Any]) -> None:
+    def add_argo_application(self, application: Mapping[str, Any], local_cluster_aliases: Iterable[str] = ()) -> None:
         resources = argo_application_inventory(application)
         self.add_inventory(resources)
+        spec = as_mapping(application.get("spec")) or {}
+        remote = not argo_destination_is_local(as_mapping(spec.get("destination")), local_cluster_aliases)
         for controller in {resource.controller for resource in resources}:
             self._prune[controller] = argo_application_prunes(application)
+            if remote:
+                self._remote.add(controller)
 
     def add_flux_kustomization(self, kustomization: Mapping[str, Any]) -> None:
         resources = flux_kustomization_inventory(kustomization)
         self.add_inventory(resources)
+        remote = flux_targets_remote_cluster(as_mapping(kustomization.get("spec")))
         for controller in {resource.controller for resource in resources}:
             self._prune[controller] = flux_kustomization_prunes(kustomization)
+            if remote:
+                self._remote.add(controller)
 
     def managed(self, kinds: Iterable[tuple[str, str]] | None = None) -> list[ManagedResource]:
         """Every inventory entry, optionally only of the ``(group, kind)`` pairs in ``kinds``."""
@@ -348,6 +368,8 @@ class ResourceBindingIndex:
             if source.status is not BindingStatus.RESOLVED:
                 continue
             controller = (source.controller_kind, source.controller_namespace, source.controller_name)
+            if controller in self._remote:
+                continue
             existing = self._locations.get(controller)
             if existing is None:
                 if controller not in conflicting:
@@ -372,6 +394,15 @@ class ResourceBindingIndex:
         if len(controllers) > 1:
             return ResourceBinding(
                 ref=ref, status="ambiguous", controllers=controllers, reason="managed-by-multiple-controllers"
+            )
+        if controllers[0] in self._remote:
+            return ResourceBinding(
+                ref=ref,
+                status="resolved",
+                controllers=controllers,
+                location=None,
+                reason=DESTINATION_REMOTE_REASON,
+                prune=self._prune.get(controllers[0]),
             )
         location = self._locations.get(controllers[0])
         return ResourceBinding(
@@ -398,6 +429,10 @@ def bind_resources(index: ResourceBindingIndex, refs: Iterable[ResourceTarget]) 
             raise UnboundResourceError(f"{described} is not managed by an Argo CD Application or Flux Kustomization")
         if binding.status == "ambiguous":
             raise UnboundResourceError(f"{described} is managed by several GitOps controllers")
+        if binding.reason == DESTINATION_REMOTE_REASON:
+            raise UnboundResourceError(
+                f"{described} is listed by a GitOps controller that deploys to another cluster (destination_remote)"
+            )
         if not binding.resolved:
             raise UnboundResourceError(f"the Git source of the controller managing {described} is unresolved")
         bindings.append(binding)

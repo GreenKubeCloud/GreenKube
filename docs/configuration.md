@@ -264,6 +264,7 @@ most important values are:
 | `automation.policy.pauseDelivery` | `false` | `AUTOMATION_PAUSE_DELIVERY`. The only off switch: plan approval returns `delivery_paused` (409) and no PR is opened, while discovery, previews and measurement keep running. |
 | `automation.discoveryInterval` | `5m` | Discovery refresh cadence (`1s`–`1h`). |
 | `automation.bindingTtl` | `30m` | Binding and manual-resolution freshness (`1s`–`24h`). |
+| `automation.localClusterAliases` | `[]` | `GITOPS_LOCAL_CLUSTER_ALIASES` (JSON list). Extra Argo CD destination server URLs or cluster names under which this cluster is registered, besides `https://kubernetes.default.svc` and `in-cluster`. An Application deploying to any other cluster, and a Flux Kustomization or HelmRelease with `spec.kubeConfig`, never binds a workload or resource of this cluster (`destination_remote`). |
 | `automation.prPollIntervalSeconds` | `120` | PR polling fallback interval (10–86400). |
 | `automation.syncPollIntervalSeconds` | `30` | Controller sync observation interval (10–86400). |
 | `automation.syncTimeoutSeconds` | `1800` | Time before a merged but unsynced plan becomes `sync_failed` (60–86400). |

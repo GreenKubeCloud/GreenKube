@@ -14,10 +14,13 @@ from greenkube.gitops.contracts import BindingStatus, ControllerKind, RendererKi
 from greenkube.gitops.discovery.common import (
     SUPPORTED_WORKLOAD_KINDS,
     WORKLOAD_KINDS,
+    argo_destination_is_local,
     as_mapping,
     controller_evidence,
+    destination_evidence,
     immutable_revision,
     join_repo_path,
+    mark_destination_remote,
     positive_generation,
     safe_repo_path,
     text,
@@ -25,6 +28,8 @@ from greenkube.gitops.discovery.common import (
 )
 
 _HELM_VALUES_MAPPING_ANNOTATION = "greenkube.cloud/helm-values-mapping"
+#: Binding reason of a source whose type (directory, Kustomize, Helm) Argo CD did not report.
+SOURCE_TYPE_UNKNOWN_REASON = "source_type_unknown"
 _MAX_HELM_VALUES_MAPPING_BYTES = 4096
 
 
@@ -65,6 +70,7 @@ def discover_argo_application(
     kustomization_paths: Iterable[str] = (),
     live_resources: Iterable[Mapping[str, Any]] = (),
     observed_at: datetime | None = None,
+    local_cluster_aliases: Iterable[str] = (),
 ) -> list[WorkloadSource]:
     """Map an Application's live resources and source configuration without I/O.
 
@@ -73,6 +79,14 @@ def discover_argo_application(
     be treated as an editable source. ``kustomization_paths`` contains
     caller-supplied repository-relative paths already known to have a
     kustomization file; this adapter never probes repositories.
+
+    An Application whose ``spec.destination`` is another cluster than the local one
+    (``local_cluster_aliases`` names the extra server URLs or cluster names of the local
+    cluster) never binds a local workload: its candidates are blocked with the reason
+    ``destination_remote``. A source whose type Argo CD did not report
+    (``status.sourceType`` is missing after a ComparisonError) and that carries no
+    explicit renderer configuration stays unresolved (``source_type_unknown``) instead
+    of being read as raw manifests.
     """
     metadata = as_mapping(application.get("metadata")) or {}
     spec = as_mapping(application.get("spec")) or {}
@@ -97,10 +111,7 @@ def discover_argo_application(
     controller_state = controller_evidence(ControllerKind.ARGOCD, spec, status)
 
     sources, source_form_error = _application_sources(spec)
-    detected_source_type = text(status.get("sourceType"))
-    application_source_type = (
-        detected_source_type.casefold() if len(sources) == 1 and detected_source_type is not None else None
-    )
+    source_types = _source_types(status, len(sources))
     known_kustomization_paths = {
         path for raw_path in kustomization_paths if (path := safe_repo_path(raw_path, allow_root=True)) is not None
     }
@@ -159,14 +170,36 @@ def discover_argo_application(
                     helm_values_mapping_error=helm_values_mapping_error,
                     application_source=application_source,
                     kustomization_paths=known_kustomization_paths,
-                    application_source_type=application_source_type,
+                    application_source_type=(
+                        source_types[owner.index] if 0 <= owner.index < len(source_types) else None
+                    ),
                     forced_status=forced_status,
                     forced_reason=forced_reason,
                     controller_state=controller_state,
                     observed_at=observed_at,
                 )
             )
+    if not argo_destination_is_local(destination, local_cluster_aliases):
+        # A hub Argo CD deploying to a spoke cluster does not manage a workload of this
+        # cluster, even when one has the same namespace and name (fail closed, explained).
+        return [mark_destination_remote(candidate, destination_evidence(destination)) for candidate in candidates]
     return candidates
+
+
+def _source_types(status: Mapping[str, Any], source_count: int) -> list[str | None]:
+    """Argo CD's detected type of each source (``status.sourceType``/``sourceTypes``), casefolded."""
+    if source_count == 1 and (detected := text(status.get("sourceType"))) is not None:
+        return [detected.casefold()]
+    values = status.get("sourceTypes")
+    if isinstance(values, list) and len(values) == source_count:
+        return [value.casefold() if (value := text(item)) is not None else None for item in values]
+    return [None] * source_count
+
+
+def application_destination_remote(application: Mapping[str, Any], local_cluster_aliases: Iterable[str] = ()) -> bool:
+    """Whether an Argo CD Application deploys to another cluster than the local one."""
+    spec = as_mapping(application.get("spec")) or {}
+    return not argo_destination_is_local(as_mapping(spec.get("destination")), local_cluster_aliases)
 
 
 def _helm_values_mapping(
@@ -507,6 +540,9 @@ def _candidate_for_workload(
     elif resource.kind not in SUPPORTED_WORKLOAD_KINDS:
         status = BindingStatus.BLOCKED
         reason = "owner-resolution-required" if resource.kind in {"Pod", "ReplicaSet"} else "unsupported-workload-kind"
+    elif renderer_error == SOURCE_TYPE_UNKNOWN_REASON:
+        status = BindingStatus.UNRESOLVED
+        reason = renderer_error
     elif renderer_error is not None:
         status = BindingStatus.BLOCKED
         reason = renderer_error
@@ -627,11 +663,15 @@ def _renderer_configuration(
     kustomization_paths: set[str],
     application_source_type: str | None,
 ) -> tuple[RendererKind, dict[str, Any], str | None, bool]:
-    if owner.raw.get("plugin") is not None:
+    if owner.raw.get("plugin") is not None or application_source_type == "plugin":
         return RendererKind.RAW, {}, "unsupported-config-management-plugin", False
     if owner.directory is not None and owner.directory.get("jsonnet"):
         return RendererKind.RAW, {}, "unsupported-directory-renderer", False
-    if owner.helm_present or owner.chart is not None:
+    if (
+        owner.helm_present
+        or owner.chart is not None
+        or (application_source_type == "helm" and not owner.kustomize_present and owner.directory is None)
+    ):
         if owner.helm_present and owner.helm is None:
             return RendererKind.HELM_VALUES, {}, "unsupported-helm-config", False
         helm = owner.helm or {}
@@ -736,6 +776,11 @@ def _renderer_configuration(
 
     if owner.raw.get("directory") is not None and owner.directory is None:
         return RendererKind.RAW, {}, "unsupported-directory-config", False
+    if owner.directory is None and application_source_type != "directory":
+        # Argo CD did not report the source type (a ComparisonError leaves status.sourceType
+        # unset) and nothing in the spec names one: a Kustomize overlay or a chart read as
+        # raw manifests would bind every plan to the wrong renderer (fail closed).
+        return RendererKind.RAW, {}, SOURCE_TYPE_UNKNOWN_REASON, False
     directory = owner.directory or {}
     return RendererKind.RAW, {"directory": deepcopy(dict(directory))}, None, False
 

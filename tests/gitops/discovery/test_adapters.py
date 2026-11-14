@@ -39,6 +39,7 @@ def _application(resource: Mapping[str, Any], *, status: dict[str, Any] | None =
         },
         "status": {
             "sync": {"revision": "a" * 40},
+            "sourceType": "Directory",
             "resources": [dict(resource)],
         },
     }
@@ -1178,7 +1179,7 @@ def test_argo_tracking_id_fallback_reads_the_managed_live_resource():
                 "path": "apps/payments",
             },
         },
-        "status": {"sync": {"revision": "a" * 40}},
+        "status": {"sync": {"revision": "a" * 40}, "sourceType": "Directory"},
     }
     live_resource = {
         "apiVersion": "apps/v1",

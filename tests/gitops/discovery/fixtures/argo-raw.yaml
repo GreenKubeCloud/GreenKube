@@ -12,6 +12,7 @@ spec:
     targetRevision: main
     path: apps/payments
 status:
+  sourceType: Directory
   sync:
     revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   resources:

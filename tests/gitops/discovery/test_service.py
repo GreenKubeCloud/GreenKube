@@ -242,6 +242,7 @@ def _application() -> dict[str, Any]:
         },
         "status": {
             "sync": {"revision": "a" * 40},
+            "sourceType": "Directory",
             "resources": [
                 {
                     "group": "apps",

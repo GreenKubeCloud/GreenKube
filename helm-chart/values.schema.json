@@ -108,6 +108,11 @@
         "syncTimeoutSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
         "discoveryInterval": {"$ref": "#/definitions/duration"},
         "bindingTtl": {"$ref": "#/definitions/duration"},
+        "localClusterAliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "pattern": "^\\S+$"}
+        },
         "webhooks": {
           "type": "object",
           "properties": {
