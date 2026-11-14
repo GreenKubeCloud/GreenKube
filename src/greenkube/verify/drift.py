@@ -69,7 +69,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Sequence, Set
 
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.model import (
@@ -105,6 +105,9 @@ _SECONDS_PER_YEAR = 365.25 * 24 * 3600
 #: The day each (change, measurement) was last assessed: drift is decided on complete days, so a
 #: realized change is read once per day (per process), not on every pass.
 _ASSESSED: Dict[tuple, datetime] = {}
+#: Closed changes whose closing event is not ``superseded`` (per process): a closing event never
+#: changes, so their events are read once, not on every hourly pass.
+_NOT_SUPERSEDED: Set[str] = set()
 _SLOT = timedelta(hours=1)
 _MIN_COVERAGE = 0.5
 #: Events of the deletion check (C8): the workload was found absent, then present again.
@@ -541,6 +544,8 @@ class DriftMonitor:
         """A closed change whose closing event is ``superseded`` (from its details, or its events for older rows)."""
         if (status.details or {}).get(_SUPERSEDED_BY):
             return True
+        if status.change_id in _NOT_SUPERSEDED:
+            return False
         events = await self.changes.list_events(status.change_id)
         closing = next(
             (
@@ -550,7 +555,11 @@ class DriftMonitor:
             ),
             None,
         )
-        return closing is not None and closing.event_type == SUPERSEDED
+        if closing is not None and closing.event_type == SUPERSEDED:
+            return True
+        if closing is not None:
+            _NOT_SUPERSEDED.add(status.change_id)
+        return False
 
     async def _watch_superseded(self, status: ChangeStatus, now: datetime) -> bool:
         """End the measured accrual of a superseded change once the saving on its workload cannot be vouched for.
