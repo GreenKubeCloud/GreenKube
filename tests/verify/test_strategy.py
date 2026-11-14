@@ -176,3 +176,67 @@ def test_cpu_usage_load_driver_is_resolved_when_nothing_else_is_available():
         {"cpu_usage": quantity_series(post, "cpu_usage_cores")},
     )
     assert resolved is not None and resolved.info.weak
+
+
+def test_an_unrelated_replica_drop_is_not_credited_to_a_request_change():
+    """4 -> 2 replicas during the post-window with unchanged requests: no saving (it was credited before 2.1)."""
+
+    def before(window):
+        return workload_rows(window, pods=("a", "b", "c", "d"), cost=0.01, step=timedelta(minutes=5))
+
+    def after(window):
+        return workload_rows(window, pods=("a", "b"), cost=0.01, step=timedelta(minutes=5))
+
+    result, estimates = _measure(before, after, projected=500.0)
+    cost = estimates["allocated_cost"]
+    assert result.outcome is not ChangeOutcome.REALIZED
+    assert cost.annualized == pytest.approx(0.0, abs=1e-6)
+    assert cost.counterfactual_per_hour == pytest.approx(cost.actual_per_hour)
+
+
+def test_a_request_cut_with_fewer_replicas_credits_the_per_replica_saving_times_replica_hours():
+    """1000m -> 300m (per pod-hour $0.12 -> $0.05) while replicas drop 4 -> 2: saving = $0.07 x 2 replicas."""
+
+    def before(window):
+        return workload_rows(window, pods=("a", "b", "c", "d"), cost=0.01, step=timedelta(minutes=5))
+
+    def after(window):
+        return workload_rows(window, pods=("a", "b"), cost=0.01 * 5 / 12, cpu_request=300, step=timedelta(minutes=5))
+
+    result, estimates = _measure(before, after, projected=1500.0)
+    cost = estimates["allocated_cost"]
+    assert result.outcome is ChangeOutcome.REALIZED
+    assert cost.rate_per_hour == pytest.approx((0.12 - 0.05) * 2, rel=1e-6)
+    # Freed capacity: 0.7 cores per replica x 2 replicas.
+    assert estimates["core_hours"].rate_per_hour == pytest.approx(1.4)
+
+
+def test_an_hpa_scale_out_after_a_request_cut_is_not_credited():
+    """2 pods at $0.01 -> 4 pods at $0.005 after 1000m -> 500m: the workload total is unchanged, no saving."""
+
+    def before(window):
+        return workload_rows(window, pods=("a", "b"), cost=0.01, step=timedelta(minutes=5))
+
+    def after(window):
+        return workload_rows(window, pods=("a", "b", "c", "d"), cost=0.005, cpu_request=500, step=timedelta(minutes=5))
+
+    result, estimates = _measure(before, after, projected=1000.0)
+    cost = estimates["allocated_cost"]
+    assert result.outcome is not ChangeOutcome.REALIZED
+    assert cost.outcome is not ChangeOutcome.REALIZED
+    assert cost.annualized == pytest.approx(0.0, abs=1e-6)
+    assert result.counterfactual_params["replica_basis"]["allocated_cost"] == "workload_total"
+
+
+def test_a_request_cut_realized_on_both_bases_claims_the_smaller_one():
+    """Replicas steady (2 -> 2): both bases agree and the cut is realized."""
+
+    def before(window):
+        return workload_rows(window, pods=("a", "b"), cost=0.01, step=timedelta(minutes=5))
+
+    def after(window):
+        return workload_rows(window, pods=("a", "b"), cost=0.006, cpu_request=500, step=timedelta(minutes=5))
+
+    result, estimates = _measure(before, after, projected=1000.0)
+    assert result.outcome is ChangeOutcome.REALIZED
+    assert estimates["allocated_cost"].rate_per_hour == pytest.approx(0.004 * 12 * 2, rel=1e-6)

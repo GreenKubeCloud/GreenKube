@@ -43,7 +43,7 @@ from greenkube.models.metrics import RecommendationEventType, RecommendationReco
 from greenkube.models.verification import HealthGateResult, HealthGateStatus, MeasuredLedgerInput
 from greenkube.storage.change_repository import ChangeConflictError, ChangeRepository, change_identity
 from greenkube.utils.time import ensure_utc
-from greenkube.verify.attribution import allocate
+from greenkube.verify.attribution import allocate, allocated_projection
 from greenkube.verify.confounders import (
     ConfounderDetector,
     PoolContext,
@@ -587,7 +587,16 @@ class ChangeMeasurementService:
         )
 
     async def _close_superseded(self, change: ChangeEvent, now: datetime) -> None:
-        """A new change on a workload closes the accrual of its earlier realized changes."""
+        """A new change on a workload closes its earlier realized changes as ``superseded``.
+
+        A superseded change keeps accruing its own measured step (the newer
+        change is measured against a baseline that already includes it, so
+        nothing is counted twice) and stays watched by the drift monitor: its
+        accrual ends when a newer change on the workload ends (regressed,
+        reverted, spec drift, workload deleted), or when the workload is
+        deleted or drifts while no newer change is realized
+        (:meth:`greenkube.verify.drift.DriftMonitor.run`).
+        """
         try:
             earlier = await self.changes.changes_for_workload(*change.target.key)
         except Exception as exc:
@@ -606,6 +615,7 @@ class ChangeMeasurementService:
                     event_type="superseded",
                     reason=f"change {change.change_id} landed on the same workload",
                     payload={"superseded_by": change.change_id},
+                    details={**(status.details or {}), "superseded_by": change.change_id},
                     now=now,
                 )
             except ChangeConflictError as exc:
@@ -985,8 +995,9 @@ class ChangeMeasurementService:
             pool=pool,
         )
         in_effect = [member for member in members if _value(member.status) in _IN_EFFECT]
+        # Measured rows are allocated (projected != allocated != realized): compare with the allocated projection.
         projections = {
-            "allocated_cost": _sum(member.potential_savings_cost for member in in_effect),
+            "allocated_cost": _sum(allocated_projection(member) for member in in_effect),
             # Component-matched: only the projected components the measured rows carry.
             "co2e_g": _sum(_measurable_co2e(member) for member in in_effect),
             CO2E_WITH_EMBODIED: _sum(_measurable_co2e(member, CO2E_COMPONENTS) for member in in_effect),
@@ -1001,6 +1012,7 @@ class ChangeMeasurementService:
             projections=projections,
             settings=self.settings,
             seed_parts=(change.change_id, status.sequence),
+            rate_sources=[_rate_source(member) for member in in_effect],
         )
         awaiting = [member for member in in_effect if _awaiting(member)]
         gates, reliability = (
@@ -1009,6 +1021,10 @@ class ChangeMeasurementService:
             else ([], None)
         )
         counterfactual_params = dict(result.counterfactual_params)
+        # Measured savings are allocated; the realization factor of the projections says how much of
+        # them is expected on the bill (realized_billed is not measured yet, C10).
+        counterfactual_params["projection_basis"] = PROJECTION_BASIS
+        counterfactual_params["realization_factor"] = realization_factor(in_effect)
         reasons = list(result.reasons)
         if reliability is not None:
             # The outcome of a reliability increase (H1); its cost stays in the estimates, as a cost.
@@ -1036,7 +1052,7 @@ class ChangeMeasurementService:
             change_id=change.change_id,
             sequence=status.sequence,
             strategy_key=strategy.key,
-            strategy_version=strategy.version,
+            strategy_version=result.strategy_version or strategy.version,
             impact_model_version=snapshot.impact_model_version,
             baseline_snapshot_id=snapshot.snapshot_id,
             baseline_sha256=snapshot.content_sha256,
@@ -1220,7 +1236,7 @@ class ChangeMeasurementService:
         if failed:
             outcome = MeasurementOutcome.ROLLBACK_REVIEW
             reasons = [gate.detail for gate in failed]
-        cost = _quantity_estimate("cost", "currency", basis, share, estimate, outcome, member.potential_savings_cost)
+        cost = _quantity_estimate("cost", "currency", basis, share, estimate, outcome, allocated_projection(member))
         co2e_source = measurement.estimate("co2e_g")
         # The measured CO2e (operational, allocated by the Impact Model like the
         # projection) is claimed only when its own interval shows a saving, and
@@ -1348,14 +1364,49 @@ def _co2e_basis(shares: Mapping[int, float]) -> str:
 def _measurable_co2e(
     member: RecommendationRecord, components: Sequence[str] = MEASURED_CO2E_COMPONENTS
 ) -> Optional[float]:
-    """Projected CO2e of the components a measurement sees (None: nothing comparable)."""
-    return measurable_co2e_projection(getattr(member, "impact", None), components)
+    """Projected allocated CO2e of the components a measurement sees (None: nothing comparable)."""
+    return measurable_co2e_projection(getattr(member, "impact", None), components, allocated=True)
 
 
 def _co2e_components_of(measurement: ChangeMeasurement) -> Sequence[str]:
     """Components the measured CO2e covers (operational only for measurements before embodied was measured)."""
     estimate = measurement.estimate("co2e_g")
     return tuple(estimate.components) if estimate is not None and estimate.components else MEASURED_CO2E_COMPONENTS
+
+
+#: What a measurement is compared with (projected != allocated != realized).
+PROJECTION_BASIS = "allocated"
+
+
+def _factor(record: RecommendationRecord) -> Optional[float]:
+    impact = record.impact if isinstance(record.impact, dict) else {}
+    value = impact.get("realization_factor")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return None
+    return min(max(float(value), 0.0), 1.0)
+
+
+def realization_factor(records: Sequence[RecommendationRecord]) -> Optional[float]:
+    """Realization factor of a group's projections, weighted by their allocated saving (None when one is unknown)."""
+    pairs = []
+    for record in records:
+        factor = _factor(record)
+        if factor is None:
+            return None
+        pairs.append((max(float(allocated_projection(record) or 0.0), 0.0), factor))
+    if not pairs:
+        return None
+    total = math.fsum(weight for weight, _ in pairs)
+    if total <= 0:
+        return math.fsum(factor for _, factor in pairs) / len(pairs)
+    return math.fsum(weight * factor for weight, factor in pairs) / total
+
+
+def _rate_source(member: RecommendationRecord) -> str:
+    """Provenance of the rate frozen in a recommendation's projection (``assumptions.cost_source``)."""
+    impact = member.impact if isinstance(member.impact, dict) else {}
+    assumptions = impact.get("assumptions") if isinstance(impact.get("assumptions"), dict) else {}
+    return str(assumptions.get("cost_source") or "unknown")
 
 
 def _sum(values: Iterable[Optional[float]]) -> Optional[float]:
@@ -1440,4 +1491,4 @@ def _quantity_outcome(outcome: ChangeOutcome) -> QuantityOutcome:
     }.get(outcome, QuantityOutcome.INCONCLUSIVE)
 
 
-__all__ = ["ChangeMeasurementService", "DECISION_GRACE"]
+__all__ = ["ChangeMeasurementService", "DECISION_GRACE", "PROJECTION_BASIS", "realization_factor"]

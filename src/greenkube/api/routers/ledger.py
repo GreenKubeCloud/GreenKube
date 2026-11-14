@@ -55,6 +55,14 @@ from greenkube.verify.ledger.model import (
 
 logger = logging.getLogger(__name__)
 
+#: What each ledger method measures (projected != allocated != realized), for labels.
+METHOD_BASIS: Dict[str, str] = {
+    "projected": "projection of an applied change that is not measured yet",
+    "measured_allocated": "measured allocated saving (what the workload stops being charged); not the bill",
+    "realized_billed": "measured billed saving (removed node-hours on the bill)",
+    "user_declared": "value declared by a user, never measured",
+}
+
 router = APIRouter()
 
 MAX_LIMIT = 500
@@ -325,6 +333,8 @@ async def get_ledger_summary(
         "cluster_uid_source": source,
         "window": {"start": format_time(begin), "end": format_time(finish)},
         "totals": [],
+        "currencies": [],
+        "methods": dict(METHOD_BASIS),
         "entries_by_kind": {},
         "chain": None,
     }
@@ -337,18 +347,29 @@ async def get_ledger_summary(
     except Exception as exc:
         logger.error("Could not read the savings ledger: %s", exc)
         raise HTTPException(status_code=503, detail="Savings ledger unavailable.") from exc
-    totals: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    # Never summed across methods, quantities or currencies: one total per (method, quantity, unit).
+    totals: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     by_kind: Dict[str, int] = {}
     for row in rows:
         bucket = totals.setdefault(
-            (row.method, row.quantity),
-            {"method": row.method, "quantity": row.quantity, "unit": row.unit, "accrued": 0.0, "restatement": 0.0},
+            (row.method, row.quantity, row.unit),
+            {
+                "method": row.method,
+                "quantity": row.quantity,
+                "unit": row.unit,
+                "currency": row.unit if row.quantity == QUANTITY_COST else None,
+                "basis": METHOD_BASIS.get(row.method, "unknown"),
+                "billed": row.method == "realized_billed",
+                "accrued": 0.0,
+                "restatement": 0.0,
+            },
         )
         bucket["accrued" if row.book == BOOK_ACCRUED else "restatement"] += row.value
         by_kind[row.entry_kind] = by_kind.get(row.entry_kind, 0) + row.entries
     for bucket in totals.values():
         bucket["restated"] = bucket["accrued"] + bucket["restatement"]
-    base["totals"] = sorted(totals.values(), key=lambda item: (item["method"], item["quantity"]))
+    base["totals"] = sorted(totals.values(), key=lambda item: (item["method"], item["quantity"], item["unit"]))
+    base["currencies"] = sorted({item["unit"] for item in totals.values() if item["quantity"] == QUANTITY_COST})
     base["entries_by_kind"] = by_kind
     base["chain"] = {
         "head_seq": head_seq or None,

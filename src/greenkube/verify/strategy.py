@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 
 from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
@@ -83,6 +84,8 @@ class StrategyResult:
     reasons: List[str]
     coverage: float
     counterfactual_params: Dict[str, Any] = field(default_factory=dict)
+    #: The version recorded on the measurement when it differs from the strategy's (e.g. the rate provenance).
+    strategy_version: Optional[str] = None
 
 
 class SavingsMeasurementStrategy(Protocol):
@@ -103,6 +106,7 @@ class SavingsMeasurementStrategy(Protocol):
         projections: Mapping[str, Optional[float]],
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
+        rate_sources: Sequence[str] = (),
     ) -> StrategyResult: ...
 
 
@@ -129,10 +133,30 @@ class RequestRightsizingStrategy:
     :mod:`greenkube.verify.regression`) when a load driver exists and the fit's
     diagnostics pass, otherwise the hour-of-week MVP; ``method`` and the
     diagnostics are recorded.
+
+    **Per replica (2.1).** A request change moves what each replica is
+    charged, not how many replicas run. Every quantity is measured *per
+    replica* (each hour's value over its mean replica count), and the per-replica
+    saving is multiplied by the replicas that actually ran in the post-window:
+    ``saving = Δ(per-replica rate) × post replica-hours``, the roadmap's
+    ``Σ Δrequest × replica-hours``. A replica count that drops for another
+    reason (4 → 2 during the post-window) is therefore never credited to the
+    change; it is reported by the ``replica_shift`` confounder. Hours without
+    a replica count are left out. Measurements decided before 2.1 compared
+    workload totals.
+
+    **Both bases, the smaller claim (2.2).** Per-replica scaling alone
+    over-credits the mirror case: a CPU-request cut that makes an HPA scale
+    out (2 pods at $0.01 -> 4 pods at $0.005) halves the per-pod cost while the
+    workload total is unchanged. Every quantity is therefore also fitted on
+    workload totals, and the estimate with the smaller mean saving is kept
+    (``counterfactual_params.replica_basis``). It stays ``realized`` only
+    when both bases are realized; otherwise it is ``inconclusive``. Neither a
+    replica drop nor a replica rise is credited to the change.
     """
 
     key = "request_rightsizing"
-    version = "2.0"
+    version = "2.2"
     primary = "allocated_cost"
 
     QUANTITIES = (
@@ -167,13 +191,16 @@ class RequestRightsizingStrategy:
         projections: Mapping[str, Optional[float]],
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
+        rate_sources: Sequence[str] = (),
     ) -> StrategyResult:
+        del rate_sources  # measured from the workload's own trusted rows
         expected_hours = len(window_hours(plan.post)) or 1
         estimates: List[SavingsEstimate] = []
         methods: Dict[str, str] = {}
         elasticities: Dict[str, float] = {}
         matched: Dict[str, int] = {}
         diagnostics: Dict[str, Any] = {}
+        bases: Dict[str, str] = {}
         embodied = has_embodied(pre) and has_embodied(post)
         for spec in self.QUANTITIES:
             fitted = self._estimate_quantity(
@@ -188,6 +215,7 @@ class RequestRightsizingStrategy:
                 embodied=embodied,
             )
             estimates.append(fitted.estimate)
+            bases[spec.quantity] = fitted.basis
             if fitted.mvp is not None:
                 elasticities[spec.quantity] = round(fitted.mvp.elasticity, 6)
                 matched[spec.quantity] = len(fitted.mvp.means)
@@ -201,6 +229,7 @@ class RequestRightsizingStrategy:
             "elasticity": elasticities,
             "matched_hours_of_week": matched,
             "diagnostics": diagnostics,
+            "replica_basis": bases,
             "co2e_components": list(_co2e_components(embodied)),
             "block_hours": 24,
             "bootstrap_samples": settings.bootstrap_samples,
@@ -249,6 +278,7 @@ class RequestRightsizingStrategy:
         else:
             pre_values = quantity_series(pre, spec.quantity)
             post_values = quantity_series(post, spec.quantity)
+        post_replicas = quantity_series(post, "replicas")
         base: Dict[str, Any] = {
             "quantity": spec.quantity,
             "unit": spec.unit,
@@ -256,6 +286,44 @@ class RequestRightsizingStrategy:
             "projected_annual": projected,
             "components": components,
         }
+        fit = partial(
+            RequestRightsizingStrategy._fit_basis,
+            spec,
+            base=base,
+            load=load,
+            expected_hours=expected_hours,
+            projected=projected,
+            settings=settings,
+            seed_parts=seed_parts,
+        )
+        per_replica = fit(
+            _per_replica(pre_values, quantity_series(pre, "replicas")),
+            _per_replica(post_values, post_replicas),
+            post_replicas,
+        )
+        if per_replica.estimate.rate_per_hour is None:
+            return per_replica
+        totals = fit(pre_values, post_values, None)
+        totals.basis = BASIS_WORKLOAD_TOTAL
+        if totals.estimate.rate_per_hour is None:
+            return per_replica
+        return _conservative(per_replica, totals)
+
+    @staticmethod
+    def _fit_basis(
+        spec: QuantitySpec,
+        pre_values: Mapping[datetime, float],
+        post_values: Mapping[datetime, float],
+        post_replicas: Optional[Mapping[datetime, float]],
+        *,
+        base: Mapping[str, Any],
+        load: Optional[ResolvedLoad],
+        expected_hours: int,
+        projected: Optional[float],
+        settings: MeasurementSettings,
+        seed_parts: Sequence[object],
+    ) -> "_Fitted":
+        """Fit one basis: per-replica values scaled by ``post_replicas``, or workload totals (``None``)."""
         if not pre_values or not post_values:
             missing = "baseline" if not pre_values else "post-change"
             return _Fitted(
@@ -309,8 +377,13 @@ class RequestRightsizingStrategy:
                 mvp,
                 diagnostics,
             )
-        counterfactual = math.fsum(item.counterfactual for item in aligned) / len(aligned)
-        actual = math.fsum(item.actual for item in aligned) / len(aligned)
+        # Per-replica rates times the replicas that ran: the saving of the post-window's replica-hours.
+        replicas = (
+            math.fsum(post_replicas[item.hour] for item in aligned) / len(aligned) if post_replicas is not None else 1.0
+        )
+        interval = interval.scaled(replicas)
+        counterfactual = math.fsum(item.counterfactual for item in aligned) / len(aligned) * replicas
+        actual = math.fsum(item.actual for item in aligned) / len(aligned) * replicas
         epsilon = settings.epsilon_ratio * abs(counterfactual)
         if coverage < settings.min_coverage:
             outcome = ChangeOutcome.INCONCLUSIVE
@@ -343,11 +416,51 @@ class RequestRightsizingStrategy:
         )
 
 
+def _per_replica(values: Mapping[datetime, float], replicas: Mapping[datetime, float]) -> Dict[datetime, float]:
+    """``{hour: value / replicas}`` over the hours with a positive replica count."""
+    return {
+        hour: value / replicas[hour]
+        for hour, value in values.items()
+        if replicas.get(hour) is not None and replicas[hour] > 0 and math.isfinite(replicas[hour])
+    }
+
+
+BASIS_PER_REPLICA = "per_replica"
+BASIS_WORKLOAD_TOTAL = "workload_total"
+
+
 @dataclass
 class _Fitted:
     estimate: SavingsEstimate
     mvp: Optional[HourOfWeekCounterfactual] = None
     diagnostics: Optional[Dict[str, Any]] = None
+    basis: str = BASIS_PER_REPLICA
+
+
+def _conservative(per_replica: _Fitted, totals: _Fitted) -> _Fitted:
+    """The smaller of the per-replica and workload-total savings (fail closed in both directions).
+
+    Per-replica scaling stops an unrelated replica drop from being credited; the
+    workload total stops a replica rise the change itself caused (an HPA scaling
+    out after a CPU-request cut: per-pod cost halved, twice the pods) from being
+    credited. The claim is the smaller mean saving, and it stays ``realized``
+    only when both bases are realized.
+    """
+    per_rate = per_replica.estimate.rate_per_hour or 0.0
+    total_rate = totals.estimate.rate_per_hour or 0.0
+    chosen, other = (per_replica, totals) if per_rate <= total_rate else (totals, per_replica)
+    estimate = chosen.estimate
+    if estimate.outcome is ChangeOutcome.REALIZED and other.estimate.outcome is not ChangeOutcome.REALIZED:
+        chosen.estimate = estimate.model_copy(
+            update={
+                "outcome": ChangeOutcome.INCONCLUSIVE,
+                "reason": (
+                    f"{estimate.reason}; the {other.basis.replace('_', ' ')} measurement is "
+                    f"{other.estimate.outcome.value}, so the saving is not attributed to the change"
+                ),
+            }
+        )
+    return chosen
 
 
 def _co2e_components(embodied: bool) -> tuple[str, ...]:

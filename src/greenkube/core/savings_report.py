@@ -11,6 +11,7 @@ and are never summed (product principle 3, roadmap C0.14):
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from datetime import datetime
 from typing import Iterable, List, Optional
@@ -20,11 +21,12 @@ from ..models.savings import (
     METHOD_MEASURED,
     METHOD_PROJECTED,
     METHOD_USER_DECLARED,
+    RealizationSummary,
     SavingsAccrualTotal,
     SavingsBlock,
     SavingsReport,
 )
-from .savings_attributor import annual_rates_by_method
+from .savings_attributor import InvalidSavingsRecord, accrual_components, annual_rates_by_method
 
 LEGACY_COMPRESSED_DIAGNOSTIC = (
     "legacy_compressed: part of this window comes from hourly ledger rows compressed before 0.4; "
@@ -45,6 +47,49 @@ def _annual_block(rates: dict, method: str) -> SavingsBlock:
         co2e_grams=float(values.get("co2e_grams", 0.0)),
         cost=float(values.get("cost", 0.0)),
         recommendation_count=int(values.get("count", 0)),
+    )
+
+
+def _realization_factor(record: RecommendationRecord) -> Optional[float]:
+    impact = record.impact if isinstance(record.impact, dict) else {}
+    value = impact.get("realization_factor")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return None
+    return min(max(float(value), 0.0), 1.0)
+
+
+def realization_summary(records: Iterable[RecommendationRecord]) -> RealizationSummary:
+    """Measured allocated rates of ``records`` and the billed saving their realization factors imply."""
+    cost = co2e = billed_cost = billed_co2e = weighted = 0.0
+    count = without = 0
+    for record in records:
+        try:
+            components = [item for item in accrual_components(record) if item.method == METHOD_MEASURED]
+        except (InvalidSavingsRecord, ValueError):
+            continue
+        if not components:
+            continue
+        count += 1
+        measured_cost = math.fsum(item.cost_per_year for item in components)
+        measured_co2e = math.fsum(item.co2e_grams_per_year for item in components)
+        cost += measured_cost
+        co2e += measured_co2e
+        factor = _realization_factor(record)
+        if factor is None:
+            without += 1
+            continue
+        billed_cost += measured_cost * factor
+        billed_co2e += measured_co2e * factor
+        weighted += measured_cost
+    known = count - without
+    return RealizationSummary(
+        measured_allocated_cost_annual=cost,
+        measured_allocated_co2e_grams_annual=co2e,
+        realization_factor=(billed_cost / weighted) if weighted else None,
+        realized_billed_cost_annual_expected=billed_cost if known else None,
+        realized_billed_co2e_grams_annual_expected=billed_co2e if known else None,
+        recommendation_count=count,
+        without_realization_count=without,
     )
 
 
@@ -113,6 +158,7 @@ def assemble_savings_report(
         applied_count=len(applied_records),
         verified_count=sum(1 for record in applied_records if _status(record) == "verified"),
         diagnostics=[LEGACY_COMPRESSED_DIAGNOSTIC] if legacy_compressed else [],
+        realization=realization_summary(applied_records),
         total_carbon_saved_co2e_grams=realized.co2e_grams,
         total_cost_saved=realized.cost,
         measured_carbon_saved_co2e_grams=realized.co2e_grams,

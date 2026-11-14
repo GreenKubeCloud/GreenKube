@@ -132,6 +132,19 @@ class SummaryRow:
     entries: int
 
 
+def _impact_currency(raw: Any) -> Optional[str]:
+    """The ``currency`` of a stored ``impact`` projection (JSON text or a mapping), ``None`` when absent."""
+    if isinstance(raw, (str, bytes)):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+    currency = raw.get("currency")
+    return str(currency).strip().upper() or None if isinstance(currency, str) else None
+
+
 @dataclass(frozen=True)
 class Provenance:
     change_id: Optional[str] = None
@@ -139,6 +152,8 @@ class Provenance:
     measurement_id: Optional[str] = None
     method_version: Optional[str] = None
     recommendation_ids: Tuple[int, ...] = ()
+    #: Currency of the recommendation's projection (``impact.currency``): the currency its accruals are in.
+    currency: Optional[str] = None
 
 
 class LedgerRepository:
@@ -516,6 +531,14 @@ class LedgerRepository:
                 )
                 if row.get("change_id") and not data.get("change_id"):
                     data["change_id"] = row["change_id"]
+            impacts = await self._select(
+                f"SELECT id, impact FROM recommendation_history WHERE id IN ({placeholders})",
+                chunk,
+            )
+            for row in impacts:
+                currency = _impact_currency(row.get("impact"))
+                if currency is not None and int(row["id"]) in result:
+                    result[int(row["id"])]["currency"] = currency
         return {rec_id: Provenance(**data) for rec_id, data in result.items()}
 
     # ------------------------------------------------------------------
