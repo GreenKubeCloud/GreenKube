@@ -430,6 +430,11 @@ class AutomationPlanService:
             ):
                 # A fresh request after the previous identical preview expired re-plans instead of 409.
                 existing = await self._transition(existing, PlanStatus.STALE, reason_code="plan_expired")
+            refreshed = _binding_generation_changed(existing.source, source)
+            if existing.status in SUPERSEDABLE_PREVIEW_STATUSES and refreshed:
+                # Same files, but the binding was refreshed since (e2e: a crash-looping workload's
+                # live evidence flaps): approving the old preview would always answer source_changed.
+                existing = await self._transition(existing, PlanStatus.STALE, reason_code="source_changed")
             if existing.status in _REPLANABLE_STATUSES:
                 plan = await self._next_attempt_plan(plan)
             elif existing.status not in _REPLACEABLE_STATUSES | {PlanStatus.APPLYING, PlanStatus.PR_OPEN}:
@@ -1344,6 +1349,12 @@ def _safe_snapshot_path(path: str) -> bool:
 
 def _in_binding_scope(path: str, scope: str) -> bool:
     return scope == "." or path == scope or path.startswith(f"{scope}/")
+
+
+def _binding_generation_changed(stored: WorkloadSource, current: WorkloadSource) -> bool:
+    """Whether the binding a preview was planned from was refreshed since (approval refuses it)."""
+    expected = stored.evidence.get("binding_generation")
+    return expected is not None and expected != current.evidence.get("binding_generation")
 
 
 def _same_workload_binding(left: WorkloadSource, right: WorkloadSource) -> bool:

@@ -156,3 +156,14 @@ def test_loop_runs_the_check_after_the_verdict():
     assert "/api/v2/changes/${change_id}/measurements" in script
     assert "E2E_PROJECTION_TOLERANCE:=0.2" in script
     assert 'evidence "${prefix}.projection_accuracy" warning' in script
+
+
+def test_loop_skips_the_check_when_change_measurement_is_off():
+    """The default quickstart records no change: the step is skipped, never a failure (e2e)."""
+    script = LOOP.read_text()
+
+    gate = script.index("CHANGE_MEASUREMENT_ENABLED")
+    skipped = script.index('evidence "${prefix}.projection_accuracy" skipped')
+    changes = script.index("/api/v2/changes?plan_id=${plan_id}")
+    assert script.index('evidence "${prefix}.verdict" ok') < gate < skipped < changes
+    assert 'get configmap "${GK_RELEASE}-config"' in script

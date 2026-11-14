@@ -168,7 +168,9 @@ class _GreenkubeSecretsSource(PydanticBaseSettingsSource):
             secret_key = alias if isinstance(alias, str) else field_name
             val = _read_secret(secret_key)
             if val is not None:
-                d[field_name] = val
+                # Keyed like the input pydantic validates: an aliased field (for example
+                # METRICS_TOKEN <- GREENKUBE_METRICS_TOKEN) ignores its field name.
+                d[secret_key] = val
         return d
 
 

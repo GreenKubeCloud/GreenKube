@@ -41,6 +41,7 @@ from greenkube.gitops.contracts import (
     binding_candidate_generation_token,
     public_repository_url,
 )
+from greenkube.gitops.discovery.common import DESTINATION_REMOTE_REASON
 from greenkube.gitops.discovery.kubernetes import CapabilityAvailability, KubernetesDiscoverySource
 from greenkube.gitops.discovery.runtime import GitOpsDiscoveryRuntime
 from greenkube.gitops.discovery.service import DiscoveryCoverage
@@ -74,6 +75,8 @@ _SAFE_REASON_CODES = frozenset(
         "conflicting-renderer-config",
         "conflicting-source-forms",
         "crd-not-found",
+        # The controller deploys to another cluster (delivery safety): never bound.
+        DESTINATION_REMOTE_REASON,
         "duplicate-candidate-id-conflict",
         "empty-sources",
         "helmrelease-context-unresolved",

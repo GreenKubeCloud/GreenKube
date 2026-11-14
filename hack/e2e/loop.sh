@@ -379,6 +379,16 @@ if [[ "${E2E_WAIT_VERDICT}" == "1" ]]; then
   # |measured_allocated - projected_allocated| / projected_allocated must stay within
   # E2E_PROJECTION_TOLERANCE for cost (projection-accuracy.jq). An inconclusive or
   # contaminated measurement cannot be compared: it is recorded as a warning.
+  # Change measurement is off by default in the quickstart (values-change-measurement.yaml
+  # turns it on): no change is recorded, so there is nothing to compare.
+  measurement_enabled="$(kubectl -n "${GK_NAMESPACE}" get configmap "${GK_RELEASE}-config" \
+    -o jsonpath='{.data.CHANGE_MEASUREMENT_ENABLED}' 2>/dev/null || true)"
+  if [[ "${measurement_enabled}" != "true" ]]; then
+    evidence "${prefix}.projection_accuracy" skipped \
+      "change measurement is off (CHANGE_MEASUREMENT_ENABLED=${measurement_enabled:-unset}); add docs/examples/quickstart/values-change-measurement.yaml to compare projected and measured cost"
+    log "Loop for ${controller}/${workload} complete. Evidence: ${E2E_EVIDENCE_DIR}"
+    exit 0
+  fi
   changes="$(gk_api GET "/api/v2/changes?plan_id=${plan_id}&limit=50")" ||
     fail_step projection_accuracy "cannot list the changes of plan ${plan_id}"
   save_json "${prefix}-changes" "${changes}"

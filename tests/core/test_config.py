@@ -344,3 +344,19 @@ class TestGitOpsDiscoveryConfig:
         with patch.dict(os.environ, {"GITOPS_BINDING_TTL": "25h"}, clear=True):
             with pytest.raises(ValueError, match="GITOPS_BINDING_TTL"):
                 Config(_env_file=None)
+
+
+class TestSecretFilesForAliasedFields:
+    """Secret files reach fields declared with a validation alias (e2e: scrape token ignored)."""
+
+    def test_metrics_token_and_api_key_are_read_from_secret_files(self):
+        files = {"GREENKUBE_METRICS_TOKEN": "scrape-token", "GREENKUBE_API_KEY": "bootstrap-key"}
+
+        def read_secret(key, default=None):
+            return files.get(key, default)
+
+        with patch.dict(os.environ, {}, clear=True), patch("greenkube.core.config._read_secret", read_secret):
+            cfg = Config(_env_file=None)
+
+        assert cfg.METRICS_TOKEN == "scrape-token"
+        assert cfg.API_KEY == "bootstrap-key"

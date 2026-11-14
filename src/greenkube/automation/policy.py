@@ -851,7 +851,22 @@ class AutomationPolicyEvaluator:
             )
             return
         rollout = _optional_bool(evidence, "rollout_in_progress")
-        if rollout is True:
+        if (
+            rollout is True
+            and _optional_bool(evidence, "rollout_pods_unavailable_only") is True
+            and _increase_only_reliability(records)
+        ):
+            # An OOM-killed or crash-looping workload is unavailable after a completed rollout;
+            # blocking its own increase would keep it broken (same rule as controller health).
+            add_check(
+                "rollout_state",
+                PolicyCheckState.PASSED,
+                "The rollout is complete but the workload's pods are not ready; this increase-only "
+                "reliability fix is the remedy, so the rollout gate does not block it.",
+                observed={"rollout_in_progress": True, "pods_unavailable_only": True},
+                limit=False,
+            )
+        elif rollout is True:
             add_check(
                 "rollout_state",
                 PolicyCheckState.REJECTED,

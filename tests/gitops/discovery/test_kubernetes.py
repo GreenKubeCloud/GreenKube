@@ -794,6 +794,24 @@ async def test_missing_vpa_crd_counts_as_checked_and_other_errors_do_not():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "in_progress", "unavailable_only"),
+    [
+        # OOM-killed single replica after a completed rollout (e2e): health, not a rollout.
+        ({"observedGeneration": 1, "replicas": 1, "updatedReplicas": 1, "unavailableReplicas": 1}, True, True),
+        # New pods crash while the old ReplicaSet still runs: a real rollout.
+        ({"observedGeneration": 1, "replicas": 2, "updatedReplicas": 1, "unavailableReplicas": 1}, True, False),
+        ({"observedGeneration": 0, "replicas": 1, "updatedReplicas": 1, "readyReplicas": 1}, True, False),
+        ({"observedGeneration": 1, "replicas": 1, "updatedReplicas": 1, "readyReplicas": 1}, False, False),
+    ],
+)
+def test_rollout_evidence_separates_unavailable_pods_from_a_rollout(status, in_progress, unavailable_only):
+    workload = {"metadata": {"generation": 1}, "spec": {"replicas": 1}, "status": status}
+
+    assert kubernetes_discovery._workload_rollout_in_progress(workload, "Deployment") is in_progress
+    assert kubernetes_discovery._workload_pods_unavailable_only(workload, "Deployment") is unavailable_only
+
+
 async def test_discovery_attaches_live_labels_rollout_and_hpa_pdb_evidence():
     api = _CustomObjectsApi(_complete_responses())
     workload = {

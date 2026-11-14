@@ -125,8 +125,10 @@ class _ChartRunner:
         ignore_values: bool = False,
         ambiguous_mapping: bool = False,
         container_names: Sequence[str] = ("api", "sidecar"),
+        omit_namespace: bool = False,
     ) -> None:
         self.helm_version = helm_version
+        self.omit_namespace = omit_namespace
         self.unrelated_on_action = unrelated_on_action
         self.ignore_values = ignore_values
         self.ambiguous_mapping = ambiguous_mapping
@@ -177,6 +179,9 @@ class _ChartRunner:
             "metadata": {"name": "payments-api", "namespace": "prod"},
             "spec": {"template": {"spec": {"containers": containers}}},
         }
+        if self.omit_namespace:
+            # Most charts leave the namespace to ``helm template --namespace``.
+            del deployment["metadata"]["namespace"]
         output = f"# Source: {chart_path.as_posix()}/templates/deployment.yaml\n---\n{_safe_dump(deployment)}"
         if self.unrelated_on_action and "cpu: 300m" in output:
             output += """\
@@ -1008,6 +1013,22 @@ def test_flux_helmrelease_planner_adds_render_validated_managed_postrenderer_ide
         }
         assert (snapshot.workspace / "clusters/prod/helmrelease.yaml").read_text(encoding="utf-8") == release_content
         assert not list(snapshot.workspace.rglob(".greenkube-render-*"))
+    finally:
+        snapshot.close()
+
+
+def test_flux_helmrelease_planner_refuses_a_target_without_metadata_namespace():
+    """e2e: such a chart crashed the planner (KeyError, HTTP 500); planning it would open a no-op PR.
+
+    Flux post-renders the chart before Helm assigns the namespace, so a patch selecting the
+    release namespace never matches: the planner refuses with a typed reason instead.
+    """
+    snapshot = _snapshot({**_CHART, "clusters/prod/helmrelease.yaml": _release_manifest()})
+    planner = FluxHelmReleasePlanner(renderer=_helm_renderer(_ChartRunner(omit_namespace=True)))
+
+    try:
+        with pytest.raises(FluxHelmReleaseUnsupportedError, match="leaves metadata.namespace"):
+            planner.plan(_action(), _flux_source(), snapshot, BASE_REVISION)
     finally:
         snapshot.close()
 

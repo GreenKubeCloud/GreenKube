@@ -306,6 +306,11 @@ def cpu_proposal(
     if evidence or _cpu_increase_triggered(config, summary):
         # The container's own data contradicts its pod's: no decrease from it either (fail closed).
         return None
+    if summary.oom_kill_count or summary.restarts_in_window:
+        # A crash-looping container's samples cover its back-off, not its load; and its CPU
+        # decrease would share one action with its memory fix, so the fix would no longer be
+        # increase-only and its own unhealthiness would block it (e2e).
+        return None
 
     if stats.avg / request >= config.RIGHTSIZING_CPU_THRESHOLD or not _coverage_ok(config, summary):
         return None

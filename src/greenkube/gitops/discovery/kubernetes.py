@@ -860,13 +860,30 @@ def _with_live_workload_evidence(
     }
     if rollout_in_progress is not None:
         evidence["rollout_in_progress"] = rollout_in_progress
+        evidence["rollout_pods_unavailable_only"] = _workload_pods_unavailable_only(resource, candidate.workload_kind)
     # Raw interaction facts; the policy decides per planned resource whether they conflict (D13).
     evidence.pop("hpa_pdb_conflict", None)
     evidence.update(interactions)
     return candidate.model_copy(update={"evidence": evidence})
 
 
-def _workload_rollout_in_progress(resource: Mapping[str, Any], kind: str) -> bool | None:
+def _workload_pods_unavailable_only(resource: Mapping[str, Any], kind: str) -> bool:
+    """The rollout gate fires only because pods of a fully rolled-out spec are not ready.
+
+    An OOM-killed or crash-looping workload stays unavailable after its rollout has
+    completed: that is its health, not a rollout. The policy lets an increase-only
+    reliability fix through in that case (it is the remedy); every other plan stays
+    blocked by ``rollout_in_progress``.
+    """
+    return (
+        _workload_rollout_in_progress(resource, kind) is True
+        and _workload_rollout_in_progress(resource, kind, include_availability=False) is False
+    )
+
+
+def _workload_rollout_in_progress(
+    resource: Mapping[str, Any], kind: str, *, include_availability: bool = True
+) -> bool | None:
     spec = as_mapping(_field(resource, "spec")) or {}
     status = as_mapping(_field(resource, "status")) or {}
     generation = _field(_field(resource, "metadata") or {}, "generation")
@@ -881,12 +898,18 @@ def _workload_rollout_in_progress(resource: Mapping[str, Any], kind: str) -> boo
     unavailable = _field_any(status, "unavailableReplicas", "unavailable_replicas")
     current = _field_any(status, "currentReplicas", "current_replicas")
 
+    if not include_availability:
+        unavailable = ready = None
     if kind == "Deployment":
         if isinstance(updated, int) and updated < desired:
             return True
         if isinstance(unavailable, int) and unavailable > 0:
             return True
         if isinstance(current, int) and isinstance(updated, int) and current > updated:
+            return True
+        # Pods of an older ReplicaSet still exist (status.replicas counts every pod).
+        total = _field_any(status, "replicas")
+        if isinstance(total, int) and isinstance(updated, int) and total > updated:
             return True
         if isinstance(ready, int) and ready < desired:
             return True
@@ -910,6 +933,8 @@ def _workload_rollout_in_progress(resource: Mapping[str, Any], kind: str) -> boo
         updated_scheduled = _field_any(status, "updatedNumberScheduled", "updated_number_scheduled")
         number_unavailable = _field_any(status, "numberUnavailable", "number_unavailable")
         number_ready = _field_any(status, "numberReady", "number_ready")
+        if not include_availability:
+            number_unavailable = number_ready = None
         if isinstance(desired_scheduled, int):
             if isinstance(updated_scheduled, int) and updated_scheduled < desired_scheduled:
                 return True

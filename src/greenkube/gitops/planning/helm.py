@@ -551,6 +551,7 @@ class FluxHelmReleasePlanner:
                 FluxHelmReleaseUnsupportedError,
             )
             _require_exact_target(before_chart, action.target, FluxHelmReleaseUnsupportedError)
+            _require_postrenderer_matchable_target(before_chart, action.target, FluxHelmReleaseUnsupportedError)
             existing_patches = _managed_postrenderer_patches(spec, FluxHelmReleaseUnsupportedError)
             before = _apply_managed_postrenderer_patches(
                 before_chart,
@@ -1870,6 +1871,27 @@ def _require_exact_target(
         raise error_type("the local Helm chart produced an ambiguous exact workload target")
 
 
+def _require_postrenderer_matchable_target(
+    result: RawRenderResult,
+    target: ResourceTarget,
+    error_type: type[HelmPlanError],
+) -> None:
+    """Refuse a target whose chart document names no namespace (fail closed).
+
+    Flux runs post-renderers on the chart output before Helm assigns the release
+    namespace, so a patch selecting ``namespace: <release namespace>`` never matches a
+    document that leaves ``metadata.namespace`` to Helm: the merged pull request would
+    change nothing (e2e: the Deployment kept its requests).
+    """
+    manifest = _resources_by_identity(result).get(_target_identity(target))
+    metadata = manifest.get("metadata") if isinstance(manifest, Mapping) else None
+    if target.namespace and not (isinstance(metadata, Mapping) and metadata.get("namespace")):
+        raise error_type(
+            "the chart leaves metadata.namespace of the target to Helm, so a Flux post-renderer patch "
+            "selecting its namespace would not match; set the namespace in the chart template"
+        )
+
+
 def _require_target_containers(
     result: RawRenderResult,
     target: ResourceTarget,
@@ -2879,6 +2901,21 @@ def _operations_from_patch(
     return operations
 
 
+def _with_release_namespace(manifest: Mapping[str, Any], target: ResourceTarget) -> Any:
+    """A plain copy of a rendered manifest that names the namespace its identity carries.
+
+    Charts commonly leave ``metadata.namespace`` to ``helm --namespace`` (the release or
+    ``targetNamespace``): re-rendering the bare document would key it to no namespace and
+    lose its source path (e2e: KeyError, HTTP 500 on a Flux HelmRelease plan).
+    """
+    document = _plain(manifest)
+    if target.namespace and isinstance(document, dict):
+        metadata = document.setdefault("metadata", {})
+        if isinstance(metadata, dict) and not metadata.get("namespace"):
+            metadata["namespace"] = target.namespace
+    return document
+
+
 def _normalise_rendered_result(
     original: RawRenderResult,
     manifests: Mapping[tuple[str, str, str, str], Mapping[str, Any]],
@@ -2890,7 +2927,10 @@ def _normalise_rendered_result(
     yaml.sort_base_mapping_type_on_output = False
     try:
         yaml.dump_all(
-            [_plain(manifests[_target_identity(resource.target)]) for resource in original.resources],
+            [
+                _with_release_namespace(manifests[_target_identity(resource.target)], resource.target)
+                for resource in original.resources
+            ],
             stream,
         )
         normalized = render_raw({"rendered/helm-release.yaml": stream.getvalue()})
