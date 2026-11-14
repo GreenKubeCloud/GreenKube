@@ -1017,17 +1017,18 @@ def test_flux_helmrelease_planner_adds_render_validated_managed_postrenderer_ide
         snapshot.close()
 
 
-def test_flux_helmrelease_planner_accepts_a_chart_without_metadata_namespace():
-    """e2e: a chart that omits metadata.namespace crashed the planner with a KeyError (HTTP 500)."""
+def test_flux_helmrelease_planner_refuses_a_target_without_metadata_namespace():
+    """e2e: such a chart crashed the planner (KeyError, HTTP 500); planning it would open a no-op PR.
+
+    Flux post-renders the chart before Helm assigns the namespace, so a patch selecting the
+    release namespace never matches: the planner refuses with a typed reason instead.
+    """
     snapshot = _snapshot({**_CHART, "clusters/prod/helmrelease.yaml": _release_manifest()})
     planner = FluxHelmReleasePlanner(renderer=_helm_renderer(_ChartRunner(omit_namespace=True)))
 
     try:
-        plan = planner.plan(_action(), _flux_source(), snapshot, BASE_REVISION)
-
-        assert plan.validation.passed
-        assert plan.validation.target_changed
-        assert [edit.path for edit in plan.files] == ["clusters/prod/helmrelease.yaml"]
+        with pytest.raises(FluxHelmReleaseUnsupportedError, match="leaves metadata.namespace"):
+            planner.plan(_action(), _flux_source(), snapshot, BASE_REVISION)
     finally:
         snapshot.close()
 

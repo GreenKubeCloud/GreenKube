@@ -551,6 +551,7 @@ class FluxHelmReleasePlanner:
                 FluxHelmReleaseUnsupportedError,
             )
             _require_exact_target(before_chart, action.target, FluxHelmReleaseUnsupportedError)
+            _require_postrenderer_matchable_target(before_chart, action.target, FluxHelmReleaseUnsupportedError)
             existing_patches = _managed_postrenderer_patches(spec, FluxHelmReleaseUnsupportedError)
             before = _apply_managed_postrenderer_patches(
                 before_chart,
@@ -1868,6 +1869,27 @@ def _require_exact_target(
         raise error_type("the exact workload target was not produced by the local Helm chart")
     if len(matches) != 1:
         raise error_type("the local Helm chart produced an ambiguous exact workload target")
+
+
+def _require_postrenderer_matchable_target(
+    result: RawRenderResult,
+    target: ResourceTarget,
+    error_type: type[HelmPlanError],
+) -> None:
+    """Refuse a target whose chart document names no namespace (fail closed).
+
+    Flux runs post-renderers on the chart output before Helm assigns the release
+    namespace, so a patch selecting ``namespace: <release namespace>`` never matches a
+    document that leaves ``metadata.namespace`` to Helm: the merged pull request would
+    change nothing (e2e: the Deployment kept its requests).
+    """
+    manifest = _resources_by_identity(result).get(_target_identity(target))
+    metadata = manifest.get("metadata") if isinstance(manifest, Mapping) else None
+    if target.namespace and not (isinstance(metadata, Mapping) and metadata.get("namespace")):
+        raise error_type(
+            "the chart leaves metadata.namespace of the target to Helm, so a Flux post-renderer patch "
+            "selecting its namespace would not match; set the namespace in the chart template"
+        )
 
 
 def _require_target_containers(
