@@ -3,7 +3,7 @@
 	import { formatMoney } from '$lib/utils/decision.js';
 	import { measurementRows } from '$lib/changes.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
-	import { outcomeLabel } from '$lib/savingsVocabulary.js';
+	import { outcomeLabel, realizationText } from '$lib/savingsVocabulary.js';
 
 	/** One decided measurement from GET /api/v2/changes/{id}/measurements. */
 	export let measurement;
@@ -13,6 +13,8 @@
 	const OUTCOME_TONES = { realized: 'green', not_realized: 'yellow', inconclusive: 'dark', contaminated: 'yellow' };
 
 	$: rows = measurementRows(measurement);
+	// `savings_basis` (when the server sends it) relates the allocated saving to the bill.
+	$: realization = realizationText(measurement?.savings_basis?.realization_factor);
 
 	function amount(row, value) {
 		if (value === null) return '—';
@@ -61,6 +63,9 @@
 			Measured values are allocated savings (what the workload stops being charged; the bill drops only when
 			capacity is removed). The projected column is the original estimate, shown for comparison only.
 		</p>
+		{#if realization}
+			<p class="text-[11px] text-dark-400" data-testid="measurement-realization">{realization}</p>
+		{/if}
 	{/if}
 	{#if measurement?.reasons?.length}
 		<ul class="text-xs text-dark-400 list-disc pl-4">

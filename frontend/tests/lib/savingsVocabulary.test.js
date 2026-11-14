@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
 import SavingsHero from '$lib/components/SavingsHero.svelte';
+import MeasurementTable from '$lib/components/MeasurementTable.svelte';
 import { buildSavingsOverview } from '$lib/overview.js';
 import { outcomeLabel, realizationFactorOf, realizationText, savingsFigures } from '$lib/savingsVocabulary.js';
 import { stateLabel } from '$lib/changes.js';
@@ -66,6 +67,31 @@ describe('savingsFigures', () => {
 		expect(outcomeLabel(null)).toBe('—');
 		expect(stateLabel('realized')).toBe('Saving measured');
 		expect(stateLabel('not_realized')).toBe('No saving measured');
+	});
+});
+
+describe('MeasurementTable vocabulary', () => {
+	const measurement = {
+		measurement_id: 'm-1',
+		outcome: 'realized',
+		decided_at: new Date().toISOString(),
+		estimates: [{ quantity: 'allocated_cost', unit: 'currency', claimed: true, annualized: 300, outcome: 'realized' }]
+	};
+
+	it('labels the outcome without "Realized" and shows the realization factor when sent', () => {
+		const { container } = render(MeasurementTable, {
+			props: { measurement: { ...measurement, savings_basis: { realization_factor: 0.3 } } }
+		});
+
+		expect(container.textContent).toContain('Saving measured');
+		expect(container.textContent).not.toMatch(/\bRealized\b|\brealized\b/);
+		expect(screen.getByTestId('measurement-realization')).toHaveTextContent('Realization factor 30%');
+	});
+
+	it('works without savings_basis (older server)', () => {
+		render(MeasurementTable, { props: { measurement } });
+
+		expect(screen.queryByTestId('measurement-realization')).not.toBeInTheDocument();
 	});
 });
 
