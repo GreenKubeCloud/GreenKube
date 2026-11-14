@@ -817,6 +817,7 @@ class GitProvider(ABC):
             current_params = params
             current_headers = self._headers()
             retry_response = False
+            retry_wait = 0.05 * (2**attempt)
             try:
                 redirects = 0
                 while True:
@@ -835,10 +836,15 @@ class GitProvider(ABC):
                             rate_limited = rate_limit_error(self.name, response, context="archive download")
                             if rate_limited is not None:
                                 record_rate_limited(self.name)
-                                if attempt >= 2 or _inline_retry_wait(response, attempt) is None:
+                                rate_limit_wait = _inline_retry_wait(response, attempt)
+                                if attempt >= 2 or rate_limit_wait is None:
                                     raise rate_limited
+                                retry_wait = rate_limit_wait
+                                retry_response = True
+                                break
                         if response.status_code in retryable_statuses:
                             if attempt < 2:
+                                retry_wait = _inline_retry_wait(response, attempt) or 0.05 * (2**attempt)
                                 retry_response = True
                                 break
                             raise GitProviderTransientError(
@@ -899,7 +905,7 @@ class GitProvider(ABC):
                         return bytes(content)
 
                 if retry_response:
-                    await asyncio.sleep(0.05 * (2**attempt))
+                    await asyncio.sleep(retry_wait)
                     continue
             except (httpx.TimeoutException, httpx.NetworkError):
                 if attempt < 2:
@@ -1369,6 +1375,10 @@ def _inline_retry_wait(response: httpx.Response, attempt: int) -> float | None:
     backoff = 0.05 * (2**attempt)
     announced = announced_wait_seconds(response.headers, now=datetime.now(timezone.utc))
     if announced is None:
+        if response.status_code == 403:
+            # A rate-limited 403 without reset headers is a secondary limit: GitHub asks
+            # clients to wait at least a minute, and fast retries extend the penalty.
+            return None
         return backoff
     if announced > MAX_INLINE_RATE_LIMIT_WAIT_SECONDS:
         return None

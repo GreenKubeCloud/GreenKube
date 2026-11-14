@@ -217,3 +217,77 @@ def test_retry_at_is_found_through_the_cause_chain():
     except RuntimeError as wrapped:
         assert rate_limit_retry_at_of(wrapped) == retry_at
     assert rate_limit_retry_at_of(GitProviderTransientError("503")) is None
+
+
+ARCHIVE_PATH = "/repos/acme/manifests/tarball/" + "a" * 40
+ARCHIVE_URL = "https://api.github.com" + ARCHIVE_PATH
+SECONDARY_LIMIT_BODY = {
+    "message": "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."
+}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_secondary_limit_403_without_headers_is_not_retried_inline():
+    route = respx.get(REPO_URL).mock(return_value=Response(403, json=SECONDARY_LIMIT_BODY))
+    provider = GitHubProvider("token")
+    repo = provider.repository("https://github.com/acme/manifests.git")
+
+    with pytest.raises(GitProviderRateLimitError):
+        await provider.get_default_branch(repo)
+
+    # Fast retries extend a secondary-limit penalty: one call, then reschedule.
+    assert route.call_count == 1
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_archive_secondary_limit_403_without_headers_is_rate_limited():
+    route = respx.get(ARCHIVE_URL).mock(return_value=Response(403, json=SECONDARY_LIMIT_BODY))
+    provider = GitHubProvider("token")
+    started = datetime.now(timezone.utc)
+
+    with pytest.raises(GitProviderRateLimitError) as raised:
+        await provider._request_archive(ARCHIVE_PATH, max_bytes=1024)
+
+    assert route.call_count == 1
+    assert _close_to(raised.value.retry_at, started + timedelta(seconds=61))
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_archive_403_with_short_retry_after_is_retried_inline():
+    route = respx.get(ARCHIVE_URL).mock(
+        side_effect=[
+            Response(403, json=SECONDARY_LIMIT_BODY, headers={"Retry-After": "1"}),
+            Response(200, content=b"archive"),
+        ]
+    )
+    provider = GitHubProvider("token")
+    started = datetime.now(timezone.utc)
+
+    content = await provider._request_archive(ARCHIVE_PATH, max_bytes=1024)
+
+    assert content == b"archive"
+    assert route.call_count == 2
+    # The announced wait was honoured, not the fixed 50 ms backoff.
+    assert (datetime.now(timezone.utc) - started).total_seconds() >= 0.9
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_archive_short_retry_after_403_ends_rate_limited_never_permanent():
+    route = respx.get(ARCHIVE_URL).mock(
+        return_value=Response(403, json=SECONDARY_LIMIT_BODY, headers={"Retry-After": "0"})
+    )
+    provider = GitHubProvider("token")
+
+    with pytest.raises(GitProviderRateLimitError) as raised:
+        await provider._request_archive(ARCHIVE_PATH, max_bytes=1024)
+
+    assert raised.value.status_code == 403
+    assert route.call_count == 3
+    await provider.close()
