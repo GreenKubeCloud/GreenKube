@@ -1055,18 +1055,20 @@ async def _async_start(last: Optional[str]):
                 task.cancel()
             results = await asyncio.gather(*tasks, return_exceptions=True)
             try:
-                if plan_executor is not None:
-                    plan_executor.close()
-                if processor is not None:
-                    await processor.close()
+                try:
+                    if plan_executor is not None:
+                        plan_executor.close()
+                    if processor is not None:
+                        await processor.close()
+                finally:
+                    # Hand the Lease over only now that every leader loop and the deferred
+                    # initial work have stopped, so a standby never overlaps with them. The
+                    # release is a compare-and-set on this replica's identity, so it is also
+                    # safe when the election task ended abnormally.
+                    if leader_election_task is not None and leader_election is not None and results[0] is not False:
+                        await leader_election.release()
             finally:
-                # Hand the Lease over only now that every leader loop and the deferred
-                # initial work have stopped, so a standby never overlaps with them. The
-                # release is a compare-and-set on this replica's identity, so it is also
-                # safe when the election task ended abnormally.
-                if leader_election_task is not None and leader_election is not None and results[0] is not False:
-                    await leader_election.release()
-            await stop_controller_metrics_server(metrics_endpoint)
+                await stop_controller_metrics_server(metrics_endpoint)
             logger.info("🛑 Shutting down GreenKube service gracefully.")
 
 

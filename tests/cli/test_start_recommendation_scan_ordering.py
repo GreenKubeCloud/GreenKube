@@ -47,8 +47,12 @@ class _Elector:
     async def try_acquire_or_renew(self) -> bool:
         return True
 
-    async def run(self, stop_event: asyncio.Event) -> None:
+    async def run(self, stop_event: asyncio.Event) -> bool:
         await stop_event.wait()
+        return True
+
+    async def release(self, timeout_seconds: float = 5.0) -> bool:
+        return True
 
 
 @pytest.fixture
