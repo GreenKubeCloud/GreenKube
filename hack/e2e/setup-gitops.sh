@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Register the sample repository with the GitOps controllers: one Argo CD
 # Application (raw YAML, apps/oversized-web) and, when E2E_FLUX=1, one Flux
-# GitRepository + Kustomization (Kustomize, flux/oversized-worker). Creates
+# GitRepository + Kustomization (Kustomize, flux/oversized-worker). E2E_ARGOCD=0
+# skips Argo CD (a cluster without it). Creates
 # only these objects and the sample namespace, each labelled
 # greenkube.io/e2e=true, and refuses to update an existing object without that
 # label. Idempotent (kubectl apply).
@@ -26,22 +27,26 @@ render() {
 
 ensure_harness_namespace "${APPS_NAMESPACE}"
 
-claim_object application "${ARGOCD_APP}" "${ARGOCD_NAMESPACE}"
-log "Applying Argo CD Application ${ARGOCD_NAMESPACE}/${ARGOCD_APP}..."
-render "${QUICKSTART_DIR}/argocd-application.yaml" "${ARGOCD_APP}" "${ARGOCD_NAMESPACE}" |
-  kubectl apply -f - >/dev/null
-kubectl -n "${ARGOCD_NAMESPACE}" annotate application "${ARGOCD_APP}" argocd.argoproj.io/refresh=normal --overwrite >/dev/null
+if [[ "${E2E_ARGOCD}" == "1" ]]; then
+  claim_object application "${ARGOCD_APP}" "${ARGOCD_NAMESPACE}"
+  log "Applying Argo CD Application ${ARGOCD_NAMESPACE}/${ARGOCD_APP}..."
+  render "${QUICKSTART_DIR}/argocd-application.yaml" "${ARGOCD_APP}" "${ARGOCD_NAMESPACE}" |
+    kubectl apply -f - >/dev/null
+  kubectl -n "${ARGOCD_NAMESPACE}" annotate application "${ARGOCD_APP}" argocd.argoproj.io/refresh=normal --overwrite >/dev/null
 
-argo_synced() {
-  local status
-  status="$(kubectl -n "${ARGOCD_NAMESPACE}" get application "${ARGOCD_APP}" -o json 2>/dev/null)" || return 1
-  [[ "$(jq -r '.status.sync.status' <<<"${status}")" == "Synced" &&
-    "$(jq -r '.status.health.status' <<<"${status}")" == "Healthy" ]]
-}
-wait_until "Argo CD Application ${ARGOCD_APP} Synced/Healthy" 300 5 argo_synced ||
-  die "Argo CD Application ${ARGOCD_APP} did not become Synced/Healthy."
-argo_revision="$(kubectl -n "${ARGOCD_NAMESPACE}" get application "${ARGOCD_APP}" -o jsonpath='{.status.sync.revision}')"
-evidence argocd_app ok "${ARGOCD_NAMESPACE}/${ARGOCD_APP} Synced/Healthy at ${argo_revision}"
+  argo_synced() {
+    local status
+    status="$(kubectl -n "${ARGOCD_NAMESPACE}" get application "${ARGOCD_APP}" -o json 2>/dev/null)" || return 1
+    [[ "$(jq -r '.status.sync.status' <<<"${status}")" == "Synced" &&
+      "$(jq -r '.status.health.status' <<<"${status}")" == "Healthy" ]]
+  }
+  wait_until "Argo CD Application ${ARGOCD_APP} Synced/Healthy" 300 5 argo_synced ||
+    die "Argo CD Application ${ARGOCD_APP} did not become Synced/Healthy."
+  argo_revision="$(kubectl -n "${ARGOCD_NAMESPACE}" get application "${ARGOCD_APP}" -o jsonpath='{.status.sync.revision}')"
+  evidence argocd_app ok "${ARGOCD_NAMESPACE}/${ARGOCD_APP} Synced/Healthy at ${argo_revision}"
+else
+  evidence argocd_app skipped "E2E_ARGOCD=0"
+fi
 
 if [[ "${E2E_FLUX}" == "1" ]]; then
   if ! kubectl get crd kustomizations.kustomize.toolkit.fluxcd.io >/dev/null 2>&1; then
@@ -67,7 +72,9 @@ if [[ "${E2E_FLUX}" == "1" ]]; then
   evidence flux_kustomization ok "${FLUX_NAMESPACE}/${FLUX_NAME} Ready at ${flux_revision}"
 fi
 
-kubectl -n "${APPS_NAMESPACE}" rollout status "deployment/${ARGO_WORKLOAD}" --timeout=180s >/dev/null
+if [[ "${E2E_ARGOCD}" == "1" ]]; then
+  kubectl -n "${APPS_NAMESPACE}" rollout status "deployment/${ARGO_WORKLOAD}" --timeout=180s >/dev/null
+fi
 if [[ "${E2E_FLUX}" == "1" ]]; then
   kubectl -n "${APPS_NAMESPACE}" rollout status "deployment/${FLUX_WORKLOAD}" --timeout=180s >/dev/null
 fi

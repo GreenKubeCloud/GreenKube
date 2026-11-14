@@ -62,9 +62,12 @@ fi
 : "${GITEA_OWNER:=greenkube}"
 : "${GITEA_REPO:=greenkube-e2e-quickstart}"
 : "${GITEA_BRANCH:=main}"
-# Token with read/write repository scope: GITEA_TOKEN, or a file that holds it
-# in GITEA_TOKEN_FILE (GITEA_TOKEN wins). The token's user must be GITEA_OWNER,
-# a member of the GITEA_OWNER organization, or a Gitea administrator.
+# Token with write:repository scope: GITEA_TOKEN, or a file that holds it in
+# GITEA_TOKEN_FILE (GITEA_TOKEN wins). The token's user must be GITEA_OWNER,
+# a member of the GITEA_OWNER organization, or a Gitea administrator. To create
+# the sample repository Gitea also wants write:user when GITEA_OWNER is the
+# token's own user (POST /user/repos), write:organization when it is an
+# organization, write:admin otherwise.
 : "${GITEA_TOKEN_FILE:=}"
 # Set to 1 to delete and recreate the sample repository (only when its
 # description carries the harness marker, see GITEA_REPO_MARKER).
@@ -77,6 +80,8 @@ fi
 : "${FLUX_NAME:=greenkube-e2e-quickstart}"
 # Set to 0 to skip the Flux variant.
 : "${E2E_FLUX:=1}"
+# Set to 0 to skip the Argo CD variant (a cluster without Argo CD).
+: "${E2E_ARGOCD:=1}"
 
 # --- Observability backends (in-cluster URLs used by GreenKube) -------------------
 : "${PROMETHEUS_URL:=http://prometheus-k8s.monitoring.svc.cluster.local:9090}"
@@ -221,7 +226,15 @@ port_forward() {
   local name="$1" namespace="$2" resource="$3" local_port="$4" remote_port="$5" probe="$6"
   local pid_file="${E2E_STATE_DIR}/pf-${name}.pid"
   if curl -fsS -o /dev/null --max-time 3 "${probe}" 2>/dev/null; then
-    return 0
+    # Reuse only this harness's own port-forward: a listener started by anyone
+    # else (another e2e run on another cluster) would silently drive the wrong
+    # cluster. E2E_REUSE_PORT_<NAME>=1 accepts a listener you started yourself.
+    local reuse_var="E2E_REUSE_PORT_$(printf '%s' "${name}" | tr '[:lower:]-' '[:upper:]_')"
+    if [[ -s "${pid_file}" ]] && kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
+      return 0
+    fi
+    [[ "${!reuse_var:-0}" == "1" ]] && return 0
+    die "Port ${local_port} (${name}) already answers but was not opened by this harness (no live ${pid_file}): another port-forward, maybe to another cluster, holds it. Pick a free port (GK_LOCAL_PORT / GITEA_LOCAL_PORT), or set ${reuse_var}=1 if that listener is yours."
   fi
   if [[ -s "${pid_file}" ]]; then
     kill "$(cat "${pid_file}")" >/dev/null 2>&1 || true
