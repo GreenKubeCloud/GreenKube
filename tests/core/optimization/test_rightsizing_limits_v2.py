@@ -6,15 +6,28 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pytest
+
 from greenkube.automation.actions.container_resources import build_container_resource_actions
 from greenkube.core.config import Config
 from greenkube.core.optimization.analyzers import CpuRightsizingAnalyzer
-from greenkube.core.optimization.analyzers.rightsizing import CPU_LIMIT_P99_FACTOR, planned_limit_changes
+from greenkube.core.optimization.analyzers.rightsizing import (
+    CPU_LIMIT_P99_FACTOR,
+    memory_proposal,
+    planned_limit_changes,
+)
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.evidence import build_evidence
 from greenkube.gitops.contracts import SetContainerResources
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.workload_usage import UsageStats, WorkloadUsageSummary
+from tests.automation.actions.oom_limit_scenario import (  # pyrefly: ignore[missing-import]
+    OOM_PROPOSED,
+    OOM_REQUEST,
+    oom_action,
+    oom_operation,
+    oom_summary,
+)
 
 MIB = 1024 * 1024
 
@@ -158,3 +171,85 @@ def test_scan_evidence_carries_limits_and_the_action_raises_the_limit() -> None:
     assert isinstance(operation, SetContainerResources)
     assert operation.resources.requests == {"cpu": f"{rec.recommended_cpu_request_millicores}m"}
     assert operation.resources.limits == {"cpu": f"{change.proposed}m"}
+
+
+# -- OOM-driven increases raise the memory limit with headroom (live Minikube e2e) ------------
+
+
+def test_oom_increase_at_request_equal_limit_raises_the_limit_above_the_new_request() -> None:
+    """e2e: request = limit = 24Mi, OOM-killed; a 48Mi request with a 48Mi limit kept the kills going."""
+    assert _changes(Config(), oom_summary(), "memory", OOM_PROPOSED) == [
+        # 10% headroom above the new request, in whole mebibytes.
+        ("memory", "set", OOM_REQUEST, 53 * MIB, "oom_headroom")
+    ]
+
+
+def test_the_oom_scenario_action_carries_the_request_and_the_raised_limit() -> None:
+    operation = oom_operation()
+    assert operation.resources.requests == {"memory": "48Mi"}
+    assert operation.resources.limits == {"memory": "53Mi"}
+
+
+def test_the_analyzer_oom_proposal_advises_a_limit_with_headroom() -> None:
+    proposal = memory_proposal(Config(), oom_summary())
+    assert proposal is not None and proposal.direction == "increase"
+    (advice,) = proposal.limit_advice
+    assert advice.action == "raise" and advice.reason == "oom_headroom"
+    assert advice.minimum is not None and advice.minimum > proposal.proposed
+    assert "OOM" in advice.text
+
+
+def test_an_oom_increase_scales_the_limit_with_the_request_within_the_cap() -> None:
+    """Limit 2x the request: the limit keeps that ratio, bounded by the max increase factor x the old limit."""
+    summary = _summary(
+        memory_request=100 * MIB,
+        memory_limit=200 * MIB,
+        oom_kill_count=2,
+        memory=_stats(avg=90 * MIB, p99=150 * MIB, peak=199 * MIB),
+    )
+    # 120Mi x 2 = 240Mi: within 2 x 200Mi.
+    assert _changes(Config(), summary, "memory", 120 * MIB) == [("memory", "set", 200 * MIB, 240 * MIB, "oom_headroom")]
+    # 250Mi x 2 = 500Mi: capped at 2 x 200Mi = 400Mi (still 10% above the request).
+    assert _changes(Config(), summary, "memory", 250 * MIB) == [("memory", "set", 200 * MIB, 400 * MIB, "oom_headroom")]
+
+
+def test_a_non_oom_increase_well_below_the_limit_leaves_the_limit_untouched() -> None:
+    summary = _summary(memory_limit=2048 * MIB)
+    assert _changes(Config(), summary, "memory", 576 * MIB) == []
+
+
+def test_a_non_oom_increase_reaching_the_limit_raises_it_with_headroom() -> None:
+    summary = _summary(
+        memory_request=512 * MIB, memory_limit=512 * MIB, memory=_stats(avg=400 * MIB, p99=500 * MIB, peak=505 * MIB)
+    )
+    assert _changes(Config(), summary, "memory", 600 * MIB) == [
+        ("memory", "set", 512 * MIB, 660 * MIB, "request_reaches_limit")
+    ]
+
+
+@pytest.mark.parametrize("oom", [0, 3])
+@pytest.mark.parametrize("limit_mib", [24, 30, 48, 64, 200, 1024])
+@pytest.mark.parametrize("proposed_mib", [25, 27, 48, 60, 120])
+def test_an_increase_never_lowers_or_removes_a_memory_limit(oom: int, limit_mib: int, proposed_mib: int) -> None:
+    summary = oom_summary(limit=limit_mib * MIB, oom_kills=oom)
+    for policy in ("keep", "remove_cpu", "memory_equals_request"):
+        config = _config(RECOMMENDATION_LIMITS_POLICY=policy)
+        for change in planned_limit_changes(config, summary, None, "memory", proposed_mib * MIB):
+            assert change.action == "set"
+            assert change.proposed is not None and change.proposed > limit_mib * MIB
+            assert change.proposed >= proposed_mib * MIB
+            if oom or proposed_mib >= limit_mib:
+                assert change.proposed > proposed_mib * MIB
+
+
+def test_an_oom_increase_under_memory_equals_request_stays_advisory_and_says_why() -> None:
+    """The policy forbids a limit above the request, so a request increase cannot stop the kills."""
+    config = _config(RECOMMENDATION_LIMITS_POLICY="memory_equals_request")
+    summary = oom_summary()
+    assert planned_limit_changes(config, summary, None, "memory", OOM_PROPOSED) == []
+    proposal = memory_proposal(config, summary)
+    assert proposal is not None
+    (advice,) = proposal.limit_advice
+    assert advice.reason == "oom_headroom_forbidden"
+    assert "advisory" in advice.text and "memory_equals_request" in advice.text
+    assert oom_action(config) is None

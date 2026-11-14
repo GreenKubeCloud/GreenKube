@@ -680,6 +680,36 @@ def _lowers_memory_request(record: Any) -> bool:
     )
 
 
+def _memory_limit_change(member: Any) -> tuple[Optional[int], Optional[int]]:
+    """``(current, proposed)`` memory limit of a change member; ``proposed`` is None without a set limit edit."""
+    evidence = getattr(member, "evidence", None)
+    current = getattr(getattr(evidence, "current", None), "memory_limit_bytes", None)
+    current = current if isinstance(current, int) and not isinstance(current, bool) and current > 0 else None
+    proposed: Optional[int] = None
+    for change in getattr(evidence, "limit_changes", None) or []:
+        if getattr(change, "resource", None) != "memory" or getattr(change, "action", None) != "set":
+            continue
+        value = getattr(change, "proposed", None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            proposed = value
+    return current, proposed
+
+
+def _limit_cannot_cure_oom(member: Any) -> bool:
+    """A memory increase that left a known memory limit in place (or lowered it): it cannot stop OOM kills.
+
+    The kernel OOM-kills at the memory **limit**: only a raised limit can lower the
+    kill rate. Such a change keeps the strict "any kill fails" gate instead of the
+    rate comparison, which assumes the change could cure the kills.
+    """
+    if not raises_memory_request(member):
+        return False
+    current, proposed = _memory_limit_change(member)
+    if current is None:
+        return False
+    return proposed is None or proposed <= current
+
+
 def _oom_baseline(group: Sequence[Any]) -> tuple[Optional[int], Optional[float]]:
     """OOM kills observed before the change by the memory increases of one container (and their window)."""
     events: Optional[int] = None
@@ -721,7 +751,7 @@ def _judge_container(
         post_events,
         (ensure_utc(post_end) - ensure_utc(post_start)).total_seconds(),
     )
-    if any(_lowers_memory_request(member) for member in group):
+    if any(_lowers_memory_request(member) or _limit_cannot_cure_oom(member) for member in group):
         return list(gates), outcome, False
     if not outcome.baseline_events or post_events is None:
         return list(gates), outcome, False
@@ -790,7 +820,9 @@ def container_reliability(
     longer counts those OOM restarts. Everything else keeps the strict gates:
     containers without a memory increase (CPU-only increases cannot cure OOM kills,
     and decreases must never hide one), containers with a memory decrease, memory
-    increases without OOM history, and an unknown OOM restart count (fail closed).
+    increases that kept or lowered a known memory limit (the kernel kills at the
+    limit, so the request alone cannot cure the kills), memory increases without
+    OOM history, and an unknown OOM restart count (fail closed).
     """
     judged, outcome, relaxed = _judge_container(group, gates, post_start, post_end, oom_restarts)
     if relaxed and outcome is not None and outcome.post_events:

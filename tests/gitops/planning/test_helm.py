@@ -43,6 +43,7 @@ from greenkube.gitops.planning.render_inputs import changed_render_inputs, git_b
 from greenkube.gitops.renderers.helm import HelmRenderer
 from greenkube.gitops.renderers.sandbox import SandboxResult
 from greenkube.gitops.snapshots import RepositorySnapshot, snapshot_from_files
+from tests.automation.actions.oom_limit_scenario import oom_operation  # pyrefly: ignore[missing-import]
 
 BASE_REVISION = "a" * 40
 PROVIDER_ID = "github-main"
@@ -1013,6 +1014,65 @@ def test_flux_helmrelease_planner_adds_render_validated_managed_postrenderer_ide
         }
         assert (snapshot.workspace / "clusters/prod/helmrelease.yaml").read_text(encoding="utf-8") == release_content
         assert not list(snapshot.workspace.rglob(".greenkube-render-*"))
+    finally:
+        snapshot.close()
+
+
+_OOM_CHART_VALUES = """\
+app:
+  resources:
+    requests:
+      memory: 24Mi
+    limits:
+      memory: 24Mi
+"""
+
+
+def _oom_action() -> ActionPlanV3:
+    """e2e: request = limit = 24Mi, OOM-killed; GreenKube raises the request and the limit above it."""
+    operation = oom_operation()
+    return ActionPlanV3(
+        action_id="act-oom",
+        recommendation_ids=[7],
+        target=TARGET,
+        operations=[operation],
+        evidence_ref="recommendation/7",
+    )
+
+
+def test_helm_values_planner_renders_the_oom_increase_with_its_raised_limit_in_mebibytes():
+    files = {
+        **_CHART,
+        "charts/payments/values.yaml": _OOM_CHART_VALUES,
+        "apps/prod/values.yaml": _OOM_CHART_VALUES,
+    }
+    snapshot = _snapshot(files)
+    try:
+        plan = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _oom_action(), _values_source(), snapshot, BASE_REVISION, mapping=_values_mapping()
+        )
+        assert plan.validation.passed and plan.validation.requests_within_limits
+        values = _safe_load(plan.files[0].content or "")
+        assert values["app"]["resources"] == {"requests": {"memory": "48Mi"}, "limits": {"memory": "53Mi"}}
+    finally:
+        snapshot.close()
+
+
+def test_flux_post_renderer_renders_the_oom_increase_with_its_raised_limit():
+    release = _release_manifest().replace("          cpu: 100m\n          memory: 128Mi\n", "          memory: 24Mi\n")
+    files = {**_CHART, "charts/payments/values.yaml": _OOM_CHART_VALUES, "clusters/prod/helmrelease.yaml": release}
+    snapshot = _snapshot(files)
+    try:
+        plan = FluxHelmReleasePlanner(renderer=_helm_renderer(_ChartRunner())).plan(
+            _oom_action(), _flux_source(), snapshot, BASE_REVISION
+        )
+        assert plan.validation.passed and plan.validation.requests_within_limits
+        planned = _safe_load(plan.files[0].content or "")
+        patch = _safe_load(planned["spec"]["postRenderers"][0]["kustomize"]["patches"][0]["patch"])
+        assert patch["spec"]["template"]["spec"]["containers"][0]["resources"] == {
+            "requests": {"memory": "48Mi"},
+            "limits": {"memory": "53Mi"},
+        }
     finally:
         snapshot.close()
 
