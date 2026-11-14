@@ -293,3 +293,39 @@ async def test_argo_status_reader_reads_the_bound_application_only():
     )
     assert await argo_application_status_reader(_CustomObjects(RuntimeError("forbidden")))(_source()) is None
     assert await reader(_source(kind=ControllerKind.FLUX_KUSTOMIZATION)) is None
+
+
+def _rollout_check(result: AutomationPolicyResult):
+    return next(check for check in result.checks if check.gate == "rollout_state")
+
+
+# The live status of an OOM-killed Deployment (e2e): its rollout is complete, its pod is not ready.
+_CRASHLOOPING = {**_DEGRADED, "rollout_in_progress": True, "rollout_pods_unavailable_only": True}
+
+
+@pytest.mark.asyncio
+async def test_the_rollout_gate_lets_the_fix_of_a_crashlooping_workload_through():
+    result = await _evaluate(_memory_record(128 * 2**20, 256 * 2**20), _app_status(), source=_source(_CRASHLOOPING))
+
+    assert _rollout_check(result).state is PolicyCheckState.PASSED
+    assert _controller_check(result).state is PolicyCheckState.PASSED
+    assert result.rejections == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evidence", "record"),
+    [
+        pytest.param(_CRASHLOOPING, lambda: _memory_record(256 * 2**20, 128 * 2**20), id="decrease"),
+        pytest.param(
+            {**_CRASHLOOPING, "rollout_pods_unavailable_only": False},
+            lambda: _memory_record(128 * 2**20, 256 * 2**20),
+            id="real-rollout",
+        ),
+    ],
+)
+async def test_the_rollout_gate_still_blocks_other_plans(evidence, record):
+    result = await _evaluate(record(), _app_status(), source=_source(evidence))
+
+    assert _rollout_check(result).state is PolicyCheckState.REJECTED
+    assert AutomationErrorCode.ROLLOUT_IN_PROGRESS in {rejection.code for rejection in result.rejections}
