@@ -34,6 +34,7 @@ from greenkube.core.optimization.applied_detector import K8sResourceReader, Reso
 from greenkube.gitops.contracts import ActionStatus, PlanStatus
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.base_repository import RecommendationRepository
+from greenkube.utils.k8s_quantities import format_cpu_quantity, format_memory_quantity
 
 router = APIRouter()
 
@@ -102,9 +103,24 @@ def _namespace_flag(namespace: str) -> str:
 
 
 def _quantity(resource: str, value: Optional[int]) -> Optional[str]:
+    """A Kubernetes quantity as the manifest writes it (``250m``, ``36Mi``), never a raw byte count."""
     if value is None:
         return None
-    return f"{value}m" if resource == "cpu" else str(value)
+    return format_cpu_quantity(value) if resource == "cpu" else format_memory_quantity(value, exact=True)
+
+
+def _limit_diff(record: RecommendationRecord) -> str:
+    """The limit changes the patch carries (an OOM-driven increase lifts the memory limit, H1)."""
+    changes = record.evidence.limit_changes if record.evidence is not None else []
+    lines = []
+    for change in changes:
+        before = _quantity(change.resource, change.current)
+        after = _quantity(change.resource, change.proposed) if change.action == "set" else None
+        if before is not None:
+            lines.append(f"-{change.resource}: {before}\n")
+        if after is not None:
+            lines.append(f"+{change.resource}: {after}\n")
+    return "@@ resources.limits @@\n" + "".join(lines) if lines else ""
 
 
 def _rightsizing_diff(record: RecommendationRecord) -> Optional[str]:
@@ -133,7 +149,7 @@ def _rightsizing_diff(record: RecommendationRecord) -> Optional[str]:
         f"@@ resources.requests @@\n"
         f"-{resource}: {before}\n"
         f"+{resource}: {after}\n"
-    )
+    ) + _limit_diff(record)
 
 
 def manual_guide(record: RecommendationRecord) -> ManualApplyGuide:
