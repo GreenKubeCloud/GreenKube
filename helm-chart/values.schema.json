@@ -482,7 +482,15 @@
             "storageClassName": {"type": "string"}
           }
         },
-        "resources": {"$ref": "#/definitions/resources"}
+        "resources": {"$ref": "#/definitions/resources"},
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "additionalIngress": {"type": "array", "items": {"type": "object"}}
+          }
+        }
       }
     },
     "monitoring": {

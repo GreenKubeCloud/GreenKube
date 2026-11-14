@@ -953,6 +953,15 @@ postgres:
     requests:
       cpu: 100m
       memory: 128Mi
+  # Ingress NetworkPolicy of the bundled PostgreSQL (security hardening): only
+  # the api, controller and worker of this release (and pods labelled
+  # greenkube.cloud/postgres-client: "true", e.g. a backup or copy Job) reach
+  # port 5432. Needs a CNI that enforces NetworkPolicy.
+  networkPolicy:
+    enabled: true
+    # Extra NetworkPolicy peers allowed to connect, e.g.
+    #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: dba}}
+    additionalIngress: []
 
 # Prometheus → GreenKube monitoring integration (optional).
 # This controls whether Prometheus scrapes GreenKube's own /prometheus/metrics endpoint.

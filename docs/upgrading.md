@@ -110,6 +110,10 @@ printing these steps. Your data stays on the claim `<release>` (it was mounted a
    spec:
      backoffLimit: 0
      template:
+       metadata:
+         labels:
+           # Allowed through the bundled PostgreSQL NetworkPolicy (postgres.networkPolicy).
+           greenkube.cloud/postgres-client: "true"
        spec:
          restartPolicy: Never
          securityContext:

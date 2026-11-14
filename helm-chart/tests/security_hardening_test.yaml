@@ -6,6 +6,7 @@ templates:
   - templates/controller-servicemonitor.yaml
   - templates/worker-servicemonitor.yaml
   - templates/components.yaml
+  - templates/postgres-networkpolicy.yaml
 release:
   name: gk
   namespace: greenkube
@@ -212,3 +213,69 @@ tests:
           content:
             key: GREENKUBE_API_KEY
             path: GREENKUBE_API_KEY
+
+  - it: isolates the bundled PostgreSQL to GreenKube's own clients by default
+    templates:
+      - templates/postgres-networkpolicy.yaml
+    asserts:
+      - isKind:
+          of: NetworkPolicy
+      - equal:
+          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
+          value: postgres
+      - equal:
+          path: spec.policyTypes
+          value: [Ingress]
+      - equal:
+          path: spec.ingress[0].ports
+          value:
+            - protocol: TCP
+              port: 5432
+      - contains:
+          path: spec.ingress[0].from[0].podSelector.matchExpressions
+          content:
+            key: app.kubernetes.io/component
+            operator: In
+            values: [api, controller, worker, backup, postgres-backup, db-backup, db-copy]
+      - notContains:
+          path: spec.ingress[0].from[0].podSelector.matchExpressions[0].values
+          content: renderer-sandbox
+      - equal:
+          path: spec.ingress[0].from[1].podSelector.matchLabels
+          value:
+            greenkube.cloud/postgres-client: "true"
+
+  - it: appends additional PostgreSQL peers
+    templates:
+      - templates/postgres-networkpolicy.yaml
+    set:
+      postgres.networkPolicy.additionalIngress:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: dba
+    asserts:
+      - equal:
+          path: spec.ingress[0].from[2]
+          value:
+            namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: dba
+
+  - it: renders no PostgreSQL NetworkPolicy when disabled or without the bundled database
+    templates:
+      - templates/postgres-networkpolicy.yaml
+    set:
+      postgres.networkPolicy.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders no PostgreSQL NetworkPolicy for an external database
+    templates:
+      - templates/postgres-networkpolicy.yaml
+    set:
+      postgres.enabled: false
+      secrets.dbConnectionString: postgresql://u:p@db:5432/greenkube
+    asserts:
+      - hasDocuments:
+          count: 0
