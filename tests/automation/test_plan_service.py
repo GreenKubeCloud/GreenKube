@@ -524,6 +524,26 @@ async def test_closed_plan_can_be_replanned_at_the_same_revision(monkeypatch: py
 
 
 @pytest.mark.asyncio
+async def test_a_preview_planned_from_an_older_binding_is_replanned(monkeypatch: pytest.MonkeyPatch):
+    """e2e: the identical preview was returned with its old binding, so approval always answered source_changed."""
+    repository = MemoryPlanRepository()
+    action = _action()
+    service = _service(repository)
+    old_source = _source(evidence={"binding_generation": 14})
+    first = await service.create_plan(action, old_source, _archive_snapshot(monkeypatch, old_source))
+
+    same = await service.create_plan(action, old_source, _archive_snapshot(monkeypatch, old_source))
+    assert same.plan_id == first.plan_id
+
+    new_source = _source(evidence={"binding_generation": 15})
+    second = await service.create_plan(action, new_source, _archive_snapshot(monkeypatch, new_source))
+
+    assert second.plan_id == f"{first.plan_id}-attempt-2"
+    assert second.source.evidence["binding_generation"] == 15
+    assert repository.plans[first.plan_id].status is PlanStatus.STALE
+
+
+@pytest.mark.asyncio
 async def test_create_plan_dispatches_kustomize_with_verified_archive_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ):
