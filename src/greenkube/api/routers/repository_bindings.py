@@ -1,4 +1,9 @@
-"""Repository binding API endpoints."""
+"""Legacy repository-binding read endpoints.
+
+Read-only: the former ``POST /repository-bindings`` stored any ``repo_url`` for
+any workload and nothing used the table (bindings come from GitOps discovery,
+``/api/v1/gitops/*``), so it was removed (security hardening).
+"""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -52,11 +57,3 @@ async def get_repository_binding(
     if binding is None:
         raise HTTPException(status_code=404, detail="Repository binding not found")
     return binding
-
-
-@router.post("", response_model=RepositoryBinding, status_code=201)
-async def save_repository_binding(
-    binding: RepositoryBinding,
-    repository: RepositoryBindingRepository = Depends(get_repository_binding_repository),
-) -> RepositoryBinding:
-    return await repository.save_binding(binding)

@@ -235,7 +235,6 @@ Repository URLs, provider IDs, paths, and renderer configuration are never accep
 |---|---|---|
 | `GET` | `/repository-bindings` | Legacy binding view; optional `cluster` filter. |
 | `GET` | `/repository-bindings/{namespace}/{workload_kind}/{workload_name}` | Legacy binding lookup; optional `cluster` filter. |
-| `POST` | `/repository-bindings` | Legacy manual binding endpoint. |
 
 ### Prometheus scrape endpoint
 
