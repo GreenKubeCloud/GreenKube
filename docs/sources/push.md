@@ -12,7 +12,7 @@ Any tool, script or vendor can contribute advice to GreenKube by pushing signals
 | `complete` | Required. `true`: the batch is the client's full current advice and replaces every signal it pushed before. `false`: the batch adds or refreshes signals and keeps the others. |
 | `signals` | At most 5,000 signals. |
 
-A pushed signal is a `SourceSignal` without the fields the server computes (`schema_version`, `signal_id`, `source_id`, `provenance`, `fetched_at`): `target`, `capability`, `kind`, `proposal`, `algorithm`, and optionally `evidence`, `observed_window`, `confidence`, `source_estimate`, `source_ref`, `source_version`, `engine_family` and `raw` (trimmed to 8 KiB). A client counts as at most one consensus vote per target and finding, and `engine_family` cannot multiply its votes: a client that relays another engine's advice (for example `engine_family: vpa`) joins that engine's single vote. Pushed deletions never become recommendations on their own: another source must propose the deletion too. `target.cluster_uid` may be left out; a signal about another cluster than this GreenKube's is rejected.
+A pushed signal is a `SourceSignal` without the fields the server computes (`schema_version`, `signal_id`, `source_id`, `provenance`, `fetched_at`): `target`, `capability`, `kind`, `proposal`, `algorithm`, and optionally `evidence`, `observed_window`, `confidence`, `source_estimate`, `source_ref`, `source_version`, `engine_family` and `raw` (trimmed to 8 KiB). A client counts as at most one consensus vote per target and finding, and `engine_family` cannot multiply its votes: a client that relays another engine's advice (for example `engine_family: vpa`) joins that engine's single vote. All pushed signals together (every `push:<client>` and the KRR and Polaris reports) are at most **one independent vote**: one key could otherwise push as several clients and meet, alone, the two-independent-sources condition of auto-approval. Pushed deletions never become recommendations on their own: another source must propose the deletion too. `target.cluster_uid` may be left out; a signal about another cluster than this GreenKube's is rejected.
 
 ## How it runs
 
@@ -26,7 +26,7 @@ The `push` source is `unavailable` until something was pushed, and `degraded` wh
 
 ## Permissions
 
-An API key with scope `signals:write` (an admin creates it with `POST /api/v1/auth/api-keys` with `{"name": "ci", "scopes": ["signals:write"]}`). The key can push signals and connector reports (KRR, Polaris), nothing else.
+An API key with scope `signals:write` (an admin creates it with `POST /api/v1/auth/api-keys` with `{"name": "ci", "scopes": ["signals:write"]}`). The key can push signals, nothing else. Connector reports (KRR, Polaris) need the `signals:report` scope (a `signals:write` key is still accepted there for one minor release, with a `Deprecation` header).
 
 **A key is bound to one client.** A scoped API key may only push batches whose `source_id` is `push:<key name>`: the key name in lowercase, every character other than `[a-z0-9_.-]` replaced by `-` (a key named `ci` writes `push:ci`, a key named `Acme Optimizer` writes `push:acme-optimizer`). Any other `source_id` answers `403` with `{"code": "push_client_mismatch"}`, whatever the key's scopes (an `admin` key included), so a leaked CI key cannot overwrite or withdraw another client's advice. Signed-in administrators and the deprecated bootstrap key `GREENKUBE_API_KEY` are not bound. Create one key per client.
 

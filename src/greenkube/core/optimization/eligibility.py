@@ -966,14 +966,48 @@ def has_native_evidence(record: Any) -> bool:
     return any(str(item) == "greenkube" or str(item).startswith("greenkube.") for item in chosen or [])
 
 
+#: Sources whose signals arrive through the push API (report uploads); ``push:<client>`` too.
+_PUSHED_SOURCE_IDS = frozenset({"krr", "polaris"})
+
+
+def _vote_field(vote: Any, name: str) -> Any:
+    return vote.get(name) if isinstance(vote, Mapping) else getattr(vote, name, None)
+
+
+def _pushed_vote(vote: Any) -> bool:
+    flag = _vote_field(vote, "pushed")
+    if isinstance(flag, bool):
+        return flag
+    # Consensus stored before votes carried the flag.
+    source_id = str(_vote_field(vote, "source_id") or "")
+    return source_id.startswith("push:") or source_id in _PUSHED_SOURCE_IDS
+
+
 def independent_votes(record: Any) -> int:
-    """Independent consensus votes behind a recommendation (one per engine family), 1 without consensus."""
+    """Independent consensus votes behind a recommendation (one per engine family), 1 without consensus.
+
+    Every pushed vote (``push:<client>``, KRR and Polaris reports) together counts
+    once: one ``signals:write`` key can push as several clients and upload reports,
+    so pushed sources never corroborate each other. The count is recomputed from
+    the stored votes, which also covers a consensus stored before that rule, and
+    the lower of the stored and recomputed counts wins (fail closed).
+    """
     consensus = getattr(record, "consensus", None)
     if isinstance(consensus, Mapping):
         value = consensus.get("independent_votes")
+        votes = consensus.get("votes")
     else:
         value = getattr(consensus, "independent_votes", 1)
-    return value if isinstance(value, int) and not isinstance(value, bool) else 1
+        votes = getattr(consensus, "votes", None)
+    stored = value if isinstance(value, int) and not isinstance(value, bool) else 1
+    if not isinstance(votes, (list, tuple)) or not votes:
+        return stored
+    counted = [vote for vote in votes if _vote_field(vote, "counted") is not False]
+    native = {
+        str(_vote_field(vote, "family") or _vote_field(vote, "source_id")) for vote in counted if not _pushed_vote(vote)
+    }
+    recomputed = len(native) + (1 if any(_pushed_vote(vote) for vote in counted) else 0)
+    return min(stored, max(recomputed, 1))
 
 
 def _auto_approvable(record: Any) -> bool:

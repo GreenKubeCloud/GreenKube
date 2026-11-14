@@ -9,13 +9,16 @@ GreenKube has two kinds of callers:
 
 Both resolve to one identity, the *principal*, which GreenKube records in audit events, plan approvals and ledger
 entries: `user:<username>` for people, `apikey:<key name>` for scoped keys, and `api-key:<digest>` for the deprecated
-bootstrap key.
+bootstrap key. Prometheus scrapes with a dedicated `metrics:read` [scrape token](#prometheus).
+
+The threat model behind these choices (who can reach what, which credential grants what, residual risks) is in
+[Security model](security-model.md).
 
 The mode is `config.apiAuthMode` (setting `API_AUTH_MODE`):
 
 | Mode | Browser sign-in | API keys | Use |
 |---|---|---|---|
-| `session` (default) | local accounts (username and password) | scoped keys and the deprecated bootstrap key | Every installation |
+| `session` (default) | local accounts (username and password) | scoped keys (and a bootstrap key kept from an earlier install) | Every installation |
 | `proxy` | single sign-on through an authentication proxy (oauth2-proxy, Authentik, Pomerium), plus local accounts | same | Clusters that already front their tools with an auth proxy |
 | `oidc` | native OpenID Connect (**Sign in with ...**), plus local accounts | same | Any OpenID Connect provider (Keycloak, Dex, Entra ID, Okta, Google, GitLab) |
 | `api_key` | no (`POST /auth/login` answers `409`) | scoped keys and the bootstrap key | Headless installations driven only by machines |
@@ -68,7 +71,9 @@ never writes any other Secret.
 | Setting | Helm value | Default |
 |---|---|---|
 | `SESSION_COOKIE_NAME` | | `greenkube_session` |
-| `SESSION_COOKIE_SECURE` | `auth.session.secureCookie` | `auto` |
+| `SESSION_COOKIE_SECURE` | `auth.session.secureCookie` | `auto` (`always` with an HTTPS Ingress or HTTPRoute) |
+| `HSTS_MAX_AGE` | `auth.session.hsts.maxAge` | `31536000` (`0` disables `Strict-Transport-Security`) |
+| `HSTS_INCLUDE_SUBDOMAINS` | `auth.session.hsts.includeSubdomains` | `false` |
 | `AUTH_SESSION_IDLE_TIMEOUT` | `auth.session.idleTimeout` | `12h` (sliding) |
 | `AUTH_SESSION_ABSOLUTE_LIFETIME` | `auth.session.absoluteLifetime` | `7d` |
 | `AUTH_SESSION_REMEMBER_LIFETIME` | `auth.session.rememberLifetime` | `30d` (with **Keep me signed in**) |
@@ -81,15 +86,26 @@ never writes any other Secret.
   browser-session cookie; with it, it lasts the remember lifetime.
 - `Secure` follows `SESSION_COOKIE_SECURE`: `auto` sets it when the browser uses HTTPS, either directly or through a
   proxy listed in `TRUSTED_PROXY_IPS` that sends `X-Forwarded-Proto: https`; `always` sets it unconditionally;
-  `never` is for plain-HTTP tests only.
+  `never` is for plain-HTTP tests only. The chart renders `always` for `auto` when it exposes GreenKube over HTTPS
+  (`ingress.enabled` with an `ingress.tls` entry, or `httpRoute.enabled` with `httpRoute.scheme: https`), so the
+  cookie is `Secure` behind a TLS Ingress even before `config.trustedProxyIps` is set.
+- HTTPS responses carry `Strict-Transport-Security: max-age=31536000` (`HSTS_MAX_AGE`; `includeSubDomains` with
+  `HSTS_INCLUDE_SUBDOMAINS`). A response is HTTPS when the request is, directly or per `X-Forwarded-Proto` from
+  `TRUSTED_PROXY_IPS`, and always when `SESSION_COOKIE_SECURE=always` (browsers ignore the header over plain HTTP,
+  so a `kubectl port-forward` is not affected).
 - Signing out revokes the session on the server. Changing a password revokes every session of the account and
   issues a new one for the current browser.
 - **Account & sessions** (sidebar, or `/settings/account`) lists your active sessions and signs out any of them.
 - Expired sessions, and sessions revoked more than a day ago, are purged daily.
 
 Serve GreenKube over HTTPS for remote access (an Ingress with TLS): the dashboard shows a warning when it is reached
-over plain HTTP from anything other than `localhost`. Behind an Ingress that terminates TLS, set
-`config.trustedProxyIps` to the addresses of the Ingress controller so that the cookie is marked `Secure`.
+over plain HTTP from anything other than `localhost`. Behind an Ingress or a Gateway, set `config.trustedProxyIps`
+to the addresses the API sees the Ingress controller (or gateway) connect from: usually the pod CIDR of the cluster
+(for example `10.244.0.0/16` on kind and Minikube, the VPC pod range on EKS) or the controller pods' addresses. Only
+then does GreenKube read the client address from `X-Forwarded-For` (the rightmost hop that is not a trusted proxy)
+and `X-Forwarded-Proto`. Without it, every request appears to come from the Ingress controller, so API rate limits
+and sign-in lockouts are shared by all users; `helm install` prints a warning when an Ingress or HTTPRoute is enabled
+with an empty `config.trustedProxyIps`.
 
 ### Cross-site request protection
 
@@ -105,19 +121,21 @@ over plain HTTP from anything other than `localhost`. Behind an Ingress that ter
 
 ### Brute-force protection
 
-Failed sign-ins are counted per username and per client IP (four times the per-username budget). Past the budget,
-the username is locked for one rate-limit window, doubling at every further exhaustion up to 15 minutes; a
-successful sign-in resets it. Locked attempts answer `429` with `Retry-After`. Errors never say whether a username
+Failed sign-ins are counted per username **and client IP** (`AUTH_LOGIN_RATE_LIMIT`) and per client IP across
+usernames (four times that budget). Past its budget, the username and IP pair is locked for one rate-limit window,
+doubling at every further exhaustion up to 15 minutes; a successful sign-in resets it. The per-IP budget is a plain
+moving window without escalation: it bounds password spraying from one address. Locked attempts answer `429` with
+`Retry-After`. Errors never say whether a username
 exists, and an unknown username costs the same password-hashing time as a known one. A wrong current password on
 `POST /api/v1/auth/password` counts as a failed sign-in for that user, so a stolen session cookie does not allow
 unthrottled guessing either.
 
-The per-username lockout applies before the password is checked, so anyone who can reach the sign-in page can keep a
-known username (for example `admin`) locked by sending wrong passwords. This is the price of resisting distributed
-guessing. API keys keep working while a username is locked; to limit exposure, keep the sign-in page off the public
-internet. Behind an Ingress or load balancer, set `config.trustedProxyIps` so GreenKube sees each client's address
-(the rightmost `X-Forwarded-For` entry that is not a trusted proxy); otherwise every user shares the proxy's per-IP
-budget.
+The lockout never covers a username alone: an attacker guessing the `admin` password from one address locks only
+that address out of that account, and the real administrator still signs in from theirs. The trade-off is that
+guessing distributed over many addresses is bounded per address only, which is why passwords need at least 12
+characters and why the sign-in page is best kept off the public internet. All of this needs the real client
+address: behind an Ingress or load balancer, set `config.trustedProxyIps` (see [Sessions](#sessions)); otherwise
+every user shares the proxy's address, and one client exhausting the per-IP budget blocks everyone for a window.
 
 At most two password hashes run at once per API process (each scrypt run uses about 32 MiB), so a burst of sign-in
 requests queues instead of exhausting the Pod's memory.
@@ -149,7 +167,7 @@ sign-in. Passwords need at least 12 characters (at most 256) and must differ fro
   signs out all of its sessions. The last active admin can be neither demoted nor disabled (`409 LAST_ADMIN`).
 - Single sign-on accounts get their role from their groups (below) at every sign-in; it cannot be edited in the UI.
 - Operator (`write`, `approve`, `plans:deliver`) covers the day-to-day loop: plans and their delivery,
-  recommendation decisions, repository bindings (`/api/v1/repository-bindings`) and GitOps discovery and provider
+  recommendation decisions, GitOps binding resolution and GitOps discovery and provider
   routes (`/api/v1/gitops/*`). Admin is required for users and roles (`/api/v1/auth/users`), API keys
   (`/api/v1/auth/api-keys`) and the repository allowlist.
 
@@ -292,17 +310,33 @@ curl -X POST https://greenkube.example.com/api/v1/auth/api-keys \
 | `write` | Mutations: scans, ignore/restore, mark applied, plan previews, binding resolution |
 | `approve` | Plan approval, which opens pull requests: `POST /api/v1/automation/plans/{id}/approve` |
 | `plans:deliver` | Report that an approved plan was delivered outside GreenKube (`POST /api/v1/automation/plans/{id}/delivery`, `patch` and `ci` delivery modes). A CI job needs `read` + `plans:deliver` only |
-| `signals:write` | Pushing signals: `POST /api/v1/signals` ([Push API](sources/push.md)), `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)) and `POST /api/v1/sources/polaris/reports` ([Polaris](sources/polaris.md)). A key pushes `POST /api/v1/signals` batches only as `push:<key name>` (`403 push_client_mismatch` otherwise) |
+| `signals:write` | Pushing signals: `POST /api/v1/signals` ([Push API](sources/push.md)). A key pushes batches only as `push:<key name>` (`403 push_client_mismatch` otherwise) |
+| `signals:report` | Uploading reports: `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)) and `POST /api/v1/sources/polaris/reports` ([Polaris](sources/polaris.md)). A `signals:write` key is still accepted there for one minor release, with a `Deprecation: true` response header and a warning in the API log |
 | `metrics:read` | Only the Prometheus endpoint `/prometheus/metrics` |
 | `admin` | Everything, including API keys |
 
 User roles map to the same scopes: `viewer` (`read`, `metrics:read`), `operator` (adds `write`, `approve` and `plans:deliver`) and
 `admin` (everything). See [Roles](#roles).
 
+Pushed signals never corroborate each other: every signal that arrives through the push API (`push:<client>`
+batches, KRR and Polaris reports) counts as at most **one** independent consensus vote together, whatever the key and
+the client name. One `signals:write` key could otherwise push as two clients, or as a client plus a report, and meet
+the "two independent sources" condition that lets [auto-approval](automation.md) approve a request decrease.
+
 ### Prometheus
 
-Create a key with only the `metrics:read` scope, store it in a Secret in the namespace of the ServiceMonitor, and
-reference it:
+Prometheus scrapes three endpoints: the API's `/prometheus/metrics`, the controller's metrics listener and, with a
+dedicated worker, the worker's. All three accept the **scrape token** `GREENKUBE_METRICS_TOKEN`: a random token the
+credentials bootstrap hook generates once into the Secret `<release>` (or `secrets.metricsToken`), which grants
+`metrics:read` and nothing else (`403` on `/api/v1/recommendations`). The chart's ServiceMonitors send it as their
+bearer token; the controller never receives the admin API key.
+
+With `secrets.existingSecret`, add a `GREENKUBE_METRICS_TOKEN` key to your Secret and set
+`secrets.existingSecretHasMetricsToken: true`; until then the ServiceMonitors keep scraping with its
+`GREENKUBE_API_KEY`, as before. Without `rbac.create`, supply `secrets.metricsToken`.
+
+You can also scrape the API with a scoped key of your own. Create a key with only the `metrics:read` scope, store it
+in a Secret in the namespace of the ServiceMonitor, and reference it:
 
 ```bash
 kubectl -n monitoring create secret generic greenkube-metrics --from-literal=token='gk_...'
@@ -317,14 +351,34 @@ monitoring:
       key: token
 ```
 
-That key is rejected everywhere else (`403` on `/api/v1/recommendations`, for example).
+That key is rejected everywhere else (`403` on `/api/v1/recommendations`, for example). The controller and worker
+listeners do not read the account store: they accept the scrape token (and the bootstrap key while it is enabled).
 
-### The deprecated bootstrap key
+### The bootstrap API key
 
-`GREENKUBE_API_KEY` (generated into the Secret `<release>`, or `secrets.apiKey`) still works as an admin Bearer key
-for one more minor release; `GET /auth/me` reports it with `deprecated_credential: true`. Replace it with scoped keys,
-then stop using it. The ServiceMonitor uses it while `monitoring.serviceMonitor.bearerTokenSecret.name` is empty.
-The controller and automation-worker metrics endpoints still accept only this key.
+`GREENKUBE_API_KEY` is a deprecated, non-expiring credential. `AUTH_LEGACY_API_KEY` (`auth.legacyApiKey`) decides
+what it may do:
+
+| Value | The bootstrap key |
+|---|---|
+| `admin` (default) | is a full-admin Bearer key, as before; `GET /auth/me` reports `deprecated_credential: true` |
+| `metrics` | may only scrape metrics (API, controller and worker) |
+| `disabled` | is rejected everywhere (`401`) |
+
+- **New installs** in `session`, `oidc` and `proxy` modes no longer generate it: people sign in, machines use scoped
+  keys and Prometheus uses the scrape token. `api_key` mode still generates it, because it is that mode's only
+  administrator (`auth.legacyApiKey` must stay `admin` there; the chart and the API refuse anything else).
+- **Upgraded installs** keep the key the hook generated earlier (the hook never removes a key), and it stays `admin`
+  so that scripts using it keep working. `helm upgrade` prints a security warning while it is accepted as admin.
+
+Migration:
+
+1. Upgrade. The hook adds `GREENKUBE_METRICS_TOKEN` to the Secret `<release>` before the Pods roll, and the
+   ServiceMonitors switch to it in the same release: Prometheus keeps scraping with no change on your side.
+2. Find what still uses the bootstrap key: its audit actor is `api-key:<digest>`, and `GET /auth/me` with it answers
+   `deprecated_credential: true`. Give each script a scoped key (**Settings > API keys**).
+3. Set `auth.legacyApiKey: metrics` (or `disabled`) and upgrade. Then remove the `GREENKUBE_API_KEY` key from the
+   Secret `<release>` if you want it gone for good.
 
 ## Endpoints
 
@@ -374,9 +428,9 @@ kubectl -n greenkube exec -it greenkube-postgres-0 -- \
 
 | Item | Implementation |
 |---|---|
-| Cookie flags | `HttpOnly`, `SameSite=Strict`, `Path=/`, `Secure` (auto via HTTPS or trusted `X-Forwarded-Proto`, or always) |
+| Cookie flags | `HttpOnly`, `SameSite=Strict`, `Path=/`, `Secure` (auto via HTTPS or trusted `X-Forwarded-Proto`, or always; always behind an HTTPS Ingress or HTTPRoute); `Strict-Transport-Security` on HTTPS |
 | CSRF | Same-origin `Origin`/`Referer` and `X-CSRF-Token` on every cookie-authenticated mutation; wildcard CORS never credentialed |
-| Rate limits | Per username and per IP, exponential lockout, `429` with `Retry-After`, `greenkube_auth_failures_total` |
+| Rate limits | Per username and client IP (exponential lockout) and per IP (window), `429` with `Retry-After`, `greenkube_auth_failures_total`; the API rate limit is per client and per route template |
 | Hashing | scrypt `N=2^15, r=8, p=1`, per-user salt, rehash on parameter change, dummy hash for unknown users |
 | Session fixation | A new token at every sign-in and password change; a token presented at sign-in is revoked |
 | Constant-time comparisons | API-key secrets, the bootstrap key and CSRF tokens use `hmac.compare_digest`; sessions are looked up by SHA-256 |

@@ -1,12 +1,24 @@
 """Brute-force protection for the sign-in endpoint (roadmap F14).
 
-Failed sign-ins are counted per client IP and per username with the ``limits``
-library already used by the API rate limiter. Past the limit, a key is locked
-for one rate-limit window, doubling with every further exhaustion (1, 2, 4 ...
-minutes for ``5/minute``, up to 15 minutes); a successful sign-in resets it.
-State is per API process: with several replicas the effective limit is
-multiplied by the replica count, which keeps the bound small while avoiding a
-database write per attempt.
+Failed sign-ins are counted with the ``limits`` library already used by the
+API rate limiter, under two keys:
+
+* **username and client IP** (``AUTH_LOGIN_RATE_LIMIT``, default 5/minute):
+  past the limit, that pair is locked for one rate-limit window, doubling with
+  every further exhaustion (1, 2, 4 ... minutes for ``5/minute``, up to 15
+  minutes); a successful sign-in resets it. The lockout never covers the
+  username alone: an attacker guessing from one address cannot lock the real
+  user (who signs in from another address) out of the account.
+* **client IP** (4x the limit): a plain moving window, with no exponential
+  lockout. It bounds password spraying across usernames from one address, and
+  a client behind a shared address (an ingress without ``TRUSTED_PROXY_IPS``,
+  a NAT) can deny others for one window at most.
+
+The client IP is :func:`greenkube.auth.http.client_ip` (the rightmost
+``X-Forwarded-For`` hop that is not a trusted proxy). State is per API
+process: with several replicas the effective limit is multiplied by the
+replica count, which keeps the bound small while avoiding a database write per
+attempt.
 """
 
 from __future__ import annotations
@@ -41,14 +53,19 @@ class LoginThrottle:
         self._clock = clock
         self._backoff: OrderedDict[str, _Backoff] = OrderedDict()
 
-    def _keys(self, ip: str, username: str) -> list[tuple[str, object]]:
-        return [(f"user:{username.lower()}", self._limit), (f"ip:{ip}", self._ip_limit)]
+    @staticmethod
+    def _pair_key(ip: str, username: str) -> str:
+        return f"user:{username.strip().lower()}@{ip}"
+
+    def _keys(self, ip: str, username: str) -> list[tuple[str, object, bool]]:
+        """``(key, limit, escalates)``: only the username+IP pair has an exponential lockout."""
+        return [(self._pair_key(ip, username), self._limit, True), (f"ip:{ip}", self._ip_limit, False)]
 
     def retry_after(self, ip: str, username: str) -> int:
         """Seconds until a new attempt is allowed, or 0 when it is allowed now."""
         now = self._clock()
         wait = 0.0
-        for key, limit in self._keys(ip, username):
+        for key, limit, _escalates in self._keys(ip, username):
             backoff = self._backoff.get(key)
             if backoff is not None and backoff.locked_until > now:
                 wait = max(wait, backoff.locked_until - now)
@@ -59,8 +76,10 @@ class LoginThrottle:
 
     def record_failure(self, ip: str, username: str) -> None:
         now = self._clock()
-        for key, limit in self._keys(ip, username):
+        for key, limit, escalates in self._keys(ip, username):
             self._limiter.hit(limit, key)  # type: ignore[arg-type]
+            if not escalates:
+                continue
             backoff = self._backoff.pop(key, None) or _Backoff()
             if not self._limiter.test(limit, key):  # type: ignore[arg-type]
                 # The budget is exhausted: lock for one window, doubling with
@@ -73,10 +92,9 @@ class LoginThrottle:
             self._backoff.popitem(last=False)
 
     def record_success(self, ip: str, username: str) -> None:
-        for key, limit in self._keys(ip, username):
-            if key.startswith("user:"):
-                self._backoff.pop(key, None)
-                self._limiter.clear(limit, key)  # type: ignore[arg-type]
+        key = self._pair_key(ip, username)
+        self._backoff.pop(key, None)
+        self._limiter.clear(self._limit, key)  # type: ignore[arg-type]
 
 
 def _scale(rate_limit: str, factor: int) -> str:

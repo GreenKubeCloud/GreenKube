@@ -149,7 +149,7 @@ Settings-page overrides are stored, and otherwise fall back to the app default.
 {{- $data := dict -}}
 {{- if not .Values.secrets.existingSecret -}}
   {{- $secrets := .Values.secrets -}}
-  {{- range $pair := list (list "ELECTRICITY_MAPS_TOKEN" $secrets.electricityMapsToken) (list "BOAVIZTA_TOKEN" $secrets.boaviztaToken) (list "WATTNET_EMAIL" $secrets.wattnetEmail) (list "WATTNET_PASSWORD" $secrets.wattnetPassword) (list "GREENKUBE_API_KEY" $secrets.apiKey) (list "PROMETHEUS_URL" $.Values.config.prometheus.url) (list "OPENCOST_API_URL" $.Values.config.opencost.url) (list "BOAVIZTA_API_URL" $.Values.config.boavizta.url) -}}
+  {{- range $pair := list (list "ELECTRICITY_MAPS_TOKEN" $secrets.electricityMapsToken) (list "BOAVIZTA_TOKEN" $secrets.boaviztaToken) (list "WATTNET_EMAIL" $secrets.wattnetEmail) (list "WATTNET_PASSWORD" $secrets.wattnetPassword) (list "GREENKUBE_API_KEY" $secrets.apiKey) (list "GREENKUBE_METRICS_TOKEN" $secrets.metricsToken) (list "PROMETHEUS_URL" $.Values.config.prometheus.url) (list "OPENCOST_API_URL" $.Values.config.opencost.url) (list "BOAVIZTA_API_URL" $.Values.config.boavizta.url) -}}
     {{- if index $pair 1 -}}
       {{- $_ := set $data (index $pair 0) (index $pair 1 | toString) -}}
     {{- end -}}
@@ -195,7 +195,7 @@ explicit Secret instead.
 */}}
 {{- define "greenkube.credentialsBootstrapEnabled" -}}
 {{- if not .Values.secrets.existingSecret -}}
-  {{- $generates := or (not .Values.secrets.apiKey) (and (include "greenkube.bundledPostgres" .) (not .Values.postgres.auth.password)) -}}
+  {{- $generates := or (include "greenkube.generateApiKey" .) (and (include "greenkube.bundledPostgres" .) (not .Values.postgres.auth.password)) -}}
   {{- if .Values.rbac.create -}}
 true
   {{- else if $generates -}}
@@ -250,6 +250,10 @@ Project only the application Secret keys required by one component.
 {{- end -}}
 {{- if or (eq $component "api") (eq $component "worker") -}}
   {{- $keys = append $keys "GREENKUBE_API_KEY" -}}
+{{- end -}}
+{{- /* The metrics:read scrape token checked by each component's metrics endpoint. */ -}}
+{{- if and (has $component (list "api" "controller" "worker")) (include "greenkube.dedicatedScrapeToken" $context) -}}
+  {{- $keys = append $keys "GREENKUBE_METRICS_TOKEN" -}}
 {{- end -}}
 {{- range $key := $keys }}
 - key: {{ $key }}

@@ -11,7 +11,12 @@ re-rendered it on every upgrade, it is rebuilt from the stored password when the
 PostgreSQL user, database, host or port in the values change.
 
 Generated keys:
-  GREENKUBE_API_KEY                         when secrets.apiKey is empty;
+  GREENKUBE_METRICS_TOKEN                   the Prometheus scrape token (metrics:read
+                                            only), when secrets.metricsToken is empty;
+  GREENKUBE_API_KEY                         the deprecated bootstrap admin key, only
+                                            for config.apiAuthMode=api_key when
+                                            secrets.apiKey is empty (an existing key
+                                            is kept, never removed);
   POSTGRES_PASSWORD, DB_CONNECTION_STRING   for the bundled PostgreSQL when
                                             postgres.auth.password is empty.
 
@@ -44,10 +49,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 API_KEY = "GREENKUBE_API_KEY"
+METRICS_TOKEN = "GREENKUBE_METRICS_TOKEN"
 POSTGRES_PASSWORD = "POSTGRES_PASSWORD"
 DB_CONNECTION_STRING = "DB_CONNECTION_STRING"
 
 API_KEY_LENGTH = 64
+METRICS_TOKEN_LENGTH = 64
 POSTGRES_PASSWORD_LENGTH = 24
 INITIAL_ADMIN_PASSWORD_LENGTH = 24
 _ALPHABET = string.ascii_letters + string.digits
@@ -88,6 +95,7 @@ class Settings:
     initial_admin_secret: str = ""
     initial_admin_username: str = "admin"
     generate_api_key: bool = False
+    generate_metrics_token: bool = False
     generate_postgres_password: bool = False
     postgres_user: str = ""
     postgres_database: str = ""
@@ -111,6 +119,7 @@ class Settings:
             initial_admin_secret=initial_admin_secret,
             initial_admin_username=env.get("GREENKUBE_INITIAL_ADMIN_USERNAME", "").strip() or "admin",
             generate_api_key=_flag(env.get("GREENKUBE_GENERATE_API_KEY")),
+            generate_metrics_token=_flag(env.get("GREENKUBE_GENERATE_METRICS_TOKEN")),
             generate_postgres_password=_flag(env.get("GREENKUBE_GENERATE_POSTGRES_PASSWORD")),
             postgres_user=env.get("GREENKUBE_POSTGRES_USER", "").strip(),
             postgres_database=env.get("GREENKUBE_POSTGRES_DATABASE", "").strip(),
@@ -153,6 +162,8 @@ def missing_credentials(
     additions: dict[str, str] = {}
     if settings.generate_api_key and not current.get(API_KEY):
         additions[API_KEY] = token(API_KEY_LENGTH)
+    if settings.generate_metrics_token and not current.get(METRICS_TOKEN):
+        additions[METRICS_TOKEN] = token(METRICS_TOKEN_LENGTH)
     if settings.generate_postgres_password:
         password = current.get(POSTGRES_PASSWORD, "")
         if not password:

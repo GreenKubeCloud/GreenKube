@@ -41,7 +41,7 @@ fail_step() {
 gitea_port_forward
 greenkube_port_forward
 GK_API_KEY="$(greenkube_api_key)"
-[[ -n "${GK_API_KEY}" ]] || die "Could not read GREENKUBE_API_KEY from Secret ${GK_NAMESPACE}/${GK_RELEASE}."
+[[ -n "${GK_API_KEY}" ]] || die "Could not read the harness API key (${E2E_STATE_DIR}/api-key, or GREENKUBE_API_KEY in Secret ${GK_NAMESPACE}/${GK_RELEASE}-values); run install.sh first."
 export GK_API_KEY
 
 # --- 0. GreenKube is healthy and automation is ready ---------------------------------

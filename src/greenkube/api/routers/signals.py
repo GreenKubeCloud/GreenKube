@@ -1,9 +1,16 @@
 """Push endpoints: signals from external tools (roadmap G2, G6).
 
-Endpoints (API key scope ``signals:write``):
-  POST /signals                - A batch of ``signal.v1alpha1`` signals (``source_id: push:<client>``)
-  POST /sources/krr/reports    - A Robusta KRR JSON report (``krr simple -f json``)
-  POST /sources/polaris/reports - A Fairwinds Polaris audit report (``polaris audit --format=json``)
+Endpoints:
+  POST /signals                - A batch of ``signal.v1alpha1`` signals (``source_id: push:<client>``),
+                                 scope ``signals:write``
+  POST /sources/krr/reports    - A Robusta KRR JSON report (``krr simple -f json``), scope ``signals:report``
+  POST /sources/polaris/reports - A Fairwinds Polaris audit report (``polaris audit --format=json``),
+                                 scope ``signals:report``
+
+Report uploads accept a ``signals:write`` key for one more minor release and
+answer it with a ``Deprecation`` header. Whatever the key, every pushed signal
+(push clients and reports alike) counts as at most one independent consensus
+vote (:func:`greenkube.signals.consensus.independent_vote_count`).
 
 Pushed signals are stored in the inbox and used by the next scans through the
 ``push`` and ``krr`` sources: they reach recommendations only through
@@ -20,7 +27,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -75,6 +82,22 @@ def _cluster_uid() -> str:
     from greenkube.core.optimization.registry import cluster_uid
 
     return cluster_uid(get_config())
+
+
+def _flag_deprecated_scope(request: Request, response: Response) -> None:
+    """Report uploads authorized by ``signals:write`` instead of ``signals:report`` (one minor release)."""
+    deprecated = getattr(request.state, "deprecated_scope", None)
+    if not deprecated:
+        return
+    used, required = deprecated
+    response.headers["Deprecation"] = "true"
+    response.headers["Warning"] = f'299 - "the {used} scope is deprecated for this endpoint; use {required}"'
+    logger.warning(
+        "%s uploaded a report with the deprecated '%s' scope; create a key with the '%s' scope.",
+        _actor(request) or "A client",
+        used,
+        required,
+    )
 
 
 def _actor(request: Request) -> Optional[str]:
@@ -252,6 +275,7 @@ async def push_signals(request: Request, inbox: SignalInboxRepository = Depends(
 )
 async def push_krr_report(
     request: Request,
+    response: Response,
     complete: bool = Query(
         True,
         description="True when the report covers every workload KRR sizes (replaces earlier reports); "
@@ -266,6 +290,7 @@ async def push_krr_report(
     inbox: SignalInboxRepository = Depends(get_signal_inbox),
 ):
     """Push a Robusta KRR report (``krr simple -f json``); its signals are used by the next scans."""
+    _flag_deprecated_scope(request, response)
     document = await _json_body(request, MAX_KRR_REPORT_BYTES)
     received_at = datetime.now(timezone.utc)
     try:
@@ -297,6 +322,7 @@ async def push_krr_report(
 )
 async def push_polaris_report(
     request: Request,
+    response: Response,
     complete: bool = Query(
         True,
         description="True when the report audits the whole cluster (replaces earlier reports); false for a "
@@ -309,6 +335,7 @@ async def push_polaris_report(
     Findings are hygiene advice (never pull requests); missing CPU or memory
     requests also get a request computed by GreenKube from observed usage.
     """
+    _flag_deprecated_scope(request, response)
     document = await _json_body(request, MAX_POLARIS_REPORT_BYTES)
     received_at = datetime.now(timezone.utc)
     try:

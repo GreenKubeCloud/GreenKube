@@ -91,7 +91,7 @@ image:
 | `config.logLevel` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `config.environment` | `production` | Runtime environment. Production never serves anonymous requests. |
 | `config.apiAuthMode` | `session` | `API_AUTH_MODE`. `session`: account sign-in with server-side sessions plus scoped API keys; `api_key`: Bearer API keys only; `proxy`: single sign-on through an authentication proxy whose identity headers are trusted only from `config.trustedProxyIps` (required); `oidc`: native OpenID Connect sign-in (`auth.oidc.*`). See [Authentication](authentication.md). |
-| `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress) and, with `apiAuthMode: proxy`, the only peers whose identity headers are accepted. |
+| `config.trustedProxyIps` | `""` | `TRUSTED_PROXY_IPS`. Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers are trusted (client IP for rate limits, `Secure` session cookie behind a TLS-terminating Ingress) and, with `apiAuthMode: proxy`, the only peers whose identity headers are accepted. Behind an Ingress or a Gateway, list the controller or gateway Pods (often the pod CIDR, e.g. `10.244.0.0/16`): otherwise all clients share the proxy's address for rate limits and sign-in lockouts, and `helm install` prints a warning. |
 | `config.externalUrl` | `""` | `GREENKUBE_EXTERNAL_URL`. Public URL of the GreenKube UI (http(s), no query or fragment), used for deep links in pull requests, commit statuses and status comments. Empty: no links. |
 | `config.clusterName` | `""` | Cluster name used as a label in Prometheus metrics |
 | `config.cloudProvider` | `unknown` | Cloud provider (`aws`, `gcp`, `azure`, `ovh`, `scaleway`, `on-prem`, `unknown`) |
@@ -115,7 +115,7 @@ image:
 The API is always deployed (it serves the UI); `config.api.enabled`, `config.api.livenessProbe` and
 `config.api.readinessProbe` of 0.3.x are mapped to `api.*` for one minor release.
 | `config.corsOrigins` | `""` | Comma-separated allowed CORS origins (`CORS_ORIGINS`). Empty (default) keeps the API same-origin. Credentials are allowed only for explicitly listed origins; `*` allows any origin without credentials. |
-| `config.apiRateLimit` | `60/minute` | SlowAPI rate limit for API endpoints. |
+| `config.apiRateLimit` | `60/minute` | `API_RATE_LIMIT`. Rate limit per client IP and per route template (`/api/v1/automation/plans/{plan_id}` is one route, whatever the id); several limits can be combined with `;`. The client IP is the rightmost `X-Forwarded-For` hop that is not in `config.trustedProxyIps`. |
 | `config.rootPath` | `""` | Sub-path prefix when served behind a reverse proxy. |
 | `config.metricsListMaxRangeDays` | `30` | Maximum raw `/metrics` listing window; wider ranges use report endpoints. |
 
@@ -226,20 +226,20 @@ Sources produce the signals recommendations are built from: one per native analy
 | `sources.settings` | `SOURCES_CONFIG` | `{}` | Per-source settings keyed by source id, rendered as a JSON object. `enabled` is `true`, `false` or `auto` (run when the source's prerequisites are detected, the default for `vpa` and `greenkube.nodepool`); other keys are validated by the source (unknown keys disable that source and are reported). Invalid JSON is rejected at startup. Do not put credentials here: the map is stored in the ConfigMap. The 0.3.x `config.recommendations.vpaEnabled`/`karpenterEnabled` flags are still honoured for one minor release. |
 | `sources.priority` | `RECOMMENDATION_SOURCE_PRIORITY` | `vpa,karpenter,greenkube` | Arbitration precedence (highest first). Replaces `config.recommendations.sourcePriority`. |
 
-| `sources.krr.job.enabled` | — | `false` | Run [Robusta KRR](sources/krr.md) as a CronJob that pushes its report to `POST /api/v1/sources/krr/reports`. Needs `sources.krr.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:write`) and `config.api.enabled`. |
+| `sources.krr.job.enabled` | — | `false` | Run [Robusta KRR](sources/krr.md) as a CronJob that pushes its report to `POST /api/v1/sources/krr/reports`. Needs `sources.krr.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:report`; `signals:write` is accepted, deprecated) and `config.api.enabled`. |
 | `sources.krr.job.schedule` | — | `17 3 * * *` | Cron schedule of the KRR job. |
 | `sources.krr.job.strategy` | — | `simple` | KRR strategy (`krr <strategy>`). |
 | `sources.krr.job.image.*` | — | `robustadev/krr` v1.31.1 by digest | KRR image; `digest` is required (`sha256:<64 hex>`). |
 | `sources.krr.job.prometheusUrl` | — | `""` | Prometheus URL passed to KRR (`-p`); empty lets KRR discover it. |
 | `sources.krr.job.extraArgs` | — | `[]` | Extra KRR arguments (`--namespace`, `--history_duration`...). |
-| `sources.krr.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:write` API key. |
+| `sources.krr.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:report` API key. |
 | `sources.krr.job.resources`, `activeDeadlineSeconds` | — | `100m`/`512Mi` requests, `2Gi` limit; `3600` | KRR container resources and job deadline. |
-| `sources.polaris.job.enabled` | — | `false` | Run [Fairwinds Polaris](sources/polaris.md) as a CronJob that pushes its audit to `POST /api/v1/sources/polaris/reports`. Needs `sources.polaris.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:write`) and `config.api.enabled`. |
+| `sources.polaris.job.enabled` | — | `false` | Run [Fairwinds Polaris](sources/polaris.md) as a CronJob that pushes its audit to `POST /api/v1/sources/polaris/reports`. Needs `sources.polaris.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:report`; `signals:write` is accepted, deprecated) and `config.api.enabled`. |
 | `sources.polaris.job.schedule` | — | `37 3 * * *` | Cron schedule of the Polaris job. |
 | `sources.polaris.job.image.*` | — | `quay.io/fairwinds/polaris` 10.1.8 by digest | Polaris image; `digest` is required (`sha256:<64 hex>`). |
 | `sources.polaris.job.extraArgs` | — | `[]` | Extra `polaris audit` arguments. |
 | `sources.polaris.job.complete` | — | `true` | `true`: each audit replaces every earlier Polaris finding. Set `false` when `extraArgs` narrows the audit (for example one namespace): the job posts with `?complete=false` and adds or refreshes findings. |
-| `sources.polaris.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:write` API key. |
+| `sources.polaris.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:report` API key. |
 | `sources.polaris.job.resources`, `activeDeadlineSeconds` | — | `50m`/`128Mi` requests, `512Mi` limit; `1800` | Polaris container resources and job deadline. |
 | `sources.polaris.job.rbac.create`, `serviceAccountName` | — | `true`, `""` | Create the job's read-only ServiceAccount and ClusterRole, or bring your own. |
 | `sources.krr.job.rbac.create`, `serviceAccountName` | — | `true`, `""` | Create the job's ServiceAccount and read-only ClusterRole, or use an existing ServiceAccount. |
@@ -489,7 +489,9 @@ GitHub supports draft PRs, labels, reviewers, and team reviewers. GitLab support
 
 | Key | Description |
 |-----|-------------|
-| `secrets.apiKey` | API bearer token, rendered into the Secret `<release>-values`. When omitted, the `<release>-credentials-bootstrap` hook generates one once into the Secret `<release>`; upgrades and GitOps syncs never rotate it. An existing Secret must contain `GREENKUBE_API_KEY`; without it, production requests fail closed with `503`. |
+| `secrets.apiKey` | Deprecated bootstrap API key `GREENKUBE_API_KEY` (what it may do: `auth.legacyApiKey`), rendered into the Secret `<release>-values`. When omitted, the `<release>-credentials-bootstrap` hook generates one once into the Secret `<release>` **only with `config.apiAuthMode: api_key`**, where it is the only administrator (an existing generated key is kept on upgrade); upgrades and GitOps syncs never rotate it. In `api_key` mode an existing Secret must contain `GREENKUBE_API_KEY`; without it, production requests fail closed with `503`. |
+| `secrets.metricsToken` | Prometheus scrape token `GREENKUBE_METRICS_TOKEN` (`metrics:read` only), sent by the ServiceMonitors to the API, controller and worker metrics endpoints. When omitted, the credentials bootstrap hook generates one once into the Secret `<release>`. |
+| `secrets.existingSecretHasMetricsToken` | `false`. With `secrets.existingSecret`: `true` when that Secret holds `GREENKUBE_METRICS_TOKEN`; the ServiceMonitors then scrape with it and the components check it. Otherwise they keep scraping with its `GREENKUBE_API_KEY`. |
 | `secrets.electricityMapsToken` | Electricity Maps API token when `config.electricityProvider` is `electricity_maps`. Without it, GreenKube uses bundled zone-specific fallback data when available, then the configured global intensity. Get a token at [electricitymaps.com](https://www.electricitymaps.com/). |
 | `secrets.wattnetEmail` | Wattnet account email (only when `config.electricityProvider` is `wattnet`). Register for free at [api.wattnet.eu/token-request/register](https://api.wattnet.eu/token-request/register) |
 | `secrets.wattnetPassword` | Wattnet account password (only when `config.electricityProvider` is `wattnet`) |
@@ -498,7 +500,14 @@ GitHub supports draft PRs, labels, reviewers, and team reviewers. GitLab support
 | `secrets.dbConnectionString` | PostgreSQL connection string when using an external PostgreSQL instance (`postgres.enabled: false`) with the chart-managed Secret. When `secrets.existingSecret` is set, put `DB_CONNECTION_STRING` in that Secret instead. |
 | `secrets.prometheus.username`, `secrets.prometheus.password`, `secrets.prometheus.bearerToken` | Optional Prometheus authentication credentials. |
 
-Rendering never uses `lookup` or random functions, so `helm template` output is stable under Argo CD and Flux. Values set above go to the Secret `<release>-values`; generated credentials (`GREENKUBE_API_KEY`, and `POSTGRES_PASSWORD` with `DB_CONNECTION_STRING` for the bundled database) are created once by the credentials bootstrap hook in the Secret `<release>`, which is not part of the release and survives `helm uninstall`. See [Credentials and GitOps](installation.md#credentials-and-gitops-argo-cd-flux).
+Rendering never uses `lookup` or random functions, so `helm template` output is stable under Argo CD and Flux. Values set above go to the Secret `<release>-values`; generated credentials (the scrape token `GREENKUBE_METRICS_TOKEN`, `GREENKUBE_API_KEY` in `api_key` mode, and `POSTGRES_PASSWORD` with `DB_CONNECTION_STRING` for the bundled database) are created once by the credentials bootstrap hook in the Secret `<release>`, which is not part of the release and survives `helm uninstall`. See [Credentials and GitOps](installation.md#credentials-and-gitops-argo-cd-flux).
+
+### PostgreSQL network policy (`postgres.networkPolicy`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `postgres.networkPolicy.enabled` | `true` | Ingress NetworkPolicy of the bundled PostgreSQL: only the release's `api`, `controller` and `worker` Pods (and backup or copy Jobs labelled `greenkube.cloud/postgres-client: "true"`) reach port 5432. Needs a CNI that enforces NetworkPolicy. |
+| `postgres.networkPolicy.additionalIngress` | `[]` | Extra NetworkPolicy peers (`podSelector`, `namespaceSelector`, `ipBlock`) allowed to connect. |
 
 ### Controller metrics endpoint (`controller.metricsPort`)
 
@@ -654,11 +663,14 @@ config:
 |-----|---------|---------|-------------|
 | `auth.admin.username` | `admin` | `AUTH_ADMIN_USERNAME` | Name of the first account, created when no account exists. |
 | `auth.admin.existingSecret` | `""` | `AUTH_ADMIN_PASSWORD` | Secret holding the first admin password (key `auth.admin.existingSecretKey`, default `password`), mounted into the API. Empty: the credentials bootstrap hook generates it once into `<release>-initial-admin` (`AUTH_INITIAL_ADMIN_SECRET`) and the UI forces a change at first sign-in. |
-| `auth.session.secureCookie` | `auto` | `SESSION_COOKIE_SECURE` | `auto` (HTTPS directly or via `config.trustedProxyIps`), `always`, `never`. `true`/`false` are accepted as `always`/`never`. |
+| `auth.session.secureCookie` | `auto` | `SESSION_COOKIE_SECURE` | `auto` (HTTPS directly or via `config.trustedProxyIps`), `always`, `never`. `true`/`false` are accepted as `always`/`never`. With an HTTPS exposure (`ingress.enabled` with `ingress.tls`, or `httpRoute.enabled` with `httpRoute.scheme: https`) the chart renders `auto` as `always`. |
+| `auth.session.hsts.maxAge` | `31536000` | `HSTS_MAX_AGE` | `max-age` of `Strict-Transport-Security`, sent on HTTPS responses and, with `SESSION_COOKIE_SECURE=always`, on every response. `0` disables the header. |
+| `auth.session.hsts.includeSubdomains` | `false` | `HSTS_INCLUDE_SUBDOMAINS` | Add `includeSubDomains` to the header. |
 | `auth.session.idleTimeout` | `12h` | `AUTH_SESSION_IDLE_TIMEOUT` | Sliding inactivity timeout (`<n>s\|m\|h\|d`, `m` = minutes). |
 | `auth.session.absoluteLifetime` | `7d` | `AUTH_SESSION_ABSOLUTE_LIFETIME` | Maximum session lifetime. |
 | `auth.session.rememberLifetime` | `30d` | `AUTH_SESSION_REMEMBER_LIFETIME` | Lifetime with **Keep me signed in**. |
-| `auth.login.rateLimit` | `5/minute` | `AUTH_LOGIN_RATE_LIMIT` | Failed sign-ins per username (four times as many per client IP) before an exponential lockout. |
+| `auth.login.rateLimit` | `5/minute` | `AUTH_LOGIN_RATE_LIMIT` | Failed sign-ins per username and client IP before an exponential lockout of that pair; each client IP also gets four times as many across usernames (a plain window). |
+| `auth.legacyApiKey` | `admin` | `AUTH_LEGACY_API_KEY` | What the deprecated bootstrap key `GREENKUBE_API_KEY` may do: `admin` (full admin, as before; required with `apiAuthMode: api_key`), `metrics` (scrape only) or `disabled` (rejected). See [The bootstrap API key](authentication.md#the-bootstrap-api-key). |
 | `auth.localLogin` | `true` | `AUTH_LOCAL_LOGIN` | In `proxy` and `oidc` modes, local accounts (the break-glass admin) still sign in with a password. `false`: SSO only (`POST /auth/login` answers `409`). |
 | `auth.roles.groups.{admin,operator,viewer}` | `[]` | `AUTH_ROLE_GROUPS` | IdP groups granting each role (rendered as a JSON object role to groups). An SSO user gets the highest role any of its groups grants, recomputed at every sign-in. |
 | `auth.roles.defaultRole` | `viewer` | `AUTH_DEFAULT_ROLE` | Role of an SSO user in no listed group: `viewer`, `operator`, `admin`, or `none` (access refused). |
@@ -672,11 +684,12 @@ config:
 | `auth.oidc.groupsClaim` | `groups` | `OIDC_GROUPS_CLAIM` | Claim holding the groups (a list, or a comma-separated string). |
 | `auth.oidc.redirectUrl` | `""` | `OIDC_REDIRECT_URL` | Redirect URI registered at the provider. Empty: `<config.externalUrl>/api/v1/auth/oidc/callback`, or the request's origin when `externalUrl` is empty. |
 | `auth.oidc.providerName` | `SSO` | `OIDC_PROVIDER_NAME` | Label of the **Sign in with ...** button. |
-| `monitoring.serviceMonitor.bearerTokenSecret` | `{name: "", key: token}` | | Secret with a `metrics:read` API key for the Prometheus scrape. Empty uses the deprecated bootstrap key. |
+| `monitoring.serviceMonitor.bearerTokenSecret` | `{name: "", key: token}` | | Secret with a `metrics:read` API key for the API scrape. Empty uses the scrape token `GREENKUBE_METRICS_TOKEN` (or, without one, the deprecated bootstrap key). The controller and worker ServiceMonitors always use the scrape token. |
+| `secrets.metricsToken` | `""` | `GREENKUBE_METRICS_TOKEN` | See [Secrets](#secrets-secrets). |
 
 `SESSION_COOKIE_NAME` (default `greenkube_session`) is not exposed in values.
 
-The chart defaults to `environment: production`, disables GitOps automation until explicitly enabled, and generates a random bootstrap API key once (credentials bootstrap hook, Secret `<release>`) when `secrets.apiKey` is omitted. That key is deprecated: people sign in with accounts and machines use scoped API keys. For local development, `config.environment: development` leaves an instance without any account and without a bootstrap key open; do not expose it publicly. See [Authentication](authentication.md).
+The chart defaults to `environment: production`, disables GitOps automation until explicitly enabled, and generates a random Prometheus scrape token once (credentials bootstrap hook, Secret `<release>`); only `apiAuthMode: api_key` also generates the deprecated bootstrap API key. People sign in with accounts and machines use scoped API keys. For local development, `config.environment: development` leaves an instance without any account and without a bootstrap key open; do not expose it publicly. See [Authentication](authentication.md).
 
 ### Data sources are configuration as code
 

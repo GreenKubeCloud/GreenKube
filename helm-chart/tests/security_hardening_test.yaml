@@ -1,0 +1,281 @@
+suite: security hardening (session cookie, HSTS, scrape token, bootstrap key)
+templates:
+  - templates/configmap.yaml
+  - templates/credentials-bootstrap.yaml
+  - templates/servicemonitor.yaml
+  - templates/controller-servicemonitor.yaml
+  - templates/worker-servicemonitor.yaml
+  - templates/components.yaml
+  - templates/postgres-networkpolicy.yaml
+release:
+  name: gk
+  namespace: greenkube
+
+tests:
+  - it: keeps the cookie automatic and HSTS on by default without an HTTPS exposure
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: auto
+      - equal:
+          path: data.HSTS_MAX_AGE
+          value: "31536000"
+      - equal:
+          path: data.HSTS_INCLUDE_SUBDOMAINS
+          value: "false"
+
+  - it: renders a Secure cookie behind an Ingress with TLS even without trusted proxies
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      ingress.tls:
+        - secretName: greenkube-tls
+          hosts: [greenkube.example.com]
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: always
+
+  - it: keeps auto behind a plain-HTTP Ingress
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: auto
+
+  - it: renders a Secure cookie behind an https HTTPRoute
+    set:
+      httpRoute.enabled: true
+      httpRoute.parentRefs:
+        - name: gateway
+      httpRoute.hostnames: [greenkube.example.com]
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: always
+
+  - it: keeps auto behind an http HTTPRoute
+    set:
+      httpRoute.enabled: true
+      httpRoute.parentRefs:
+        - name: gateway
+      httpRoute.hostnames: [greenkube.example.com]
+      httpRoute.scheme: http
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: auto
+
+  - it: never overrides an explicit secureCookie choice
+    set:
+      auth.session.secureCookie: never
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      ingress.tls:
+        - secretName: greenkube-tls
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.SESSION_COOKIE_SECURE
+          value: never
+
+  - it: configures or disables HSTS
+    set:
+      auth.session.hsts.maxAge: 0
+      auth.session.hsts.includeSubdomains: true
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.HSTS_MAX_AGE
+          value: "0"
+      - equal:
+          path: data.HSTS_INCLUDE_SUBDOMAINS
+          value: "true"
+
+  - it: keeps the bootstrap key an admin key by default (upgrade safety)
+    templates:
+      - templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.AUTH_LEGACY_API_KEY
+          value: admin
+
+  - it: restricts or disables the bootstrap key in session mode
+    templates:
+      - templates/configmap.yaml
+    set:
+      auth.legacyApiKey: disabled
+    asserts:
+      - equal:
+          path: data.AUTH_LEGACY_API_KEY
+          value: disabled
+
+  - it: refuses to restrict the only administrator of api_key mode
+    templates:
+      - templates/configmap.yaml
+    set:
+      config.apiAuthMode: api_key
+      auth.legacyApiKey: metrics
+    asserts:
+      - failedTemplate:
+          errorPattern: "auth.legacyApiKey must be admin with config.apiAuthMode=api_key"
+
+  - it: generates no full-admin bootstrap key in SSO modes
+    templates:
+      - templates/credentials-bootstrap.yaml
+    documentIndex: 3
+    set:
+      config.apiAuthMode: proxy
+      config.trustedProxyIps: 10.0.0.0/8
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_GENERATE_API_KEY
+            value: "false"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_GENERATE_METRICS_TOKEN
+            value: "true"
+
+  - it: generates no scrape token when one is supplied in values
+    templates:
+      - templates/credentials-bootstrap.yaml
+    documentIndex: 3
+    set:
+      secrets.metricsToken: supplied
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_GENERATE_METRICS_TOKEN
+            value: "false"
+
+  - it: scrapes every component with the scrape token of an existing Secret that declares it
+    templates:
+      - templates/servicemonitor.yaml
+      - templates/controller-servicemonitor.yaml
+      - templates/worker-servicemonitor.yaml
+    set:
+      worker.replicas: 1
+      monitoring.serviceMonitor.enabled: true
+      secrets.existingSecret: platform-secrets
+      secrets.existingSecretHasMetricsToken: true
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: platform-secrets
+            key: GREENKUBE_METRICS_TOKEN
+
+  - it: keeps scraping an existing Secret with its API key when it holds no scrape token (upgrade safety)
+    templates:
+      - templates/servicemonitor.yaml
+      - templates/worker-servicemonitor.yaml
+    set:
+      worker.replicas: 1
+      monitoring.serviceMonitor.enabled: true
+      secrets.existingSecret: platform-secrets
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: platform-secrets
+            key: GREENKUBE_API_KEY
+
+  - it: projects the scrape token into the controller, never the admin API key
+    templates:
+      - templates/components.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes[0].projected.sources[0].secret.items
+          content:
+            key: GREENKUBE_METRICS_TOKEN
+            path: GREENKUBE_METRICS_TOKEN
+      - notContains:
+          path: spec.template.spec.volumes[0].projected.sources[0].secret.items
+          content:
+            key: GREENKUBE_API_KEY
+            path: GREENKUBE_API_KEY
+
+  - it: isolates the bundled PostgreSQL to GreenKube's own clients by default
+    templates:
+      - templates/postgres-networkpolicy.yaml
+    asserts:
+      - isKind:
+          of: NetworkPolicy
+      - equal:
+          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
+          value: postgres
+      - equal:
+          path: spec.policyTypes
+          value: [Ingress]
+      - equal:
+          path: spec.ingress[0].ports
+          value:
+            - protocol: TCP
+              port: 5432
+      - contains:
+          path: spec.ingress[0].from[0].podSelector.matchExpressions
+          content:
+            key: app.kubernetes.io/component
+            operator: In
+            values: [api, controller, worker, backup, postgres-backup, db-backup, db-copy]
+      - notContains:
+          path: spec.ingress[0].from[0].podSelector.matchExpressions[0].values
+          content: renderer-sandbox
+      - equal:
+          path: spec.ingress[0].from[1].podSelector.matchLabels
+          value:
+            greenkube.cloud/postgres-client: "true"
+
+  - it: appends additional PostgreSQL peers
+    templates:
+      - templates/postgres-networkpolicy.yaml
+    set:
+      postgres.networkPolicy.additionalIngress:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: dba
+    asserts:
+      - equal:
+          path: spec.ingress[0].from[2]
+          value:
+            namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: dba
+
+  - it: renders no PostgreSQL NetworkPolicy when disabled or without the bundled database
+    templates:
+      - templates/postgres-networkpolicy.yaml
+    set:
+      postgres.networkPolicy.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders no PostgreSQL NetworkPolicy for an external database
+    templates:
+      - templates/postgres-networkpolicy.yaml
+    set:
+      postgres.enabled: false
+      secrets.dbConnectionString: postgresql://u:p@db:5432/greenkube
+    asserts:
+      - hasDocuments:
+          count: 0

@@ -5,13 +5,13 @@ JSON report to POST /api/v1/sources/krr/reports. Disabled by default.
 * An init container runs `krr <strategy> -f json --fileoutput /report/krr.json`
   with a read-only ClusterRole of its own (see docs/sources/krr.md).
 * The upload container (the GreenKube image, no extra tool) posts the report
-  with an API key of scope signals:write read from sources.krr.job.apiKeySecret.
+  with an API key of scope signals:report (signals:write: deprecated) read from sources.krr.job.apiKeySecret.
 */ -}}
 {{- include "greenkube.requireChartDefaults" . -}}
 {{- $job := .Values.sources.krr.job -}}
 {{- if $job.enabled }}
 {{- $v := include "greenkube.values" . | fromYaml }}
-{{- $secretName := required "sources.krr.job.apiKeySecret.name is required: a Secret holding a GreenKube API key with scope signals:write" $job.apiKeySecret.name }}
+{{- $secretName := required "sources.krr.job.apiKeySecret.name is required: a Secret holding a GreenKube API key with scope signals:report" $job.apiKeySecret.name }}
 {{- $digest := $job.image.digest | default "" | toString }}
 {{- if not (regexMatch "^sha256:[0-9a-fA-F]{64}$" $digest) }}
 {{- fail "sources.krr.job.image.digest must pin the KRR image (sha256:<64 hexadecimal characters>)" }}

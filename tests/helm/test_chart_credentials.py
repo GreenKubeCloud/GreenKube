@@ -174,7 +174,9 @@ def test_bootstrap_hook_creates_generated_credentials_once():
     assert job["metadata"]["annotations"]["helm.sh/hook"] == "pre-install,pre-upgrade"
     env = {item["name"]: item.get("value") for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert env["GREENKUBE_SECRET_NAME"] == "greenkube"
-    assert env["GREENKUBE_GENERATE_API_KEY"] == "true"
+    # Session mode (the default): a metrics:read scrape token, no full-admin bootstrap key.
+    assert env["GREENKUBE_GENERATE_API_KEY"] == "false"
+    assert env["GREENKUBE_GENERATE_METRICS_TOKEN"] == "true"
     assert env["GREENKUBE_GENERATE_POSTGRES_PASSWORD"] == "true"
     assert env["GREENKUBE_POSTGRES_PVC"] == "data-greenkube-postgres-0"
 
@@ -182,6 +184,15 @@ def test_bootstrap_hook_creates_generated_credentials_once():
     named_rules = [rule for rule in role["rules"] if rule.get("resourceNames")]
     assert {"secrets", "persistentvolumeclaims"} == {res for rule in named_rules for res in rule["resources"]}
     assert all(rule["verbs"] == ["create"] for rule in role["rules"] if not rule.get("resourceNames"))
+
+
+def test_api_key_mode_still_generates_its_bootstrap_admin_key():
+    docs = _documents(_render("--set", "config.apiAuthMode=api_key"))
+
+    job = _get(docs, "Job", "greenkube-credentials-bootstrap")
+    env = {item["name"]: item.get("value") for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["GREENKUBE_GENERATE_API_KEY"] == "true"
+    assert env["GREENKUBE_GENERATE_METRICS_TOKEN"] == "true"
 
 
 def test_supplied_credentials_are_not_generated():

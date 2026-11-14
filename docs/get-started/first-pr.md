@@ -191,7 +191,10 @@ loop with the public APIs only. The calls below are what it sends; run them
 yourself after `kubectl -n greenkube port-forward svc/greenkube-api 8000` and
 
 ```bash
-export GREENKUBE_API_KEY="$(kubectl -n greenkube get secret greenkube -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d)"
+# install.sh supplies the harness key as secrets.apiKey (Secret greenkube-values): browser
+# auth modes no longer generate a bootstrap key. Outside the harness, create a scoped key
+# in Settings > API keys instead.
+export GREENKUBE_API_KEY="$(kubectl -n greenkube get secret greenkube-values -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d)"
 api() { curl -fsS -H "Authorization: Bearer $GREENKUBE_API_KEY" -H 'Content-Type: application/json' "http://localhost:8000/api/v1$1" "${@:2}"; }
 ```
 

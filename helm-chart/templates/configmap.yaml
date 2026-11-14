@@ -135,13 +135,22 @@ data:
   {{- $session := $auth.session | default dict }}
   {{- $admin := $auth.admin | default dict }}
   {{- $secureCookie := $session.secureCookie | default "auto" | toString }}
+  {{- /* auto + an HTTPS exposure (Ingress TLS, https HTTPRoute): Secure without relying on
+    config.trustedProxyIps to see X-Forwarded-Proto (security hardening). */}}
+  {{- if and (eq $secureCookie "auto") (include "greenkube.httpsExposure" .) }}
+  {{- $secureCookie = "always" }}
+  {{- end }}
   SESSION_COOKIE_SECURE: {{ $secureCookie | quote }}
+  {{- $hsts := $session.hsts | default dict }}
+  HSTS_MAX_AGE: {{ ternary 31536000 $hsts.maxAge (kindIs "invalid" $hsts.maxAge) | int64 | quote }}
+  HSTS_INCLUDE_SUBDOMAINS: {{ $hsts.includeSubdomains | default false | toString | quote }}
   AUTH_SESSION_IDLE_TIMEOUT: {{ $session.idleTimeout | default "12h" | quote }}
   AUTH_SESSION_ABSOLUTE_LIFETIME: {{ $session.absoluteLifetime | default "7d" | quote }}
   AUTH_SESSION_REMEMBER_LIFETIME: {{ $session.rememberLifetime | default "30d" | quote }}
   AUTH_LOGIN_RATE_LIMIT: {{ ($auth.login | default dict).rateLimit | default "5/minute" | quote }}
   AUTH_ADMIN_USERNAME: {{ $admin.username | default "admin" | quote }}
   AUTH_INITIAL_ADMIN_SECRET: {{ include "greenkube.initialAdminSecretName" . | quote }}
+  AUTH_LEGACY_API_KEY: {{ include "greenkube.legacyApiKeyAccess" . | quote }}
 
   # --- Single sign-on and roles (F16) ---
   {{- $mode := .Values.config.apiAuthMode | default "session" }}

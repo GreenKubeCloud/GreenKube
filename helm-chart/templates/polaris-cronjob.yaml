@@ -5,13 +5,13 @@ its audit to POST /api/v1/sources/polaris/reports. Disabled by default.
 * An init container runs `polaris audit --format=json --output-file /report/polaris.json`
   with a read-only ClusterRole of its own (see docs/sources/polaris.md).
 * The upload container (the GreenKube image, no extra tool) posts the report
-  with an API key of scope signals:write read from sources.polaris.job.apiKeySecret.
+  with an API key of scope signals:report (signals:write: deprecated) read from sources.polaris.job.apiKeySecret.
 */ -}}
 {{- include "greenkube.requireChartDefaults" . -}}
 {{- $job := dig "polaris" "job" dict (.Values.sources | default dict) -}}
 {{- if $job.enabled }}
 {{- $v := include "greenkube.values" . | fromYaml }}
-{{- $secretName := required "sources.polaris.job.apiKeySecret.name is required: a Secret holding a GreenKube API key with scope signals:write" (dig "apiKeySecret" "name" "" $job) }}
+{{- $secretName := required "sources.polaris.job.apiKeySecret.name is required: a Secret holding a GreenKube API key with scope signals:report" (dig "apiKeySecret" "name" "" $job) }}
 {{- $digest := dig "image" "digest" "" $job | toString }}
 {{- if not (regexMatch "^sha256:[0-9a-fA-F]{64}$" $digest) }}
 {{- fail "sources.polaris.job.image.digest must pin the Polaris image (sha256:<64 hexadecimal characters>)" }}

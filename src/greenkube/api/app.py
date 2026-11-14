@@ -9,14 +9,15 @@ directory is present in the image.
 """
 
 import asyncio
-import ipaddress
 import logging
 import os
 import re
 import time
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import uvicorn
 from fastapi import Depends, FastAPI, Request
@@ -60,7 +61,9 @@ from greenkube.api.routers import setup as setup_router
 from greenkube.api.routers import signals as signals_router
 from greenkube.api.routers import sources as sources_router
 from greenkube.api.routers import webhooks as webhooks_router
+from greenkube.auth.http import client_ip, is_https
 from greenkube.auth.lifecycle import start_auth_runtime
+from greenkube.auth.settings import AuthSettings
 from greenkube.automation.plan_runtime import PlanRuntimeConfigurationError, build_plan_api_service
 from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
 from greenkube.automation.webhook_runtime import create_webhook_processing_service
@@ -71,27 +74,6 @@ logger = logging.getLogger(__name__)
 _MANUAL_BINDING_RESOLUTION_PATH = re.compile(r"^/api/v1/gitops/bindings/[^/]+/[^/]+/[^/]+/resolve$")
 
 FRONTEND_DIR = Path("/app/frontend")
-
-
-def _parse_networks(value: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
-    networks = []
-    for item in value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            networks.append(ipaddress.ip_network(item, strict=False))
-        except ValueError:
-            logger.warning("Ignoring invalid trusted proxy network: %s", item)
-    return tuple(networks)
-
-
-def _is_trusted_ip(value: str, networks) -> bool:
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return any(address in network for network in networks)
 
 
 def _cors_policy(raw_origins: str) -> tuple[list[str], bool]:
@@ -105,6 +87,27 @@ def _cors_policy(raw_origins: str) -> tuple[list[str], bool]:
         logger.warning("CORS_ORIGINS contains '*': any origin is allowed and credentialed CORS is disabled.")
         return ["*"], False
     return origins, bool(origins)
+
+
+def _hsts_header(request: Request) -> str | None:
+    """``Strict-Transport-Security`` value for this response, or None.
+
+    Sent when the browser reached GreenKube over HTTPS (directly, or per
+    ``X-Forwarded-Proto`` from ``TRUSTED_PROXY_IPS``) and whenever the deployment
+    declares HTTPS with ``SESSION_COOKIE_SECURE=always``: browsers ignore the
+    header on plain-HTTP responses, so the latter is harmless on a port-forward.
+    """
+    cfg = get_config()
+    max_age = getattr(cfg, "HSTS_MAX_AGE", 0)
+    if not isinstance(max_age, int) or isinstance(max_age, bool) or max_age <= 0:
+        return None
+    settings = AuthSettings.from_config(cfg)
+    if settings.cookie_secure != "always" and not is_https(request, settings):
+        return None
+    value = f"max-age={max_age}"
+    if getattr(cfg, "HSTS_INCLUDE_SUBDOMAINS", False) is True:
+        value += "; includeSubDomains"
+    return value
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -124,6 +127,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Common security headers for all responses
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        hsts = _hsts_header(request)
+        if hsts:
+            response.headers.setdefault("Strict-Transport-Security", hsts)
 
         # Document-only headers — only meaningful for HTML pages, not for
         # JSON API responses or static assets.  Setting them on every response
@@ -186,12 +192,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not (path.startswith(self._LIMITED_PREFIXES) or path in self._LIMITED_EXACT):
             return await call_next(request)
 
-        client = request.client.host if request.client else "unknown"
-        trusted_proxies = _parse_networks(getattr(get_config(), "TRUSTED_PROXY_IPS", ""))
-        if _is_trusted_ip(client, trusted_proxies):
-            forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-            if forwarded:
-                client = forwarded
+        # The rightmost X-Forwarded-For hop that is not a trusted proxy, and only from a
+        # trusted peer: the leftmost entry is whatever the client chose to send.
+        client = client_ip(request, AuthSettings.from_config(get_config()))
         identifiers = (client, self._route_key(request))
         for limit in self._limits:
             if not self._limiter.hit(limit, *identifiers):
@@ -206,13 +209,42 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _route_key(request: Request) -> str:
-        """Use the registered route template instead of untrusted path parameters."""
+        """The registered route template (``/api/v1/plans/{plan_id}``), never the raw path.
+
+        The middleware runs before routing, so the template is resolved here. Routers
+        included with ``include_router`` are ``_IncludedRouter`` objects (FastAPI >=
+        0.121) without a ``path``: their effective routes, which carry the full
+        prefixed template, are matched instead. Untrusted path parameters therefore
+        never create buckets, and distinct routes never share one.
+        """
         router = getattr(request.app, "router", None)
-        for route in getattr(router, "routes", ()):
-            match, _ = route.matches(request.scope)
+        partial: str | None = None
+        for route in _flat_routes(getattr(router, "routes", ())):
+            try:
+                match, _ = route.matches(request.scope)
+            except Exception:
+                continue
+            path = getattr(route, "path", None)
+            if not isinstance(path, str):
+                continue
             if match is Match.FULL:
-                return getattr(route, "path", "<matched-route>")
-        return "<unmatched-route>"
+                return path
+            if match is Match.PARTIAL and partial is None:
+                # Path matches, method does not (405): still that route's bucket.
+                partial = path
+        return partial or "<unmatched-route>"
+
+
+def _flat_routes(routes):
+    """Routes in matching order, with included routers expanded to their effective routes."""
+    for route in routes:
+        effective = getattr(route, "effective_route_contexts", None)
+        if callable(effective):
+            yield from cast(Iterable[Any], effective())
+        elif getattr(route, "path", None) is None and isinstance(getattr(route, "routes", None), list):
+            yield from _flat_routes(route.routes)
+        else:
+            yield route
 
 
 @asynccontextmanager

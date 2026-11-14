@@ -171,17 +171,18 @@ tests:
       - isNotEmpty:
           path: spec.endpoints[0].metricRelabelings
 
-  - it: ServiceMonitor should authenticate with the generated API key by default
+  - it: ServiceMonitor should authenticate with the generated scrape token by default
     set:
       monitoring.serviceMonitor.enabled: true
     templates:
       - templates/servicemonitor.yaml
     asserts:
-      - isNotEmpty:
+      - equal:
           path: spec.endpoints[0].authorization.credentials.name
+          value: RELEASE-NAME-greenkube
       - equal:
           path: spec.endpoints[0].authorization.credentials.key
-          value: GREENKUBE_API_KEY
+          value: GREENKUBE_METRICS_TOKEN
 
   - it: ServiceMonitor still renders with the deprecated config.api.enabled false (the API is always deployed)
     set:
@@ -193,7 +194,7 @@ tests:
       - hasDocuments:
           count: 1
 
-  - it: ServiceMonitor should use the API key as bearer token when configured
+  - it: ServiceMonitor never scrapes with a supplied admin API key when a scrape token exists
     set:
       monitoring.serviceMonitor.enabled: true
       secrets.apiKey: test-key
@@ -205,7 +206,35 @@ tests:
           value: Bearer
       - equal:
           path: spec.endpoints[0].authorization.credentials.key
-          value: GREENKUBE_API_KEY
+          value: GREENKUBE_METRICS_TOKEN
+
+  - it: ServiceMonitor uses a scrape token supplied in values
+    set:
+      monitoring.serviceMonitor.enabled: true
+      secrets.metricsToken: scrape
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: RELEASE-NAME-greenkube-values
+            key: GREENKUBE_METRICS_TOKEN
+
+  - it: ServiceMonitor falls back to the API key without RBAC to generate a scrape token
+    set:
+      monitoring.serviceMonitor.enabled: true
+      rbac.create: false
+      secrets.apiKey: test-key
+      postgres.auth.password: pw
+    templates:
+      - templates/servicemonitor.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].authorization.credentials
+          value:
+            name: RELEASE-NAME-greenkube-values
+            key: GREENKUBE_API_KEY
 
   - it: ServiceMonitor should use existingSecret for bearer credentials
     set:

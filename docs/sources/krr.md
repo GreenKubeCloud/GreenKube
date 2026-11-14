@@ -35,11 +35,11 @@ curl -sS -X POST "$GREENKUBE_URL/api/v1/sources/krr/reports" \
   --data-binary @krr.json
 ```
 
-The key needs scope `signals:write`. Reports up to 64 MiB are accepted. When the run covers several clusters, push it to each GreenKube with `?cluster=<kubeconfig context>` (see [Limitations](#limitations)).
+The key needs scope `signals:report` (a `signals:write` key is still accepted for one minor release; the answer then carries `Deprecation: true`). KRR's signals are pushed: together with every other pushed signal they count as at most one independent consensus vote. Reports up to 64 MiB are accepted. When the run covers several clusters, push it to each GreenKube with `?cluster=<kubeconfig context>` (see [Limitations](#limitations)).
 
 ## Job mode (optional CronJob)
 
-Disabled by default. Create a `signals:write` API key, store it in a Secret, then:
+Disabled by default. Create a `signals:report` API key, store it in a Secret, then:
 
 ```yaml
 sources:

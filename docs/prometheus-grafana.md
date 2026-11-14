@@ -53,7 +53,7 @@ The `ServiceMonitor` scrapes the `http` port (8000) at `/prometheus/metrics` on 
 
 When NetworkPolicy is enabled, the chart covers standalone app/worker pods and production API/controller/worker pods. It permits DNS and the bundled PostgreSQL connection, and allows Prometheus to scrape the API, controller or worker metrics port. Other ingress is denied unless configured with `additionalIngress`; external database, Git provider, and Kubernetes API traffic require narrow `additionalEgress` rules. The chart does not add unrestricted internet egress.
 
-The chart adds bearer-token authentication to the `ServiceMonitor`. Recommended: create an API key with only the `metrics:read` scope (**Settings > API keys**), store it in a Secret in `monitoring.serviceMonitor.namespace`, and set `monitoring.serviceMonitor.bearerTokenSecret.name` (and `.key`, default `token`). Without it, the ServiceMonitor uses the deprecated bootstrap key `GREENKUBE_API_KEY`, whose Secret must then be available in that namespace. See [Authentication](authentication.md#prometheus). If using static scrape configuration instead, configure the corresponding bearer token in Prometheus; unauthenticated scrapes will receive `401`.
+The chart adds bearer-token authentication to the `ServiceMonitor`. Recommended: create an API key with only the `metrics:read` scope (**Settings > API keys**), store it in a Secret in `monitoring.serviceMonitor.namespace`, and set `monitoring.serviceMonitor.bearerTokenSecret.name` (and `.key`, default `token`). Without it, the ServiceMonitor uses the generated scrape token `GREENKUBE_METRICS_TOKEN` (`metrics:read` only; Secret `<release>`), or, when no scrape token exists (`secrets.existingSecret` without `secrets.existingSecretHasMetricsToken`), the deprecated bootstrap key `GREENKUBE_API_KEY`; that Secret must then be available in the ServiceMonitor namespace. See [Authentication](authentication.md#prometheus). If using static scrape configuration instead, configure the corresponding bearer token in Prometheus; unauthenticated scrapes will receive `401`.
 
 ### Without the Prometheus Operator
 
@@ -219,9 +219,9 @@ does not report them. The chart renders the internal ClusterIP Service
 `<release>-controller-metrics`; with `monitoring.serviceMonitor.enabled=true`
 it also renders a controller ServiceMonitor next to the API one, and the
 optional NetworkPolicy admits Prometheus on that port. Without the Prometheus
-Operator, add a scrape job for the controller Service (add an `authorization`
-block with the API key only if `GREENKUBE_API_KEY` is set in the controller's
-environment):
+Operator, add a scrape job for the controller Service, with an `authorization`
+block carrying the scrape token `GREENKUBE_METRICS_TOKEN` when the controller
+has one (the chart gives it one by default):
 
 ```yaml
 - job_name: greenkube-controller
@@ -296,10 +296,10 @@ worker-specific ServiceMonitor are rendered only for the production worker
 component; the ServiceMonitor additionally requires
 `monitoring.serviceMonitor.enabled=true`. The worker endpoint exposes that
 process's control-loop registry, not API dashboard gauges. The Service is
-internal-only (no Ingress or external Service type), and the endpoint reuses
-the API's `GREENKUBE_API_KEY` bearer authentication behavior. Configure
-`secrets.apiKey` or `secrets.existingSecret` so Prometheus uses the same bearer
-credential. The CLI enables its listener only when
+internal-only (no Ingress or external Service type), and the endpoint requires
+the scrape token `GREENKUBE_METRICS_TOKEN` (or, while `auth.legacyApiKey` is not
+`disabled`, the deprecated `GREENKUBE_API_KEY`); a production worker with neither
+answers `503`. The worker ServiceMonitor sends the scrape token. The CLI enables its listener only when
 `GREENKUBE_WORKER_METRICS_PORT` is set; the production chart sets it.
 
 ### Controller metrics endpoint
@@ -314,11 +314,13 @@ scans, verification, GitOps sync observation) serves its own process-local regis
 ServiceMonitor. Verification outcomes recorded by the controller are now
 scrapeable (they used to live in a process without an endpoint).
 
-The chart keeps the API key out of the controller (least privilege): the
-endpoint is reachable on the pod network only, serves bounded, non-sensitive
-counters, and is restricted to Prometheus when `monitoring.networkPolicy` is
-enabled. If an API key is set in the controller's environment, scrapes must
-send it as a bearer token. Outside Kubernetes, `greenkube start` also listens on
+The chart keeps the admin API key out of the controller (least privilege) and
+gives it the `metrics:read` scrape token `GREENKUBE_METRICS_TOKEN` instead, which
+the controller ServiceMonitor sends as a bearer token; `/loops` needs it too. The
+endpoint is reachable on the pod network only and restricted to Prometheus when
+`monitoring.networkPolicy` is enabled. Without any token (`secrets.existingSecret`
+without `GREENKUBE_METRICS_TOKEN`) it serves its bounded, non-sensitive counters
+openly, as before. Outside Kubernetes, `greenkube start` also listens on
 `0.0.0.0:9102` by default; set `CONTROLLER_METRICS_PORT=0` to turn it off.
 
 | Metric | Type and labels | Description |

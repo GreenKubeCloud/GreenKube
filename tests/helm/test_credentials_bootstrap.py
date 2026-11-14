@@ -136,6 +136,32 @@ def test_creates_the_secret_with_generated_credentials_when_absent():
     )
 
 
+def test_generates_the_scrape_token_once_without_a_bootstrap_api_key():
+    """Session modes no longer generate the full-admin bootstrap key, only a metrics:read scrape token."""
+    api = FakeApi()
+    settings = _settings(generate_api_key=False, generate_metrics_token=True)
+
+    bootstrap.ensure_credentials(api, settings)
+    first = _plain(api.stored)
+    bootstrap.ensure_credentials(api, settings)
+
+    assert "GREENKUBE_API_KEY" not in first
+    assert len(first["GREENKUBE_METRICS_TOKEN"]) == 64
+    assert _plain(api.stored) == first
+    assert len(api.writes()) == 1
+
+
+def test_an_upgrade_adds_the_scrape_token_and_keeps_the_existing_bootstrap_key():
+    legacy = _legacy_secret(GREENKUBE_API_KEY="legacy-key", POSTGRES_PASSWORD="pw", DB_CONNECTION_STRING=LEGACY_DSN)
+    api = FakeApi(secret=legacy, pvcs={"data-greenkube-postgres-0"})
+
+    bootstrap.ensure_credentials(api, _settings(generate_api_key=False, generate_metrics_token=True))
+
+    ((_, patch),) = api.writes()
+    assert set(patch["data"]) == {"GREENKUBE_METRICS_TOKEN"}
+    assert _plain(api.stored)["GREENKUBE_API_KEY"] == "legacy-key"
+
+
 def test_created_secret_is_not_tracked_by_helm_or_argo_cd():
     api = FakeApi()
 
@@ -313,6 +339,7 @@ def test_settings_from_env():
             "GREENKUBE_SECRET_NAME": "gk-secret",
             "GREENKUBE_RELEASE": "gk",
             "GREENKUBE_GENERATE_API_KEY": "true",
+            "GREENKUBE_GENERATE_METRICS_TOKEN": "true",
             "GREENKUBE_GENERATE_POSTGRES_PASSWORD": "TRUE",
             "GREENKUBE_POSTGRES_USER": "u",
             "GREENKUBE_POSTGRES_DATABASE": "d",
@@ -323,6 +350,7 @@ def test_settings_from_env():
     )
 
     assert settings.generate_api_key and settings.generate_postgres_password
+    assert settings.generate_metrics_token
     assert settings.postgres_port == "5432"
     assert settings.postgres_pvc == "data-h-0"
 

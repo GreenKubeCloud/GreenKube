@@ -46,8 +46,36 @@ def _key(h, *scopes: str, name: str = "ci") -> dict:
 
 def test_push_needs_the_signals_write_scope():
     assert required_scope("POST", "/api/v1/signals") == "signals:write"
-    assert required_scope("POST", "/api/v1/sources/krr/reports") == "signals:write"
+    assert required_scope("POST", "/api/v1/sources/krr/reports") == "signals:report"
     assert required_scope("GET", "/api/v1/sources/krr/runs") == "read"
+
+
+def test_report_uploads_have_their_own_scope(tmp_path, monkeypatch):
+    """A signals:report key uploads KRR/Polaris reports and cannot push signals as a client."""
+    inbox = MemoryInbox()
+    with auth_harness(tmp_path, monkeypatch) as h:
+        h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
+        reporter = _key(h, "signals:report", name="krr-job")
+        report = h.client.post("/api/v1/sources/krr/reports", content=KRR_FIXTURE.read_bytes(), headers=reporter)
+        body = {"source_id": "push:krr-job", "complete": True, "signals": [_signal()]}
+        push = h.client.post("/api/v1/signals", json=body, headers=reporter)
+
+    assert report.status_code == 200, report.text
+    assert "deprecation" not in report.headers
+    assert push.status_code == 403
+
+
+def test_a_signals_write_key_still_uploads_reports_with_a_deprecation_header(tmp_path, monkeypatch):
+    """Existing KRR/Polaris CronJob keys keep working for one minor release."""
+    inbox = MemoryInbox()
+    with auth_harness(tmp_path, monkeypatch) as h:
+        h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
+        writer = _key(h, "signals:write", name="krr-job")
+        report = h.client.post("/api/v1/sources/krr/reports", content=KRR_FIXTURE.read_bytes(), headers=writer)
+
+    assert report.status_code == 200, report.text
+    assert report.headers["deprecation"] == "true"
+    assert "signals:report" in report.headers["warning"]
 
 
 def test_push_batch_is_stored_and_idempotent(tmp_path, monkeypatch):
@@ -251,7 +279,7 @@ POLARIS_FIXTURE = Path(__file__).resolve().parents[1] / "sources" / "fixtures" /
 
 def test_polaris_report_needs_signals_write_and_is_stored(tmp_path, monkeypatch):
     """G4: a Polaris audit pushed by a signals:write key becomes polaris hygiene signals."""
-    assert required_scope("POST", "/api/v1/sources/polaris/reports") == "signals:write"
+    assert required_scope("POST", "/api/v1/sources/polaris/reports") == "signals:report"
     inbox = MemoryInbox()
     with auth_harness(tmp_path, monkeypatch) as h:
         h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox

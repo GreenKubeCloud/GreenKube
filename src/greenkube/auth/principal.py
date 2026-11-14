@@ -21,6 +21,8 @@ class Scope(StrEnum):
     WRITE = "write"
     APPROVE = "approve"
     SIGNALS_WRITE = "signals:write"
+    #: Upload KRR and Polaris reports only (``/api/v1/sources/{krr,polaris}/reports``).
+    SIGNALS_REPORT = "signals:report"
     PLANS_DELIVER = "plans:deliver"
     METRICS_READ = "metrics:read"
     ADMIN = "admin"
@@ -96,7 +98,10 @@ _APPROVE_PATHS = (re.compile(r"^/api/v1/automation/plans/[^/]+/approve$"),)
 # a CI job holds ``read`` + ``plans:deliver``, never ``write`` or ``approve``.
 _DELIVERY_PATHS = (re.compile(r"^/api/v1/automation/plans/[^/]+/delivery$"),)
 # Connector reports pushed like signals (KRR, Polaris: roadmap G2, G4).
-_REPORT_PATHS = frozenset({"/api/v1/sources/krr/reports", "/api/v1/sources/polaris/reports"})
+REPORT_PATHS = frozenset({"/api/v1/sources/krr/reports", "/api/v1/sources/polaris/reports"})
+#: Scopes still accepted in place of a required one, for one minor release: report
+#: uploads moved from ``signals:write`` to their own ``signals:report`` scope.
+DEPRECATED_SCOPE_FALLBACKS: dict[str, str] = {Scope.SIGNALS_REPORT.value: Scope.SIGNALS_WRITE.value}
 _ADMIN_PREFIXES = ("/api/v1/auth/api-keys", "/api/v1/auth/users", "/api/v1/automation/repositories/allowlist")
 # Endpoints any authenticated principal may call for itself.
 SELF_SERVICE_PATHS = frozenset({"/api/v1/auth/me"})
@@ -107,8 +112,9 @@ def required_scope(method: str, path: str) -> str | None:
     """Return the scope a request needs, or ``None`` when authentication suffices.
 
     The table is coarse on purpose: reads need ``read``, mutations ``write``,
-    plan approvals ``approve``, delivery reports ``plans:deliver``, signal pushes ``signals:write``, the Prometheus
-    endpoint ``metrics:read``, and user or API-key administration ``admin``.
+    plan approvals ``approve``, delivery reports ``plans:deliver``, signal pushes ``signals:write``, KRR and
+    Polaris report uploads ``signals:report``, the Prometheus endpoint ``metrics:read``, and user or API-key
+    administration ``admin``.
     """
     method = method.upper()
     if path == "/prometheus/metrics":
@@ -117,7 +123,9 @@ def required_scope(method: str, path: str) -> str | None:
         return None
     if path.startswith(_ADMIN_PREFIXES):
         return Scope.ADMIN.value
-    if (path.startswith("/api/v1/signals") or path in _REPORT_PATHS) and method not in SAFE_METHODS:
+    if path in REPORT_PATHS and method not in SAFE_METHODS:
+        return Scope.SIGNALS_REPORT.value
+    if path.startswith("/api/v1/signals") and method not in SAFE_METHODS:
         return Scope.SIGNALS_WRITE.value
     if method in SAFE_METHODS:
         return Scope.READ.value

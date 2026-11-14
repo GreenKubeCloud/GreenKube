@@ -56,11 +56,20 @@ them upstream; we track them with Trivy in CI).
 
 ## Hardening
 
+The threat model (trust boundaries, roles and scopes per route group, credentials,
+renderer isolation, outbound requests, residual risks) and a production
+hardening checklist are in [Security model](docs/security-model.md).
+
 - Every pod of the chart meets Pod Security `restricted` by default; see
   [Installation → Pod Security Admission](docs/installation.md#pod-security-admission).
-- Enable `monitoring.networkPolicy.enabled` to restrict ingress and egress.
-- Serve the UI over HTTPS (see [Installation → Ingress and TLS](docs/installation.md#optional-ingress-and-tls)) and
-  use scoped API keys and accounts ([Authentication](docs/authentication.md)).
+- The bundled PostgreSQL accepts connections from GreenKube's own components only
+  (`postgres.networkPolicy`, on by default). Enable `monitoring.networkPolicy.enabled`
+  to restrict ingress and egress of the other components.
+- Serve the UI over HTTPS (see [Installation → Ingress and TLS](docs/installation.md#optional-ingress-and-tls)),
+  set `config.trustedProxyIps` to your Ingress controller addresses, and use scoped
+  API keys and accounts ([Authentication](docs/authentication.md)). Upgraded installs:
+  retire the deprecated bootstrap key (`auth.legacyApiKey`).
+- CI runs CodeQL, Trivy and `npm audit` on every change.
 
 ## Verifying releases
 

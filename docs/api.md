@@ -8,7 +8,7 @@ See [Authentication](authentication.md) for the full model. In short:
 
 - **Machines** send a scoped API key as `Authorization: Bearer gk_<id>_<secret>`. Administrators create keys in
   **Settings > API keys** or with `POST /api/v1/auth/api-keys`; the key is shown once. Scopes: `read`, `write`,
-  `approve`, `plans:deliver`, `signals:write`, `metrics:read`, `admin`. A request outside its key's scopes answers `403` with code
+  `approve`, `plans:deliver`, `signals:write`, `signals:report`, `metrics:read`, `admin`. A request outside its key's scopes answers `403` with code
   `INSUFFICIENT_SCOPE`.
 - **The dashboard** signs in with `POST /api/v1/auth/login` and then uses an `HttpOnly` session cookie. Mutations
   authenticated by that cookie need a same-origin `Origin` and the `X-CSRF-Token` header returned by
@@ -100,8 +100,8 @@ Recommendation GET endpoints never run analyzers and never write. Scans run in t
 | `GET` | `/sources/{source_id}/runs` | A source's runs, newest first (`limit` 1–500, default 20): status, health, counts, consecutive failures, `error_code` and `diagnostics`. `404` for an unknown source. |
 | `GET` | `/sources/{source_id}/signals` | A source's v2 signals, most recently seen first (`limit` 1–500, default 100, optional `target_key`), with `first_seen_at`, `last_seen_at`, `last_run_id` and the `recommendation_fingerprint` they support. Kept 30 days after the last sighting. `404` for an unknown source. |
 | `POST` | `/signals` | Push a batch of signals (scope `signals:write`; schema [`signal-batch.v1alpha1`](../schemas/signal-batch.v1alpha1.json)): `source_id` `push:<client>`, `complete` (true replaces the client's earlier signals) and up to 5,000 `signals`. Idempotent on `signal_id`. Answers `batch_id`, `accepted`, `signal_ids`, `withdrawn` and `diagnostics`; `422` lists schema errors as JSON pointers; `403 push_client_mismatch` when an API key pushes for another client than `push:<key name>`. Pushed signals are used by the next scans through the `push` source and become recommendations only through consensus. See [Push API](sources/push.md). |
-| `POST` | `/sources/krr/reports` | Push a Robusta KRR JSON report (`krr simple -f json`; scope `signals:write`; `?complete=false` for a partial report; `?cluster=<context>` keeps one kubeconfig context of a multi-cluster report). Answers like `POST /signals`; `422` when the body is not a KRR report, or when it covers several clusters without `cluster` (`multiple_clusters`) or lacks the given one (`cluster_not_in_report`). See [KRR](sources/krr.md). |
-| `POST` | `/sources/polaris/reports` | Push a Fairwinds Polaris audit (`polaris audit --format=json`; scope `signals:write`; `?complete=false` for a partial audit). Answers like `POST /signals`; `422` when the body is not a Polaris audit (`polaris_report`). Findings are hygiene advice; missing requests get a request computed from usage. See [Polaris](sources/polaris.md). |
+| `POST` | `/sources/krr/reports` | Push a Robusta KRR JSON report (`krr simple -f json`; scope `signals:report`, `signals:write` deprecated; `?complete=false` for a partial report; `?cluster=<context>` keeps one kubeconfig context of a multi-cluster report). Answers like `POST /signals`; `422` when the body is not a KRR report, or when it covers several clusters without `cluster` (`multiple_clusters`) or lacks the given one (`cluster_not_in_report`). See [KRR](sources/krr.md). |
+| `POST` | `/sources/polaris/reports` | Push a Fairwinds Polaris audit (`polaris audit --format=json`; scope `signals:report`, `signals:write` deprecated; `?complete=false` for a partial audit). Answers like `POST /signals`; `422` when the body is not a Polaris audit (`polaris_report`). Findings are hygiene advice; missing requests get a request computed from usage. See [Polaris](sources/polaris.md). |
 | `POST` | `/optimization/runs` | Queue a recommendation scan for the controller (optional body `{"namespace": "..."}`). Returns `202 {"run_id", "status": "queued"}` and a `Location` header; while a run is queued for the same scope (or a cluster-wide run is queued) its id is returned instead of a duplicate. |
 | `GET` | `/optimization/runs` | List recent runs, newest first (`limit` 1–100, default 20), with per-source health and new/changed/resolved counts. |
 | `GET` | `/optimization/runs/{run_id}` | Read one run: `run_id`, `status` (`queued`, `running`, `succeeded`, `failed`), `trigger`, `requested_at`, `started_at`, `completed_at`, `recommendation_count`, `sources`, diff counts, `diff`, `error`. `404` when unknown. |
@@ -235,11 +235,10 @@ Repository URLs, provider IDs, paths, and renderer configuration are never accep
 |---|---|---|
 | `GET` | `/repository-bindings` | Legacy binding view; optional `cluster` filter. |
 | `GET` | `/repository-bindings/{namespace}/{workload_kind}/{workload_name}` | Legacy binding lookup; optional `cluster` filter. |
-| `POST` | `/repository-bindings` | Legacy manual binding endpoint. |
 
 ### Prometheus scrape endpoint
 
-GreenKube exposes Prometheus metrics at `GET /prometheus/metrics`. The endpoint is authenticated under the same API-key configuration as protected API routes. For the complete metric inventory and scrape setup, see [Prometheus & Grafana](prometheus-grafana.md).
+GreenKube exposes Prometheus metrics at `GET /prometheus/metrics`. The endpoint needs the `metrics:read` scope: the generated scrape token `GREENKUBE_METRICS_TOKEN` (what the chart's ServiceMonitors send), a scoped `metrics:read` key, or a signed-in user. For the complete metric inventory and scrape setup, see [Prometheus & Grafana](prometheus-grafana.md).
 
 ## Examples
 

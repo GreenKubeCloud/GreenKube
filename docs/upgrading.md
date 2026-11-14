@@ -146,6 +146,10 @@ printing these steps. Your data stays on the claim `<release>` (it was mounted a
    spec:
      backoffLimit: 0
      template:
+       metadata:
+         labels:
+           # Allowed through the bundled PostgreSQL NetworkPolicy (postgres.networkPolicy).
+           greenkube.cloud/postgres-client: "true"
        spec:
          restartPolicy: Never
          securityContext:
@@ -212,7 +216,19 @@ greenkube db copy --from sqlite:///path/to/greenkube_data.db --to postgresql://u
 
 Existing users go through the initial-admin flow on their first visit: sign in as `admin` with the password of
 the Secret `<release>-initial-admin` and choose a new one. Existing API keys keep working, including the
-deprecated bootstrap key `GREENKUBE_API_KEY`.
+deprecated bootstrap key `GREENKUBE_API_KEY`, which stays an admin key (`auth.legacyApiKey: admin`).
+
+The upgrade hook adds the scrape token `GREENKUBE_METRICS_TOKEN` to the Secret `<release>` before the Pods roll,
+and the ServiceMonitors switch to it in the same release, so an existing Prometheus scrape keeps working. With
+`secrets.existingSecret`, the ServiceMonitors keep using its `GREENKUBE_API_KEY` until you add
+`GREENKUBE_METRICS_TOKEN` to it and set `secrets.existingSecretHasMetricsToken: true`. Then move scripts to scoped
+keys and set `auth.legacyApiKey: metrics` or `disabled`
+([The bootstrap API key](authentication.md#the-bootstrap-api-key)).
+
+The bundled PostgreSQL now accepts connections only from the api, controller and worker Pods
+(`postgres.networkPolicy`). A Job of yours that connects to it (backup, `greenkube db copy`) needs the label
+`greenkube.cloud/postgres-client: "true"` on its Pod template, or a peer in
+`postgres.networkPolicy.additionalIngress`.
 
 ### Checking an upgrade without a cluster
 

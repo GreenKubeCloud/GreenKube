@@ -13,10 +13,14 @@ the others (the former ``dedup.arbitrate``).
 * Sources that run the same engine vote once (:func:`engine_family`):
   Goldilocks runs the VPA recommender, so Goldilocks and VPA on the same VPA
   object are one vote, never two.
-* Pushed signals (``push:<client>``) are capped: one counted vote per push
-  client, a pushed ballot never stands for an engine family another source
-  also voted in, and pushed signals alone never produce a deletion
-  (:func:`admissible_ballots`).
+* Pushed signals (``push:<client>`` and the KRR/Polaris report uploads,
+  origin ``push``) are capped: one counted ballot per push client, a pushed
+  ballot never stands for an engine family another source also voted in, and
+  pushed signals alone never produce a deletion (:func:`admissible_ballots`).
+  Every pushed ballot of a group together is **one** independent vote
+  (:func:`independent_vote_count`): one ``signals:write`` key can push as
+  several clients and upload reports, so pushed sources never corroborate
+  each other (the auto-approval decrease guard needs two independent votes).
 * A :class:`ConsensusPolicy` picks the consolidated proposal:
 
   ``safest`` (default)
@@ -274,6 +278,8 @@ class ConsensusVote(BaseModel):
     counted: bool = True
     #: Whether this signal supports the chosen proposal.
     supports_chosen: bool = False
+    #: Pushed through the API (``push:<client>``, KRR/Polaris reports): all pushed votes are one independent vote.
+    pushed: bool = False
 
 
 class Consensus(BaseModel):
@@ -295,7 +301,7 @@ class Consensus(BaseModel):
     reasons: List[str] = Field(default_factory=list)
     #: Per resource: ``{source_id: value}``.
     spread: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-    #: Independent votes (one per engine family, one per push client).
+    #: Independent votes: one per engine family, all pushed signals together counting once.
     independent_votes: int = 1
     votes: List[ConsensusVote] = Field(default_factory=list)
     #: Every source id that voted on the group, the chosen one first (provenance badges:
@@ -405,6 +411,18 @@ def _representatives(ballots: Sequence[Ballot], priorities: Mapping[str, int]) -
     return representatives
 
 
+def independent_vote_count(representatives: Sequence[Ballot]) -> int:
+    """Independent votes among the counted ballots: every pushed ballot together counts once.
+
+    Push clients and the KRR/Polaris report endpoints share one trust boundary
+    (any ``signals:write`` key, or the principal behind it), so they never
+    corroborate each other: two clients of one key, or a client and a report,
+    are a single independent vote. Their proposals still shape the value.
+    """
+    native = sum(1 for ballot in representatives if not ballot.pushed)
+    return native + (1 if any(ballot.pushed for ballot in representatives) else 0)
+
+
 def admissible_ballots(ballots: Sequence[Ballot]) -> List[Ballot]:
     """The ballots of one group that may take part in its consensus.
 
@@ -486,6 +504,7 @@ def _votes(ballots: Sequence[Ballot], representatives: Sequence[Ballot], support
             direction=ballot.direction,
             counted=id(ballot) in counted,
             supports_chosen=supports(ballot),
+            pushed=ballot.pushed,
         )
         for ballot in ballots
     ]
@@ -540,7 +559,7 @@ def _numeric(
         contested=bool(reasons),
         reasons=reasons,
         spread={resource: {ballot.source_id: ballot.value for ballot in ballots}},
-        independent_votes=len(representatives),
+        independent_votes=independent_vote_count(representatives),
         votes=_votes(ballots, representatives, lambda ballot: ballot.value == value),
     )
     return chosen, consensus
@@ -576,7 +595,7 @@ def _categorical(
         agreement=agreement,
         contested=bool(reasons),
         reasons=reasons,
-        independent_votes=len(representatives),
+        independent_votes=independent_vote_count(representatives),
         votes=_votes(ballots, representatives, lambda ballot: ballot.identity == identity),
     )
     return chosen, consensus

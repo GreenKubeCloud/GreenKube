@@ -23,7 +23,14 @@ spec:
       path: /prometheus/metrics
       interval: {{ .Values.monitoring.serviceMonitor.interval | default "30s" }}
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout | default "10s" }}
-      # The controller never receives the API key (least privilege). Its endpoint
-      # serves only bounded operational counters on the pod network; enable
-      # monitoring.networkPolicy to restrict it to Prometheus.
+      # The controller never receives the admin API key (least privilege). With a
+      # scrape token (GREENKUBE_METRICS_TOKEN) its endpoint requires it; without one it
+      # serves only bounded operational counters on the pod network (enable
+      # monitoring.networkPolicy to restrict it to Prometheus).
+      {{- if include "greenkube.dedicatedScrapeToken" . }}
+      authorization:
+        type: Bearer
+        credentials:
+          {{- include "greenkube.scrapeCredentials" . | nindent 10 }}
+      {{- end }}
 {{- end }}

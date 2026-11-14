@@ -495,13 +495,15 @@ config:
   # disables credentialed CORS.
   corsOrigins: ''
 
-  # Rate limit for API endpoints (slowapi format, e.g. "60/minute", "100/hour").
+  # Rate limit per client IP and per API route template (e.g. "60/minute",
+  # "60/minute;1000/hour").
   apiRateLimit: 60/minute
 
-  # Comma-separated IPs or CIDRs of reverse proxies (Ingress controller) whose
-  # X-Forwarded-For and X-Forwarded-Proto headers are trusted, for example
-  # "10.0.0.0/8". Needed for the session cookie to be marked Secure
-  # automatically when TLS terminates at the Ingress.
+  # Comma-separated IPs or CIDRs of reverse proxies whose X-Forwarded-For and
+  # X-Forwarded-Proto headers are trusted: the Ingress controller or gateway
+  # pods, often the pod CIDR (e.g. "10.244.0.0/16"). Behind an Ingress, set it:
+  # otherwise every client shares the controller's address for rate limits and
+  # sign-in lockouts (helm install prints a warning).
   trustedProxyIps: ''
 
   # Root path prefix when the API is served behind a reverse proxy at a
@@ -694,7 +696,8 @@ sources:
       prometheusUrl: ""
       # Extra KRR arguments, e.g. ["--namespace", "shop", "--history_duration", "168"].
       extraArgs: []
-      # Secret holding a GreenKube API key with scope signals:write (required).
+      # Secret holding a GreenKube API key with scope signals:report (required; a
+      # signals:write key is still accepted, deprecated).
       apiKeySecret:
         name: ""
         key: api-key
@@ -728,7 +731,8 @@ sources:
       # true: each audit replaces every earlier Polaris finding. Set false when
       # extraArgs narrows the audit (one namespace): findings are added or refreshed.
       complete: true
-      # Secret holding a GreenKube API key with scope signals:write (required).
+      # Secret holding a GreenKube API key with scope signals:report (required; a
+      # signals:write key is still accepted, deprecated).
       apiKeySecret:
         name: ""
         key: api-key
@@ -795,16 +799,31 @@ auth:
   session:
     # auto: Secure cookie when the browser uses HTTPS (directly, or through a
     # proxy listed in config.trustedProxyIps); always; never (plain-HTTP tests).
+    # With an HTTPS exposure (ingress.enabled with ingress.tls, or httpRoute.enabled
+    # with scheme https) auto renders "always".
     secureCookie: auto
+    # Strict-Transport-Security sent on HTTPS responses (and on every response
+    # when the cookie is always Secure). maxAge 0 disables the header.
+    hsts:
+      maxAge: 31536000
+      includeSubdomains: false
     # Sign out after this much inactivity (sliding).
     idleTimeout: 12h
     # Maximum session lifetime, and with "Keep me signed in".
     absoluteLifetime: 7d
     rememberLifetime: 30d
   login:
-    # Failed sign-ins allowed per username (4x per client IP) before an
-    # exponential lockout.
+    # Failed sign-ins allowed per username and client IP before an exponential
+    # lockout of that pair; each client IP also gets 4x this budget across
+    # usernames (no escalation). The client IP is read from X-Forwarded-For only
+    # from config.trustedProxyIps: behind an Ingress, list its controller pods.
     rateLimit: 5/minute
+  # What the deprecated bootstrap key GREENKUBE_API_KEY may do: admin (the
+  # historical full-admin key; required with config.apiAuthMode=api_key),
+  # metrics (Prometheus scrape only) or disabled (rejected). New session, oidc
+  # and proxy installs generate no bootstrap key; installs upgraded with one keep
+  # it as admin until you migrate (docs/authentication.md#the-bootstrap-api-key).
+  legacyApiKey: admin
   # --- Single sign-on and roles (F16) ---
   # Roles: viewer (read), operator (approve plans, ignore/restore, mark
   # applied), admin (settings, users, API keys, repository allowlist).
@@ -892,11 +911,21 @@ secrets:
   # Boavizta API Token (optional)
   boaviztaToken: ''
 
-  # Deprecated bootstrap API key (GREENKUBE_API_KEY): accepted as an admin
-  # Bearer key for one more minor release. Prefer scoped API keys created in
-  # Settings > API keys. Left empty, a key is generated once by the
-  # credentials bootstrap Job.
+  # Deprecated bootstrap API key (GREENKUBE_API_KEY): a full-admin Bearer key
+  # (see auth.legacyApiKey) kept for one more minor release. Prefer scoped API
+  # keys created in Settings > API keys. Left empty, a key is generated once by
+  # the credentials bootstrap Job only for config.apiAuthMode=api_key; an
+  # existing generated key is kept on upgrade.
   apiKey: ''
+
+  # Prometheus scrape token (GREENKUBE_METRICS_TOKEN): metrics:read only, sent by
+  # the ServiceMonitors to the API, controller and worker metrics endpoints.
+  # Left empty, it is generated once by the credentials bootstrap Job.
+  metricsToken: ''
+  # With secrets.existingSecret: true when that Secret holds a
+  # GREENKUBE_METRICS_TOKEN key. Otherwise the ServiceMonitors keep scraping
+  # with its GREENKUBE_API_KEY (deprecated).
+  existingSecretHasMetricsToken: false
 
   # PostgreSQL connection string, only used with postgres.enabled=false
   # (bring your own PostgreSQL instance)
@@ -1044,6 +1073,15 @@ postgres:
     priorityClassName: ''
     podAnnotations: {}
     podLabels: {}
+  # Ingress NetworkPolicy of the bundled PostgreSQL (security hardening): only
+  # the api, controller and worker of this release (and pods labelled
+  # greenkube.cloud/postgres-client: "true", e.g. a backup or copy Job) reach
+  # port 5432. Needs a CNI that enforces NetworkPolicy.
+  networkPolicy:
+    enabled: true
+    # Extra NetworkPolicy peers allowed to connect, e.g.
+    #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: dba}}
+    additionalIngress: []
 
 # Prometheus → GreenKube monitoring integration (optional).
 # This controls whether Prometheus scrapes GreenKube's own /prometheus/metrics endpoint.

@@ -324,13 +324,16 @@ volume). Without volume expansion, back up, install on a larger volume and [rest
 ## Optional: SSO and accounts
 
 Browser users sign in with accounts and server-side sessions; machines use scoped API keys created in
-**Settings > API keys** (`read`, `write`, `approve`, `plans:deliver`, `signals:write`, `metrics:read`, `admin`). To provide the first
+**Settings > API keys** (`read`, `write`, `approve`, `plans:deliver`, `signals:write`, `signals:report`, `metrics:read`, `admin`). To provide the first
 admin password yourself (GitOps), set `auth.admin.existingSecret`. Single sign-on works through an authentication
 proxy (`config.apiAuthMode: proxy`) or native OpenID Connect (`config.apiAuthMode: oidc`), with IdP groups mapped to
 the `viewer`, `operator` and `admin` roles. See [Authentication](authentication.md).
 
-The bootstrap API key `GREENKUBE_API_KEY` (Secret `greenkube`) still works as an admin key for one more minor
-release (deprecated).
+Browser modes generate no bootstrap API key: Prometheus scrapes with the generated `metrics:read` scrape token
+`GREENKUBE_METRICS_TOKEN`, and machines use scoped keys. Installs upgraded with a bootstrap key `GREENKUBE_API_KEY`
+(Secret `greenkube`) keep it as an admin key until you restrict it with `auth.legacyApiKey`
+([migration](authentication.md#the-bootstrap-api-key)). Before exposing GreenKube, read the
+[Security model](security-model.md) hardening checklist.
 
 ## Credentials and GitOps (Argo CD, Flux)
 
@@ -341,7 +344,7 @@ output is stable under Argo CD and Flux. Credentials come from three places:
 |---|---|---|
 | `secrets.existingSecret` | your Secret | you (recommended for GitOps: External Secrets, Sealed Secrets, SOPS, `kubectl`) |
 | Values you set (`secrets.*`, `postgres.auth.password`, service URLs) | `<release>-values` | Helm / Argo CD / Flux |
-| Generated when not supplied: `GREENKUBE_API_KEY`, the bundled PostgreSQL password | `<release>` | the `<release>-credentials-bootstrap` hook |
+| Generated when not supplied: the scrape token `GREENKUBE_METRICS_TOKEN`, `GREENKUBE_API_KEY` (`api_key` mode only), the bundled PostgreSQL password | `<release>` | the `<release>-credentials-bootstrap` hook |
 
 The bootstrap hook (an Argo CD PreSync hook) creates `<release>` only when it is absent and afterwards only adds
 missing keys, so it never rotates a value; it also creates `<release>-initial-admin` once. Both survive

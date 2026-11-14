@@ -399,6 +399,14 @@
           "type": "object",
           "properties": {
             "secureCookie": {"type": "string", "enum": ["auto", "always", "never"]},
+            "hsts": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "maxAge": {"type": "integer", "minimum": 0},
+                "includeSubdomains": {"type": "boolean"}
+              }
+            },
             "idleTimeout": {"$ref": "#/definitions/longDuration"},
             "absoluteLifetime": {"$ref": "#/definitions/longDuration"},
             "rememberLifetime": {"$ref": "#/definitions/longDuration"}
@@ -406,6 +414,7 @@
         },
         "login": {"type": "object", "properties": {"rateLimit": {"type": "string"}}},
         "localLogin": {"type": "boolean"},
+        "legacyApiKey": {"type": "string", "enum": ["admin", "metrics", "disabled"]},
         "roles": {
           "type": "object",
           "properties": {
@@ -444,7 +453,13 @@
         }
       }
     },
-    "secrets": {"type": "object"},
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "metricsToken": {"type": "string"},
+        "existingSecretHasMetricsToken": {"type": "boolean"}
+      }
+    },
     "hooks": {"type": "object"},
     "tests": {"type": "object"},
     "postgres": {
@@ -467,7 +482,15 @@
             "storageClassName": {"type": "string"}
           }
         },
-        "resources": {"$ref": "#/definitions/resources"}
+        "resources": {"$ref": "#/definitions/resources"},
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "additionalIngress": {"type": "array", "items": {"type": "object"}}
+          }
+        }
       }
     },
     "monitoring": {

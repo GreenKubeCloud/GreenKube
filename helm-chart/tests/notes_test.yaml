@@ -6,12 +6,72 @@ release:
   namespace: greenkube
 
 tests:
-  - it: prints the exact command that reads the generated API key
+  - it: prints the exact command that reads the generated API key in api_key mode
+    set:
+      config.apiAuthMode: api_key
     asserts:
       - matchRegexRaw:
           pattern: "kubectl -n greenkube get secret gk-greenkube -o jsonpath='\\{\\.data\\.GREENKUBE_API_KEY\\}' \\| base64 -d; echo"
       - matchRegexRaw:
           pattern: generated once by the gk-greenkube-credentials-bootstrap hook
+      - notMatchRegexRaw:
+          pattern: SECURITY WARNING
+
+  - it: names the scrape token and no bootstrap key on a new session install
+    asserts:
+      - matchRegexRaw:
+          pattern: metrics:read scrape token GREENKUBE_METRICS_TOKEN
+      - notMatchRegexRaw:
+          pattern: GREENKUBE_API_KEY
+      - notMatchRegexRaw:
+          pattern: SECURITY WARNING
+
+  - it: warns about a bootstrap admin key kept from an earlier install
+    kubernetesProvider:
+      scheme:
+        "v1/Secret":
+          gvr:
+            version: "v1"
+            resource: "secrets"
+          namespaced: true
+      objects:
+        - kind: Secret
+          apiVersion: v1
+          metadata:
+            name: gk-greenkube
+            namespace: greenkube
+          data:
+            GREENKUBE_API_KEY: a2V5
+    asserts:
+      - matchRegexRaw:
+          pattern: "jsonpath='\\{\\.data\\.GREENKUBE_API_KEY\\}'"
+      - matchRegexRaw:
+          pattern: "SECURITY WARNING: a deprecated, non-expiring full-admin bootstrap key"
+
+  - it: does not warn once the bootstrap key is restricted to metrics
+    set:
+      secrets.apiKey: supplied
+      auth.legacyApiKey: metrics
+    asserts:
+      - notMatchRegexRaw:
+          pattern: full-admin bootstrap key
+
+  - it: warns when an Ingress is enabled without trusted proxies
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+    asserts:
+      - matchRegexRaw:
+          pattern: "config.trustedProxyIps is empty"
+
+  - it: does not warn about proxies once they are trusted
+    set:
+      ingress.enabled: true
+      ingress.hosts: [greenkube.example.com]
+      config.trustedProxyIps: 10.244.0.0/16
+    asserts:
+      - notMatchRegexRaw:
+          pattern: "config.trustedProxyIps is empty"
 
   - it: prints the dashboard and setup URLs
     asserts:
