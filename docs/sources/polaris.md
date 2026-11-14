@@ -47,11 +47,11 @@ curl -sS -X POST "$GREENKUBE_URL/api/v1/sources/polaris/reports" \
   --data-binary @polaris.json
 ```
 
-The key needs scope `signals:write`. Audits up to 64 MiB are accepted. Errors: `400` (not JSON), `403` (key without `signals:write`), `413` (too large), `422` (not a Polaris audit: no `Results` array, type `polaris_report`), `503` (database unavailable).
+The key needs scope `signals:report` (a `signals:write` key is still accepted for one minor release; the answer then carries `Deprecation: true`). Audits up to 64 MiB are accepted. Errors: `400` (not JSON), `403` (key without `signals:report`), `413` (too large), `422` (not a Polaris audit: no `Results` array, type `polaris_report`), `503` (database unavailable).
 
 ## Job mode (optional CronJob)
 
-Disabled by default. Create a `signals:write` API key, store it in a Secret, then:
+Disabled by default. Create a `signals:report` API key, store it in a Secret, then:
 
 ```yaml
 sources:

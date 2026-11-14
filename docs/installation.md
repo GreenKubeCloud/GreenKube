@@ -221,7 +221,7 @@ executors next to the controller.
 ## Optional: SSO and accounts
 
 Browser users sign in with accounts and server-side sessions; machines use scoped API keys created in
-**Settings > API keys** (`read`, `write`, `approve`, `plans:deliver`, `signals:write`, `metrics:read`, `admin`). To provide the first
+**Settings > API keys** (`read`, `write`, `approve`, `plans:deliver`, `signals:write`, `signals:report`, `metrics:read`, `admin`). To provide the first
 admin password yourself (GitOps), set `auth.admin.existingSecret`. Single sign-on works through an authentication
 proxy (`config.apiAuthMode: proxy`) or native OpenID Connect (`config.apiAuthMode: oidc`), with IdP groups mapped to
 the `viewer`, `operator` and `admin` roles. See [Authentication](authentication.md).

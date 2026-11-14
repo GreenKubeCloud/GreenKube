@@ -1,0 +1,23 @@
+### Added
+- **Prometheus scrape token (F15).** The credentials bootstrap hook generates `GREENKUBE_METRICS_TOKEN` once into the Secret `<release>` (or `secrets.metricsToken`). It grants `metrics:read` only and is accepted by the API's `/prometheus/metrics`, the controller metrics listener (including `/loops`) and the worker metrics listener. The API, controller and worker ServiceMonitors send it as their bearer token; the controller still never receives the admin API key. With `secrets.existingSecret`, add the key and set `secrets.existingSecretHasMetricsToken: true`.
+- **`auth.legacyApiKey` (`AUTH_LEGACY_API_KEY`)**: what the deprecated bootstrap key `GREENKUBE_API_KEY` may do: `admin` (default, unchanged for upgraded installs), `metrics` (scrape only) or `disabled` (rejected everywhere). `api_key` mode requires `admin` (refused by the chart and at startup otherwise).
+- **`signals:report` scope (G2, G4)** for `POST /api/v1/sources/krr/reports` and `POST /api/v1/sources/polaris/reports`. A `signals:write` key is still accepted there for one minor release, answered with `Deprecation: true` and a `Warning` header and logged.
+- **HSTS:** `Strict-Transport-Security: max-age=31536000` on HTTPS responses, and on every response when `SESSION_COOKIE_SECURE=always` (`HSTS_MAX_AGE`, `HSTS_INCLUDE_SUBDOMAINS`; Helm `auth.session.hsts.*`; `maxAge: 0` disables it).
+- **PostgreSQL NetworkPolicy (on by default):** only the release's api, controller and worker Pods, and Pods labelled `greenkube.cloud/postgres-client: "true"` (backup or copy Jobs), reach the bundled PostgreSQL (`postgres.networkPolicy.enabled`, `postgres.networkPolicy.additionalIngress`).
+- **Install notes security warnings:** a warning while a full-admin bootstrap key is accepted in a browser mode, and when an Ingress or HTTPRoute is enabled with an empty `config.trustedProxyIps`.
+- **CodeQL** (`security-extended`, Python and JavaScript) in `.github/workflows/security.yml`.
+- `docs/security-model.md`: threat model of the auth modes, roles and scopes per route group, credentials, renderer isolation, outbound requests, network policies, a production hardening checklist and residual risks; linked from `SECURITY.md` and `docs/authentication.md`.
+
+### Changed
+- **No generated admin key in browser modes (N1, F15):** `session`, `oidc` and `proxy` installs no longer generate `GREENKUBE_API_KEY`; only `api_key` mode does. Upgraded installs keep the key the hook generated earlier (the hook never removes a key) and it stays an admin key until `auth.legacyApiKey` is changed; migration in `docs/authentication.md#the-bootstrap-api-key`. The install notes print the bootstrap-key command only when such a key is configured.
+- **The session cookie is `Secure` behind an HTTPS exposure (F14):** `auth.session.secureCookie: auto` renders `SESSION_COOKIE_SECURE=always` when `ingress.enabled` has an `ingress.tls` entry or `httpRoute.enabled` uses `scheme: https`.
+- **All pushed consensus votes count as one independent vote (E6, G6):** every pushed signal of a group (`push:<client>` batches and KRR/Polaris reports) together is at most one independent vote; their proposals still shape the consolidated value. Votes record `pushed`, and the auto-approval decrease guard recomputes the independent votes from the stored votes (also for consensus stored before this change), so one `signals:write` key can no longer manufacture the two independent votes that let a decrease be approved automatically.
+- **Sign-in lockout per username and client IP (F14):** the exponential lockout applies to the username+IP pair, so an attacker cannot lock a user out from another address; the per-IP budget (4x) is a plain window without escalation.
+- The self-hosted Git provider probe (F2) only contacts `https://` hosts and never a literal loopback, link-local, multicast or unspecified address; a plain-HTTP self-hosted provider is declared in `automation.providers`.
+
+### Fixed
+- **API rate limiting shared one bucket across routes:** every route of an included router keyed as `<matched-route>` (FastAPI 0.138 `_IncludedRouter` has no `path`). The limiter now keys on the registered route template of the effective route, so each route has its own budget and path parameters never create buckets.
+- **API rate limiting trusted a spoofable client address:** behind `TRUSTED_PROXY_IPS` it took the leftmost `X-Forwarded-For` entry, which the client chooses. It now uses the authentication client-address rule (the rightmost hop that is not a trusted proxy, read only from a trusted TCP peer).
+
+### Removed
+- `POST /api/v1/repository-bindings`: an unused legacy route that stored any `repo_url` for any workload. The read-only `GET` routes remain.
