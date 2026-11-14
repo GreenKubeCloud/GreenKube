@@ -4,7 +4,8 @@
 #
 #   collection -> recommendation -> plan preview -> approval -> PR on Gitea
 #   -> merge (Gitea API) -> controller sync -> GreenKube sync confirmation
-#   -> apply detection -> measurement (-> verdict when E2E_WAIT_VERDICT=1)
+#   -> apply detection -> measurement (-> verdict and projection accuracy when
+#   E2E_WAIT_VERDICT=1)
 #
 # Usage: loop.sh [argocd|flux]   (default: argocd)
 #
@@ -27,6 +28,9 @@ esac
 # to 1 to record any other verdict (regressed, not_realized, inconclusive...)
 # without failing.
 : "${E2E_ALLOW_REGRESSION:=0}"
+# v0.4 exit criterion (after the verdict): the measured allocated cost of each
+# recommendation agrees with its projection within this relative tolerance.
+: "${E2E_PROJECTION_TOLERANCE:=0.2}"
 prefix="${controller}"
 
 fail_step() {
@@ -370,6 +374,41 @@ if [[ "${E2E_WAIT_VERDICT}" == "1" ]]; then
     evidence "${prefix}.verdict" failed "${verdict_status}: ${verdict_detail}"
     exit 1
   fi
+
+  # --- 12. v0.4 exit criterion: projected vs measured allocated cost ---------------------
+  # |measured_allocated - projected_allocated| / projected_allocated must stay within
+  # E2E_PROJECTION_TOLERANCE for cost (projection-accuracy.jq). An inconclusive or
+  # contaminated measurement cannot be compared: it is recorded as a warning.
+  changes="$(gk_api GET "/api/v2/changes?plan_id=${plan_id}&limit=50")" ||
+    fail_step projection_accuracy "cannot list the changes of plan ${plan_id}"
+  save_json "${prefix}-changes" "${changes}"
+  change_measurements="[]"
+  for change_id in $(jq -r '.items[]?.change_id' <<<"${changes}"); do
+    measurement="$(gk_api GET "/api/v2/changes/${change_id}/measurements")" ||
+      fail_step projection_accuracy "cannot read the measurements of change ${change_id}"
+    save_json "${prefix}-measurements-${change_id}" "${measurement}"
+    change_measurements="$(jq -c --argjson item "${measurement}" '. + [$item]' <<<"${change_measurements}")"
+  done
+  accuracy="$(jq -cn \
+    --argjson changes "${change_measurements}" \
+    --argjson ids "$(printf '%s\n' "${rec_ids[@]}" | jq -sc 'map(tonumber)')" \
+    --argjson tolerance "${E2E_PROJECTION_TOLERANCE}" \
+    '{recommendation_ids: $ids, tolerance: $tolerance, changes: $changes}' |
+    jq -c -f "${E2E_DIR}/projection-accuracy.jq")"
+  save_json "${prefix}-projection-accuracy" "${accuracy}"
+  accuracy_status="$(jq -r .status <<<"${accuracy}")"
+  accuracy_detail="$(jq -c '[.checks[] | {recommendation_id, change_id, outcome, measured_allocated, projected_allocated, ratio, tolerance, reason}]' <<<"${accuracy}")"
+  case "${accuracy_status}" in
+    ok) evidence "${prefix}.projection_accuracy" ok "${accuracy_detail}" ;;
+    warning) evidence "${prefix}.projection_accuracy" warning "${accuracy_detail}" ;;
+    *)
+      if [[ "${E2E_ALLOW_REGRESSION}" == "1" ]]; then
+        evidence "${prefix}.projection_accuracy" projection_mismatch "${accuracy_detail} (allowed by E2E_ALLOW_REGRESSION=1)"
+      else
+        fail_step projection_accuracy "${accuracy_detail}"
+      fi
+      ;;
+  esac
 fi
 
 log "Loop for ${controller}/${workload} complete. Evidence: ${E2E_EVIDENCE_DIR}"

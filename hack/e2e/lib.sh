@@ -313,22 +313,24 @@ greenkube_api_key() {
   kubectl -n "${GK_NAMESPACE}" get secret "${GK_RELEASE}" -o jsonpath='{.data.GREENKUBE_API_KEY}' | base64 -d
 }
 
-# gk_api <method> <path> [json-body]; path is relative to /api/v1. Prints the body and
-# fails on HTTP errors; the body of a failed call is kept in ${E2E_STATE_DIR}/last-error.json.
+# gk_api <method> <path> [json-body]; path is relative to /api/v1 unless it starts
+# with /api/ (e.g. /api/v2/changes). Prints the body and fails on HTTP errors; the
+# body of a failed call is kept in ${E2E_STATE_DIR}/last-error.json.
 gk_api() {
   local method="$1" path="$2" body="${3:-}"
+  [[ "${path}" == /api/* ]] || path="/api/v1${path}"
   local args=(-sS -X "${method}" -H @- -H "Accept: application/json")
   if [[ -n "${body}" ]]; then
     args+=(-H "Content-Type: application/json" --data "${body}")
   fi
   local output status
   output="$(printf 'Authorization: Bearer %s\n' "${GK_API_KEY:?GK_API_KEY is not set}" |
-    curl "${args[@]}" -w '\n%{http_code}' "${GK_LOCAL_URL}/api/v1${path}")" || return 1
+    curl "${args[@]}" -w '\n%{http_code}' "${GK_LOCAL_URL}${path}")" || return 1
   status="${output##*$'\n'}"
   output="${output%$'\n'*}"
   if [[ "${status}" -ge 400 ]]; then
     printf '%s\n' "${output}" >"${E2E_STATE_DIR}/last-error.json"
-    warn "${method} /api/v1${path} -> HTTP ${status}: ${output:0:600}"
+    warn "${method} ${path} -> HTTP ${status}: ${output:0:600}"
     return 1
   fi
   printf '%s' "${output}"
