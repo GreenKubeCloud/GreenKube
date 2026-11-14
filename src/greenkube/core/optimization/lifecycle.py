@@ -186,12 +186,40 @@ def _event_time(event: RecommendationEvent) -> datetime:
     return ensure_utc(event.created_at)
 
 
+#: Plan statuses that end a plan without delivering it: its approval decided nothing.
+_ABANDONED_PLAN_STATUSES = frozenset({"closed", "stale", "failed", "rejected", "superseded"})
+
+
+def _abandoned_plan_ids(events: Iterable[RecommendationEvent]) -> set[str]:
+    """Plans whose latest recorded status ends them without delivery (closed, stale, failed...)."""
+    latest: dict[str, tuple[datetime, Optional[str]]] = {}
+    for event in events:
+        if event.event_type != "plan_status_changed":
+            continue
+        details = getattr(event.payload, "details", None) or {}
+        linked = details.get("plan_id")
+        if not linked:
+            continue
+        moment = _event_time(event)
+        if linked not in latest or moment >= latest[linked][0]:
+            latest[linked] = (moment, details.get("new_status"))
+    return {linked for linked, (_, status) in latest.items() if status in _ABANDONED_PLAN_STATUSES}
+
+
 def _plan_status_event_time(
     events: Iterable[RecommendationEvent],
     new_status: str,
     plan_id: Optional[str],
+    *,
+    skip_abandoned: bool = False,
 ) -> Optional[datetime]:
-    """Return the latest time a linked plan entered ``new_status``."""
+    """Return the latest time a linked plan entered ``new_status``.
+
+    With ``skip_abandoned``, plans that ended without delivery (closed, stale,
+    failed, rejected, superseded) are left out.
+    """
+    events = list(events)
+    abandoned: set[str] = _abandoned_plan_ids(events) if skip_abandoned else set()
     latest: Optional[datetime] = None
     for event in events:
         if event.event_type != "plan_status_changed":
@@ -200,6 +228,8 @@ def _plan_status_event_time(
         if details.get("new_status") != new_status:
             continue
         if plan_id is not None and details.get("plan_id") not in (None, plan_id):
+            continue
+        if details.get("plan_id") in abandoned:
             continue
         moment = _event_time(event)
         if latest is None or moment > latest:
@@ -394,7 +424,9 @@ class RecommendationLifecycle:
         merged = _plan_status_event_time(events, "merged", plan_id)
         if merged is not None:
             return merged
-        return _plan_status_event_time(events, "approved", plan_id)
+        # Without a known plan (manual or detected apply), the approval of a plan that
+        # was then closed, went stale or failed did not decide this change.
+        return _plan_status_event_time(events, "approved", plan_id, skip_abandoned=plan_id is None)
 
     async def expire(self, now: Optional[datetime] = None) -> List[RecommendationRecord]:
         """Marks TTL-elapsed active recommendations as expired and records events.

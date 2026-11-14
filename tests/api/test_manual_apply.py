@@ -15,6 +15,7 @@ from greenkube.api.routers.manual_apply import get_manual_resource_reader, manua
 from greenkube.core.db import db_manager
 from greenkube.core.optimization.applied_detector import ResourceReadError
 from greenkube.gitops.contracts import ActionPlanV3, ContainerResources, ResourceTarget, SetContainerResources
+from greenkube.models.evidence import LimitChange, RecommendationEvidence
 from greenkube.models.metrics import RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 
@@ -79,6 +80,30 @@ def test_a_typed_rightsizing_becomes_a_strategic_kubectl_patch() -> None:
     assert rollout == "kubectl rollout status deployment checkout -n prod"
     assert guide.diff is not None and "-cpu: 500m" in guide.diff and "+cpu: 250m" in guide.diff
     assert guide.can_mark_applied
+
+
+def test_the_diff_shows_the_memory_limit_an_oom_increase_raises() -> None:
+    # Live e2e: the patch raised the limit to 40Mi but the diff only showed the request, in bytes.
+    mib = 1024 * 1024
+    record = _rightsizing(
+        type=RecommendationType.RIGHTSIZING_MEMORY,
+        current_cpu_request_millicores=None,
+        recommended_cpu_request_millicores=None,
+        current_memory_request_bytes=32 * mib,
+        recommended_memory_request_bytes=36 * mib,
+        evidence=RecommendationEvidence(
+            limit_changes=[
+                LimitChange(resource="memory", action="set", current=32 * mib, proposed=40 * mib, reason="oom_headroom")
+            ]
+        ),
+    )
+
+    diff = manual_guide(record).diff
+
+    assert diff is not None
+    requests, limits = diff.split("@@ resources.limits @@\n")
+    assert "-memory: 32Mi\n+memory: 36Mi\n" in requests
+    assert limits == "-memory: 32Mi\n+memory: 40Mi\n"
 
 
 def test_an_orphaned_volume_becomes_a_kubectl_delete_with_the_retained_disk_note() -> None:
