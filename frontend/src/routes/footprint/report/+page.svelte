@@ -177,7 +177,7 @@
 	<div>
 		<h1 class="text-2xl font-bold text-dark-100">Report</h1>
 		<p class="text-sm text-dark-500 mt-1">
-			Configure, preview and export your FinGreenOps report as CSV or JSON.
+			Configure, preview and export your cost, energy and CO₂e report as CSV or JSON.
 		</p>
 	</div>
 

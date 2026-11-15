@@ -35,20 +35,25 @@ async def health(request: Request):
             logger.warning("Schema readiness check failed (%s).", type(error).__name__)
             return JSONResponse(
                 status_code=503,
-                content=HealthResponse(status="database_unavailable", version=__version__).model_dump(),
+                content=HealthResponse(status="database_unavailable", version=__version__, demo=_demo()).model_dump(),
             )
         if not schema.current:
             return JSONResponse(
                 status_code=503,
-                content=HealthResponse(status="migrating", version=__version__).model_dump(),
+                content=HealthResponse(status="migrating", version=__version__, demo=_demo()).model_dump(),
             )
     supervisor = getattr(request.app.state, "automation_loop_supervisor", None)
     if supervisor is not None and not supervisor.health.ready():
         return JSONResponse(
             status_code=503,
-            content=HealthResponse(status="degraded", version=__version__).model_dump(),
+            content=HealthResponse(status="degraded", version=__version__, demo=_demo()).model_dump(),
         )
-    return HealthResponse(status="ok", version=__version__, collection=await _collection_status())
+    return HealthResponse(status="ok", version=__version__, collection=await _collection_status(), demo=_demo())
+
+
+def _demo() -> bool:
+    """Whether this API runs `greenkube demo` (``GREENKUBE_DEMO_MODE``)."""
+    return bool(getattr(get_config(), "GREENKUBE_DEMO_MODE", False))
 
 
 async def _collection_status():

@@ -168,6 +168,27 @@ describe('deliveryHint and targetName', () => {
 		expect(deliveryHint({})).toBeNull();
 	});
 
+	it('drops the "no automation" blockers in demo mode only', () => {
+		const rec = {
+			eligibility: {
+				can_open_pr: false,
+				blockers: [
+					{ code: 'action_unavailable', message: 'No typed change' },
+					{ code: 'automation_not_configured', message: 'No plan service' }
+				]
+			}
+		};
+		expect(deliveryHint(rec)).toEqual({ ready: false, text: 'No typed change' });
+		expect(deliveryHint(rec, true)).toBeNull();
+		const bound = {
+			eligibility: {
+				can_open_pr: false,
+				blockers: [...rec.eligibility.blockers, { code: 'binding_unresolved', message: 'No Git source' }]
+			}
+		};
+		expect(deliveryHint(bound, true)).toEqual({ ready: false, text: 'No Git source' });
+	});
+
 	it('prefers the workload owner', () => {
 		expect(targetName({ owner_kind: 'Deployment', owner_name: 'api', pod_name: 'api-0' })).toBe('Deployment/api');
 		expect(targetName({ pod_name: 'api-0' })).toBe('api-0');

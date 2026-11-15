@@ -18,7 +18,7 @@
  */
 import { eligibilityOf, expectedValue } from '$lib/utils/decision.js';
 import { getDisplayCurrency } from '$lib/utils/format.js';
-import { savingsFigures } from '$lib/savingsVocabulary.js';
+import { savingsFigures, visibleDiagnostics } from '$lib/savingsVocabulary.js';
 
 function finite(value) {
 	const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
@@ -155,11 +155,13 @@ export function targetName(rec) {
 }
 
 /** One-line delivery state of a recommendation from the server's eligibility. */
-export function deliveryHint(rec) {
+export function deliveryHint(rec, demo = false) {
 	const eligibility = eligibilityOf(rec);
 	if (!eligibility) return null;
 	if (eligibility.canOpenPr) return { ready: true, text: 'Ready for a pull request' };
-	const blocker = eligibility.blockers[0];
+	// Demo mode: "no automation on this install" is said once on the page, not on every row.
+	const blocker = visibleDiagnostics(eligibility, demo).blockers[0];
+	if (!blocker && demo) return null;
 	if (blocker) return { ready: false, text: blocker.message || blocker.code };
 	return { ready: false, text: 'Not deliverable as a pull request' };
 }

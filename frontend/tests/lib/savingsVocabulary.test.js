@@ -8,7 +8,14 @@ import { render, screen } from '@testing-library/svelte';
 import SavingsHero from '$lib/components/SavingsHero.svelte';
 import MeasurementTable from '$lib/components/MeasurementTable.svelte';
 import { buildSavingsOverview } from '$lib/overview.js';
-import { outcomeLabel, realizationFactorOf, realizationText, savingsFigures } from '$lib/savingsVocabulary.js';
+import {
+	outcomeLabel,
+	realizationFactorOf,
+	realizationText,
+	savingPhrase,
+	savingsFigures,
+	visibleDiagnostics
+} from '$lib/savingsVocabulary.js';
 import { stateLabel } from '$lib/changes.js';
 
 const current = {
@@ -126,5 +133,49 @@ describe('SavingsHero vocabulary', () => {
 		expect(realization).toBeTruthy();
 		expect(screen.getByTestId('realized-cost')).toHaveTextContent('$120');
 		expect(screen.queryByTestId('realization-factor')).not.toBeInTheDocument();
+	});
+});
+
+describe('savingPhrase', () => {
+	const money = (value) => '$' + value.toFixed(2);
+	const kg = (grams) => (grams / 1000).toFixed(2) + ' kg';
+
+	it('reads a saving as a positive amount, never with a minus sign', () => {
+		expect(savingPhrase(232.53, money)).toBe('saves $232.53/yr');
+		expect(savingPhrase(69900, kg, { suffix: ' CO₂e/yr' })).toBe('saves 69.90 kg CO₂e/yr');
+		expect(savingPhrase(580, money, { verb: 'saved' })).toBe('saved $580.00/yr');
+	});
+
+	it('keeps an increase as an increase', () => {
+		expect(savingPhrase(-40, money)).toBe('costs $40.00 more/yr');
+		expect(savingPhrase(-40, money, { verb: 'saved' })).toBe('cost $40.00 more/yr');
+	});
+
+	it('returns null for missing or zero values', () => {
+		expect(savingPhrase(null, money)).toBeNull();
+		expect(savingPhrase(undefined, money)).toBeNull();
+		expect(savingPhrase(0, money)).toBeNull();
+	});
+});
+
+describe('visibleDiagnostics', () => {
+	const eligibility = {
+		blockers: [
+			{ code: 'action_unavailable', message: 'No typed change' },
+			{ code: 'binding_unresolved', message: 'No Git source' }
+		],
+		warnings: [{ code: 'automation_not_configured', message: 'No plan service' }]
+	};
+
+	it('shows every diagnostic on a real install', () => {
+		expect(visibleDiagnostics(eligibility)).toEqual({ blockers: eligibility.blockers, warnings: eligibility.warnings });
+	});
+
+	it('hides only the automation-unavailable diagnostics in demo mode', () => {
+		expect(visibleDiagnostics(eligibility, true)).toEqual({
+			blockers: [{ code: 'binding_unresolved', message: 'No Git source' }],
+			warnings: []
+		});
+		expect(visibleDiagnostics(null, true)).toEqual({ blockers: [], warnings: [] });
 	});
 });

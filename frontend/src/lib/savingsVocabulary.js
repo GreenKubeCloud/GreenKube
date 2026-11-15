@@ -88,3 +88,36 @@ export function realizationText(factor) {
 	if (value === null) return '';
 	return `${SAVINGS_TERMS.realizationFactor} ${Math.round(value * 100)}%: the expected share of an allocated saving that reaches the bill once capacity is removed.`;
 }
+
+/**
+ * A saving as a positive phrase: `saves $232.53/yr`. A negative value is an
+ * increase and keeps its meaning: `costs $40.00 more/yr`. `verb` is `saves`
+ * for projections and `saved` for applied results; `suffix` follows the
+ * amount (for example ` CO₂e/yr`). Null for a missing or zero value.
+ */
+export function savingPhrase(value, format, { verb = 'saves', suffix = '/yr' } = {}) {
+	const number = Number(value);
+	if (value === null || value === undefined || !Number.isFinite(number) || number === 0) return null;
+	if (number > 0) return `${verb} ${format(number)}${suffix}`;
+	return `${verb === 'saved' ? 'cost' : 'costs'} ${format(-number)} more${suffix}`;
+}
+
+/**
+ * Per-recommendation diagnostics that only say "this install has no GitOps
+ * automation". In demo mode the page shows one demo notice instead; on a real
+ * install they are always shown.
+ */
+export const AUTOMATION_UNAVAILABLE_CODES = new Set([
+	'action_unavailable',
+	'automation_not_configured',
+	'automation_disabled'
+]);
+
+/** The eligibility blockers and warnings a card shows (demo mode drops the automation-unavailable ones). */
+export function visibleDiagnostics(eligibility, demo = false) {
+	const keep = (item) => !(demo && AUTOMATION_UNAVAILABLE_CODES.has(item?.code));
+	return {
+		blockers: (eligibility?.blockers ?? []).filter(keep),
+		warnings: (eligibility?.warnings ?? []).filter(keep)
+	};
+}

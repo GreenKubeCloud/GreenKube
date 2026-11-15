@@ -23,6 +23,17 @@ class TestHealthEndpoint:
         assert "version" in data
         assert isinstance(data["version"], str)
 
+    def test_health_is_not_demo_by_default(self, client):
+        """A real install never reports demo mode."""
+        assert client.get("/api/v1/health").json()["demo"] is False
+
+    def test_health_reports_demo_mode(self, client, monkeypatch):
+        """`greenkube demo` sets GREENKUBE_DEMO_MODE, which the UI reads to show one demo notice."""
+        from greenkube.core.config import get_config
+
+        monkeypatch.setattr(get_config(), "GREENKUBE_DEMO_MODE", True)
+        assert client.get("/api/v1/health").json()["demo"] is True
+
 
 class TestSchemaReadiness:
     """F11: only the controller migrates; API replicas are not ready until the schema is current."""

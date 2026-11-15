@@ -1,7 +1,7 @@
 <script>
 	import '../app.css';
 	import { page } from '$app/stores';
-	import { sidebarCollapsed, servicesHealth, healthPopupDismissed, currentUser, hasScope } from '$lib/stores.js';
+	import { sidebarCollapsed, servicesHealth, healthPopupDismissed, currentUser, hasScope, demoMode } from '$lib/stores.js';
 	import {
 		ApiError,
 		AUTH_REQUIRED_EVENT,
@@ -160,6 +160,7 @@
 		(async () => {
 			try {
 				health = await getHealth();
+				demoMode.set(health?.demo === true);
 			} catch {
 				healthError = true;
 			}
@@ -256,7 +257,7 @@
 <!-- Health Popup (shown once on first load if issues detected) -->
 <HealthPopup
 	services={$servicesHealth?.services}
-	visible={showHealthPopup}
+	visible={showHealthPopup && !$demoMode}
 	on:dismiss={handlePopupDismiss}
 />
 
@@ -270,7 +271,7 @@
 			{#if !$sidebarCollapsed}
 				<div class="overflow-hidden">
 					<h1 class="text-base font-bold text-dark-100 truncate">GreenKube</h1>
-					<p class="text-[10px] text-dark-500 truncate">FinGreenOps Platform</p>
+					<p class="text-[10px] text-dark-500 truncate">Kubernetes optimization loop</p>
 				</div>
 			{/if}
 		</div>
@@ -297,8 +298,8 @@
 
 		<!-- Bottom section -->
 		<div class="p-3 border-t border-dark-700/50">
-			<!-- Service health indicators -->
-			{#if Object.keys(activeServices).length > 0}
+			<!-- Service health indicators (none in the demo: it has no cluster to connect to) -->
+			{#if !$demoMode && Object.keys(activeServices).length > 0}
 				<div class="space-y-1 mb-2">
 					{#each Object.entries(activeServices) as [name, svc]}
 						<div class="flex items-center gap-2 px-2 py-0.5" title="{svc.message}">
@@ -326,7 +327,13 @@
 
 			{#if $currentUser}
 				<div class="mt-1 border-t border-dark-700/50 pt-2" data-testid="account-menu">
-					{#if $currentUser.kind === 'anonymous'}
+					{#if $currentUser.kind === 'anonymous' && $demoMode}
+						{#if !$sidebarCollapsed}
+							<p class="px-2 text-[10px] text-dark-400" title="Demo mode: synthetic data, no cluster, pull requests disabled." data-testid="demo-badge">
+								Demo
+							</p>
+						{/if}
+					{:else if $currentUser.kind === 'anonymous'}
 						{#if !$sidebarCollapsed}
 							<p class="px-2 text-[10px] text-yellow-500" title="No account exists yet and no API key is configured.">
 								Sign-in disabled (development)
@@ -406,7 +413,7 @@
 				Password changed. The initial admin password was erased from its Kubernetes Secret.
 			</div>
 		{/if}
-		{#if !$setupBannerDismissed && !$page.url.pathname.startsWith('/setup')}
+		{#if !$demoMode && !$setupBannerDismissed && !$page.url.pathname.startsWith('/setup')}
 			<SetupBanner status={$setupStatus} on:dismiss={() => setupBannerDismissed.set(true)} />
 		{/if}
 		{#key authEpoch}

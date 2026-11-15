@@ -669,6 +669,10 @@ There is no production profile: the default topology is production-grade. For pr
 
 See the [Installation guide](installation.md#credentials-and-gitops-argo-cd-flux).
 
+`GREENKUBE_DEMO_MODE` (default `false`, no Helm value) is set by `greenkube demo` only. `GET /api/v1/health`
+reports it as `demo`, and the UI then shows one demo notice instead of per-recommendation automation diagnostics
+and "Demo" instead of the sign-in state. Never set it on a real install: it hides true diagnostics.
+
 ## On-premises and bare-metal clusters
 
 Cloud providers automatically expose zone labels on nodes (`topology.kubernetes.io/zone`). On-premises clusters require manual configuration:

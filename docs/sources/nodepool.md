@@ -1,10 +1,18 @@
-# NodePools and autoscalers (`greenkube.nodepool`)
+# Karpenter and the Cluster Autoscaler (`greenkube.nodepool`)
 
-GreenKube reads the cluster's autoscalers for two purposes (roadmap G5): to estimate how much released capacity really becomes removed nodes (the realization factor), and to advise on Karpenter NodePool policies.
+> This page documents Karpenter and the Cluster Autoscaler. The file keeps its historical name (`nodepool.md`) so existing links work; the source id is `greenkube.nodepool` (v1 `source: karpenter`).
+
+GreenKube reads the cluster's autoscalers for three purposes (roadmap G5): to recommend consolidating under-utilized Karpenter NodePools, to estimate how much released capacity really becomes removed nodes (the realization factor, from Karpenter or the Cluster Autoscaler), and to advise on Karpenter NodePool policies. The source is enabled automatically when the Karpenter CRDs exist; the Cluster Autoscaler is read for the realization factor only, and never produces recommendations.
+
+Code: `src/greenkube/core/optimization/providers/karpenter.py`.
+
+## NodePool consolidation (Karpenter)
+
+For each Karpenter NodePool with at least two claimed nodes, GreenKube computes the time-weighted CPU request utilization of its nodes (requests over allocatable, from its own node and usage data). Below `NODE_UTILIZATION_THRESHOLD` (default 20%) it emits an `OVERPROVISIONED_NODE` recommendation (capability `node_pool`, target `nodepool/<name>`). The number of removable nodes keeps `ceil(nodes x utilization)` nodes, with utilization the larger of the CPU and memory request utilization, and the projection prices the cheapest removable nodes (node-hours x node price, realization factor 1, because the consolidation is the action itself). This is GreenKube's heuristic over Karpenter's state, not Karpenter's own advice. It is reviewed by a person: there is no NodePool pull request yet (roadmap H7).
 
 ## Realization context (not recommendations)
 
-The controller reads, read-only:
+The controller reads, read-only (Cluster Autoscaler and Karpenter):
 
 - the Cluster Autoscaler status ConfigMap `kube-system/cluster-autoscaler-status`;
 - Karpenter NodePools (consolidation policy, disruption budgets) and NodeClaims (claim → pool);
