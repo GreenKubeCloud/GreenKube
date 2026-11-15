@@ -159,6 +159,7 @@ def assemble_savings_report(
     accrued_only: Optional[List[SavingsAccrualTotal]] = None,
     source: str = "ledger_v2",
     projected_unverified: Optional[List[SavingsAccrualTotal]] = None,
+    cost_of_fix: Optional[List[SavingsAccrualTotal]] = None,
 ) -> SavingsReport:
     """Build the report from applied recommendations and ledger totals.
 
@@ -167,7 +168,9 @@ def assemble_savings_report(
     ``source="ledger_v1"`` it is the v1 staging ledger (fallback, flagged).
     ``projected_unverified`` holds the ledger totals of the changes whose
     measurement was inconclusive: reported apart and left out of
-    ``projected_to_date`` (LED-03).
+    ``projected_to_date`` (LED-03). ``cost_of_fix`` holds the measured cost of
+    reliability fixes, reported in ``reliability_cost_to_date``, never netted
+    into a saving.
     """
     rates = annual_rates_by_method(applied_records)
     blocks = {"source": source, "accrued_only": accrued_only}
@@ -218,6 +221,9 @@ def assemble_savings_report(
         projected_to_date=projected_to_date,
         user_declared_annual=_annual_block(rates, METHOD_USER_DECLARED),
         projected_unverified_to_date=unverified_block,
+        reliability_cost_to_date=(
+            _accrued_block(cost_of_fix, METHOD_MEASURED, start, end, source=source) if cost_of_fix is not None else None
+        ),
         user_declared_to_date=_accrued_block(
             breakdown,
             METHOD_USER_DECLARED,

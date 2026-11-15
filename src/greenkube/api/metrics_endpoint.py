@@ -435,7 +435,8 @@ NS_REC_SAVINGS_COST = Gauge(
 # The ``*_attributed_*_total`` and ``*_reversed_*_total`` families are monotonic
 # counters computed from the append-only, hash-chained ledger v2 (LED-04:
 # positive entries are attributed, negative entries such as supersession,
-# drift and restatement reversals are reversed), labelled by ``method``
+# drift and restatement reversals are reversed; the cost of reliability fixes
+# is a cost, never a saving, and is left out), labelled by ``method``
 # (projected, measured, user_declared). Net savings = attributed − reversed.
 # Never sum methods: only ``method="measured"`` is realized savings.
 # ---------------------------------------------------------------------------
@@ -453,7 +454,8 @@ class _SavingsLedgerCounterCollector:
         ),
         (
             "greenkube_cost_savings_attributed_dollars",
-            "Cumulative cost (dollars) accrued in the savings ledger, by method. Monotonic.",
+            "Cumulative cost (dollars) accrued in the savings ledger, by method; the cost of reliability fixes "
+            "is not a saving and is left out. Monotonic.",
             "accrued_cost_dollars",
         ),
         (
@@ -463,7 +465,8 @@ class _SavingsLedgerCounterCollector:
         ),
         (
             "greenkube_cost_savings_reversed_dollars",
-            "Cumulative cost reversed: negative ledger entries (supersession, drift, restatement). Monotonic.",
+            "Cumulative cost reversed: negative savings entries (supersession, drift, restatement); the cost of "
+            "reliability fixes is not counted. Monotonic.",
             "reversed_cost_dollars",
         ),
     )

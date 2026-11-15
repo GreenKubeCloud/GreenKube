@@ -268,6 +268,13 @@ class SavingsReport(BaseModel):
     projected_to_date: SavingsBlock
     user_declared_annual: SavingsBlock
     user_declared_to_date: SavingsBlock
+    reliability_cost_to_date: Optional[SavingsBlock] = Field(
+        None,
+        description=(
+            "Measured cost of reliability fixes (request increases) over the window: negative, a cost and never "
+            "a saving, kept out of realized_to_date (ledger reason cost_of_fix)."
+        ),
+    )
     projected_unverified_to_date: Optional[SavingsBlock] = Field(
         None,
         description=(

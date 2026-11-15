@@ -363,6 +363,7 @@ async def get_savings_summary(
         raise HTTPException(status_code=503, detail="Recommendation store unavailable.") from exc
     accrued_only = None
     unverified = None
+    fixes = None
     source = "ledger_v2"
     try:
         cluster_name = _get_savings_cluster_name()
@@ -381,6 +382,9 @@ async def get_savings_summary(
             unverified = await ledger_repo.accrual_breakdown(
                 identity[0], start, end, namespace=namespace, recommendation_ids=inconclusive
             )
+            fixes = await ledger_repo.accrual_breakdown(
+                identity[0], start, end, namespace=namespace, reasons=("cost_of_fix",)
+            )
         else:
             source = "ledger_v1"
             breakdown = await savings_repo.get_accrual_breakdown(cluster_name, start, end, namespace=namespace)
@@ -398,6 +402,7 @@ async def get_savings_summary(
         accrued_only=accrued_only,
         source=source,
         projected_unverified=unverified,
+        cost_of_fix=fixes,
     )
 
 

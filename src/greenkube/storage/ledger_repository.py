@@ -137,7 +137,13 @@ class SummaryRow:
     entries: int
     #: Accounting basis (stored, or inferred from the method for entries stored before ledger/2).
     basis: str = ""
+    #: ``cost_of_fix`` for the cost of reliability fixes (reported apart), ``""`` for savings.
+    reason_group: str = ""
 
+
+#: SQL true for the cost of a reliability fix and its reversals (their group key carries ``cost_of_fix:``): a
+#: cost, never a saving, reported apart from every savings total (review WP-09).
+_COST_OF_FIX_SQL = "group_key LIKE '%cost_of_fix:%'"
 
 #: SQL of an entry's accounting basis (``model.basis_of``): entries stored before migration 0160 have none.
 _BASIS_SQL = (
@@ -856,6 +862,7 @@ class LedgerRepository:
         namespace: Optional[str] = None,
         books: Optional[Sequence[str]] = None,
         recommendation_ids: Optional[Sequence[int]] = None,
+        reasons: Optional[Sequence[str]] = None,
     ) -> List[SavingsAccrualTotal]:
         """Net amounts per namespace, recommendation type and method, in the v1 report shape (LED-04).
 
@@ -879,6 +886,9 @@ class LedgerRepository:
             params.extend(ids)
 
         where += " AND quantity IN ('cost', 'co2e_g')"
+        # The cost of a reliability fix is never netted into savings: only with reasons=("cost_of_fix",).
+        cost_of_fix = reasons is not None and "cost_of_fix" in reasons
+        where += f" AND {_COST_OF_FIX_SQL}" if cost_of_fix else f" AND NOT ({_COST_OF_FIX_SQL})"
         share, share_params = self._share(start, end)
         rows = await self._select(
             "SELECT namespace, recommendation_type, method, quantity, SUM(value * share) AS value "
@@ -914,6 +924,7 @@ class LedgerRepository:
             "SUM(CASE WHEN value > 0 THEN value ELSE 0 END) AS accrued, "
             "SUM(CASE WHEN value < 0 THEN -value ELSE 0 END) AS reversed "
             "FROM savings_ledger_entries WHERE cluster_uid = ? AND quantity IN ('cost', 'co2e_g') "
+            f"AND NOT ({_COST_OF_FIX_SQL}) "
             "GROUP BY recommendation_type, method, quantity",
             [cluster_uid],
         )
@@ -977,11 +988,12 @@ class LedgerRepository:
         where, params = self._filters(cluster_uid, {"namespace": namespace}, start, end)
         share, share_params = self._share(start, end)
         rows = await self._select(
-            "SELECT method, quantity, unit, book, entry_kind, basis, SUM(value * share) AS value, COUNT(*) AS entries "
-            f"FROM (SELECT method, quantity, unit, book, entry_kind, {_BASIS_SQL} AS basis, value, {share} AS share "
-            f"FROM savings_ledger_entries WHERE {where}) AS windowed "
-            "GROUP BY method, quantity, unit, book, entry_kind, basis "
-            "ORDER BY method, quantity, book, entry_kind, basis",
+            "SELECT method, quantity, unit, book, entry_kind, basis, reason_group, SUM(value * share) AS value, "
+            "COUNT(*) AS entries FROM (SELECT method, quantity, unit, book, entry_kind, "
+            f"{_BASIS_SQL} AS basis, CASE WHEN {_COST_OF_FIX_SQL} THEN 'cost_of_fix' ELSE '' END AS reason_group, "
+            f"value, {share} AS share FROM savings_ledger_entries WHERE {where}) AS windowed "
+            "GROUP BY method, quantity, unit, book, entry_kind, basis, reason_group "
+            "ORDER BY method, quantity, book, entry_kind, basis, reason_group",
             [*share_params, *params],
         )
         return [
@@ -994,6 +1006,7 @@ class LedgerRepository:
                 value=float(row["value"] or 0.0),
                 entries=int(row["entries"] or 0),
                 basis=str(row["basis"]),
+                reason_group=str(row["reason_group"] or ""),
             )
             for row in rows
         ]

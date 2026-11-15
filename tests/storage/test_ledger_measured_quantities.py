@@ -105,7 +105,24 @@ async def test_the_cost_of_a_reliability_fix_is_booked_as_a_labelled_negative_en
     assert math.fsum(entry.value for entry in costs) == pytest.approx(-0.2, rel=1e-9)  # 0.02/h x 10 h
     cpu = await _entries(ledger, 8, QUANTITY_CPU_CORE_HOURS)
     assert math.fsum(entry.value for entry in cpu) == pytest.approx(-2.5, rel=1e-9)  # an increase reserves
+    # Review WP-09 point 2: the cost of a fix is never netted into the measured savings or their counters.
     breakdown = await ledger.repo.accrual_breakdown(CLUSTER_UID)
     assert math.fsum(row.cost_saved_dollars for row in breakdown if row.method == "measured") == pytest.approx(
-        -0.2, rel=1e-9
+        0.0, abs=1e-12
     )
+    counters = await ledger.repo.lifetime_counters(CLUSTER_UID)
+    assert math.fsum(row.reversed_cost_dollars + row.accrued_cost_dollars for row in counters) == pytest.approx(
+        0.0, abs=1e-12
+    )
+    fixes = await ledger.repo.accrual_breakdown(CLUSTER_UID, reasons=(REASON_COST_OF_FIX,))
+    assert math.fsum(row.cost_saved_dollars for row in fixes) == pytest.approx(-0.2, rel=1e-9)
+    rows = await ledger.repo.summary(CLUSTER_UID)
+    assert {row.reason_group for row in rows if row.quantity == QUANTITY_COST} == {REASON_COST_OF_FIX}
+
+    # Its own block in the savings report.
+    from greenkube.core.savings_report import assemble_savings_report
+
+    report = assemble_savings_report([record], breakdown, cost_of_fix=fixes)
+    assert report.realized_to_date.cost == pytest.approx(0.0, abs=1e-12)
+    assert report.reliability_cost_to_date is not None
+    assert report.reliability_cost_to_date.cost == pytest.approx(-0.2, rel=1e-9)

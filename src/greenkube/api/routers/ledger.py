@@ -341,6 +341,7 @@ async def get_ledger_summary(
         "currencies": [],
         "methods": dict(METHOD_BASIS),
         "entries_by_kind": {},
+        "cost_of_fix": [],
         "chain": None,
     }
     if cluster_uid is None:
@@ -355,7 +356,17 @@ async def get_ledger_summary(
     # Never summed across methods, quantities or currencies: one total per (method, quantity, unit).
     totals: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     by_kind: Dict[str, int] = {}
+    cost_of_fix: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for row in rows:
+        if row.reason_group == "cost_of_fix":
+            # The cost of reliability fixes: a cost, never a saving, so never inside a savings total.
+            fix = cost_of_fix.setdefault(
+                (row.method, row.unit),
+                {"method": row.method, "quantity": row.quantity, "unit": row.unit, "currency": row.unit, "value": 0.0},
+            )
+            fix["value"] += row.value
+            by_kind[row.entry_kind] = by_kind.get(row.entry_kind, 0) + row.entries
+            continue
         bucket = totals.setdefault(
             (row.method, row.quantity, row.unit),
             {
@@ -382,6 +393,7 @@ async def get_ledger_summary(
     base["totals"] = sorted(totals.values(), key=lambda item: (item["method"], item["quantity"], item["unit"]))
     base["currencies"] = sorted({item["unit"] for item in totals.values() if item["quantity"] == QUANTITY_COST})
     base["entries_by_kind"] = by_kind
+    base["cost_of_fix"] = sorted(cost_of_fix.values(), key=lambda item: (item["method"], item["unit"]))
     base["chain"] = {
         "head_seq": head_seq or None,
         "head_hash": head_hash,
