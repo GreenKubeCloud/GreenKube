@@ -9,7 +9,7 @@ coverage of ``[start, end)`` is the share of its steps that were collected
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -45,6 +45,9 @@ REASON_RECOLLECT_SKIPPED = "recollect_skipped"
 #: ``cost_status`` of a step whose rows carry modeled cost because OpenCost could not price it
 #: (outage, lag, rejected request); the collection job re-prices it once OpenCost answers (COST-01).
 COST_STATUS_PENDING = "opencost_pending"
+#: ``cost_status`` of a pending step that left the backfill horizon before OpenCost priced it: its rows keep
+#: their untrusted ``opencost_pending`` cost for good (COST-01).
+COST_STATUS_PENDING_EXPIRED = "opencost_pending_expired"
 
 
 @dataclass(frozen=True)
@@ -211,6 +214,19 @@ class CollectionWindowRepository(ABC):
         ]
         records.sort(key=lambda record: (record.collected_at or record.window_start, record.window_start))
         return records[: max(int(limit), 0)]
+
+    async def expire_cost_pending(self, cluster_uid: str, source: str, before: datetime) -> int:
+        """Mark pending steps starting before ``before`` as ``opencost_pending_expired``; returns their number."""
+        records = [
+            record
+            for record in await self.list_overlapping(
+                cluster_uid, source, datetime(1970, 1, 1, tzinfo=before.tzinfo), before
+            )
+            if record.cost_status == COST_STATUS_PENDING and record.window_start < before
+        ]
+        if records:
+            await self.record([replace(record, cost_status=COST_STATUS_PENDING_EXPIRED) for record in records])
+        return len(records)
 
     @abstractmethod
     async def expire_failed(self, cluster_uid: str, source: str, before: datetime) -> int:

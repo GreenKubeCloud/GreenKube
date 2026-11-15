@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any
 
 from greenkube.storage.base_collection_window_repository import (
+    COST_STATUS_PENDING,
+    COST_STATUS_PENDING_EXPIRED,
     STATUS_FAILED,
     STATUS_GAP,
     CollectionWindowRecord,
@@ -135,6 +137,23 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
                 max(int(limit), 0),
             )
         return [_row(row) for row in rows]
+
+    async def expire_cost_pending(self, cluster_uid: str, source: str, before: datetime) -> int:
+        """Pending steps older than ``before`` become ``opencost_pending_expired`` (COST-01)."""
+        async with self.db_manager.connection_scope() as conn:
+            result = await conn.execute(
+                """UPDATE collection_windows SET cost_status = $1
+                WHERE cluster_uid = $2 AND source = $3 AND cost_status = $4 AND window_start < $5""",
+                COST_STATUS_PENDING_EXPIRED,
+                cluster_uid,
+                source,
+                COST_STATUS_PENDING,
+                ensure_utc(before),
+            )
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
 
     async def expire_failed(self, cluster_uid: str, source: str, before: datetime) -> int:
         """Failed steps older than ``before`` become gaps."""

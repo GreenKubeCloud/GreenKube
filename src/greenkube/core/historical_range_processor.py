@@ -16,6 +16,7 @@ from ..collectors.metrics_server_collector import MetricsServerCollector
 from ..collectors.node_collector import NodeCollector
 from ..collectors.opencost_collector import (
     OPENCOST_STATUS_EMPTY,
+    OPENCOST_STATUS_NOT_CONFIGURED,
     OPENCOST_STATUS_OK,
     OpenCostCollector,
     opencost_step_shares,
@@ -193,6 +194,9 @@ class HistoricalRangeProcessor:
         #: True when the last ``run_range`` window waits for OpenCost: its modeled rows carry
         #: ``cost_source = opencost_pending`` and the collection job re-prices it later (COST-01).
         self.last_cost_pending = False
+        #: Steps of the last ``run_range`` call with a row whose OpenCost allocation carried no usable cost
+        #: while OpenCost is known: those rows are ``opencost_pending`` too (review of COST-01/COST-05).
+        self.last_cost_pending_steps: set[datetime] = set()
         #: OpenCost priced a window before (in this process, or per the stored step records): an empty
         #: OpenCost answer is then a lag or a gap of OpenCost's own data, not a cluster without OpenCost.
         self.opencost_known = False
@@ -231,10 +235,17 @@ class HistoricalRangeProcessor:
             status = OPENCOST_STATUS_OK
             self.opencost_known = True
         self.last_cost_status = status
-        if not cost_metrics and status == OPENCOST_STATUS_EMPTY and self.opencost_known:
+        if (
+            not cost_metrics
+            and status in (OPENCOST_STATUS_EMPTY, OPENCOST_STATUS_NOT_CONFIGURED)
+            and self.opencost_known
+        ):
+            # An empty answer is a lag or a gap of OpenCost's data; no resolvable URL is a discovered
+            # OpenCost that is down (at restart): neither is a cluster without OpenCost.
             logger.error(
-                "OpenCost returned no allocation for %s -> %s although it priced earlier windows; the window "
-                "keeps a modeled cost marked opencost_pending and is re-priced later.",
+                "OpenCost %s for %s -> %s although it priced earlier windows; the window keeps a modeled cost "
+                "marked opencost_pending and is re-priced later.",
+                "returned no allocation" if status == OPENCOST_STATUS_EMPTY else "cannot be reached (no URL)",
                 start.isoformat(),
                 end.isoformat(),
             )
@@ -1014,6 +1025,7 @@ class HistoricalRangeProcessor:
         self.last_container_series_present = False
         self.last_cost_status = None
         self.last_cost_pending = False
+        self.last_cost_pending_steps = set()
 
         chosen_step_sec = self._promql.step_seconds
         window = CollectionWindow.covering(start_dt, end_dt, timedelta(seconds=chosen_step_sec))
@@ -1507,6 +1519,7 @@ class HistoricalRangeProcessor:
                 gpu_power = gpu_power_by_group.get((sample_start, node_name))
 
                 node_rows: List[CombinedMetric] = []
+                unusable_cost_pods: set[tuple[str, str]] = set()
                 group_pod_metrics: List[PodMetric] = []
                 for em_namespace, pod_name in pod_keys:
                     pod_key = (em_namespace, pod_name)
@@ -1534,6 +1547,10 @@ class HistoricalRangeProcessor:
                     )
                     if cost_metric is not None and cost_metric.source != CostSource.NONE.value:
                         attributed_cost_by_step[sample_start] += costs["total_cost"] or 0.0
+                    elif cost_metric is not None and self.opencost_known:
+                        # OpenCost knows the pod but its allocation carries no usable cost (minutes = 0
+                        # after a gap in OpenCost's data, unrebuilt sub-precision figure): pending, not modeled.
+                        unusable_cost_pods.add(pod_key)
                     is_estimated, estimation_reasons = self.assembler.build_estimation_flags(
                         energy_metric=energy_metric,
                         node_context=node_context,
@@ -1654,6 +1671,12 @@ class HistoricalRangeProcessor:
                 if cost_pending:
                     # Modeled cost while OpenCost could not price the window: never trusted, re-priced later.
                     allocated.rows = [mark_cost_pending(row) for row in allocated.rows]
+                elif unusable_cost_pods:
+                    allocated.rows = [
+                        mark_cost_pending(row) if (row.namespace, row.pod_name) in unusable_cost_pods else row
+                        for row in allocated.rows
+                    ]
+                    self.last_cost_pending_steps.add(ts)
 
                 container_cpu_usage = {
                     key: int(round(value * 1000))

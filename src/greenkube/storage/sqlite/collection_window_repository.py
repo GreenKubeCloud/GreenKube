@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from greenkube.storage.base_collection_window_repository import (
+    COST_STATUS_PENDING,
+    COST_STATUS_PENDING_EXPIRED,
     STATUS_FAILED,
     STATUS_GAP,
     CollectionWindowRecord,
@@ -137,6 +139,17 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
             ) as cursor:
                 rows = await cursor.fetchall()
         return [_row(row) for row in rows]
+
+    async def expire_cost_pending(self, cluster_uid: str, source: str, before: datetime) -> int:
+        """Pending steps older than ``before`` become ``opencost_pending_expired`` (COST-01)."""
+        async with self.db_manager.connection_scope() as conn:
+            cursor = await conn.execute(
+                """UPDATE collection_windows SET cost_status = ?
+                WHERE cluster_uid = ? AND source = ? AND cost_status = ? AND window_start < ?""",
+                (COST_STATUS_PENDING_EXPIRED, cluster_uid, source, COST_STATUS_PENDING, _encode(before)),
+            )
+            await conn.commit()
+            return int(cursor.rowcount or 0)
 
     async def expire_failed(self, cluster_uid: str, source: str, before: datetime) -> int:
         """Failed steps older than ``before`` become gaps."""

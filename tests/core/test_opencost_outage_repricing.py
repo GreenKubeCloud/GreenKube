@@ -119,9 +119,18 @@ class _ToggleOpenCost:
     def __init__(self) -> None:
         self.down = False
         self.absent = False
+        #: OpenCost answers with an allocation that carries no usable cost (minutes = 0 after a gap).
+        self.unusable = False
         self.last_status: str | None = None
 
     async def collect_range(self, start, end):
+        if self.unusable:
+            self.last_status = OPENCOST_STATUS_OK
+            return [
+                CostMetric(
+                    pod_name="p", namespace="ns", cpu_cost=0.0, ram_cost=0.0, total_cost=0.0, minutes=0, source="none"
+                )
+            ]
         if self.absent:
             self.last_status = OPENCOST_STATUS_NOT_CONFIGURED
             return []
@@ -290,3 +299,68 @@ async def test_empty_answer_after_opencost_had_data_is_pending(stack):
     await _collect_until(stack, w2 + STEP)
     assert (await _pod_row(stack, w2)).cost_source == CostSource.OPENCOST_PENDING.value
     assert (await _record(stack, w2)).cost_status == COST_STATUS_PENDING
+
+
+@pytest.mark.asyncio
+async def test_unusable_allocation_of_a_known_opencost_is_pending_and_repriced(stack):
+    """Review 1: an allocation without usable cost never becomes a trusted modeled cost."""
+    w1, w2, w3 = BASE + STEP, BASE + 2 * STEP, BASE + 3 * STEP
+    await _collect_until(stack, w1 + STEP)
+    stack["opencost"].unusable = True
+    await _collect_until(stack, w2 + STEP)
+    row = await _pod_row(stack, w2)
+    assert row.cost_source == CostSource.OPENCOST_PENDING.value
+    assert not is_cost_trusted(row)
+    assert (await _record(stack, w2)).cost_status == COST_STATUS_PENDING
+    stack["opencost"].unusable = False
+    report = await _collect_until(stack, w3 + STEP)
+    assert report.repriced_steps == 1  # only the step that had rows
+    assert (await _pod_row(stack, w2)).cost_source == CostSource.OPENCOST.value
+    assert (await _record(stack, w2)).cost_status is None
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_url_after_opencost_was_seen_is_pending(stack):
+    """Review 2: a discovered OpenCost that is down at restart (no URL) is not a cluster without OpenCost."""
+    w1, w2 = BASE + STEP, BASE + 2 * STEP
+    await _collect_until(stack, w1 + STEP)
+    stack["opencost"].absent = True
+    await _collect_until(stack, w2 + STEP)
+    assert (await _pod_row(stack, w2)).cost_source == CostSource.OPENCOST_PENDING.value
+    assert (await _record(stack, w2)).cost_status == COST_STATUS_PENDING
+
+
+@pytest.mark.asyncio
+async def test_opencost_seen_survives_the_horizon(stack):
+    """Review 2: the fact that OpenCost priced this cluster is persisted beyond the window records."""
+    from greenkube.core.collection import OPENCOST_SEEN_SOURCE
+
+    w1 = BASE + STEP
+    await _collect_until(stack, w1 + STEP)
+    job = stack["job"]()
+    assert await job.watermark_repository.get(CLUSTER, OPENCOST_SEEN_SOURCE) is not None
+    job.processor.opencost_known = False
+    job.max_backfill = timedelta(minutes=1)  # no window record inside the horizon any more
+    await job._seed_opencost_known(w1 + 30 * STEP)
+    assert job.processor.opencost_known is True
+
+
+@pytest.mark.asyncio
+async def test_pending_step_leaving_the_horizon_is_recorded_and_counted(stack):
+    """Review 3: a pending step that leaves the horizon is expired, warned about and counted."""
+    from greenkube.core import collection_telemetry
+    from greenkube.storage.base_collection_window_repository import COST_STATUS_PENDING_EXPIRED
+
+    w1, w2 = BASE + STEP, BASE + 2 * STEP
+    await _collect_until(stack, w1 + STEP)
+    stack["opencost"].down = True
+    await _collect_until(stack, w2 + STEP)
+    before = collection_telemetry.COST_PENDING_EXPIRED.labels(source=METRICS_WATERMARK_SOURCE)._value.get()
+    job = stack["job"]()
+    report = __import__("greenkube.core.collection", fromlist=["CollectionReport"]).CollectionReport()
+    fence = type("Fence", (), {"check": staticmethod(lambda *args: None)})()
+    await job._reprice_pending_steps(w2 + timedelta(hours=25), fence, report)
+    assert (await _record(stack, w2)).cost_status == COST_STATUS_PENDING_EXPIRED
+    after = collection_telemetry.COST_PENDING_EXPIRED.labels(source=METRICS_WATERMARK_SOURCE)._value.get()
+    assert after == before + 1
+    assert report.cost_pending_steps == 0
