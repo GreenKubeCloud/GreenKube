@@ -6,6 +6,7 @@
 	import { safeHttpUrl } from '$lib/recommendationDetail.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
 	import MeasurementTable from '$lib/components/MeasurementTable.svelte';
+	import ReleasedCapacity from '$lib/components/ReleasedCapacity.svelte';
 
 	/** @type {{planId: string}} */
 	export let data;
@@ -174,6 +175,8 @@
 				</dl>
 				{#if current}
 					<MeasurementTable measurement={current} />
+					<!-- WP-08.1: released capacity, decided from the specs alone, never money -->
+					<ReleasedCapacity capacity={current.capacity} testid="measured-capacity" />
 				{:else}
 					<p class="text-sm text-dark-400">No measurement decided yet.</p>
 				{/if}

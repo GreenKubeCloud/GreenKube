@@ -74,6 +74,8 @@ class WorkloadSnapshot:
     observed_generation: int | None = None
     container_request_values: Dict[str, Tuple[int | None, int | None]] = field(default_factory=dict)
     container_request_values_valid: bool = True
+    #: Per-container limits (CPU millicores, memory bytes), recorded with spec observations (WP-08.1).
+    container_limit_values: Dict[str, Tuple[int | None, int | None]] = field(default_factory=dict)
     # Rollout state; ``None`` means the reader does not report it (legacy/fake readers).
     desired_replicas: int | None = None
     current_replicas: int | None = None
@@ -209,8 +211,9 @@ def _resource_field(value, name: str, camel_case: str | None = None):
 
 
 def _read_container_request_values(
-    containers,
+    containers, field_name: str = "requests"
 ) -> tuple[Dict[str, Tuple[int | None, int | None]], bool]:
+    """Per-container ``(cpu millicores, memory bytes)`` of ``resources.<field_name>`` and whether all parsed."""
     values: Dict[str, Tuple[int | None, int | None]] = {}
     valid = True
     from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
@@ -221,7 +224,7 @@ def _read_container_request_values(
             valid = False
             continue
         resources = _resource_field(container, "resources")
-        requests = _resource_field(resources, "requests") if resources else None
+        requests = _resource_field(resources, field_name) if resources else None
         if requests is None:
             requests = {}
         elif not isinstance(requests, Mapping):
@@ -459,6 +462,9 @@ class K8sWorkloadReader:
                 request_values, request_values_valid = _read_container_request_values(
                     [*(containers or []), *init_containers]
                 )
+                limit_values, limit_values_valid = _read_container_request_values(
+                    [*(containers or []), *init_containers], "limits"
+                )
                 status = _resource_field(item, "status")
                 namespace = _resource_field(metadata, "namespace")
                 name = _resource_field(metadata, "name")
@@ -476,6 +482,7 @@ class K8sWorkloadReader:
                     observed_generation=_resource_field(status, "observed_generation", "observedGeneration"),
                     container_request_values=request_values,
                     container_request_values_valid=request_values_valid,
+                    container_limit_values=limit_values if limit_values_valid else {},
                     spec_digest=pod_template_digest(template),
                     resources_digest=resources_digest(template),
                     image_digest=image_digest(template),

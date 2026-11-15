@@ -653,8 +653,8 @@ class ChangeRepository:
                 "INSERT INTO change_measurements (measurement_id, change_id, sequence, strategy_key, strategy_version, "
                 "impact_model_version, baseline_snapshot_id, baseline_sha256, windows, load_driver, "
                 "counterfactual_params, estimates, confounders, confidence, health, allocations, outcome, reasons, "
-                "evidence_sha256, supersedes_measurement_id, decided_at) "
-                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?j, ?j, ?j, ?j, ?j, ?, ?j, ?j, ?, ?j, ?, ?, ?) {conflict}",
+                "evidence_sha256, supersedes_measurement_id, decided_at, capacity) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?j, ?j, ?j, ?j, ?j, ?, ?j, ?j, ?, ?j, ?, ?, ?, ?j) {conflict}",
                 [
                     measurement.measurement_id,
                     measurement.change_id,
@@ -677,6 +677,7 @@ class ChangeRepository:
                     measurement.evidence_sha256,
                     measurement.supersedes_measurement_id,
                     self._ts(measurement.decided_at),
+                    _dumps(data["capacity"]) if data["capacity"] is not None else None,
                 ],
             )
         stored = await self.get_measurement_for_cycle(measurement.change_id, measurement.sequence)
@@ -695,6 +696,7 @@ class ChangeRepository:
             "health",
             "allocations",
             "reasons",
+            "capacity",
         ):
             values[column] = _loads(values.get(column))
         values["decided_at"] = _parse_time(values.get("decided_at"))
@@ -729,6 +731,7 @@ class ChangeRepository:
             hpa_digest=row.get("hpa_digest"),
             resources_digest=row.get("resources_digest"),
             image_digest=row.get("image_digest"),
+            container_resources=_loads(row.get("container_resources")) or None,
             observed_at=_required_time(row["observed_at"]),
         )
 
@@ -750,8 +753,8 @@ class ChangeRepository:
                 await self._execute(
                     conn,
                     "INSERT INTO workload_spec_observations (namespace, workload_kind, workload_name, workload_uid, "
-                    "generation, spec_digest, hpa_digest, resources_digest, image_digest, observed_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "generation, spec_digest, hpa_digest, resources_digest, image_digest, container_resources, "
+                    "observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?j, ?)",
                     [
                         item.namespace,
                         item.kind,
@@ -762,6 +765,7 @@ class ChangeRepository:
                         item.hpa_digest,
                         item.resources_digest,
                         item.image_digest,
+                        _dumps(item.container_resources) if item.container_resources is not None else None,
                         self._ts(item.observed_at),
                     ],
                 )

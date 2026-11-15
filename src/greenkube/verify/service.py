@@ -45,6 +45,7 @@ from greenkube.models.verification import HealthGateResult, HealthGateStatus, Me
 from greenkube.storage.change_repository import ChangeConflictError, ChangeRepository, change_identity
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.attribution import allocate, allocated_projection
+from greenkube.verify.capacity import measure_capacity
 from greenkube.verify.confounders import (
     SCOPE_WORKLOAD_NODES,
     ConfounderDetector,
@@ -466,6 +467,7 @@ class ChangeMeasurementService:
                     hpa_digest=hpa,
                     resources_digest=getattr(snapshot, "resources_digest", None),
                     image_digest=getattr(snapshot, "image_digest", None),
+                    container_resources=container_resources(snapshot),
                     observed_at=moment,
                 )
                 if previous is None or not previous.same_revision(observation):
@@ -1279,6 +1281,16 @@ class ChangeMeasurementService:
             reasons=reasons,
             supersedes_measurement_id=previous[-1].measurement_id if previous else None,
             decided_at=now,
+            # WP-08.1: released capacity and its verdict, from the specs alone (any cost outcome).
+            capacity=measure_capacity(
+                change,
+                observations,
+                snapshot.hours,
+                post_buckets,
+                in_effect,
+                post_end=ensure_utc(plan.post.end),
+                slot_seconds=self.settings.slot_seconds,
+            ),
         ).with_evidence_digest()
         stored, _ = await self.changes.insert_measurement(measurement)
         return stored
@@ -1650,6 +1662,29 @@ def _excused_baseline_restarts(baseline: Mapping[str, Any], relaxed: Iterable[Op
             return None
         total += float(value)
     return total
+
+
+def container_resources(snapshot: Any) -> Optional[Dict[str, Dict[str, Optional[int]]]]:
+    """Per-container requests and limits of a workload snapshot (WP-08.1); ``None`` when unknown or invalid."""
+    requests = getattr(snapshot, "container_request_values", None)
+    if (
+        not isinstance(requests, Mapping)
+        or not requests
+        or not getattr(snapshot, "container_request_values_valid", True)
+    ):
+        return None
+    limits = getattr(snapshot, "container_limit_values", None)
+    limits = limits if isinstance(limits, Mapping) else {}
+    resources: Dict[str, Dict[str, Optional[int]]] = {}
+    for name, (cpu, memory) in sorted(requests.items()):
+        cpu_limit, memory_limit = limits.get(name, (None, None))
+        resources[str(name)] = {
+            "cpu_request_millicores": cpu,
+            "memory_request_bytes": memory,
+            "cpu_limit_millicores": cpu_limit,
+            "memory_limit_bytes": memory_limit,
+        }
+    return resources
 
 
 def _container_requests(snapshot: Any) -> Dict[str, Any]:

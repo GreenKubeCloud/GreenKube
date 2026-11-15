@@ -127,6 +127,34 @@ describe('/changes/[plan_id]', () => {
 		expect(api.getChangeMeasurements).toHaveBeenCalledWith('chg-1', expect.anything());
 	});
 
+	it('shows the measured released capacity with its verdict, units and replica change (WP-08.1)', async () => {
+		api.getChangeMeasurements.mockResolvedValue({
+			items: [
+				{
+					...measurement,
+					outcome: 'inconclusive',
+					capacity: {
+						method: 'measured',
+						verdict: 'released',
+						per_replica: { cpu_cores: 0.7, mem_gib: 1 },
+						total: { cpu_cores: 2.1, mem_gib: 3 },
+						replicas: { before: 2, after: 3 },
+						replica_change: { before: 2, after: 3, cpu_cores: -0.3, mem_gib: -1 },
+						cpu_core_hours: 352.8,
+						mem_gib_hours: 504
+					}
+				}
+			]
+		});
+		render(ChangePage, { props: { data: { planId: 'plan-1' } } });
+		const block = await screen.findByTestId('measured-capacity');
+		expect(block).toHaveTextContent('Released capacity (measured)');
+		expect(block).toHaveTextContent('2.10 cores');
+		expect(block).toHaveTextContent('353 core-hours');
+		expect(screen.getByTestId('measured-capacity-verdict')).toHaveTextContent('Released');
+		expect(screen.getByTestId('measured-capacity-replicas')).toHaveTextContent('2 → 3 replicas');
+	});
+
 	it('explains a plan that is not applied yet', async () => {
 		api.listChanges.mockResolvedValue({ items: [], next_cursor: null });
 		render(ChangePage, { props: { data: { planId: 'plan-1' } } });

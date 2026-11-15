@@ -232,7 +232,7 @@ def test_spec_hpa_and_recreation_confounders():
     plan = _plan(change)
 
     def observed(offset, **values):
-        base = {"namespace": "prod", "kind": "Deployment", "name": "api", "workload_uid": "uid-api"}
+        base: dict[str, Any] = {"namespace": "prod", "kind": "Deployment", "name": "api", "workload_uid": "uid-api"}
         return WorkloadSpecObservation(**{**base, **values}, observed_at=completed + offset)
 
     observations = [

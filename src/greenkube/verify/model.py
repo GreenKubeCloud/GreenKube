@@ -400,12 +400,18 @@ class ChangeMeasurement(_Frozen):
     evidence_sha256: str = ""
     supersedes_measurement_id: Optional[str] = None
     decided_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    #: Measured released capacity and the capacity verdict (WP-08.1, :mod:`greenkube.verify.capacity`):
+    #: decided from the workload specs alone, independent of the cost outcome. ``None`` on
+    #: measurements decided before it was recorded.
+    capacity: Optional[dict[str, Any]] = None
 
     def estimate(self, quantity: str) -> Optional[SavingsEstimate]:
         return next((item for item in self.estimates if item.quantity == quantity), None)
 
     def with_evidence_digest(self) -> "ChangeMeasurement":
-        payload = self.model_dump(mode="json", exclude={"evidence_sha256"})
+        # ``capacity`` is left out when absent so digests of earlier measurements stay valid.
+        exclude = {"evidence_sha256"} | ({"capacity"} if self.capacity is None else set())
+        payload = self.model_dump(mode="json", exclude=exclude)
         return self.model_copy(update={"evidence_sha256": sha256_hex(payload)})
 
 
@@ -453,6 +459,10 @@ class WorkloadSpecObservation(BaseModel):
     hpa_digest: Optional[str] = None
     resources_digest: Optional[str] = None
     image_digest: Optional[str] = None
+    #: Per-container requests and limits of the revision (WP-08.1):
+    #: ``{container: {cpu_request_millicores, memory_request_bytes, cpu_limit_millicores, memory_limit_bytes}}``;
+    #: ``None`` on observations stored before they were recorded or when the reader could not parse them.
+    container_resources: Optional[dict[str, Any]] = None
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
@@ -460,6 +470,7 @@ class WorkloadSpecObservation(BaseModel):
         return (self.namespace, self.kind, self.name)
 
     def same_revision(self, other: "WorkloadSpecObservation") -> bool:
+        """Whether both observations describe the same revision (and the same recorded requests)."""
         return (
             self.workload_uid == other.workload_uid
             and self.generation == other.generation
@@ -467,6 +478,7 @@ class WorkloadSpecObservation(BaseModel):
             and self.hpa_digest == other.hpa_digest
             and self.resources_digest == other.resources_digest
             and self.image_digest == other.image_digest
+            and self.container_resources == other.container_resources
         )
 
 
