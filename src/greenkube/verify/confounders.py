@@ -77,8 +77,9 @@ POOL_CAPACITY_SEVERE = 0.5
 
 _PENALTY = {"mild": 0.05, "moderate": 0.15}
 #: Confounders reported without a confidence penalty: the CO2e saving is valued at the post-window
-#: carbon factors hour by hour, so an intensity shift biases neither it nor the cost verdict (MEA-03).
-INFORMATIVE_KINDS = frozenset({"intensity_shift"})
+#: carbon factors hour by hour, so an intensity shift biases neither it nor the cost verdict (MEA-03),
+#: and a carbon-factor fallback only touches the CO2e valuation, never the cost verdict.
+INFORMATIVE_KINDS = frozenset({"intensity_shift", "co2e_factor_fallback"})
 #: Confidence penalty when the counterfactual has no load driver or only the weak CPU-usage driver.
 WEAK_LOAD_PENALTY = 0.10
 
@@ -480,6 +481,8 @@ class ConfounderDetector:
 
         Such hours (the workload scaled to zero, post hours missing) are valued
         at the time-averaged post factor, not at the intensity of their hour.
+        The finding costs no confidence (:data:`INFORMATIVE_KINDS`): it touches
+        the CO2e valuation only, not the cost verdict.
         """
         from greenkube.verify.strategy import PostCarbonFactors
 
