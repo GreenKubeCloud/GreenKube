@@ -91,6 +91,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 **UI**
 - New pages: savings-first **Overview**, recommendation detail `/recommendations/{id}`, **Changes** board `/changes` and `/changes/{plan_id}`, **Ledger** `/ledger`, **Sources**, **Setup**, **Footprint**, account, sessions, API keys and users pages.
 - Recommendation cards show expected value and success probability, filters by namespace, source, risk and capability, warm-up ETA, released capacity, **Rescan**, one-click **Open PR** and **Apply manually**; amounts use the pricing `currency` now returned by `GET /api/v1/config`; viewers see read-only hints.
+- **Demo mode flag:** `greenkube demo` sets `GREENKUBE_DEMO_MODE`, reported as `demo` by `GET /api/v1/health`. In demo mode the UI shows one notice ("Demo data: pull requests are disabled in the demo") instead of the per-card `action_unavailable`, `automation_not_configured` and `automation_disabled` diagnostics, says "Demo" instead of "Sign-in disabled (development)", hides the service health dots, the connectivity pop-up and the setup banner, and the change page says the demo stores no plan instead of a plan-service error. Real installs are unchanged.
 
 ### Changed
 
@@ -149,6 +150,12 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - Sort options are labelled truthfully (**Ranking score (default)**, projected cost and CO₂e sorts); closing an unapproved plan preview discards it.
 - The Settings page and connectivity popup are read-only (configuration as code); the API client uses session cookies and CSRF tokens; one card each for Argo CD and Flux.
 - A memory decrease whose OOM history could not be read (`oom_history_unknown`) is now an eligibility warning instead of a blocker: a person may open its pull request. The warning names the cause (`oom_unknown_no_usage_summary`, `oom_unknown_signal_failed`, `oom_unknown_signal_unavailable`) and what to check before merging; the UI shows it on the recommendation, the detail page and the plan review, and the pull-request summary repeats it.
+- **README rewritten** (about 90 lines instead of 185): the promise, the four steps of the loop, released capacity for clusters that do not shrink, a three-step quick start (demo, Helm install, Git Secret), the principles and the documentation links. The "What works today" table is gone; the changelog's *Unreleased* section is the list of shipped features.
+- **Recommendation sources docs:** a new [Vertical Pod Autoscaler](docs/sources/vpa.md) page (recommendation-mode VPAs, `engine_family: vpa` shared with Goldilocks, what is skipped and why); `docs/sources/goldilocks.md` now covers Goldilocks only, and `docs/sources/nodepool.md` is titled "Karpenter and the Cluster Autoscaler" and documents the NodePool consolidation recommendation. `docs/sources.md` and the README link both.
+- **Demo data shows the new loop:** active rightsizings carry an Impact Model projection (released capacity, allocated and billable savings, one fixed-pool recommendation with a realization factor of 0), evidence, risk and confidence; applied recommendations are verified with measured rates (one stays inconclusive), and the savings ledger is backfilled through the production attributor (projected until the measurement, measured afterwards). Three measured changes are recorded with their decided measurement and a capacity verdict computed by `greenkube.verify.capacity` (`released`, `partially_released`), so the Overview, the Changes board and the change page are populated.
+- **Screenshots redone** from the current UI and demo data: `assets/demo-dashboard.png`, `demo-recommendations.png`, `demo-automation.png` (now the Changes board), `demo-nodes.png`, `demo-report.png`, and a new `demo-change.png` (a measured change with its released capacity).
+- **UI wording:** the sidebar tagline is "Kubernetes optimization loop" (the retired "FinGreenOps Platform" claim is gone), the Recommendations subtitle reads "Ranked, evidence-backed changes, ready as pull requests" and the report page no longer says "FinGreenOps".
+- **Savings read as savings:** recommendation cards, the measured-savings tab and the Overview show "saves $232.53/yr" and "saves 69.90 kg CO₂e/yr" instead of "-$232.53" and "-69.90 kg"; a negative value (an increase) reads "costs ... more/yr".
 
 ### Deprecated
 - `refresh=true` on recommendation reads (only queues a run).
@@ -197,6 +204,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - The API key is no longer asked after every reload; page loads no longer trigger full scans; `401` always opens sign-in; namespace filters are consistent; amounts no longer hard-code `$`; viewers no longer see mutating actions; pull-request links land on real pages with the Gitea web URL.
 - `GET /api/v1/recommendations/active?source=` matches consensus sources; the time to the first pull request is no longer overstated. Stale documentation corrected; the methodology states the known false-`realized` rates of a 7-day baseline.
 - `automation.autoApprove` never approves a plan whose recommendation carries `oom_history_unknown` (new `auto_approve_blockers` code `oom_history_unknown`); before, a `maxRisk: medium` policy could approve such a decrease automatically.
+- **VPA without `updateMode`:** a VPA whose `updateMode` is unset was read as recommendation mode (`Off`), although the VPA API defaults it to an active mode. It is now skipped and counted as `Auto (default)` in the `skipped_vpas` diagnostic.
 
 ### Security
 - Wildcard CORS is never combined with credentials; CORS is same-origin by default.
