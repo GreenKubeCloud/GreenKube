@@ -65,6 +65,18 @@ UNKNOWN_POWER_PROFILE_NODES = Gauge(
     registry=REGISTRY,
 )
 
+K8S_LIST_ERRORS = Counter(
+    "greenkube_collection_k8s_list_errors_total",
+    "Kubernetes pod or node lists that failed during metric collection, by resource.",
+    ["resource"],
+    registry=REGISTRY,
+)
+
+
+def record_k8s_list_error(resource: str) -> None:
+    """Count a failed Kubernetes list call of the collection pipeline (COL-07)."""
+    K8S_LIST_ERRORS.labels(resource=resource if resource in {"pods", "nodes"} else "other").inc()
+
 
 def record_dropped_sample(reason: str, count: int = 1) -> None:
     if count > 0:

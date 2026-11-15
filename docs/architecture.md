@@ -663,7 +663,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      └─ Generate CombinedMetrics (+ container rows) for chunk
    ```
 
-5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}` and `greenkube_unknown_power_profile_nodes`.
+5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}`, `greenkube_collection_k8s_list_errors_total{resource}` and `greenkube_unknown_power_profile_nodes`.
 
 ### Recommendation Flow
 

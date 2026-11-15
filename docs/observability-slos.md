@@ -189,6 +189,7 @@ The metric collection job publishes, on the control-loop registry:
 | `greenkube_collection_watermark_lag_seconds{source}` | Seconds between now and the end of the last fully written window. |
 | `greenkube_collection_windows_total{source}` | Collection chunks written and committed. |
 | `greenkube_collection_window_errors_total{source,reason}` | Runs stopped before committing a window (`collection_failed`, `leadership_lost`); the window is retried. |
+| `greenkube_collection_k8s_list_errors_total{resource}` | Kubernetes pod or node lists that failed during collection (`pods`, `nodes`). Without a pod snapshot newer than one step (pods) or any node snapshot (nodes) the window fails and is retried. |
 | `greenkube_collection_window_duration_seconds{source}` | Time to collect and write one chunk. |
 | `greenkube_collection_gap_windows_total{source}` | Windows abandoned because they were older than `COLLECTION_MAX_BACKFILL`. |
 | `greenkube_collection_dropped_samples_total{reason}` | Prometheus samples dropped (`non_finite`, `malformed`, `out_of_window`) or clamped (`negative_clamped`). |

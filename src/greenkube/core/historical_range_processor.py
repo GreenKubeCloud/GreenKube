@@ -2,6 +2,7 @@
 """Processes historical time ranges by querying Prometheus range API."""
 
 import asyncio
+import inspect
 import logging
 import math
 from collections import defaultdict
@@ -68,7 +69,22 @@ _POD_SNAPSHOT_MARGIN = timedelta(hours=1)
 
 
 class RangeCollectionError(RuntimeError):
-    """Prometheus could not be queried for a window; the window must be retried."""
+    """A source (Prometheus, the Kubernetes API) could not be read for a window; the window must be retried."""
+
+
+async def _list_strictly(collect):
+    """Call a pod or node collector so that an API failure raises instead of returning nothing (COL-07).
+
+    Collectors that do not take ``raise_on_error`` (test doubles, third-party
+    collectors) are called as before.
+    """
+    try:
+        parameters = inspect.signature(collect).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "raise_on_error" in parameters:
+        return await collect(raise_on_error=True)
+    return await collect()
 
 
 class HistoricalRangeProcessor:
@@ -443,7 +459,9 @@ class HistoricalRangeProcessor:
         try:
             if live_pods:
                 await repository.save_pods(live_pods, now)
-            return await repository.get_snapshots(start - margin, end + margin)
+            # No upper bound: a version first observed after the range is the
+            # nearest one for a pod first seen after its samples.
+            return await repository.get_snapshots(start - margin, now + margin)
         except Exception as error:
             logger.warning(
                 "Pod metadata history unavailable (%s); pods missing from the live pod list get "
@@ -453,6 +471,33 @@ class HistoricalRangeProcessor:
                 end.isoformat(),
             )
             return {}
+
+    async def _require_recent_pod_history(
+        self, error: Exception, now: datetime, step_seconds: int, start: datetime, end: datetime
+    ) -> None:
+        """Fail the window after a failed pod list unless the pod history is fresh (COL-07).
+
+        With a pod snapshot observed within one step the window proceeds from
+        the history (rows say ``metadata_source = k8s_snapshot``); otherwise it
+        raises :class:`RangeCollectionError` so the watermark does not move.
+        """
+        window = f"{start.isoformat()} -> {end.isoformat()}"
+        repository = self.pod_snapshot_repository
+        recent = {}
+        if repository is not None:
+            try:
+                recent = await repository.get_snapshots(
+                    now - timedelta(seconds=step_seconds), now + _POD_SNAPSHOT_MARGIN
+                )
+            except Exception as history_error:
+                logger.warning("Pod metadata history unavailable: %s", history_error)
+        if not recent:
+            raise RangeCollectionError(
+                f"Kubernetes pod list failed for {window} and no pod snapshot is newer than one step: {error}"
+            ) from error
+        logger.warning(
+            "Kubernetes pod list failed (%s); pod metadata comes from the pod history for %s.", error, window
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -551,9 +596,14 @@ class HistoricalRangeProcessor:
 
         # Pod metadata (owner, requests, containers) as of each sample (WP-01.1, COL-01).
         try:
-            pod_metrics_list = await pod_collector.collect()
-        except Exception:
+            pod_metrics_list = await _list_strictly(pod_collector.collect)
+            pod_list_error: Exception | None = None
+        except Exception as error:  # KubernetesListError, or any failure of another collector
             pod_metrics_list = []
+            pod_list_error = error
+            collection_telemetry.record_k8s_list_error("pods")
+        if pod_list_error is not None:
+            await self._require_recent_pod_history(pod_list_error, now, chosen_step_sec, start_dt, end_dt)
         live_pods: dict[tuple[str, str], list[PodMetric]] = defaultdict(list)
         for pod_metric in pod_metrics_list:
             live_pods[(pod_metric.namespace, pod_metric.pod_name)].append(pod_metric)
@@ -580,8 +630,20 @@ class HistoricalRangeProcessor:
         # assembly.  Historical snapshots (node_timeline) cover the past;
         # this provides a best-effort fallback for nodes not yet in the DB.
         try:
-            nodes_info = await self.node_collector.collect() or {}
-        except Exception:
+            nodes_info = await _list_strictly(self.node_collector.collect) or {}
+        except Exception as error:  # KubernetesListError, or any failure of another collector
+            collection_telemetry.record_k8s_list_error("nodes")
+            if not node_timeline:
+                raise RangeCollectionError(
+                    f"Kubernetes node list failed for {start_dt.isoformat()} -> {end_dt.isoformat()} and no node "
+                    f"snapshot exists: {error}"
+                ) from error
+            logger.warning(
+                "Kubernetes node list failed (%s); node attributes come from node snapshots for %s -> %s.",
+                error,
+                start_dt.isoformat(),
+                end_dt.isoformat(),
+            )
             nodes_info = {}
 
         def node_at(node_name: str, timestamp: datetime) -> tuple[NodeInfo | None, NodeSource]:
@@ -674,7 +736,6 @@ class HistoricalRangeProcessor:
         combined: List[CombinedMetric] = []
         idle_rows: List[NodeIdleMetric] = []
         allocator = self._allocator
-        skipped_carbon = 0
         unknown_power_nodes: set[str] = set()
         # (node, sample_start) -> PowerSource value; seam for per-row power provenance (A11).
         node_power_sources: dict[tuple[str, int], str] = {}
@@ -831,11 +892,23 @@ class HistoricalRangeProcessor:
                     # Energy comes from the allocation below; the calculator
                     # resolves the intensity and its provenance (A8).
                     carbon_result = await calculator.calculate_emissions(joules=0.0, zone=zone, timestamp=ts, pue=pue)
-                except Exception:
-                    carbon_result = None
+                except Exception as error:
+                    # Never drop the usage, cost and energy rows of the group for
+                    # a missing CO2e factor: fail the window so it is retried (COL-08).
+                    logger.error(
+                        "Carbon intensity lookup failed for zone %s at %s (%d pod row(s) of node %s); "
+                        "the window will be retried: %s",
+                        zone,
+                        ts.isoformat(),
+                        len(pod_keys),
+                        node_name or "<unresolved>",
+                        error,
+                    )
+                    raise RangeCollectionError(
+                        f"Carbon intensity lookup failed for zone {zone} at {ts.isoformat()}: {error}"
+                    ) from error
                 if carbon_result is None:
-                    skipped_carbon += len(pod_keys)
-                    continue
+                    raise RangeCollectionError(f"No carbon intensity result for zone {zone} at {ts.isoformat()}")
                 intensity_source = getattr(carbon_result, "intensity_source", None)
                 if not isinstance(intensity_source, str):
                     intensity_source = None

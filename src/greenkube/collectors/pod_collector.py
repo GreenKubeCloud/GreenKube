@@ -8,6 +8,7 @@ import logging
 from typing import Iterator, List, Optional
 
 from greenkube.collectors.base_collector import BaseCollector
+from greenkube.collectors.k8s_errors import KubernetesListError
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api
 from greenkube.models.metrics import PodMetric
@@ -77,7 +78,7 @@ class PodCollector(BaseCollector):
 
         return self._api
 
-    async def collect(self, include_init_containers: bool = False) -> List[PodMetric]:
+    async def collect(self, include_init_containers: bool = False, *, raise_on_error: bool = False) -> List[PodMetric]:
         """
         Fetches all pods and extracts their container resource requests and limits.
 
@@ -86,6 +87,10 @@ class PodCollector(BaseCollector):
         (``kind="sidecar"``). Classic init containers only run before the pod
         starts, so they are excluded from steady-state sums and returned only
         when ``include_init_containers`` is true (``kind="init"``).
+
+        A failed pod list returns an empty list, or raises
+        :class:`KubernetesListError` when ``raise_on_error`` is true so callers
+        that store history can tell an API error from an empty cluster (COL-07).
         """
         pod_metrics: List[PodMetric] = []
         api = await self._ensure_client()
@@ -139,7 +144,9 @@ class PodCollector(BaseCollector):
                     )
         except Exception as e:
             logger.exception("Error collecting pod metrics from Kubernetes API: %s", e)
-            return []  # Return empty list on failure
+            if raise_on_error:
+                raise KubernetesListError(f"Kubernetes pod list failed: {e}") from e
+            return []
 
         logger.debug("Collected %s pod/container request metrics.", len(pod_metrics))
         return pod_metrics
