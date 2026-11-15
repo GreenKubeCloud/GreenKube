@@ -334,6 +334,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         saved_count = 0
         try:
             async with self.db_manager.connection_scope() as conn:
+                if replace_containers:
+                    metrics = await self._without_rows_over_stored_containers(conn, metrics, container_metrics)
                 for metric in metrics:
                     try:
                         timestamp_iso = to_iso_z(metric.timestamp) if metric.timestamp else None
@@ -473,6 +475,37 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         if container_metrics:
             record_metric_provenance(container_metrics)
         return saved_count
+
+    @staticmethod
+    async def _without_rows_over_stored_containers(
+        conn, pod_rows: List[CombinedMetric], container_rows: List[CombinedMetric]
+    ) -> List[CombinedMetric]:
+        """Drop pod rows of a collected window that have no container row in the batch but stored ones.
+
+        Rewriting such a pod row would leave stored container rows whose
+        joules no longer sum to it; the stored pod and container rows stay
+        together instead (third review F1).
+        """
+        with_containers = {
+            (row.namespace, row.pod_name, to_iso_z(row.timestamp))
+            for row in container_rows
+            if row.timestamp is not None
+        }
+        kept = []
+        for row in pod_rows:
+            if row.timestamp is None:
+                kept.append(row)
+                continue
+            key = (row.namespace, row.pod_name, to_iso_z(row.timestamp))
+            if key not in with_containers:
+                async with conn.execute(
+                    "SELECT 1 FROM container_metrics WHERE namespace = ? AND pod_name = ? AND timestamp = ? LIMIT 1",
+                    key,
+                ) as cursor:
+                    if await cursor.fetchone() is not None:
+                        continue
+            kept.append(row)
+        return kept
 
     @staticmethod
     async def _delete_stale_container_rows(

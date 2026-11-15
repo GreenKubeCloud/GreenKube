@@ -251,3 +251,20 @@ tests:
       - eval_time: 25m
         alertname: GreenKubeCollectionDegraded
         exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # A series that first appears already above zero (created on its first
+      # degraded window): increase() cannot see it.
+      - series: 'greenkube_collection_degraded_windows_total{job="c",instance="leader:9102",list="nodes"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GreenKubeCollectionDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              list: nodes
+            exp_annotations:
+              summary: GreenKube stores collection windows without a working Kubernetes list
+              description: "The Kubernetes nodes list failed COLLECTION_K8S_LIST_MAX_FAILURES times in a row for collection windows stored in the last hour: their rows carry the reason k8s_list_failed (missing owner and requests, or default node attributes). Check the controller RBAC (list pods and nodes) and the API server latency."

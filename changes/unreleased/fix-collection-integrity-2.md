@@ -3,10 +3,11 @@
 - `pod_snapshots` records the pod UID and the cluster identity (migration 0121); `node_snapshots_scd.last_seen` records when an unchanged node version was last confirmed.
 
 ### Fixed
-- A re-collection no longer deletes stored container rows: a pod row rebuilt from its stored row keeps the stored container rows (requests of init containers stay on the pod row), and a pod for which the pass builds no container row keeps the stored ones.
+- A re-collection no longer deletes stored container rows: a pod row rebuilt from its stored row keeps the stored container rows (requests of init containers stay on the pod row), and a pod for which the pass builds no container row keeps its stored pod and container rows together, so pod joules still equal the sum of container joules.
 - Rows without provenance (written before calculation version `+range.4`) are not reused as stored metadata.
 - A sample older than the pod's first observation (first-install backfill, downtime) takes its metadata from kube-state-metrics when available; otherwise a pod whose owner reuses names (StatefulSet, bare pod) is flagged `pod_metadata_uncertain`.
-- kube-state-metrics queries are filtered to the pods concerned and include native sidecars and containers without requests; stored rows are no longer read for pods kube-state-metrics resolved.
+- kube-state-metrics queries are filtered to the pods concerned (chunks of at most 50 names and about 4 KB) and include native sidecars and containers, with or without requests; a failed chunk no longer discards the others and its pods are flagged `kube_state_metrics_unavailable`; stored rows are no longer read for pods kube-state-metrics resolved.
+- `greenkube_collection_degraded_windows_total` exposes every `list` label from start-up, so the first degraded window raises `GreenKubeCollectionDegraded`.
 - `COLLECTION_K8S_LIST_MAX_FAILURES` counts attempts per window start, so a window retried with a later end is the same window.
 - Pods never observed live by a collection take their owner, requests, limits and containers from kube-state-metrics at each step (`metadata_source = kube_state_metrics`, WP-01.1 step 2); without kube-state-metrics they stay `missing`.
 - A removed node whose snapshot never changed for more than `NODE_DATA_MAX_AGE_DAYS` no longer falls back to the default zone and PUE: the age counts from the end of the version or its last confirmation, not from `valid_from`.

@@ -311,3 +311,65 @@ async def test_kube_state_metrics_queries_are_filtered_and_include_sidecars_and_
     ksm_queries = [query for query, *_rest in prom.queries if "kube_pod_container_resource" in query]
     assert ksm_queries and all('pod=~"' in query for query in ksm_queries)
     assert reads == []
+
+
+@pytest.mark.asyncio
+async def test_pass_without_container_rows_leaves_pod_and_container_joules_consistent(storage):
+    """Third review F1: pod joules equal the sum of container joules after a pass missing a container series."""
+    cfg, repo, snapshots = storage
+    live = [_pod(300), _pod(200, container="side"), _pod(100).model_copy(update={"pod_name": "q"})]
+    first = await _build(cfg, repo, snapshots, pod_list=live, containers=("app", "side")).run_range(*RANGE)
+    await repo.write_combined_metrics(first, replace_containers=True)
+
+    second = await _build(cfg, repo, snapshots, pod_list=live, containers=("app",)).run_range(*RANGE)
+    await repo.write_combined_metrics(second, replace_containers=True)
+
+    (pod,) = [row for row in await repo.read_combined_metrics(*RANGE) if row.pod_name == "p"]
+    containers = [row for row in await repo.read_container_metrics(*RANGE) if row.pod_name == "p"]
+    assert pod.joules == pytest.approx(sum(row.joules for row in containers))
+
+
+def _ksm_window():
+    from greenkube.core.collection import CollectionWindow
+
+    return CollectionWindow(BASE, BASE + timedelta(seconds=STEP), timedelta(seconds=STEP))
+
+
+@pytest.mark.asyncio
+async def test_one_failed_kube_state_metrics_chunk_keeps_the_others_and_reports_its_pods(storage):
+    """Third review F4: chunks are capped by name length; a failed chunk does not discard the others."""
+    cfg, repo, snapshots = storage
+    processor = _build(cfg, repo, snapshots, pod_list=[])
+    prom = processor.prometheus_collector
+    first, second = "a" * 200, "z" * 200
+    others = {("ns", f"{letter}{index}" + "m" * 190) for index in range(25) for letter in "b"}
+    pods = {("ns", first), ("ns", second), *others}
+    for pod in (first, second):
+        prom.add("kube_pod_container_info", {"namespace": "ns", "pod": pod, "container": "app"}, 1.0)
+    prom.fail_queries_containing = (second,)
+
+    result, failed = await processor._ksm_pod_metadata(_ksm_window(), pods)
+
+    assert {(ns, pod) for ns, pod, _sample in result} == {("ns", first)}
+    assert ("ns", second) in failed and ("ns", first) not in failed
+    queries = [query for query, *_rest in prom.queries]
+    assert queries and all(len(query) < 6000 for query in queries)
+
+
+@pytest.mark.asyncio
+async def test_native_sidecar_without_requests_gets_a_container_entry(storage):
+    """Third review F5."""
+    cfg, repo, snapshots = storage
+    processor = _build(cfg, repo, snapshots, pod_list=[])
+    prom = processor.prometheus_collector
+    base = {"namespace": "ns", "pod": "p"}
+    prom.add("kube_pod_container_info", {**base, "container": "app"}, 1.0)
+    prom.add("kube_pod_init_container_info", {**base, "container": "side", "restart_policy": "Always"}, 1.0)
+
+    result, _failed = await processor._ksm_pod_metadata(_ksm_window(), {("ns", "p")})
+
+    (entry,) = result.values()
+    assert sorted((c.container_name, c.kind, c.cpu_request) for c in entry) == [
+        ("app", "container", 0),
+        ("side", "sidecar", 0),
+    ]

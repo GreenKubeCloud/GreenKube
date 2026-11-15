@@ -169,7 +169,16 @@ spec:
         - alert: GreenKubeCollectionDegraded
           # A window is stored degraded only after COLLECTION_K8S_LIST_MAX_FAILURES failed
           # Kubernetes lists in a row: any new one means the controller cannot list pods or nodes.
-          expr: sum by (list) (increase(greenkube_collection_degraded_windows_total[1h])) > 0
+          # The second clause catches a series that first appears already above zero
+          # (a controller older than the label pre-initialisation), which increase() cannot see.
+          expr: |
+            sum by (list) (increase(greenkube_collection_degraded_windows_total[1h])) > 0
+            or
+            (
+              sum by (list) (greenkube_collection_degraded_windows_total) > 0
+              unless
+              sum by (list) (greenkube_collection_degraded_windows_total offset 1h)
+            )
           for: 10m
           labels:
             severity: warning

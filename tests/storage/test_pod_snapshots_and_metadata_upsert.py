@@ -298,3 +298,18 @@ async def test_timeseries_reports_null_cpu_when_no_row_has_a_cpu_sample(database
     )
     assert point["cpu_usage_millicores"] is None
     assert point["memory_usage_bytes"] is None
+
+
+@pytest.mark.asyncio
+async def test_pod_row_without_container_rows_keeps_the_stored_consistent_pair(database):
+    """Third review F1: a pass without container rows must not rewrite the pod row under stale containers."""
+    backend, manager = database
+    repo = _metrics_repo(backend, manager)
+    await repo.write_combined_metrics([_row(), _container_row("app", 6.0), _container_row("side", 4.0)])
+
+    await repo.write_combined_metrics([_row(joules=8.0)], replace_containers=True)
+
+    (stored,) = await repo.read_combined_metrics(BASE, BASE + timedelta(minutes=5))
+    containers = await repo.read_container_metrics(BASE, BASE + timedelta(minutes=5))
+    assert stored.joules == pytest.approx(sum(c.joules for c in containers))
+    assert stored.joules == 10.0

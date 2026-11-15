@@ -344,6 +344,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 """
                 query += _metadata_upsert("combined_metrics") + ";"
 
+                if replace_containers:
+                    metrics = await self._without_rows_over_stored_containers(conn, metrics, container_metrics)
                 metrics_data = []
                 for metric in metrics:
                     reasons = metric.estimation_reasons
@@ -408,6 +410,42 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             logger.error("Error writing combined metrics to Postgres: %s", e)
             raise QueryError(f"Error writing combined metrics: {e}") from e
         return saved_count
+
+    @staticmethod
+    async def _without_rows_over_stored_containers(
+        conn: Any, pod_rows: List[CombinedMetric], container_rows: List[CombinedMetric]
+    ) -> List[CombinedMetric]:
+        """Drop pod rows of a collected window that have no container row in the batch but stored ones.
+
+        Rewriting such a pod row would leave stored container rows whose
+        joules no longer sum to it; the stored pod and container rows stay
+        together instead (third review F1).
+        """
+        with_containers = {
+            (row.namespace, row.pod_name, row.timestamp) for row in container_rows if row.timestamp is not None
+        }
+        candidates = [
+            row
+            for row in pod_rows
+            if row.timestamp is not None and (row.namespace, row.pod_name, row.timestamp) not in with_containers
+        ]
+        if not candidates:
+            return pod_rows
+        stored = await conn.fetch(
+            """SELECT DISTINCT namespace, pod_name, timestamp FROM container_metrics
+            WHERE (namespace, pod_name, timestamp) IN (
+                SELECT * FROM unnest($1::text[], $2::text[], $3::timestamptz[])
+            )""",
+            [row.namespace for row in candidates],
+            [row.pod_name for row in candidates],
+            [row.timestamp for row in candidates],
+        )
+        covered = {(r["namespace"], r["pod_name"], r["timestamp"]) for r in stored}
+        return [
+            row
+            for row in pod_rows
+            if row.timestamp is None or (row.namespace, row.pod_name, row.timestamp) not in covered
+        ]
 
     @staticmethod
     async def _delete_stale_container_rows(

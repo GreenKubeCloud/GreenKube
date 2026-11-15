@@ -192,3 +192,11 @@ async def test_failure_budget_counts_attempts_per_window_start(storage):
     rows = await processor.run_range(BASE, BASE + timedelta(seconds=2 * STEP))
 
     assert any("k8s_list_failed" in row.estimation_reasons for row in rows)
+
+
+def test_degraded_window_series_exist_before_the_first_degraded_window():
+    """Third review F2: pre-initialised labels so increase() sees the first degraded window."""
+    from greenkube.core.collection_telemetry import DEGRADED_WINDOWS
+
+    labels = {sample.labels.get("list") for metric in DEGRADED_WINDOWS.collect() for sample in metric.samples}
+    assert {"pods", "nodes", "other"} <= labels

@@ -75,12 +75,30 @@ POD_METADATA_UNCERTAIN = "pod_metadata_uncertain"
 K8S_LIST_FAILED = "k8s_list_failed"
 #: Pod names per kube-state-metrics query (``pod=~"..."`` filter), so URLs stay bounded.
 _KSM_POD_FILTER_CHUNK = 50
+#: Total characters of pod names per kube-state-metrics query, so GET URLs stay under ~8 KB proxy limits.
+_KSM_POD_FILTER_CHARS = 4000
+#: Estimation reason of a row whose kube-state-metrics lookup failed (the pod fell through to the next source).
+KSM_UNAVAILABLE = "kube_state_metrics_unavailable"
 #: Failure counters kept per window; older entries are dropped (windows that became gaps).
 _MAX_TRACKED_LIST_FAILURES = 256
 #: Estimation reason of a pod row without CPU sample at its step (memory or Running phase only, COL-03).
 NO_CPU_SAMPLE = "no_cpu_sample"
 #: Pod history versions read around the range: a pod of the range was observed at most this far outside it.
 _POD_SNAPSHOT_MARGIN = timedelta(hours=1)
+
+
+def _name_chunks(names: list[str]) -> Iterator[list[str]]:
+    """Split pod names into chunks bounded by count and by total characters."""
+    current: list[str] = []
+    size = 0
+    for name in names:
+        if current and (len(current) >= _KSM_POD_FILTER_CHUNK or size + len(name) + 1 > _KSM_POD_FILTER_CHARS):
+            yield current
+            current, size = [], 0
+        current.append(name)
+        size += len(name) + 1
+    if current:
+        yield current
 
 
 class RangeCollectionError(RuntimeError):
@@ -499,7 +517,7 @@ class HistoricalRangeProcessor:
 
     async def _ksm_pod_metadata(
         self, chunk: CollectionWindow, pods: set[tuple[str, str]]
-    ) -> dict[tuple[str, str, int], list[PodMetric]]:
+    ) -> tuple[dict[tuple[str, str, int], list[PodMetric]], set[tuple[str, str]]]:
         """Owner, requests, limits and containers of ``pods`` per step, from kube-state-metrics.
 
         KSM series are exact per step, so an in-place resize or a pod that
@@ -507,17 +525,20 @@ class HistoricalRangeProcessor:
         are restricted to ``pods`` (by name, in chunks) and cover containers
         without requests (``kube_pod_container_info``) and native sidecars
         (init containers with ``restartPolicy: Always``).  KSM is optional: a
-        failed query logs a warning and the pods fall through to the next
-        source.  A ReplicaSet owner is mapped to its Deployment like the live
-        pod collector does.
+        failed query chunk logs a warning, its pods fall through to the next
+        source and are returned as the second element so their rows can be
+        flagged; the other chunks are kept.  Chunks hold at most
+        ``_KSM_POD_FILTER_CHUNK`` names and ``_KSM_POD_FILTER_CHARS``
+        characters of names, so GET URLs stay under common proxy limits.  A
+        ReplicaSet owner is mapped to its Deployment like the live pod
+        collector does.
         """
+        failed: set[tuple[str, str]] = set()
         if not pods:
-            return {}
+            return {}, failed
         promql = self._promql
-        names = sorted({pod for _namespace, pod in pods})
         series_by_query: dict[str, list] = defaultdict(list)
-        for index in range(0, len(names), _KSM_POD_FILTER_CHUNK):
-            chunk_names = names[index : index + _KSM_POD_FILTER_CHUNK]
+        for chunk_names in _name_chunks(sorted({pod for _namespace, pod in pods})):
             queries = {
                 "requests": promql.pod_container_requests(chunk_names),
                 "limits": promql.pod_container_limits(chunk_names),
@@ -530,8 +551,10 @@ class HistoricalRangeProcessor:
             try:
                 results = await asyncio.gather(*(self._query_range(chunk, query) for query in queries.values()))
             except Exception as error:
-                logger.warning("kube-state-metrics pod metadata unavailable for %d pod(s): %s", len(pods), error)
-                return {}
+                logger.warning("kube-state-metrics pod metadata unavailable for %d pod(s): %s", len(chunk_names), error)
+                wanted = set(chunk_names)
+                failed |= {key for key in pods if key[1] in wanted}
+                continue
             for name, query_result in zip(queries, results, strict=True):
                 series_by_query[name].extend(query_result or [])
 
@@ -546,6 +569,7 @@ class HistoricalRangeProcessor:
         )
         sources = (
             ("info", "container", None),
+            ("sidecars", "sidecar", None),
             ("requests", "container", "request"),
             ("limits", "container", "limit"),
             ("init_requests", "sidecar", "request"),
@@ -597,7 +621,7 @@ class HistoricalRangeProcessor:
                 )
                 for (container, kind), values in sorted(by_container.items())
             ]
-        return result
+        return result, failed
 
     def _list_failure_budget_spent(self, resource: str, start: datetime, end: datetime, error: Exception) -> bool:
         """Count a failed pod or node list for the window; True once COLLECTION_K8S_LIST_MAX_FAILURES is reached.
@@ -667,6 +691,7 @@ class HistoricalRangeProcessor:
         stored_metadata: dict[tuple[str, str, int], list[PodMetric]],
         chunk: CollectionWindow,
         ksm_metadata: dict[tuple[str, str, int], list[PodMetric]] | None = None,
+        ksm_failed: set[tuple[str, str]] | None = None,
     ) -> None:
         """Find metadata for pods of the chunk that neither the range read of the history nor the live list has.
 
@@ -707,7 +732,10 @@ class HistoricalRangeProcessor:
             and pod_history[key][0].first_seen > chunk.start + timedelta(seconds=2 * chunk.step_seconds)
         }
         if ksm_metadata is not None and (unseen or observed_late):
-            ksm_metadata.update(await self._ksm_pod_metadata(chunk, unseen | observed_late))
+            found_ksm, failed_ksm = await self._ksm_pod_metadata(chunk, unseen | observed_late)
+            ksm_metadata.update(found_ksm)
+            if ksm_failed is not None:
+                ksm_failed |= failed_ksm
         # Stored rows are read only for pods kube-state-metrics did not resolve.
         resolved = {(namespace, pod) for namespace, pod, _sample in (ksm_metadata or {})}
         unseen -= resolved
@@ -892,6 +920,8 @@ class HistoricalRangeProcessor:
         stored_metadata: dict[tuple[str, str, int], list[PodMetric]] = {}
         #: (namespace, pod, sample epoch) -> metadata from kube-state-metrics (WP-01.1 step 2).
         ksm_metadata: dict[tuple[str, str, int], list[PodMetric]] = {}
+        #: Pods whose kube-state-metrics query chunk failed (rows flagged, third review F4).
+        ksm_failed: set[tuple[str, str]] = set()
 
         def pod_metadata_at(
             pod_key: tuple[str, str], timestamp: datetime
@@ -1170,6 +1200,7 @@ class HistoricalRangeProcessor:
                 stored_metadata,
                 chunk,
                 ksm_metadata,
+                ksm_failed,
             )
             latest_sample_ts = max(samples) if samples else None
             current_chunk = current_window and chunk_end == end_dt
@@ -1302,6 +1333,9 @@ class HistoricalRangeProcessor:
                     if node_list_degraded and node_source is NodeSource.UNKNOWN:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, K8S_LIST_FAILED]))
+                    if pod_key in ksm_failed and metadata_source is not MetadataSource.KUBE_STATE_METRICS:
+                        is_estimated = True
+                        estimation_reasons = list(dict.fromkeys([*estimation_reasons, KSM_UNAVAILABLE]))
                     if metadata_uncertain:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, POD_METADATA_UNCERTAIN]))

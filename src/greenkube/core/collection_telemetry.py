@@ -85,6 +85,9 @@ DEGRADED_WINDOWS = Counter(
     ["list"],
     registry=REGISTRY,
 )
+# Every label exists from start-up at 0, so increase() sees the first degraded window.
+for _list in ("pods", "nodes", "other"):
+    DEGRADED_WINDOWS.labels(list=_list)
 
 
 def record_degraded_window(resource: str) -> None:
