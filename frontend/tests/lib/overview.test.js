@@ -69,7 +69,7 @@ describe('buildSavingsOverview', () => {
 			[]
 		);
 		expect(empty.realized.hasMeasurement).toBe(false);
-		expect(empty.opportunity).toEqual({ cost: 0, co2eGrams: 0, ev: null, count: 0, reliabilityCount: 0 });
+		expect(empty.opportunity).toEqual({ cost: 0, co2eGrams: 0, ev: null, count: 0, reliabilityCount: 0, allocatedOnly: 0 });
 
 		const missing = buildSavingsOverview(null, []);
 		expect(missing.realized.toDate).toBeNull();
@@ -85,12 +85,36 @@ describe('opportunityOf', () => {
 			co2eGrams: 10000,
 			ev: 250,
 			count: 3,
-			reliabilityCount: 1
+			reliabilityCount: 1,
+			allocatedOnly: 0
 		});
 	});
 
 	it('tolerates a non-array input', () => {
 		expect(opportunityOf(null).count).toBe(0);
+	});
+
+	it('keeps the allocated (chargeback) value out of the EV and unknown billable savings out of the cost', () => {
+		const result = opportunityOf([
+			// Fixed nodes: billable 0, the EV holds 90 of allocated value.
+			{
+				potential_savings_cost: 0,
+				projected_billable_cost_annual: 0,
+				projected_allocated_cost_annual: 100,
+				value: { ev: 80, p_success: 0.9, factors: { allocated_value: 90 } }
+			},
+			// Unobserved cluster: the billable saving is unknown, potential_savings_cost is the allocated value.
+			{
+				potential_savings_cost: 50,
+				projected_billable_cost_annual: null,
+				projected_allocated_cost_annual: 50,
+				projection_note: 'billable saving unknown: cluster not observed yet',
+				value: { ev: 40, p_success: 0.9 }
+			}
+		]);
+		expect(result.ev).toBe(40);
+		expect(result.cost).toBe(0);
+		expect(result.allocatedOnly).toBe(2);
 	});
 });
 

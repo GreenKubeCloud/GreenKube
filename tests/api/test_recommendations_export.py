@@ -44,6 +44,9 @@ def test_csv_export_carries_released_capacity_with_units_and_the_projected_label
     assert row["capacity_method"] == "projected"
     assert float(row["released_cpu_cores"]) == 0.9
     assert float(row["released_cpu_core_hours_per_year"]) == 7884.0
+    # Replica-hours of a request change are the hours it applies to, not a release (review point 7).
+    assert "released_replica_hours_per_year" not in row
+    assert float(row["affected_replica_hours_per_year"]) == 8760.0
     assert row["projected_allocated_cost_annual"] == "236.52"
     assert float(row["projected_billable_cost_annual"]) == 0.0
     # Formula injection is neutralized.

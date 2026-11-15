@@ -13,8 +13,7 @@
 		released: 'Released',
 		partially_released: 'Partially released',
 		not_released: 'Not released',
-		replica_change_only: 'Replica change only',
-		unknown: 'Unknown'
+		unknown: 'Unknown (requests not recorded)'
 	};
 
 	$: view = releasedCapacityOf(capacity);

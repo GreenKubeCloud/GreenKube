@@ -110,7 +110,13 @@
 				</p>
 				{#if opportunity.ev !== null}
 					<p class="text-xs text-dark-400" data-testid="opportunity-ev">
-						Risk-adjusted expected value ≈ {money(opportunity.ev)}/yr
+						Risk-adjusted expected value ≈ {money(opportunity.ev)}/yr (billable savings only)
+					</p>
+				{/if}
+				{#if opportunity.allocatedOnly}
+					<p class="text-xs text-dark-500" data-testid="opportunity-allocated-only">
+						{opportunity.allocatedOnly} {opportunity.allocatedOnly === 1 ? 'recommendation frees' : 'recommendations free'} allocated cost only
+						(chargeback, not billed: fixed nodes or cluster not observed yet); not counted here.
 					</p>
 				{/if}
 			{:else}

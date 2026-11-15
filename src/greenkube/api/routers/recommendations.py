@@ -392,7 +392,7 @@ EXPORT_COLUMNS = (
     "replicas",
     "released_cpu_core_hours_per_year",
     "released_mem_gib_hours_per_year",
-    "released_replica_hours_per_year",
+    "affected_replica_hours_per_year",
     "released_node_hours_per_year",
     "released_storage_gib",
     "released_load_balancers",
@@ -428,7 +428,7 @@ def _export_row(record: RecommendationRecord) -> dict:
         "replicas": now.get("replicas"),
         "released_cpu_core_hours_per_year": annual.get("cpu_core_hours"),
         "released_mem_gib_hours_per_year": annual.get("mem_gib_hours"),
-        "released_replica_hours_per_year": annual.get("replica_hours"),
+        "affected_replica_hours_per_year": annual.get("replica_hours"),
         "released_node_hours_per_year": annual.get("node_hours"),
         "released_storage_gib": now.get("storage_gib"),
         "released_load_balancers": now.get("load_balancers"),
@@ -459,7 +459,7 @@ async def export_recommendations(
 
     Every figure is projected. Cost columns are per year in ``currency``;
     released capacity columns carry their unit in their name (cores, GiB,
-    core-hours, GiB-hours, replica-hours and node-hours per year, storage GiB,
+    core-hours, GiB-hours and node-hours per year, storage GiB,
     LoadBalancer count). Released capacity is never converted to money and
     never added to a cost; negative values are increases. The JSON form returns
     the full records, including the ``released_capacity`` object with its units.
