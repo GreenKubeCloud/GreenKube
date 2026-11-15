@@ -495,6 +495,72 @@ class HistoricalRangeProcessor:
             )
             return {}
 
+    async def _ksm_pod_metadata(
+        self, chunk: CollectionWindow, pods: set[tuple[str, str]]
+    ) -> dict[tuple[str, str, int], list[PodMetric]]:
+        """Owner, requests, limits and containers of ``pods`` per step, from kube-state-metrics.
+
+        KSM series are exact per step, so an in-place resize or a pod that
+        lived between two collection ticks gets its real metadata.  KSM is
+        optional: a failed query logs a warning and the pods fall through to
+        the next source (rows stay flagged ``pod_metadata_missing`` when none
+        has them).  A ReplicaSet owner is mapped to its Deployment like the
+        live pod collector does.
+        """
+        if not pods:
+            return {}
+        promql = self._promql
+        try:
+            requests, limits, owners = await asyncio.gather(
+                self._query_range(chunk, promql.pod_container_requests()),
+                self._query_range(chunk, promql.pod_container_limits()),
+                self._query_range(chunk, promql.pod_owner()),
+            )
+        except Exception as error:
+            logger.warning("kube-state-metrics pod metadata unavailable for %d pod(s): %s", len(pods), error)
+            return {}
+        containers: dict[tuple[str, str, int], dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(dict))
+        for results, suffix in ((requests, "request"), (limits, "limit")):
+            for series in results or []:
+                namespace, pod, container, _node = self._series_identity(series)
+                resource = (series.get("metric", {}) or {}).get("resource")
+                if (namespace, pod) not in pods or not container or resource not in ("cpu", "memory"):
+                    continue
+                for sample_start, value in self._iter_window_samples(series, chunk):
+                    containers[(namespace, pod, sample_start)][container][f"{resource}_{suffix}"] = value
+        owner_at: dict[tuple[str, str, int], tuple[str, str]] = {}
+        for series in owners or []:
+            metric = series.get("metric", {}) or {}
+            namespace, pod, _container, _node = self._series_identity(series)
+            kind, name = metric.get("owner_kind"), metric.get("owner_name")
+            if (namespace, pod) not in pods or not kind or not name or kind == "<none>":
+                continue
+            if kind == "ReplicaSet" and "-" in name:
+                kind, name = "Deployment", name.rsplit("-", 1)[0]
+            for sample_start, value in self._iter_window_samples(series, chunk):
+                if value >= 1:
+                    owner_at[(namespace, pod, sample_start)] = (kind, name)
+        result: dict[tuple[str, str, int], list[PodMetric]] = {}
+        for key in set(containers) | set(owner_at):
+            namespace, pod, _sample = key
+            owner_kind, owner_name = owner_at.get(key, (None, None))
+            by_container = containers.get(key) or {"": {}}
+            result[key] = [
+                PodMetric(
+                    pod_name=pod,
+                    namespace=namespace,
+                    container_name=container,
+                    cpu_request=int(round(values.get("cpu_request", 0.0) * 1000)),
+                    memory_request=int(values.get("memory_request", 0.0)),
+                    cpu_limit=int(round(values["cpu_limit"] * 1000)) if "cpu_limit" in values else None,
+                    memory_limit=int(values["memory_limit"]) if "memory_limit" in values else None,
+                    owner_kind=owner_kind,
+                    owner_name=owner_name,
+                )
+                for container, values in sorted(by_container.items())
+            ]
+        return result
+
     def _list_failure_budget_spent(self, resource: str, start: datetime, end: datetime, error: Exception) -> bool:
         """Count a failed pod or node list for the window; True once COLLECTION_K8S_LIST_MAX_FAILURES is reached.
 
@@ -561,12 +627,15 @@ class HistoricalRangeProcessor:
         live_pods: dict,
         stored_metadata: dict[tuple[str, str, int], list[PodMetric]],
         chunk: CollectionWindow,
+        ksm_metadata: dict[tuple[str, str, int], list[PodMetric]] | None = None,
     ) -> None:
         """Find metadata for pods of the chunk that neither the range read of the history nor the live list has.
 
         1) Every retained history version of those pods, without lower bound:
         a pod deleted during a controller downtime longer than the read margin
-        keeps its metadata (review 2).  2) For pods still unknown, the owner,
+        keeps its metadata (review 2).  2) For pods never observed live, the
+        owner, requests, limits and containers kube-state-metrics reports at
+        each step (WP-01.1 step 2).  3) For pods still unknown, the owner,
         requests and containers of the rows already stored for them: a
         re-collected window re-runs the allocation with the stored requests
         instead of request 0, so the row stays self-consistent (review 4).
@@ -592,8 +661,8 @@ class HistoricalRangeProcessor:
         unseen = {key for key in pod_keys if key not in pod_history and key not in live_pods}
         if not unseen:
             return
-        if not unseen:
-            return
+        if ksm_metadata is not None:
+            ksm_metadata.update(await self._ksm_pod_metadata(chunk, unseen))
         try:
             stored_rows = await self.combined_metrics_repository.read_combined_metrics(chunk.start, chunk.end)
             read_containers = getattr(self.combined_metrics_repository, "read_container_metrics", None)
@@ -766,6 +835,8 @@ class HistoricalRangeProcessor:
         gap_tolerance = timedelta(seconds=2 * chosen_step_sec)
         #: (namespace, pod, sample epoch) -> metadata of the row already stored for it (review 4).
         stored_metadata: dict[tuple[str, str, int], list[PodMetric]] = {}
+        #: (namespace, pod, sample epoch) -> metadata from kube-state-metrics (WP-01.1 step 2).
+        ksm_metadata: dict[tuple[str, str, int], list[PodMetric]] = {}
 
         def pod_metadata_at(
             pod_key: tuple[str, str], timestamp: datetime
@@ -773,7 +844,8 @@ class HistoricalRangeProcessor:
             """Containers (with owner and requests) of a pod as of ``timestamp``, their source and an uncertainty flag.
 
             The history version valid at ``timestamp`` (or the nearest one),
-            else the live pod list, else the metadata of the row already stored
+            else the live pod list, else kube-state-metrics at that step (a pod
+            never observed live), else the metadata of the row already stored
             for this pod and step (a re-collection after the pod and its
             history are gone), else nothing (``missing``).  The flag is true
             when the version may belong to another incarnation of the pod.
@@ -787,6 +859,9 @@ class HistoricalRangeProcessor:
             live = live_pods.get(pod_key)
             if live:
                 return live, MetadataSource.K8S_SNAPSHOT, False
+            ksm = ksm_metadata.get((pod_key[0], pod_key[1], int(timestamp.timestamp())))
+            if ksm is not None:
+                return ksm, MetadataSource.KUBE_STATE_METRICS, False
             stored = stored_metadata.get((pod_key[0], pod_key[1], int(timestamp.timestamp())))
             if stored is not None:
                 return stored, MetadataSource.STORED_ROW, False
@@ -1034,6 +1109,7 @@ class HistoricalRangeProcessor:
                 live_pods,
                 stored_metadata,
                 chunk,
+                ksm_metadata,
             )
             latest_sample_ts = max(samples) if samples else None
             current_chunk = current_window and chunk_end == end_dt

@@ -3,6 +3,7 @@
 - `pod_snapshots` records the pod UID and the cluster identity (migration 0121); `node_snapshots_scd.last_seen` records when an unchanged node version was last confirmed.
 
 ### Fixed
+- Pods never observed live by a collection take their owner, requests, limits and containers from kube-state-metrics at each step (`metadata_source = kube_state_metrics`, WP-01.1 step 2); without kube-state-metrics they stay `missing`.
 - A removed node whose snapshot never changed for more than `NODE_DATA_MAX_AGE_DAYS` no longer falls back to the default zone and PUE: the age counts from the end of the version or its last confirmation, not from `valid_from`.
 - A pod deleted during a controller downtime longer than one hour keeps its metadata: pods of the window are looked up in the history by name without lower bound.
 - A spec rolled back A, B, A resolves to A after the rollback: the pod history stores one version per observation interval instead of one per spec hash.

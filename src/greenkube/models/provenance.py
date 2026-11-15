@@ -80,7 +80,7 @@ class MetadataSource(StrEnum):
     K8S_SNAPSHOT = "k8s_snapshot"
     """``pod_snapshots`` version valid at the sample time, the nearest one, or the live pod list."""
     KUBE_STATE_METRICS = "kube_state_metrics"
-    """Reserved: per-step kube-state-metrics series."""
+    """Per-step kube-state-metrics series (owner, container requests and limits) of a pod never observed live."""
     STORED_ROW = "stored_row"
     """Owner, requests and containers of the row already stored for this pod and step: a window re-collected
     after the pod and its history are gone re-runs the allocation with them."""

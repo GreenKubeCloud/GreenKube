@@ -189,6 +189,21 @@ class PromQLCatalog:
         selector = _selector('node!=""', *self.extra_matchers)
         return f"max(kube_pod_info{selector}) by (namespace,pod,node)"
 
+    def pod_container_requests(self) -> str:
+        """kube-state-metrics CPU (cores) and memory (bytes) requests per container (WP-01.1 step 2)."""
+        selector = _selector('resource=~"cpu|memory"', *self.extra_matchers)
+        return f"max(kube_pod_container_resource_requests{selector}) by (namespace,pod,container,resource)"
+
+    def pod_container_limits(self) -> str:
+        """kube-state-metrics CPU (cores) and memory (bytes) limits per container (WP-01.1 step 2)."""
+        selector = _selector('resource=~"cpu|memory"', *self.extra_matchers)
+        return f"max(kube_pod_container_resource_limits{selector}) by (namespace,pod,container,resource)"
+
+    def pod_owner(self) -> str:
+        """kube-state-metrics controller owner of each pod (WP-01.1 step 2)."""
+        selector = _selector('owner_is_controller="true"', *self.extra_matchers)
+        return f"max(kube_pod_owner{selector}) by (namespace,pod,owner_kind,owner_name)"
+
     def pod_running(self) -> str:
         """Pods in phase Running (value 1), so a running pod without a CPU sample still gets its row (COL-03)."""
         selector = _selector('phase="Running"', *self.extra_matchers)
