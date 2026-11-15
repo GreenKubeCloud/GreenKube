@@ -64,12 +64,13 @@ async def test_measure_columns_are_double_precision_after_migration():
         await connection.close()
 
 
-async def test_sum_of_three_million_small_rows_does_not_drift():
+async def test_sum_of_many_small_rows_does_not_drift():
+    """300k rows of 1e-4: a float4 sum is already 0.3 % short (29.8998), a float8 sum is exact to 1e-6."""
     connection = await asyncpg.connect(_dsn())
     schema = await _schema(connection, "gk_nrg06_sum")
     try:
         await MigrationRunner("postgres").run(connection)
-        rows = 3_000_000
+        rows = 300_000
         await connection.execute(
             "INSERT INTO combined_metrics (pod_name, namespace, timestamp, joules, co2e_grams, total_cost) "
             "SELECT 'p' || i, 'ns', $1::timestamptz, 1e-4, 1e-4, 1e-4 FROM generate_series(1, $2) AS i",
@@ -80,7 +81,7 @@ async def test_sum_of_three_million_small_rows_does_not_drift():
             "SELECT SUM(joules) AS joules, SUM(co2e_grams) AS co2e, SUM(total_cost) AS cost FROM combined_metrics"
         )
         for value in totals.values():
-            assert value == pytest.approx(300.0, rel=1e-6)
+            assert value == pytest.approx(30.0, rel=1e-6)
     finally:
         await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await connection.close()
