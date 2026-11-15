@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -190,6 +191,7 @@ async def stack(tmp_path):
             "opencost": opencost,
             "metrics_repo": metrics_repo,
             "watermarks": watermarks,
+            "processor": processor,
         }
     finally:
         await dbm.close()
@@ -280,6 +282,28 @@ async def test_prometheus_outage_does_not_advance_the_watermark(stack):
     assert recovered.succeeded and recovered.windows_collected == 1
     rows = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
     assert [r.timestamp for r in rows if r.pod_name == "p"] == [BASE, BASE + STEP]
+
+
+@pytest.mark.asyncio
+async def test_failed_pod_list_does_not_advance_the_watermark(stack):
+    """COL-07 acceptance (S4): a raising pod list fails the window; the next tick stores requests."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    pod_collector = stack["processor"].pod_collector
+    working = pod_collector.collect
+    pod_collector.collect = AsyncMock(side_effect=RuntimeError("API server timeout"))
+
+    failed = await _run_scheduled(stack, BASE + STEP + timedelta(minutes=1))
+
+    assert not failed.succeeded and "pod list" in (failed.error or "")
+    assert failed.watermark == BASE
+    assert await _pod_rows(stack["metrics_repo"], BASE, BASE + STEP) == []
+
+    pod_collector.collect = working
+    recovered = await _run_scheduled(stack, BASE + 2 * STEP + timedelta(minutes=1))
+
+    assert recovered.succeeded and recovered.windows_collected == 1
+    rows = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    assert rows and all(r.cpu_request == 1000 for r in rows)
 
 
 @pytest.mark.asyncio
@@ -407,3 +431,24 @@ async def test_report_keeps_only_the_latest_sample_for_dashboard_gauges(stack):
     assert report.windows_collected == 1
     assert {row.timestamp for row in report.latest_rows} == {BASE + 2 * STEP}
     assert {row.pod_name for row in report.latest_rows if not row.container_name} == {"p", "q"}
+
+
+@pytest.mark.asyncio
+async def test_intensity_lookup_error_does_not_advance_the_watermark(stack):
+    """COL-08 acceptance (S10): rows are not dropped silently; the window is retried."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    calculator = stack["processor"].calculator
+    working = calculator.calculate_emissions
+    calculator.calculate_emissions = AsyncMock(side_effect=RuntimeError("intensity table unavailable"))
+
+    failed = await _run_scheduled(stack, BASE + STEP + timedelta(minutes=1))
+
+    assert not failed.succeeded and "intensity" in (failed.error or "")
+    assert failed.watermark == BASE
+
+    calculator.calculate_emissions = working
+    recovered = await _run_scheduled(stack, BASE + 2 * STEP + timedelta(minutes=1))
+
+    assert recovered.succeeded
+    rows = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    assert [r.timestamp for r in rows if r.pod_name == "p"] == [BASE, BASE + STEP]

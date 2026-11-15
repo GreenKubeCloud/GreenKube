@@ -59,6 +59,10 @@ class ZombieAnalyzer(Analyzer):
             joules = summary.joules
             if not (total_cost > cfg.ZOMBIE_COST_THRESHOLD and joules < cfg.ZOMBIE_ENERGY_THRESHOLD):
                 continue
+            # No CPU sample over the lookback (memory-only rows store CPU as NULL):
+            # low energy is unmeasured, not evidence of idleness.
+            if summary.cpu is None or summary.cpu.sample_count == 0:
+                continue
             # Idle by design or protected: never a deletion candidate.
             if (
                 is_infrastructure_namespace(ns)

@@ -37,6 +37,13 @@ class NodeInfo(BaseModel):
     is_active: bool = Field(True, description="Whether this node is currently active in the cluster.")
     timestamp: Optional[datetime] = Field(None, description="Snapshot timestamp")
     embodied_emissions_kg: Optional[float] = Field(None, description="Manufactured emissions in kgCO2eq")
+    confirmed_until: Optional[datetime] = Field(
+        None,
+        description=(
+            "Stored snapshots only: end of the version (valid_to) or, for the current version, the last time "
+            "the Kubernetes API confirmed it unchanged. None when unknown."
+        ),
+    )
 
     @computed_field
     @property

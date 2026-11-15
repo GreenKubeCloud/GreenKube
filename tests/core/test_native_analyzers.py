@@ -186,6 +186,20 @@ class TestZombiePod:
         assert zombie_recs[0].potential_savings_cost is not None
         assert zombie_recs[0].potential_savings_cost > 0
 
+    def test_no_zombie_for_pod_without_any_cpu_sample(self, recommender):
+        """A pod with memory but no CPU sample (NULL, never 0) has no evidence of idleness (WP-01.1 review 7)."""
+        metrics = [
+            _make_metric(
+                pod_name="memory-only-pod",
+                total_cost=0.05,
+                joules=100.0,
+                co2e_grams=0.1,
+                cpu_usage_millicores=None,
+            )
+        ]
+        recs = recommender.generate_recommendations(metrics)
+        assert [r for r in recs if r.type == RecommendationType.ZOMBIE_POD] == []
+
     def test_no_zombie_for_active_pod(self, recommender):
         """An active pod should not be flagged as zombie."""
         metrics = [

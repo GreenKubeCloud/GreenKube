@@ -65,6 +65,35 @@ UNKNOWN_POWER_PROFILE_NODES = Gauge(
     registry=REGISTRY,
 )
 
+K8S_LIST_ERRORS = Counter(
+    "greenkube_collection_k8s_list_errors_total",
+    "Kubernetes pod or node lists that failed during metric collection, by resource.",
+    ["resource"],
+    registry=REGISTRY,
+)
+
+
+def record_k8s_list_error(resource: str) -> None:
+    """Count a failed Kubernetes list call of the collection pipeline (COL-07)."""
+    K8S_LIST_ERRORS.labels(resource=resource if resource in {"pods", "nodes"} else "other").inc()
+
+
+DEGRADED_WINDOWS = Counter(
+    "greenkube_collection_degraded_windows_total",
+    "Collection windows stored in degraded mode after COLLECTION_K8S_LIST_MAX_FAILURES consecutive failed "
+    "Kubernetes list attempts, by list (rows flagged with reason k8s_list_failed).",
+    ["list"],
+    registry=REGISTRY,
+)
+# Every label exists from start-up at 0, so increase() sees the first degraded window.
+for _list in ("pods", "nodes", "other"):
+    DEGRADED_WINDOWS.labels(list=_list)
+
+
+def record_degraded_window(resource: str) -> None:
+    """Count a window stored without a working Kubernetes pod or node list (review 5)."""
+    DEGRADED_WINDOWS.labels(list=resource if resource in {"pods", "nodes"} else "other").inc()
+
 
 def record_dropped_sample(reason: str, count: int = 1) -> None:
     if count > 0:

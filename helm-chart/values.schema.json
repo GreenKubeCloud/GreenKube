@@ -301,6 +301,12 @@
             "nodeInstanceLabel": {"type": "string"}
           }
         },
+        "collection": {
+          "type": "object",
+          "properties": {
+            "k8sListMaxFailures": {"type": "integer", "minimum": 1}
+          }
+        },
         "opencost": {
           "type": "object",
           "properties": {"url": {"type": "string"}, "verifyCerts": {"type": "boolean"}}

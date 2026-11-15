@@ -647,10 +647,13 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      │   ├─ CPU and memory per container (container!="", container!="POD")
      │   ├─ Network I/O per pod, disk I/O and ephemeral usage per container
      │   ├─ Restart counts and kube_pod_info (pod → node placement)
+     │   ├─ kube_pod_status_phase{phase="Running"} (pods without a CPU sample)
      │   └─ any query error fails the window (never stored as "empty")
      │
      ├─ Parse time-series data per sample:
      │   ├─ NaN/Inf dropped, negative rates clamped to 0
+     │   ├─ pod set = CPU ∪ memory ∪ Running pods; rows without CPU sample keep
+     │   │  cpu_usage_millicores NULL with reason no_cpu_sample
      │   └─ greenkube_collection_dropped_samples_total{reason}
      │
      ├─ Energy estimation per sample:
@@ -658,12 +661,12 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      │      coefficients → DEFAULT_INSTANCE_PROFILE (flagged, counted)
      │
      ├─ Carbon calculation:
-     │   └─ Historical intensity lookup
+     │   └─ Historical intensity lookup (a lookup error fails the window)
      │
      └─ Generate CombinedMetrics (+ container rows) for chunk
    ```
 
-5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}` and `greenkube_unknown_power_profile_nodes`.
+5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}`, `greenkube_collection_k8s_list_errors_total{resource}`, `greenkube_collection_degraded_windows_total{list}` and `greenkube_unknown_power_profile_nodes`.
 
 ### Recommendation Flow
 

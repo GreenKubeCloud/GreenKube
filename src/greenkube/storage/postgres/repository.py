@@ -1,5 +1,6 @@
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, List, Mapping, Optional
 
@@ -42,6 +43,34 @@ ALLOCATION_COLUMNS: tuple[str, ...] = ("model_version", "gpu_power_watts")
 
 def _allocation_values(metric: CombinedMetric) -> tuple[Any, ...]:
     return tuple(getattr(metric, column) for column in ALLOCATION_COLUMNS)
+
+
+#: Where the node and pod metadata of a raw row came from (WP-01.1, migration 0120).
+ROW_SOURCE_COLUMNS: tuple[str, ...] = ("node_source", "metadata_source")
+
+
+def _row_source_values(metric: CombinedMetric) -> tuple[Any, ...]:
+    return tuple(getattr(metric, column) for column in ROW_SOURCE_COLUMNS)
+
+
+def _metadata_upsert(table: str) -> str:
+    """Owner, requests and provenance SET clauses, and the guard of raw metric upserts (COL-01, review 4).
+
+    A re-collected row without pod metadata (``metadata_source = 'missing'``)
+    never replaces a stored row that had metadata: its energy, CO2e, cost and
+    flags were computed with request 0, so mixing them with the stored owner
+    and requests would make the row inconsistent.  The whole stored row and
+    its container rows are kept instead.
+    """
+    has_metadata = (
+        f"{table}.owner_kind IS NOT NULL OR COALESCE({table}.cpu_request, 0) > 0 "
+        f"OR COALESCE({table}.memory_request, 0) > 0"
+    )
+    assignments = ",\n".join(
+        f"{column} = EXCLUDED.{column}"
+        for column in ("owner_kind", "owner_name", "cpu_request", "memory_request", "metadata_source", "node_source")
+    )
+    return f"{assignments}\nWHERE NOT (COALESCE(EXCLUDED.metadata_source, '') = 'missing' AND ({has_metadata}))"
 
 
 #: Columns of ``node_idle_metrics`` (``greenkube.impact.rows.NodeIdleMetric`` fields, migration 0050).
@@ -224,7 +253,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
-    async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
+    async def write_combined_metrics(self, metrics: List[CombinedMetric], *, replace_containers: bool = False) -> int:
+        """See :meth:`CombinedMetricsRepository.write_combined_metrics`."""
         container_metrics = [metric for metric in metrics if metric.container_name]
         metrics = [metric for metric in metrics if not metric.container_name]
         if not metrics:
@@ -251,7 +281,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         calculation_version,
                         cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                         cost_source, usage_source, power_source, intensity_source,
-                        model_version, gpu_power_watts
+                        model_version, gpu_power_watts, node_source, metadata_source
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8,
@@ -269,7 +299,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         $35,
                         $36, $37, $38, $39, $40,
                         $41, $42, $43, $44,
-                        $45, $46
+                        $45, $46, $47, $48
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         total_cost = EXCLUDED.total_cost,
@@ -277,8 +307,6 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         pue = EXCLUDED.pue,
                         grid_intensity = EXCLUDED.grid_intensity,
                         joules = EXCLUDED.joules,
-                        cpu_request = EXCLUDED.cpu_request,
-                        memory_request = EXCLUDED.memory_request,
                         cpu_usage_millicores = EXCLUDED.cpu_usage_millicores,
                         memory_usage_bytes = EXCLUDED.memory_usage_bytes,
                         network_receive_bytes = EXCLUDED.network_receive_bytes,
@@ -291,8 +319,6 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         ephemeral_storage_usage_bytes = EXCLUDED.ephemeral_storage_usage_bytes,
                         gpu_usage_millicores = EXCLUDED.gpu_usage_millicores,
                         restart_count = EXCLUDED.restart_count,
-                        owner_kind = EXCLUDED.owner_kind,
-                        owner_name = EXCLUDED.owner_name,
                         period = EXCLUDED.period,
                         duration_seconds = EXCLUDED.duration_seconds,
                         grid_intensity_timestamp = EXCLUDED.grid_intensity_timestamp,
@@ -314,9 +340,12 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         power_source = EXCLUDED.power_source,
                         intensity_source = EXCLUDED.intensity_source,
                         model_version = EXCLUDED.model_version,
-                        gpu_power_watts = EXCLUDED.gpu_power_watts;
+                        gpu_power_watts = EXCLUDED.gpu_power_watts,
                 """
+                query += _metadata_upsert("combined_metrics") + ";"
 
+                if replace_containers:
+                    metrics = await self._without_rows_over_stored_containers(conn, metrics, container_metrics)
                 metrics_data = []
                 for metric in metrics:
                     reasons = metric.estimation_reasons
@@ -361,20 +390,97 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             metric.calculation_version,
                             *_provenance_values(metric),
                             *_allocation_values(metric),
+                            *_row_source_values(metric),
                         )
                     )
 
-                await conn.executemany(query, metrics_data)
+                # Container rows are rewritten with their pod rows, in the same
+                # transaction, so pod and container rows of a step agree (review 4).
+                async with conn.transaction():
+                    await conn.executemany(query, metrics_data)
+                    if replace_containers:
+                        await self._delete_stale_container_rows(conn, metrics, container_metrics)
+                    saved_count = len(metrics)
+                    saved_count += await self.write_container_metrics(container_metrics, conn=conn)
                 logger.info("Saved %s combined metrics to Postgres.", len(metrics))
-                saved_count = len(metrics)
             record_metric_provenance(metrics)
+            if container_metrics:
+                record_metric_provenance(container_metrics)
         except Exception as e:
             logger.error("Error writing combined metrics to Postgres: %s", e)
             raise QueryError(f"Error writing combined metrics: {e}") from e
-
-        if container_metrics:
-            saved_count += await self.write_container_metrics(container_metrics)
         return saved_count
+
+    @staticmethod
+    async def _without_rows_over_stored_containers(
+        conn: Any, pod_rows: List[CombinedMetric], container_rows: List[CombinedMetric]
+    ) -> List[CombinedMetric]:
+        """Drop pod rows of a collected window that have no container row in the batch but stored ones.
+
+        Rewriting such a pod row would leave stored container rows whose
+        joules no longer sum to it; the stored pod and container rows stay
+        together instead (third review F1).
+        """
+        with_containers = {
+            (row.namespace, row.pod_name, row.timestamp) for row in container_rows if row.timestamp is not None
+        }
+        candidates = [
+            row
+            for row in pod_rows
+            if row.timestamp is not None and (row.namespace, row.pod_name, row.timestamp) not in with_containers
+        ]
+        if not candidates:
+            return pod_rows
+        stored = await conn.fetch(
+            """SELECT DISTINCT namespace, pod_name, timestamp FROM container_metrics
+            WHERE (namespace, pod_name, timestamp) IN (
+                SELECT * FROM unnest($1::text[], $2::text[], $3::timestamptz[])
+            )""",
+            [row.namespace for row in candidates],
+            [row.pod_name for row in candidates],
+            [row.timestamp for row in candidates],
+        )
+        covered = {(r["namespace"], r["pod_name"], r["timestamp"]) for r in stored}
+        return [
+            row
+            for row in pod_rows
+            if row.timestamp is None or (row.namespace, row.pod_name, row.timestamp) not in covered
+        ]
+
+    @staticmethod
+    async def _delete_stale_container_rows(
+        conn: Any, pod_rows: List[CombinedMetric], container_rows: List[CombinedMetric]
+    ) -> None:
+        """Delete container rows of re-written pod rows that the new batch no longer produces.
+
+        Pod rows without metadata (``missing``) are skipped: the stored pod row
+        and its containers are kept when they had metadata (review 4).  A pod
+        row without any container row in the batch (no container usage in this
+        pass, for example a missing container series) keeps its stored
+        container rows: they are never deleted for lack of data (second review 1b).
+        """
+        new_containers: dict[tuple[str, str, datetime], list[str]] = defaultdict(list)
+        for row in container_rows:
+            if row.timestamp is not None and row.container_name:
+                new_containers[(row.namespace, row.pod_name, row.timestamp)].append(row.container_name)
+        targets = [
+            (
+                row.namespace,
+                row.pod_name,
+                row.timestamp,
+                new_containers.get((row.namespace, row.pod_name, row.timestamp), []),
+            )
+            for row in pod_rows
+            if row.timestamp is not None
+            and row.metadata_source != "missing"
+            and new_containers.get((row.namespace, row.pod_name, row.timestamp))
+        ]
+        if targets:
+            await conn.executemany(
+                """DELETE FROM container_metrics
+                WHERE namespace = $1 AND pod_name = $2 AND timestamp = $3 AND NOT (container_name = ANY($4::text[]))""",
+                targets,
+            )
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         """
@@ -456,7 +562,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             logger.error("Error reading hourly metrics from Postgres: %s", e)
             raise QueryError(f"Error reading hourly metrics: {e}") from e
 
-    async def write_container_metrics(self, metrics: List[CombinedMetric]) -> int:
+    async def write_container_metrics(self, metrics: List[CombinedMetric], conn: Any = None) -> int:
+        """Upsert container rows; on ``conn`` (inside the caller's transaction) when given."""
         if not metrics:
             return 0
 
@@ -469,13 +576,14 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version,
                 cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                 cost_source, usage_source, power_source, intensity_source,
-                emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts
+                emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
+                node_source, metadata_source
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
                 $10, $11, $12, $13, $14, $15, $16, $17,
                 $18, $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31,
-                $32, $33, $34, $35, $36
+                $32, $33, $34, $35, $36, $37, $38
             )
             ON CONFLICT (namespace, pod_name, container_name, timestamp) DO UPDATE SET
                 total_cost = EXCLUDED.total_cost,
@@ -509,7 +617,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 cpu_limit = EXCLUDED.cpu_limit,
                 memory_limit = EXCLUDED.memory_limit,
                 model_version = EXCLUDED.model_version,
-                gpu_power_watts = EXCLUDED.gpu_power_watts
+                gpu_power_watts = EXCLUDED.gpu_power_watts,
+                node_source = EXCLUDED.node_source,
+                metadata_source = EXCLUDED.metadata_source
         """
         rows = []
         for metric in metrics:
@@ -546,11 +656,15 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     metric.cpu_limit,
                     metric.memory_limit,
                     *_allocation_values(metric),
+                    *_row_source_values(metric),
                 )
             )
+        if conn is not None:
+            await conn.executemany(query, rows)
+            return len(rows)
         try:
-            async with self.db_manager.connection_scope() as conn:
-                await conn.executemany(query, rows)
+            async with self.db_manager.connection_scope() as scoped:
+                await scoped.executemany(query, rows)
             record_metric_provenance(metrics)
             return len(rows)
         except Exception as e:
@@ -987,8 +1101,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
                         COALESCE(SUM(total_cost), 0)          AS total_cost,
                         COALESCE(SUM(joules), 0)              AS energy_joules,
-                        COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
-                        COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                        SUM(cpu_usage_millicores) AS cpu_usage_millicores,
+                        SUM(memory_usage_bytes) AS memory_usage_bytes
                     FROM ({union_query}) AS combined
                     GROUP BY ts_bucket
                     ORDER BY ts_bucket

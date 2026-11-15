@@ -63,6 +63,31 @@ class IntensitySource(StrEnum):
     MIXED = MIXED
 
 
+class NodeSource(StrEnum):
+    """Where the node attributes of a historical sample came from (WP-01.1, RECON-05)."""
+
+    SNAPSHOT = "snapshot"
+    """``node_snapshots_scd`` version valid at the sample time (or the earliest later one)."""
+    CURRENT_API = "current_api"
+    """The node list read from the Kubernetes API at collection time; no snapshot exists."""
+    UNKNOWN = "unknown"
+    """Neither: zone, PUE and profiles are configured defaults."""
+
+
+class MetadataSource(StrEnum):
+    """Where the pod requests, owner and containers of a historical sample came from (WP-01.1, COL-01)."""
+
+    K8S_SNAPSHOT = "k8s_snapshot"
+    """``pod_snapshots`` version valid at the sample time, the nearest one, or the live pod list."""
+    KUBE_STATE_METRICS = "kube_state_metrics"
+    """Per-step kube-state-metrics series (owner, container requests and limits) of a pod never observed live."""
+    STORED_ROW = "stored_row"
+    """Owner, requests and containers of the row already stored for this pod and step: a window re-collected
+    after the pod and its history are gone re-runs the allocation with them."""
+    MISSING = "missing"
+    """No pod metadata at all: requests are not known, the owner is NULL."""
+
+
 #: Cost sources whose figures may back a measured cost saving (C0.3).
 TRUSTED_COST_SOURCES: frozenset[str] = frozenset(
     {CostSource.OPENCOST, CostSource.OPENCOST_DERIVED, CostSource.KUBECOST, CostSource.PRICING_CATALOG}

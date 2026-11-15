@@ -131,6 +131,20 @@ tests:
           path: data.COLLECTION_MAX_BACKFILL
           value: "6h"
 
+  - it: should set the Kubernetes list failure budget of the collection
+    asserts:
+      - equal:
+          path: data.COLLECTION_K8S_LIST_MAX_FAILURES
+          value: "3"
+
+  - it: should allow overriding the Kubernetes list failure budget of the collection
+    set:
+      config.collection.k8sListMaxFailures: 5
+    asserts:
+      - equal:
+          path: data.COLLECTION_K8S_LIST_MAX_FAILURES
+          value: "5"
+
   - it: should set PROMETHEUS_NODE_INSTANCE_LABEL
     asserts:
       - equal:

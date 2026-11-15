@@ -235,6 +235,28 @@ class TestComprehensiveClusterMetrics:
         output = generate_latest(REGISTRY).decode("utf-8")
         assert "greenkube_pod_cpu_usage_millicores" in output
 
+    def test_pod_without_cpu_or_memory_sample_exposes_no_usage_series(self):
+        """NULL usage (no sample at the step) is not exported as 0 (WP-01.1 review 7)."""
+        from prometheus_client import generate_latest
+
+        row = CombinedMetric(
+            pod_name="no-cpu-sample",
+            namespace="ns",
+            cpu_usage_millicores=None,
+            memory_usage_bytes=None,
+            timestamp=datetime(2026, 11, 7, tzinfo=timezone.utc),
+        )
+        update_cluster_metrics([row])
+
+        output = generate_latest(REGISTRY).decode("utf-8")
+        usage_lines = [
+            line
+            for line in output.splitlines()
+            if 'pod="no-cpu-sample"' in line
+            and line.startswith(("greenkube_pod_cpu_usage_millicores", "greenkube_pod_memory_usage_bytes"))
+        ]
+        assert usage_lines == []
+
     def test_update_sets_pod_memory_usage(self, sample_combined_metrics):
         update_cluster_metrics(sample_combined_metrics)
         from prometheus_client import generate_latest

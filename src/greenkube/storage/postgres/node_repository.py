@@ -75,7 +75,16 @@ class PostgresNodeRepository(NodeRepository):
                                 break
 
                         if not changed:
-                            # No change — skip this node
+                            # Unchanged: the version is confirmed until this observation (review 1).
+                            await conn.execute(
+                                """
+                                UPDATE node_snapshots_scd
+                                SET last_seen = GREATEST(COALESCE(last_seen, $1), $1)
+                                WHERE id = $2
+                                """,
+                                now,
+                                current["id"],
+                            )
                             continue
 
                         # Close the current record
@@ -96,8 +105,8 @@ class PostgresNodeRepository(NodeRepository):
                             node_name, instance_type, cpu_capacity_cores,
                             architecture, cloud_provider, region, zone, node_pool,
                             memory_capacity_bytes, is_active, embodied_emissions_kg,
-                            valid_from, valid_to, is_current
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, TRUE)
+                            valid_from, valid_to, is_current, last_seen
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, TRUE, $12)
                         """,
                         node.name,
                         node.instance_type,
@@ -160,7 +169,7 @@ class PostgresNodeRepository(NodeRepository):
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
                               memory_capacity_bytes, is_active, embodied_emissions_kg,
-                           valid_from
+                           valid_from, COALESCE(valid_to, last_seen) AS confirmed_until
                     FROM node_snapshots_scd
                     WHERE valid_from <= $2
                       AND (valid_to IS NULL OR valid_to >= $1)
@@ -220,7 +229,7 @@ class PostgresNodeRepository(NodeRepository):
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
                            memory_capacity_bytes, is_active, embodied_emissions_kg,
-                           valid_from
+                           valid_from, COALESCE(valid_to, last_seen) AS confirmed_until
                     FROM node_snapshots_scd
                     WHERE {where_clause}
                     ORDER BY valid_from DESC

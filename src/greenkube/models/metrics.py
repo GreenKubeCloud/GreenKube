@@ -105,6 +105,9 @@ class PodMetric(BaseModel):
     )
     owner_kind: Optional[str] = Field(None, description="Owner resource kind (Deployment, StatefulSet, etc.).")
     owner_name: Optional[str] = Field(None, description="Owner resource name.")
+    pod_uid: Optional[str] = Field(
+        None, description="Kubernetes pod UID (metadata.uid); a new UID under the same name is a recreated pod."
+    )
 
 
 class RecommendationType(str, Enum):
@@ -922,6 +925,20 @@ class CombinedMetric(BaseModel):
     usage_source: Optional[str] = Field(None, description="Provenance of the CPU/memory usage figures.")
     power_source: Optional[str] = Field(None, description="Provenance of the node power profile.")
     intensity_source: Optional[str] = Field(None, description="Provenance of the grid carbon intensity.")
+    node_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the node attributes (zone, provider, PUE, instance type) of the sample came from: "
+            "snapshot (node history valid at the sample time), current_api or unknown (WP-01.1)."
+        ),
+    )
+    metadata_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the pod requests, owner and container list of the sample came from: k8s_snapshot "
+            "(pod history or the live pod list) or missing (WP-01.1)."
+        ),
+    )
 
     # From CarbonEmissionMetric
     co2e_grams: float = Field(

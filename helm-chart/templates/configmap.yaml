@@ -116,6 +116,7 @@ data:
   PROMETHEUS_SCRAPE_INTERVAL: {{ .Values.config.prometheus.scrapeInterval | default "30s" | quote }}
   COLLECTION_SAFETY_LAG: {{ (.Values.config.collection).safetyLag | default "1m" | quote }}
   COLLECTION_MAX_BACKFILL: {{ (.Values.config.collection).maxBackfill | default "24h" | quote }}
+  COLLECTION_K8S_LIST_MAX_FAILURES: {{ (.Values.config.collection).k8sListMaxFailures | default 3 | quote }}
   PROMETHEUS_NODE_INSTANCE_LABEL: {{ .Values.config.prometheus.nodeInstanceLabel | quote }}
 
   # --- OpenCost Collector Config ---

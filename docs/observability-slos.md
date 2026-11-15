@@ -189,6 +189,8 @@ The metric collection job publishes, on the control-loop registry:
 | `greenkube_collection_watermark_lag_seconds{source}` | Seconds between now and the end of the last fully written window. |
 | `greenkube_collection_windows_total{source}` | Collection chunks written and committed. |
 | `greenkube_collection_window_errors_total{source,reason}` | Runs stopped before committing a window (`collection_failed`, `leadership_lost`); the window is retried. |
+| `greenkube_collection_k8s_list_errors_total{resource}` | Kubernetes pod or node lists that failed during collection (`pods`, `nodes`). Without a pod snapshot newer than one step (pods) or any node snapshot (nodes) the window fails and is retried, up to `COLLECTION_K8S_LIST_MAX_FAILURES` attempts. |
+| `greenkube_collection_degraded_windows_total{list}` | Windows stored in degraded mode after `COLLECTION_K8S_LIST_MAX_FAILURES` consecutive failed pod or node lists (`pods`, `nodes`): their rows without history carry the reason `k8s_list_failed`. Any increase means the controller cannot list pods or nodes (RBAC, API timeouts). Alert `GreenKubeCollectionDegraded` fires when one was stored in the last hour (for 10 minutes). |
 | `greenkube_collection_window_duration_seconds{source}` | Time to collect and write one chunk. |
 | `greenkube_collection_gap_windows_total{source}` | Windows abandoned because they were older than `COLLECTION_MAX_BACKFILL`. |
 | `greenkube_collection_dropped_samples_total{reason}` | Prometheus samples dropped (`non_finite`, `malformed`, `out_of_window`) or clamped (`negative_clamped`). |

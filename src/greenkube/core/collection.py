@@ -176,8 +176,8 @@ class RangeProcessor(Protocol):
 
 
 class MetricsWriter(Protocol):
-    async def write_combined_metrics(self, metrics: list[CombinedMetric]) -> int:
-        """Upsert combined and container rows."""
+    async def write_combined_metrics(self, metrics: list[CombinedMetric], *, replace_containers: bool = False) -> int:
+        """Upsert combined and container rows; ``replace_containers`` rewrites the container rows of each pod."""
         ...
 
 
@@ -271,6 +271,10 @@ class MetricsCollectionJob:
             collection_telemetry.set_watermark_lag(self.source, now, report.watermark)
         return report
 
+    async def _write_rows(self, rows: list[CombinedMetric]) -> int:
+        """Write a collected window; its container rows replace the stored ones of its pods (review 4)."""
+        return await self.metrics_repository.write_combined_metrics(rows, replace_containers=True)
+
     async def _write_idle_metrics(self) -> None:
         """Commits the ``__idle__`` rows of the window just collected (roadmap B2).
 
@@ -315,7 +319,7 @@ class MetricsCollectionJob:
         fence.check("collect metrics")
         rows = await self.processor.run_range(start=window.start, end=window.end)
         fence.check("write metrics")
-        written = await self.metrics_repository.write_combined_metrics(rows) if rows else 0
+        written = await self._write_rows(rows) if rows else 0
         await self._write_idle_metrics()
         report.rows_written += written or 0
         report.windows_collected += 1

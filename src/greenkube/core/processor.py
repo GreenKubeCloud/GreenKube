@@ -28,6 +28,7 @@ from ..core.metric_assembler import MetricAssembler
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..energy.estimator import BasicEstimator
 from ..models.metrics import CombinedMetric
+from ..storage.base_pod_snapshot_repository import PodSnapshotRepository
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..storage.embodied_repository import EmbodiedRepository
 
@@ -53,6 +54,7 @@ class DataProcessor:
         estimator: BasicEstimator,
         config: Config | None = None,
         metrics_server_collector: MetricsServerCollector | None = None,
+        pod_snapshot_repository: PodSnapshotRepository | None = None,
     ):
         self._config = config if config is not None else get_config()
         self.calculator = calculator
@@ -99,6 +101,7 @@ class DataProcessor:
             zone_mapper=self._zone_mapper,
             config=self._config,
             metrics_server_collector=self._metrics_server_collector,
+            pod_snapshot_repository=pod_snapshot_repository,
         )
 
     async def run_range(

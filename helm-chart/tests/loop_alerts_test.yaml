@@ -34,9 +34,12 @@ tests:
       - equal:
           path: spec.groups[2].rules[5].alert
           value: GreenKubeGitProviderRateLimited
+      - equal:
+          path: spec.groups[2].rules[6].alert
+          value: GreenKubeCollectionDegraded
       - lengthEqual:
           path: spec.groups[2].rules
-          count: 6
+          count: 7
       - equal:
           path: spec.groups[3].name
           value: greenkube.ledger

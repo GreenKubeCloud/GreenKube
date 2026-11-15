@@ -263,6 +263,9 @@ class Config(BaseSettings):
     # job backfills missing windows up to COLLECTION_MAX_BACKFILL in the past.
     COLLECTION_SAFETY_LAG: str = "1m"
     COLLECTION_MAX_BACKFILL: str = "24h"
+    # Consecutive failed Kubernetes pod/node list attempts for one window before it is
+    # stored in degraded mode (rows flagged, reason k8s_list_failed) instead of retried.
+    COLLECTION_K8S_LIST_MAX_FAILURES: int = Field(3, ge=1)
     PROMETHEUS_VERIFY_CERTS: bool = True
     PROMETHEUS_NODE_INSTANCE_LABEL: str = "label_node_kubernetes_io_instance_type"
 
