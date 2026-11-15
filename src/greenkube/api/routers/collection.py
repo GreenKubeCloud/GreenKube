@@ -9,7 +9,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from greenkube.api.schemas import CollectionCoverageResponse, CollectionHoleResponse, CollectionStatusResponse
+from greenkube.api.schemas import (
+    CollectionCoverageResponse,
+    CollectionHoleResponse,
+    CollectionIdentityMismatchResponse,
+    CollectionStatusResponse,
+)
 from greenkube.core.collection import (
     METRICS_WATERMARK_SOURCE,
     align_down,
@@ -120,4 +125,27 @@ async def collection_status(
             if hole
             else None
         ),
+        identity_mismatch=await _identity_mismatch(),
+    )
+
+
+async def get_installation_repository():
+    """Provide the installation identity repository of the configured database."""
+    from greenkube.core.db import get_db_manager
+    from greenkube.storage.installation_repository import create_installation_repository
+
+    return create_installation_repository(get_db_manager(), get_config().DB_TYPE)
+
+
+async def _identity_mismatch() -> CollectionIdentityMismatchResponse | None:
+    """The refusal recorded by a controller of another cluster (COL-02 review); ``None`` when unreadable."""
+    try:
+        stored = await (await get_installation_repository()).get()
+    except Exception as error:  # table missing before migration 0124, or database down
+        logger.debug("Installation identity unreadable for /health (%s).", type(error).__name__)
+        return None
+    if stored is None or not stored.mismatch_uid:
+        return None
+    return CollectionIdentityMismatchResponse(
+        stored_uid=stored.cluster_uid, live_uid=stored.mismatch_uid, seen_at=stored.mismatch_seen_at
     )

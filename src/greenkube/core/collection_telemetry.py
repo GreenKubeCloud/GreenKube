@@ -126,6 +126,19 @@ COST_UNATTRIBUTED_RATIO = Gauge(
 )
 
 
+IDENTITY_MISMATCH = Gauge(
+    "greenkube_collection_identity_mismatch",
+    "1 when the database belongs to another cluster (installation kube-system UID differs) and collection "
+    "refuses to start; 0 once the identity is accepted.",
+    registry=REGISTRY,
+)
+
+
+def set_identity_mismatch(mismatch: bool) -> None:
+    """Publish whether collection is refused for a cluster identity mismatch (COL-02 review)."""
+    IDENTITY_MISMATCH.set(1 if mismatch else 0)
+
+
 RATE_WINDOW_SCRAPES = Gauge(
     "greenkube_collection_rate_window_scrapes",
     "Most scrapes any cAdvisor CPU series holds inside the rate window, measured hourly (COL-04). "

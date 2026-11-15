@@ -354,12 +354,25 @@ class CollectionCoverageResponse(BaseModel):
     holes: List[CollectionHoleResponse] = Field(default_factory=list)
 
 
+class CollectionIdentityMismatchResponse(BaseModel):
+    """A controller of another cluster refused this database: collection is stopped (COL-02 review)."""
+
+    stored_uid: str = Field(..., description="kube-system UID this database belongs to.")
+    live_uid: str = Field(..., description="kube-system UID of the controller that refused it.")
+    seen_at: Optional[datetime] = None
+
+
 class CollectionStatusResponse(BaseModel):
     """Watermark, lag and last hole of the metric collection (COL-04)."""
 
     watermark: Optional[datetime] = None
     lag_seconds: Optional[float] = None
     last_gap: Optional[CollectionHoleResponse] = None
+    identity_mismatch: Optional[CollectionIdentityMismatchResponse] = Field(
+        None,
+        description="Set while collection refuses this database because it belongs to another cluster; "
+        "set config.collection.allowClusterUidChange once to adopt it.",
+    )
 
 
 class HealthResponse(BaseModel):

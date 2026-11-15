@@ -185,6 +185,15 @@ spec:
           annotations:
             summary: GreenKube stores collection windows without a working Kubernetes list
             description: {{ `The Kubernetes {{ $labels.list }} list failed COLLECTION_K8S_LIST_MAX_FAILURES times in a row for collection windows stored in the last hour: their rows carry the reason k8s_list_failed (missing owner and requests, or default node attributes). Check the controller RBAC (list pods and nodes) and the API server latency.` | quote }}
+        - alert: GreenKubeClusterIdentityMismatch
+          # The database belongs to another cluster (kube-system UID): collection stops (fail closed).
+          expr: max(greenkube_collection_identity_mismatch) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: GreenKube refuses to collect into a database of another cluster
+            description: The database installation row holds another cluster's kube-system UID (cluster rebuilt, or a backup restored into a new cluster), so no metric is collected and every figure is stale. If this database is meant for this cluster, set config.collection.allowClusterUidChange=true for one controller start, then back to false; otherwise give this install its own database schema. See docs/operations/backup-restore.md.
     {{- end }}
     {{- if .Values.monitoring.serviceMonitor.enabled }}
     # Ledger integrity (N7). Rendered whenever a GreenKube process is scraped,

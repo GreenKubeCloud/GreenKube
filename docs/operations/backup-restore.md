@@ -189,6 +189,21 @@ kubectl -n $NS patch cronjob $RELEASE-postgres-backup -p '{"spec":{"suspend":fal
 
 (Use your usual replica counts, or simply `helm upgrade` with your values, which restores them.)
 
+### Restoring into a new or rebuilt cluster
+
+The database records the cluster it belongs to: the `kube-system` namespace UID, in the `installation`
+table. A rebuilt cluster, or another cluster, has a new UID, so after such a restore the controller refuses
+to collect into the database (fail closed, so two clusters never write into one schema). You see it as:
+
+- the controller `/readyz` not ready, with `identity_error` in its body;
+- `collection.identity_mismatch` (stored and live UID) in `GET /api/v1/health`;
+- `greenkube_collection_identity_mismatch = 1` and the critical alert `GreenKubeClusterIdentityMismatch`.
+
+When the database is meant for this cluster, set `config.collection.allowClusterUidChange: true`
+(`ALLOW_CLUSTER_UID_CHANGE`) for one controller start, check the controller log line
+`ALLOW_CLUSTER_UID_CHANGE: this database belonged to cluster ...`, then set it back to `false`. Restoring
+into the same cluster needs nothing: its UID has not changed.
+
 ### Verify the ledger after a restore
 
 The savings ledger is hash-chained per cluster: a restore that lost, reordered or altered an entry breaks the

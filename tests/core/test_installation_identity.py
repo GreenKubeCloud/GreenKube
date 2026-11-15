@@ -101,8 +101,21 @@ async def test_a_controller_of_another_cluster_refuses_the_database(database):
     with pytest.raises(ClusterIdentityMismatch, match="one database schema per cluster"):
         await resolve_installation_identity(repo, "prod", reader=_reader(UID_B))
 
+    # The refusal is visible: stored for the API, a gauge for alerting, a reason for /readyz (review 2).
+    from greenkube.core import collection_telemetry
+    from greenkube.core.cluster_identity import identity_problem
+
+    stored = await repo.get()
+    assert stored is not None and stored.mismatch_uid == UID_B and stored.mismatch_seen_at is not None
+    assert collection_telemetry.IDENTITY_MISMATCH._value.get() == 1
+    assert "one database schema per cluster" in (identity_problem() or "")
+
     adopted = await resolve_installation_identity(repo, "prod", reader=_reader(UID_B), allow_change=True)
     assert adopted.cluster_uid == UID_B
+    cleared = await repo.get()
+    assert cleared is not None and cleared.mismatch_uid is None
+    assert collection_telemetry.IDENTITY_MISMATCH._value.get() == 0
+    assert identity_problem() is None
 
 
 @pytest.mark.asyncio

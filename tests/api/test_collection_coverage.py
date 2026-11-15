@@ -116,6 +116,26 @@ def test_coverage_rejects_an_inverted_period(wired):
     assert response.status_code == 400
 
 
+def test_health_shows_a_refused_cluster_identity(wired, monkeypatch):
+    """Review 2: a database of another cluster stops collection; /health says so."""
+    from greenkube.storage.installation_repository import InstallationIdentity
+
+    seen = datetime(2026, 11, 15, 9, 0, tzinfo=timezone.utc)
+
+    class _Installation:
+        async def get(self):
+            return InstallationIdentity("uid-a", "dev", "kube-system", "uid-b", seen)
+
+    async def _installation():
+        return _Installation()
+
+    monkeypatch.setattr(collection_router, "get_installation_repository", _installation)
+
+    mismatch = wired.get("/api/v1/health").json()["collection"]["identity_mismatch"]
+
+    assert mismatch == {"stored_uid": "uid-a", "live_uid": "uid-b", "seen_at": "2026-11-15T09:00:00Z"}
+
+
 def test_health_shows_the_watermark_lag_and_the_last_gap(wired):
     """COL-04 acceptance c)."""
     body = wired.get("/api/v1/health").json()

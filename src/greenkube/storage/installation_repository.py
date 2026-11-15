@@ -27,6 +27,9 @@ class InstallationIdentity:
     cluster_uid: str
     cluster_name: str | None
     source: str
+    #: kube-system UID of the last controller that refused this database (another cluster), if any.
+    mismatch_uid: str | None = None
+    mismatch_seen_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,10 @@ class InstallationRepository(ABC):
         """Overwrite the stored identity (explicit cluster UID change)."""
 
     @abstractmethod
+    async def set_mismatch(self, live_uid: str | None) -> None:
+        """Record (or clear with ``None``) the UID of a controller that refused this database."""
+
+    @abstractmethod
     async def adopt_legacy_keys(self, cluster_uid: str, source: str) -> AdoptedKeys:
         """Merge watermark rows and window records keyed by a name into ``cluster_uid``.
 
@@ -73,9 +80,22 @@ class SQLiteInstallationRepository(InstallationRepository):
 
     async def get(self) -> InstallationIdentity | None:
         async with self.db_manager.connection_scope() as conn:
-            async with conn.execute("SELECT cluster_uid, cluster_name, source FROM installation WHERE id = 1") as cur:
+            async with conn.execute(
+                "SELECT cluster_uid, cluster_name, source, mismatch_uid, mismatch_seen_at "
+                "FROM installation WHERE id = 1"
+            ) as cur:
                 row = await cur.fetchone()
-        return InstallationIdentity(row[0], row[1], row[2]) if row else None
+        if not row:
+            return None
+        return InstallationIdentity(row[0], row[1], row[2], row[3], ensure_utc(row[4]) if row[4] else None)
+
+    async def set_mismatch(self, live_uid: str | None) -> None:
+        seen = datetime.now(timezone.utc).strftime(_SQLITE_FORMAT) if live_uid else None
+        async with self.db_manager.connection_scope() as conn:
+            await conn.execute(
+                "UPDATE installation SET mismatch_uid = ?, mismatch_seen_at = ? WHERE id = 1", (live_uid, seen)
+            )
+            await conn.commit()
 
     async def claim(self, identity: InstallationIdentity) -> InstallationIdentity:
         now = datetime.now(timezone.utc).strftime(_SQLITE_FORMAT)
@@ -98,7 +118,8 @@ class SQLiteInstallationRepository(InstallationRepository):
                 """INSERT INTO installation (id, cluster_uid, cluster_name, source, created_at, updated_at)
                 VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
                     cluster_uid = excluded.cluster_uid, cluster_name = excluded.cluster_name,
-                    source = excluded.source, updated_at = excluded.updated_at""",
+                    source = excluded.source, updated_at = excluded.updated_at,
+                    mismatch_uid = NULL, mismatch_seen_at = NULL""",
                 (identity.cluster_uid, identity.cluster_name, identity.source, now, now),
             )
             await conn.commit()
@@ -154,8 +175,27 @@ class PostgresInstallationRepository(InstallationRepository):
 
     async def get(self) -> InstallationIdentity | None:
         async with self.db_manager.connection_scope() as conn:
-            row = await conn.fetchrow("SELECT cluster_uid, cluster_name, source FROM installation WHERE id = 1")
-        return InstallationIdentity(row["cluster_uid"], row["cluster_name"], row["source"]) if row else None
+            row = await conn.fetchrow(
+                "SELECT cluster_uid, cluster_name, source, mismatch_uid, mismatch_seen_at "
+                "FROM installation WHERE id = 1"
+            )
+        if not row:
+            return None
+        return InstallationIdentity(
+            row["cluster_uid"],
+            row["cluster_name"],
+            row["source"],
+            row["mismatch_uid"],
+            ensure_utc(row["mismatch_seen_at"]) if row["mismatch_seen_at"] else None,
+        )
+
+    async def set_mismatch(self, live_uid: str | None) -> None:
+        async with self.db_manager.connection_scope() as conn:
+            await conn.execute(
+                """UPDATE installation SET mismatch_uid = $1,
+                    mismatch_seen_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END WHERE id = 1""",
+                live_uid,
+            )
 
     async def claim(self, identity: InstallationIdentity) -> InstallationIdentity:
         async with self.db_manager.connection_scope() as conn:
@@ -177,7 +217,8 @@ class PostgresInstallationRepository(InstallationRepository):
                 """INSERT INTO installation (id, cluster_uid, cluster_name, source)
                 VALUES (1, $1, $2, $3) ON CONFLICT (id) DO UPDATE SET
                     cluster_uid = EXCLUDED.cluster_uid, cluster_name = EXCLUDED.cluster_name,
-                    source = EXCLUDED.source, updated_at = NOW()""",
+                    source = EXCLUDED.source, updated_at = NOW(),
+                    mismatch_uid = NULL, mismatch_seen_at = NULL""",
                 identity.cluster_uid,
                 identity.cluster_name,
                 identity.source,

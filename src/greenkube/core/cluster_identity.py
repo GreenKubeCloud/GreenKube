@@ -24,6 +24,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from greenkube.core import collection_telemetry
 from greenkube.storage.installation_repository import (
     AdoptedKeys,
     InstallationIdentity,
@@ -37,6 +38,8 @@ SOURCE_CLUSTER_NAME = "cluster_name"
 
 #: Identity resolved by this process (one installation per process).
 _RESOLVED: dict[str, InstallationIdentity] = {}
+#: Reason collection refuses to start in this process (review of COL-02), read by /readyz.
+_PROBLEM: dict[str, str] = {}
 
 
 class InstallationIdentityError(RuntimeError):
@@ -124,13 +127,31 @@ async def resolve_installation_identity(
             )
             stored = await repo.replace(InstallationIdentity(live, cluster_name, SOURCE_KUBE_SYSTEM))
         else:
-            raise ClusterIdentityMismatch(
+            message = (
                 f"This database belongs to cluster {stored.cluster_uid} ({stored.cluster_name or 'unnamed'}), "
                 f"but this controller runs in cluster {live}. Use one database schema per cluster "
                 "(DB_SCHEMA), or set ALLOW_CLUSTER_UID_CHANGE=true once to adopt this database."
             )
+            # Fail closed, visibly: stored for the API, a gauge for alerts, a reason for /readyz.
+            _PROBLEM["identity"] = message
+            collection_telemetry.set_identity_mismatch(True)
+            try:
+                await repo.set_mismatch(live)
+            except Exception as error:  # the refusal stands even if it cannot be recorded
+                logger.warning("Could not record the cluster identity mismatch: %s", error)
+            raise ClusterIdentityMismatch(message)
+    if stored.mismatch_uid is not None:
+        await repo.set_mismatch(None)
+        stored = InstallationIdentity(stored.cluster_uid, stored.cluster_name, stored.source)
+    _PROBLEM.pop("identity", None)
+    collection_telemetry.set_identity_mismatch(False)
     _RESOLVED["installation"] = stored
     return stored
+
+
+def identity_problem() -> str | None:
+    """Why collection refuses to start in this process (cluster identity mismatch), or ``None``."""
+    return _PROBLEM.get("identity")
 
 
 def cached_installation_identity() -> InstallationIdentity | None:
@@ -141,6 +162,7 @@ def cached_installation_identity() -> InstallationIdentity | None:
 def forget_installation_identity() -> None:
     """Testing hook."""
     _RESOLVED.clear()
+    _PROBLEM.clear()
 
 
 async def adopt_legacy_collection_keys(repo: InstallationRepository, cluster_uid: str, source: str) -> AdoptedKeys:
