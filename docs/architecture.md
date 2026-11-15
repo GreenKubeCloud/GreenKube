@@ -651,7 +651,9 @@ The controller's `collect_metrics` job is the only production writer of usage, e
    ```
    For each chunk (1 day):
      ├─ Prometheus range queries from PromQLCatalog (concurrent):
-     │   ├─ CPU and memory per container (container!="", container!="POD")
+     │   ├─ CPU and memory per container and per pod cgroup in one query
+     │   │  (pod!="", container!="POD"): a pod's containers when it has any, else its
+     │   │  pod cgroup counted once, per pod (mixed runtimes keep every pod, COL-09)
      │   ├─ Network I/O per pod, disk I/O and ephemeral usage per container
      │   ├─ Restart counts and kube_pod_info (pod → node placement)
      │   ├─ kube_pod_status_phase{phase="Running"} (pods without a CPU sample)

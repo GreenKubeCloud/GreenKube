@@ -33,6 +33,8 @@ from typing import Iterable, Sequence
 
 CONTAINER_FILTER = 'container!="",container!="POD"'
 POD_CGROUP_FILTER = 'container="",pod!=""'
+#: Containers and pod cgroups of pods (pause containers and node-level cgroups excluded), COL-09.
+POD_LEVEL_OR_CONTAINER_FILTER = 'pod!="",container!="POD"'
 
 DEFAULT_SCRAPE_INTERVAL_SECONDS = 30
 _DURATION_RE = re.compile(r"^(\d+)([smhd])$")
@@ -128,6 +130,25 @@ class PromQLCatalog:
         """Fallback when no container series exist: the pod cgroup series only, counted once."""
         selector = _selector(POD_CGROUP_FILTER, *self.extra_matchers)
         return f"max(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) by (namespace,pod,node)"
+
+    def cpu_usage_by_level(self) -> str:
+        """CPU cores of every container and of every pod cgroup, in one query (COL-09).
+
+        ``container=""`` series are pod cgroups, the others containers.  The
+        caller chooses per pod: its containers when it has any, else its pod
+        cgroup (counted once), so a cluster mixing runtimes (cri-dockerd
+        exporting pod-level series next to containerd) keeps every pod.
+        """
+        selector = _selector(POD_LEVEL_OR_CONTAINER_FILTER, *self.extra_matchers)
+        return (
+            f"max(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) "
+            "by (namespace,pod,container,node)"
+        )
+
+    def memory_working_set_by_level(self) -> str:
+        """Working-set bytes of every container and every pod cgroup, chosen per pod by the caller (COL-09)."""
+        selector = _selector(POD_LEVEL_OR_CONTAINER_FILTER, *self.extra_matchers)
+        return f"max(container_memory_working_set_bytes{selector}) by (namespace,pod,container,node)"
 
     def container_cpu_counter_max(self) -> str:
         """Largest CPU counter value of each container within the step (COL-03 step 3).

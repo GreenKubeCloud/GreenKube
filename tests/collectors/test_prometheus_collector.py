@@ -231,16 +231,17 @@ async def test_collect_range_raises_on_prometheus_error_status(collector):
 
 
 def test_container_scoped_queries_exclude_pod_cgroup_and_pause_series(collector):
-    """BUG-01: the collector's CPU queries come from the catalog's container filters."""
-    assert 'container!="",container!="POD"' in collector.cpu_usage_query
-    assert 'container=""' in collector.cpu_fallback_query
+    """BUG-01, COL-09: one query reads containers and pod cgroups; pause and node-level cgroups are excluded."""
+    assert 'pod!="",container!="POD"' in collector.cpu_usage_query
+    assert "by (namespace,pod,container,node)" in collector.cpu_usage_query
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_collect_range_retries_cpu_query_without_container_label(collector):
-    respx.get(f"{collector.base_url}/api/v1/query_range").mock(
-        side_effect=[Response(200, json=MOCK_EMPTY_RESPONSE), Response(200, json=MOCK_CPU_RANGE_RESPONSE)]
+async def test_collect_range_reads_containers_and_pod_cgroups_in_one_query(collector):
+    """COL-09: no empty-result fallback; one query returns both levels."""
+    route = respx.get(f"{collector.base_url}/api/v1/query_range").mock(
+        return_value=Response(200, json=MOCK_CPU_RANGE_RESPONSE)
     )
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(minutes=5)
@@ -249,6 +250,7 @@ async def test_collect_range_retries_cpu_query_without_container_label(collector
 
     assert len(result) == 1
     assert result[0]["metric"]["pod"] == "api-1"
+    assert route.call_count == 1
 
 
 @pytest.mark.asyncio

@@ -57,7 +57,8 @@ logger = logging.getLogger(__name__)
 #: repeated Kubernetes list failures.  ``+range.4`` rows are not rewritten.
 #: range.6 (COL-03 step 3): CPU of containers too short-lived for rate() comes from their counter
 #: (reason cpu_from_counter_start); such pods had no row or a NULL CPU before.  COL-17: a container
-#: without sample no longer drops the container rows of its siblings.  ``+range.5`` rows are
+#: without sample no longer drops the container rows of its siblings.  COL-09: pods with pod-level series
+#: only are kept when other pods have container series.  ``+range.5`` rows are
 #: not rewritten: re-collect a window inside Prometheus retention to apply it.
 CALCULATION_VERSION = f"{__version__}+range.6"
 # Day-sized chunks bound the memory of long backfills.
@@ -349,16 +350,15 @@ class HistoricalRangeProcessor:
         )
 
     async def _collect_cpu(self, chunk: CollectionWindow):
-        """Container CPU series, or the pod cgroup series (counted once) when no container series exist.
+        """Container and pod cgroup CPU series in one query (COL-09).
 
-        A query error fails the window instead of degrading to the fallback, so a
-        transient outage never stores a window without its container breakdown.
+        The parser uses a pod's containers when it has any, else its pod cgroup
+        (counted once), per pod and step: a pod with pod-level series only is
+        kept even when other pods export container series.  A query error fails
+        the window.
         """
         try:
-            results = await self._query_range(chunk, self._promql.container_cpu_usage())
-            if results:
-                return results
-            return await self._query_range(chunk, self._promql.pod_cgroup_cpu_usage())
+            return await self._query_range(chunk, self._promql.cpu_usage_by_level())
         except Exception as error:
             raise RangeCollectionError(
                 f"Prometheus CPU usage is unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
@@ -433,15 +433,12 @@ class HistoricalRangeProcessor:
         return starts
 
     async def _collect_memory(self, chunk: CollectionWindow):
-        """Container working-set series, or the pod cgroup series when no container series exist.
+        """Container and pod cgroup working-set series in one query; the parser chooses per pod (COL-09).
 
-        The pod cgroup fallback gives the pod-level working set only: it never
+        A pod cgroup value gives the pod-level working set only: it never
         becomes container usage (rightsizing reports ``pod_level_usage_only``).
         """
-        results = await self._query_range(chunk, self._promql.container_memory_working_set())
-        if results:
-            return results
-        return await self._query_range(chunk, self._promql.pod_cgroup_memory_working_set())
+        return await self._query_range(chunk, self._promql.memory_working_set_by_level())
 
     async def _collect_gpu(self, chunk: CollectionWindow) -> dict[int, list[dcgm_collector.GpuSample]]:
         """DCGM GPU power and utilization per step; empty when DCGM is absent or unreachable (B5)."""
