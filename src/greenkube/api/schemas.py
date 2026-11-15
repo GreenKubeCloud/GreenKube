@@ -321,11 +321,55 @@ class AutomationPlanErrorResponse(GitOpsResponseModel):
     mapping_options: Optional[AutomationPlanMappingOptionsResponse] = None
 
 
+class CollectionHoleResponse(BaseModel):
+    """Consecutive uncovered steps of one status (COL-04)."""
+
+    start: datetime
+    end: datetime
+    status: str = Field(..., description="gap, failed or unknown.")
+    reason: Optional[str] = None
+
+
+class CollectionCoverageResponse(BaseModel):
+    """Coverage of a period by the metric collection (COL-04).
+
+    ``coverage_ratio`` is the share of steps whose data is known: collected
+    (rows stored) or empty (Prometheus scraped, no pod ran). Totals over a
+    period with ``complete = false`` miss the uncovered steps.
+    """
+
+    cluster: str
+    source: str
+    start: datetime
+    end: datetime
+    step_seconds: int
+    expected_steps: int
+    collected_steps: int
+    empty_steps: int
+    failed_steps: int
+    gap_steps: int
+    unknown_steps: int
+    coverage_ratio: float
+    complete: bool
+    holes: List[CollectionHoleResponse] = Field(default_factory=list)
+
+
+class CollectionStatusResponse(BaseModel):
+    """Watermark, lag and last hole of the metric collection (COL-04)."""
+
+    watermark: Optional[datetime] = None
+    lag_seconds: Optional[float] = None
+    last_gap: Optional[CollectionHoleResponse] = None
+
+
 class HealthResponse(BaseModel):
     """Response schema for the health check endpoint."""
 
     status: str = Field(..., description="Health status of the API.")
     version: str = Field(..., description="Current application version.")
+    collection: Optional[CollectionStatusResponse] = Field(
+        None, description="Collection watermark, lag and last hole; absent when the database cannot be read."
+    )
 
 
 class VersionResponse(BaseModel):

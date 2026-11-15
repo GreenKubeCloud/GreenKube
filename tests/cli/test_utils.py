@@ -37,6 +37,13 @@ class _MemoryWatermarks:
         return []
 
 
+@pytest.fixture(autouse=True)
+def _no_window_records():
+    """These tests use in-memory doubles; the collection window record has its own tests (COL-04)."""
+    with patch("greenkube.cli.utils.get_collection_window_repository", return_value=None):
+        yield
+
+
 def _recent_watermark() -> datetime:
     # One pending 5-minute window: watermark two steps behind now.
     now = datetime.now(timezone.utc)

@@ -46,6 +46,7 @@ from greenkube.api.routers import auth as auth_router
 from greenkube.api.routers import automation as automation_router
 from greenkube.api.routers import automation_repositories as automation_repositories_router
 from greenkube.api.routers import changes as changes_router
+from greenkube.api.routers import collection as collection_router
 from greenkube.api.routers import config as config_router
 from greenkube.api.routers import dashboard as dashboard_router
 from greenkube.api.routers import gitops as gitops_router
@@ -405,6 +406,7 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
     app.include_router(plans_router.router, prefix="/api/v1", tags=["Automation plans"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["Config"])
     app.include_router(health_router.router, prefix="/api/v1", tags=["Health"])
+    app.include_router(collection_router.router, prefix="/api/v1", tags=["Health"])
     app.include_router(report.router, prefix="/api/v1", tags=["Report"])
     app.include_router(repository_bindings.router, prefix="/api/v1", tags=["Repository bindings"])
     app.include_router(gitops_router.router, prefix="/api/v1", tags=["GitOps"])

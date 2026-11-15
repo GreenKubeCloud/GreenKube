@@ -626,10 +626,15 @@ The controller's `collect_metrics` job is the only production writer of usage, e
                └─ split into ~1h chunks, oldest first
    For each chunk:
      rows = run_range(chunk.start, chunk.end)   # raises on Prometheus errors
-     LeaderFence.check(); upsert rows
+     classify every step: collected | empty | failed   # cAdvisor probe for steps without rows
+     LeaderFence.check(); upsert rows, idle rows, then collection_windows records
      LeaderFence.check(); advance watermark to chunk.end
+   Then: retry at most one chunk of failed steps still inside the horizon,
+         turn failed steps older than the horizon into gaps, publish the coverage gauge.
    ```
    The job is scheduled on wall-clock step boundaries plus the safety lag, so a window is collected right after it closes. A failed chunk leaves the watermark in place; the next run retries it. Re-collecting a window is an idempotent upsert.
+
+   **Holes are recorded (COL-04).** Every step has a row in `collection_windows` (migration 0122): `collected` (pod rows written), `empty` (no pod row while Prometheus holds cAdvisor series for the step, so the kubelet was scraped and no pod ran), `failed` with reason `no_scrape_data` (no cAdvisor series at all: Prometheus down, TSDB lost, remote-write lag), or `gap` (abandoned: reason `beyond_backfill_horizon` for the range skipped before the horizon, or `no_scrape_data` for a failed step that left the horizon without data). A failed step does not hold the watermark back; later runs retry it, least recently attempted first, one chunk per run. Steps without a record (data collected before 0122 that has no stored row, or never planned) are `unknown`; on the first run the steps of rows already stored are seeded as `collected` (reason `seeded_from_stored_rows`). `GET /api/v1/collection/coverage?start=&end=` returns the counts per status, `coverage_ratio = (collected + empty) / expected` and the holes; `GET /api/v1/health` adds `collection.watermark`, `collection.lag_seconds` and `collection.last_gap`; `greenkube_collection_coverage_ratio{source}` is the coverage of the backfill horizon. A total over a period whose coverage is not complete misses the uncovered steps.
 
 2. **Row semantics:** a row with `timestamp = T` and `duration_seconds = step` describes `[T, T + step)`. Prometheus evaluates `rate(x[rate_window])` at `T + step`, with `rate_window = max(step, 4 × PROMETHEUS_SCRAPE_INTERVAL)`. Every repository range read uses `timestamp >= start AND timestamp < end`.
 
@@ -666,7 +671,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      └─ Generate CombinedMetrics (+ container rows) for chunk
    ```
 
-5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}`, `greenkube_collection_k8s_list_errors_total{resource}`, `greenkube_collection_degraded_windows_total{list}` and `greenkube_unknown_power_profile_nodes`.
+5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}`, `greenkube_collection_k8s_list_errors_total{resource}`, `greenkube_collection_degraded_windows_total{list}`, `greenkube_collection_steps_total{source,status}`, `greenkube_collection_coverage_ratio{source}` and `greenkube_unknown_power_profile_nodes`.
 
 ### Recommendation Flow
 

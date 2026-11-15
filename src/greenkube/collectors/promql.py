@@ -223,6 +223,15 @@ class PromQLCatalog:
         selector = self._ksm_selector(pods, 'owner_is_controller="true"')
         return f"max(kube_pod_owner{selector}) by (namespace,pod,owner_kind,owner_name)"
 
+    def scrape_probe(self) -> str:
+        """Number of cAdvisor CPU series, pod or not (COL-04).
+
+        The kubelet exports the root and system cgroups even on a node without
+        pods, so a step where this is absent had no cAdvisor scrape at all:
+        Prometheus has no data, which is a hole, not an empty cluster.
+        """
+        return f"count({self._pod('container_cpu_usage_seconds_total')})"
+
     def pod_running(self) -> str:
         """Pods in phase Running (value 1), so a running pod without a CPU sample still gets its row (COL-03)."""
         selector = _selector('phase="Running"', *self.extra_matchers)

@@ -36,7 +36,7 @@ from ..impact.realization import refresh_realization_context
 from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour
 from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
-from ..models.provenance import MetadataSource, NodeSource, UsageSource
+from ..models.provenance import CostSource, MetadataSource, NodeSource, UsageSource
 from ..storage.base_pod_snapshot_repository import PodSnapshotRepository, snapshot_at, snapshot_uncertain
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
@@ -165,6 +165,9 @@ class HistoricalRangeProcessor:
         self._gpu_model = GpuPowerModel()
         #: Idle rows (``__idle__`` per node and step) of the last ``run_range`` call.
         self.last_idle_metrics: List[NodeIdleMetric] = []
+        #: Per step of the last ``run_range`` call: (OpenCost window total spread evenly over the steps,
+        #: OpenCost cost stored in the step's rows), so allocations without a row are visible (COL-03 step 4).
+        self.last_cost_reconciliation: dict[datetime, tuple[float, float]] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -353,6 +356,27 @@ class HistoricalRangeProcessor:
             raise RangeCollectionError(
                 f"Prometheus CPU usage is unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
             ) from error
+
+    async def probe_scrape_data(self, start: datetime, end: datetime) -> set[datetime]:
+        """Sample starts of ``[start, end)`` at which Prometheus holds cAdvisor scrape data (COL-04).
+
+        A step without any cAdvisor series had no scrape (Prometheus down, TSDB
+        lost, wrong data source): its lack of rows is a hole, not an empty
+        cluster.  A query error raises :class:`RangeCollectionError` so the
+        window is retried instead of being classified.
+        """
+        chunk = CollectionWindow.covering(start, end, timedelta(seconds=self._promql.step_seconds))
+        try:
+            results = await self._query_range(chunk, self._promql.scrape_probe())
+        except Exception as error:
+            raise RangeCollectionError(
+                f"Prometheus scrape probe failed for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
+            ) from error
+        starts: set[datetime] = set()
+        for series in results or []:
+            for sample_start, _value in self._iter_window_samples(series, chunk):
+                starts.add(datetime.fromtimestamp(sample_start, tz=timezone.utc))
+        return starts
 
     async def _collect_memory(self, chunk: CollectionWindow):
         """Container working-set series, or the pod cgroup series when no container series exist.
@@ -829,6 +853,7 @@ class HistoricalRangeProcessor:
         if end_dt <= start_dt:
             raise ValueError("Historical range end must be after start")
         self.last_idle_metrics = []
+        self.last_cost_reconciliation = {}
 
         chosen_step_sec = self._promql.step_seconds
         window = CollectionWindow.covering(start_dt, end_dt, timedelta(seconds=chosen_step_sec))
@@ -1050,8 +1075,15 @@ class HistoricalRangeProcessor:
             # Exact-window allocation keyed by (namespace, pod) (A4, BUG-04, BUG-41).
             cost_metrics = await self.opencost_collector.collect_range(start=start_dt, end=end_dt)
             cost_map = {(c.namespace, c.pod_name): c for c in cost_metrics}
-        except Exception:
+        except Exception as error:
+            logger.warning("OpenCost allocation is unavailable for %s -> %s: %s", start_dt, end_dt, error)
             cost_map = {}
+        # Reconciliation against the OpenCost total of the window (COL-03 step 4): an allocation
+        # of a pod that gets no row (no sample of any kind) is not stored, so it must be counted.
+        opencost_window_total = sum(
+            cost.total_cost for cost in cost_map.values() if cost.source != CostSource.NONE.value
+        )
+        attributed_cost_by_step: dict[int, float] = defaultdict(float)
 
         # Per-pod persistent storage (PVC) request/usage — best-effort.
         try:
@@ -1309,6 +1341,8 @@ class HistoricalRangeProcessor:
                         opencost_step_share(cost_metric, chosen_step_sec, range_seconds) if cost_metric else 1.0,
                         self._config.DEFAULT_COST,
                     )
+                    if cost_metric is not None and cost_metric.source != CostSource.NONE.value:
+                        attributed_cost_by_step[sample_start] += costs["total_cost"] or 0.0
                     is_estimated, estimation_reasons = self.assembler.build_estimation_flags(
                         energy_metric=energy_metric,
                         node_context=node_context,
@@ -1508,6 +1542,12 @@ class HistoricalRangeProcessor:
         # pod rows after its leader-fence check (roadmap A14), so a replica that
         # lost the Lease during the Prometheus queries writes nothing.
         self.last_idle_metrics = idle_rows
+        if cost_map:
+            per_step_total = opencost_window_total / window.steps
+            self.last_cost_reconciliation = {
+                step_start: (per_step_total, attributed_cost_by_step.get(int(step_start.timestamp()), 0.0))
+                for step_start in window.sample_starts()
+            }
         if namespace:
             combined = [c for c in combined if c.namespace == namespace]
 

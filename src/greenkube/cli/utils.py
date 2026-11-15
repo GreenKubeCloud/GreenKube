@@ -9,6 +9,7 @@ from ..core.collection import CollectionReport, MetricsCollectionJob
 from ..core.config import get_config
 from ..core.factory import get_combined_metrics_repository, get_processor
 from ..storage.base_collection_watermark_repository import create_collection_watermark_repository
+from ..storage.base_collection_window_repository import create_collection_window_repository
 from ..utils.date_utils import parse_duration
 
 try:
@@ -38,6 +39,13 @@ def get_collection_watermark_repository():
     return create_collection_watermark_repository(get_db_manager(), get_config().DB_TYPE)
 
 
+def get_collection_window_repository():
+    """Return the per-step collection record repository for the configured database (COL-04)."""
+    from ..core.db import get_db_manager
+
+    return create_collection_window_repository(get_db_manager(), get_config().DB_TYPE)
+
+
 async def write_combined_metrics_to_database(last: Optional[str] = None) -> Optional[CollectionReport]:
     """Collect every missing window since the watermark (or the explicit ``--last`` range) and store it.
 
@@ -54,6 +62,7 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> Opti
             metrics_repository=get_combined_metrics_repository(),
             watermark_repository=get_collection_watermark_repository(),
             config=get_config(),
+            window_repository=get_collection_window_repository(),
         )
     except Exception as e:
         logger.error("Failed to initialize components for combined metrics collection: %s", e)

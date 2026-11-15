@@ -48,7 +48,30 @@ async def health(request: Request):
             status_code=503,
             content=HealthResponse(status="degraded", version=__version__).model_dump(),
         )
-    return HealthResponse(status="ok", version=__version__)
+    return HealthResponse(status="ok", version=__version__, collection=await _collection_status())
+
+
+async def _collection_status():
+    """Watermark, lag and last hole of the collection (COL-04); ``None`` when unreadable.
+
+    Bounded to one second and never changes the readiness answer.
+    """
+    import asyncio
+
+    from greenkube.api.routers.collection import (
+        collection_status,
+        get_collection_watermark_repository,
+        get_collection_window_repository,
+    )
+
+    try:
+        return await asyncio.wait_for(
+            collection_status(await get_collection_window_repository(), await get_collection_watermark_repository()),
+            timeout=1.0,
+        )
+    except Exception as error:  # the table may not exist yet, or the database is down
+        logger.debug("Collection status unavailable for /health (%s).", type(error).__name__)
+        return None
 
 
 @router.get("/version", response_model=VersionResponse)
