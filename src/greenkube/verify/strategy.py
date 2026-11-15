@@ -34,9 +34,17 @@ from greenkube.verify.model import (
     SavingsEstimate,
     TimeWindow,
     WindowPlan,
+    hour_of_week,
 )
 from greenkube.verify.regression import METHOD_OLS, OlsCounterfactual, residual_bootstrap
-from greenkube.verify.series import carbon_factor, co2e_series, has_embodied, quantity_series, window_hours
+from greenkube.verify.series import (
+    carbon_factor,
+    co2e_series,
+    has_embodied,
+    hourly_carbon_factors,
+    quantity_series,
+    window_hours,
+)
 from greenkube.verify.statistics import (
     INTERVAL_METHOD,
     between_week_term,
@@ -195,12 +203,13 @@ class RequestRightsizingStrategy:
     observed``). Measurements decided before 2.4 used the observed cost.
 
     **CO2e at the post-window carbon factor (2.4, MEA-03).** The operational
-    CO2e of every hour of both windows is its energy times the post-window
-    carbon factor (energy-weighted grid intensity x PUE,
-    :func:`~greenkube.verify.series.carbon_factor`), so the claimed CO2e
-    saving is the energy saving valued at what the grid emitted per kWh after
-    the change, plus the embodied delta; a windier or calmer post week is
-    reported by the ``intensity_shift`` confounder, not booked. Without a post
+    CO2e of every hour of both windows is its energy times a post-window
+    carbon factor (grid intensity x PUE, :class:`PostCarbonFactors`): each
+    post hour at its own factor, each baseline hour at the post factor of the
+    same hour of week (window factor as fallback), so the claimed CO2e saving
+    is each hour's energy saving valued at what the grid emitted per kWh in
+    that hour after the change, plus the embodied delta; a windier or calmer
+    post week is reported by the ``intensity_shift`` confounder, not booked. Without a post
     carbon factor (no energy) the raw difference is measured
     (``co2e_basis = raw_delta``).
     """
@@ -264,6 +273,7 @@ class RequestRightsizingStrategy:
         intervals: Dict[str, Dict[str, Any]] = {}
         embodied = has_embodied(pre) and has_embodied(post)
         factor = carbon_factor(post)
+        post_factors = PostCarbonFactors.of(post)
         for spec in self.QUANTITIES:
             observed = spec.quantity == "allocated_cost_observed"
             fitted = self._estimate_quantity(
@@ -277,7 +287,7 @@ class RequestRightsizingStrategy:
                 seed_parts,
                 embodied=embodied,
                 baseline_end=ensure_utc(plan.pre.end),
-                co2e_factor=factor,
+                co2e_factors=post_factors,
             )
             estimates.append(fitted.estimate)
             bases[spec.quantity] = fitted.basis
@@ -348,7 +358,7 @@ class RequestRightsizingStrategy:
         *,
         embodied: bool = False,
         baseline_end: Optional[datetime] = None,
-        co2e_factor: Optional[float] = None,
+        co2e_factors: Optional[PostCarbonFactors] = None,
     ) -> "_Fitted":
         components: List[str] = []
         projected = projections.get(spec.quantity)
@@ -356,8 +366,8 @@ class RequestRightsizingStrategy:
             # Component matching: the measured CO2e covers embodied emissions only when both
             # windows carry them (snapshots frozen before they were measured do not).
             components = list(_co2e_components(embodied))
-            pre_values = _co2e_at_factor(pre, embodied, co2e_factor)
-            post_values = _co2e_at_factor(post, embodied, co2e_factor)
+            pre_values = _co2e_at_factor(pre, embodied, co2e_factors, post=False)
+            post_values = _co2e_at_factor(post, embodied, co2e_factors, post=True)
             projected = projections.get(CO2E_WITH_EMBODIED) if embodied else projections.get("co2e_g")
         else:
             pre_values = quantity_series(pre, spec.quantity)
@@ -530,7 +540,8 @@ class RequestRightsizingStrategy:
         )
 
 
-CO2E_BASIS_ENERGY = "energy_delta_at_post_intensity"
+#: Each post hour at its own carbon factor, each baseline hour at the post factor of its hour of week.
+CO2E_BASIS_ENERGY = "energy_delta_at_post_hourly_intensity"
 CO2E_BASIS_RAW = "raw_delta"
 
 
@@ -538,20 +549,66 @@ def _rounded(value: Optional[float]) -> Optional[float]:
     return round(value, 6) if value is not None else None
 
 
-def _co2e_at_factor(buckets: Sequence[HourBucket], embodied: bool, factor: Optional[float]) -> Dict[datetime, float]:
-    """CO2e per hour: energy x the post-window carbon factor (MEA-03), plus embodied CO2e when measured.
+@dataclass(frozen=True)
+class PostCarbonFactors:
+    """Post-window carbon factors the CO2e of both windows is valued at (MEA-03).
 
-    Only hours with trusted carbon count (as before), so an install without
-    measured intensity still has no CO2e verdict. Without a factor the stored
-    CO2e is used (``raw_delta``).
+    ``by_hour`` is each trusted post hour's own factor (``co2e / energy``),
+    ``by_hour_of_week`` the energy-weighted post factor of each hour of the
+    week, ``window`` the energy-weighted factor of the whole post-window (the
+    fallback for an hour of the week without a trusted post hour).
+    """
+
+    window: float
+    by_hour: Dict[datetime, float]
+    by_hour_of_week: Dict[int, float]
+
+    @classmethod
+    def of(cls, post: Sequence[HourBucket]) -> Optional["PostCarbonFactors"]:
+        """The factors of ``post``, or ``None`` without a post-window factor."""
+        window = carbon_factor(post)
+        if window is None:
+            return None
+        by_hour = hourly_carbon_factors(post)
+        energy = quantity_series(post, "energy_kwh")
+        sums: Dict[int, List[float]] = {}
+        for hour, factor in by_hour.items():
+            entry = sums.setdefault(hour_of_week(hour), [0.0, 0.0])
+            entry[0] += factor * energy.get(hour, 0.0)
+            entry[1] += energy.get(hour, 0.0)
+        by_week = {key: total / weight for key, (total, weight) in sums.items() if weight > 0}
+        return cls(window=window, by_hour=by_hour, by_hour_of_week=by_week)
+
+    def baseline_factor(self, hour: datetime) -> float:
+        """The post factor of ``hour``'s hour of week, else the window factor."""
+        return self.by_hour_of_week.get(hour_of_week(hour), self.window)
+
+    def post_factor(self, hour: datetime) -> float:
+        """The post hour's own factor, else that of its hour of week, else the window factor."""
+        return self.by_hour.get(hour, self.baseline_factor(hour))
+
+
+def _co2e_at_factor(
+    buckets: Sequence[HourBucket], embodied: bool, factors: Optional[PostCarbonFactors], *, post: bool
+) -> Dict[datetime, float]:
+    """CO2e per hour: energy x the post-window carbon factor of that hour (MEA-03), plus embodied CO2e.
+
+    A post hour is valued at its own factor, a baseline hour at the post
+    factor of the same hour of week (window factor as fallback), so the
+    claimed saving is ``sum((E_pre - E_post) x factor_post)`` hour by hour and a
+    load that follows the grid intensity does not bias it. Only hours with
+    trusted carbon count (as before), so an install without measured intensity
+    still has no CO2e verdict. Without factors the stored CO2e is used
+    (``raw_delta``).
     """
     stored = co2e_series(buckets, embodied=embodied)
-    if factor is None:
+    if factors is None:
         return stored
+    value_at = factors.post_factor if post else factors.baseline_factor
     energy = quantity_series(buckets, "energy_kwh")
     manufactured = quantity_series(buckets, "embodied_co2e_g") if embodied else {}
     return {
-        hour: energy[hour] * factor + (manufactured.get(hour, 0.0) if embodied else 0.0)
+        hour: energy[hour] * value_at(hour) + (manufactured.get(hour, 0.0) if embodied else 0.0)
         for hour in stored
         if hour in energy
     }

@@ -312,6 +312,18 @@ def carbon_factor(buckets: Sequence[HourBucket]) -> Optional[float]:
     return co2e / energy if energy > 0 else None
 
 
+def hourly_carbon_factors(buckets: Sequence[HourBucket]) -> Dict[datetime, float]:
+    """Carbon factor of each hour, ``co2e_g / energy_kwh``, over the hours :func:`carbon_factor` trusts."""
+    factors: Dict[datetime, float] = {}
+    for bucket in buckets:
+        if bucket.co2e_g is None or bucket.energy_kwh is None or bucket.co2e_coverage < MIN_HOUR_COVERAGE:
+            continue
+        if bucket.co2e_coverage + 1e-9 < bucket.coverage or bucket.energy_kwh <= 0:
+            continue
+        factors[ensure_utc(bucket.hour)] = bucket.co2e_g / bucket.energy_kwh
+    return factors
+
+
 def has_embodied(buckets: Sequence[HourBucket]) -> bool:
     """Whether ``buckets`` measured embodied CO2e.
 

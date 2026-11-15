@@ -6,12 +6,13 @@ the change (sim_co2e.py G0-G2).
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from typing import List
 
 import pytest
 
-from greenkube.verify.confounders import ConfounderDetector
+from greenkube.verify.confounders import ConfounderDetector, confidence_score
 from greenkube.verify.model import ChangeEvent, ChangeOutcome, HourBucket, WorkloadRef
 from greenkube.verify.strategy import MeasurementSettings, RequestRightsizingStrategy
 
@@ -74,7 +75,7 @@ def test_same_intensity_keeps_the_true_saving():
     result, estimates, confounders = _run((0.05, 300, 1.0), (0.04, 300, 0.5))
     assert estimates["co2e_g"].rate_per_hour == pytest.approx(3.0, rel=1e-6)
     assert estimates["energy_kwh"].rate_per_hour == pytest.approx(0.01, rel=1e-6)
-    assert result.counterfactual_params["co2e_basis"] == "energy_delta_at_post_intensity"
+    assert result.counterfactual_params["co2e_basis"] == "energy_delta_at_post_hourly_intensity"
     assert result.counterfactual_params["co2e_factor_post"] == pytest.approx(300.0)
     assert not [item for item in confounders if item.kind == "intensity_shift"]
 
@@ -104,3 +105,57 @@ def test_without_energy_the_raw_delta_is_measured_and_flagged():
     assert result.counterfactual_params["co2e_basis"] == "raw_delta"
     assert ("co2e_raw_delta", "moderate") in [(item.kind, item.severity) for item in confounders]
     assert estimates["co2e_g"].quantity == "co2e_g"
+
+
+def _diurnal(hour_of_day: int) -> float:
+    return math.sin(2 * math.pi * hour_of_day / 24)
+
+
+def _diurnal_window(start: datetime, kwh: float, amplitude: float) -> List[HourBucket]:
+    out = []
+    for bucket in _buckets(start, kwh, 300, 1.0):
+        phase = _diurnal(bucket.hour.hour)
+        out.append(
+            bucket.model_copy(
+                update={
+                    "energy_kwh": kwh + amplitude * phase,
+                    "co2e_g": (kwh + amplitude * phase) * (300 + 100 * phase),
+                }
+            )
+        )
+    return out
+
+
+@pytest.mark.parametrize("amplitude", [0.03, -0.03])
+def test_each_hour_is_valued_at_its_own_carbon_factor(amplitude):
+    """Review wp07-2 G-corr: a constant 0.01 kWh/h saving claims 3.0 g/h whether load follows intensity or not.
+
+    One window factor weighted by post-window energy claimed 3.5 g/h (load in
+    phase with intensity) or 2.5 g/h (out of phase).
+    """
+    change = ChangeEvent(
+        change_id="c1",
+        target=WorkloadRef(namespace="ns", kind="Deployment", name="web"),
+        rollout_started_at=MERGE,
+        rollout_completed_at=MERGE,
+        baseline_window_end=MERGE,
+    )
+    strategy = RequestRightsizingStrategy()
+    settings = MeasurementSettings()
+    plan = strategy.required_windows(change, settings)
+    pre = _diurnal_window(datetime(2026, 11, 2, 10, 0, tzinfo=UTC), 0.05, amplitude)
+    post = _diurnal_window(MERGE + timedelta(hours=1), 0.04, amplitude)
+    result = strategy.estimate(
+        change, plan, pre, post, load=None, confounders=[], projections={}, settings=settings, seed_parts=("c", 1)
+    )
+    co2e = {item.quantity: item for item in result.estimates}["co2e_g"]
+    truth = math.fsum(0.01 * (300 + 100 * _diurnal(bucket.hour.hour)) for bucket in post) / len(post)
+    assert co2e.rate_per_hour == pytest.approx(truth, rel=1e-6)
+    assert result.counterfactual_params["co2e_basis"] == "energy_delta_at_post_hourly_intensity"
+
+
+def test_an_intensity_shift_does_not_lower_the_cost_confidence():
+    """The CO2e saving is normalised for intensity: the shift is reported but costs no confidence (review wp07-2)."""
+    _, _, confounders = _run((0.05, 300, 1.0), (0.04, 200, 0.5))
+    assert [item.kind for item in confounders] == ["intensity_shift"]
+    assert confidence_score(confounders, 1.0, None) == confidence_score([], 1.0, None)

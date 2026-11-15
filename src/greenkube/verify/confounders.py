@@ -74,6 +74,9 @@ POOL_CAPACITY_TOLERANCE = 0.25
 POOL_CAPACITY_SEVERE = 0.5
 
 _PENALTY = {"mild": 0.05, "moderate": 0.15}
+#: Confounders reported without a confidence penalty: the CO2e saving is valued at the post-window
+#: carbon factors hour by hour, so an intensity shift biases neither it nor the cost verdict (MEA-03).
+INFORMATIVE_KINDS = frozenset({"intensity_shift"})
 #: Confidence penalty when the counterfactual has no load driver or only the weak CPU-usage driver.
 WEAK_LOAD_PENALTY = 0.10
 
@@ -442,9 +445,10 @@ class ConfounderDetector:
     def _intensity_shift(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:
         """Carbon factor (grid intensity x PUE per kWh) of the two windows (MEA-03).
 
-        The CO2e saving is valued at the post-window factor, so a move does not
+        The CO2e saving is valued at the post-window factors, so a move does not
         bias it; it is reported (moderate above 10%) because the baseline CO2e
-        the change is compared with was emitted at another factor. Without a
+        the change is compared with was emitted at another factor, and costs no
+        confidence (:data:`INFORMATIVE_KINDS`). Without a
         post-window factor the raw CO2e difference is measured: moderate.
         """
         from greenkube.verify.series import carbon_factor, quantity_series
@@ -660,11 +664,15 @@ def is_contaminated(confounders: Sequence[Confounder]) -> bool:
 
 
 def confidence_score(confounders: Sequence[Confounder], coverage: float, load: Optional[ResolvedLoad]) -> float:
-    """Confidence in a measurement: coverage, minus penalties for confounders and a weak load driver."""
+    """Confidence in a measurement: coverage, minus penalties for confounders and a weak load driver.
+
+    Kinds of :data:`INFORMATIVE_KINDS` are reported but cost no confidence:
+    the verdict is the cost verdict, which they do not touch.
+    """
     if is_contaminated(confounders):
         return 0.0
     score = max(0.0, min(coverage, 1.0))
-    score -= math.fsum(_PENALTY.get(item.severity, 0.0) for item in confounders)
+    score -= math.fsum(_PENALTY.get(item.severity, 0.0) for item in confounders if item.kind not in INFORMATIVE_KINDS)
     if load is None or load.info.weak:
         score -= WEAK_LOAD_PENALTY
     return round(max(0.0, min(score, 1.0)), 4)
