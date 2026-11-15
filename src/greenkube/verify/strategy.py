@@ -1179,6 +1179,75 @@ def _raises(current: Any, proposed: Any) -> bool:
     )
 
 
+#: Objective of a change (MEA-14): a saving, or a reliability fix (every member raises a request).
+OBJECTIVE_SAVINGS = "savings"
+OBJECTIVE_RELIABILITY = "reliability"
+
+
+def change_objective(members: Sequence[Any]) -> str:
+    """``reliability`` when every member raises a request (a reliability fix), else ``savings``.
+
+    A mixed change (a decrease and an increase) keeps the savings objective.
+    """
+    items = list(members)
+    return (
+        OBJECTIVE_RELIABILITY if items and all(is_reliability_increase(item) for item in items) else OBJECTIVE_SAVINGS
+    )
+
+
+@dataclass(frozen=True)
+class ReliabilityDecision:
+    """The change outcome of a reliability fix (MEA-14): its reliability outcome, its cost reported apart."""
+
+    outcome: ChangeOutcome
+    reasons: List[str]
+    params: Dict[str, Any]
+
+
+def reliability_decision(
+    members: Sequence[Any],
+    cost_outcome: ChangeOutcome,
+    estimates: Sequence[SavingsEstimate],
+    reliability: Optional["ReliabilityOutcome"],
+    gates: Sequence[HealthGateResult],
+) -> Optional[ReliabilityDecision]:
+    """Outcome of a change whose objective is reliability, ``None`` for a savings change (MEA-14).
+
+    A request increase always costs more, so its cost outcome is never a
+    saving: the change outcome is the reliability outcome instead (the OOM-kill
+    rate drop, :func:`oom_rate_outcome`), ``realized`` only when the health
+    gates pass too, and the cost is reported as ``cost_of_fix_annual``
+    (positive: what the fix costs per year), never claimed as a saving. A
+    contaminated measurement stays contaminated.
+    """
+    if change_objective(members) != OBJECTIVE_RELIABILITY:
+        return None
+    primary = next((item for item in estimates if item.quantity == "allocated_cost"), None)
+    cost = -primary.annualized if primary is not None and primary.annualized is not None else None
+    params: Dict[str, Any] = {"objective": OBJECTIVE_RELIABILITY, "cost_of_fix_annual": _rounded(cost)}
+    cost_note = (
+        f"cost of the fix {cost:+.2f}/yr (reported, not claimed as a saving)"
+        if cost is not None
+        else "cost of the fix not measured"
+    )
+    failed = [gate for gate in gates if gate.status is HealthGateStatus.FAILED]
+    if cost_outcome is ChangeOutcome.CONTAMINATED:
+        return ReliabilityDecision(ChangeOutcome.CONTAMINATED, [cost_note], params)
+    if reliability is None:
+        return ReliabilityDecision(
+            ChangeOutcome.INCONCLUSIVE, ["reliability fix: no OOM-kill outcome was measured", cost_note], params
+        )
+    outcome = reliability.outcome
+    if outcome is ChangeOutcome.REALIZED and failed:
+        outcome = ChangeOutcome.INCONCLUSIVE
+        reason = f"reliability fix: the OOM-kill rate dropped but {len(failed)} health gate(s) failed"
+    elif outcome is ChangeOutcome.REALIZED:
+        reason = f"reliability fix confirmed: {reliability.reason}"
+    else:
+        reason = f"reliability fix {outcome.value.replace('_', ' ')}: {reliability.reason}"
+    return ReliabilityDecision(outcome, [reason, cost_note], params)
+
+
 def is_reliability_increase(record: Any) -> bool:
     """A recommendation that raises a CPU or memory request (H1): a reliability fix.
 

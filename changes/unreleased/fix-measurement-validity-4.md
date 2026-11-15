@@ -7,6 +7,9 @@
 - `CHANGE_MEASUREMENT_POST_WINDOW_DAYS` must be at least 5 days (a verdict needs 5 complete days of aligned hours), at least 30 minutes with `CHANGE_MEASUREMENT_ACCELERATED`; shorter values are rejected at startup and by the values schema (MEA-10).
 
 ### Fixed
+- A request increase whose members all raise a request (a reliability fix) is decided on its OOM-kill rate: `realized` and its recommendations `verified` when the rate dropped and the gates pass, with the cost reported as `cost_of_fix_annual` and never claimed as a saving (`counterfactual_params.objective`, MEA-14).
+- Recommendations applied by hand (`PATCH /apply`) are recorded as changes (application method `manual`) and measured by change measurement instead of the interim verifier; applied, undecided recommendations without a change id are adopted into change measurement on the next lifecycle pass (MEA-16).
+- The interim verifier (only used with `CHANGE_MEASUREMENT_ENABLED=false` and for older applies) decides on a 90% interval of the before/after difference, never on its point estimate (strategy `c0.2`), and labels its measurements `windows.method = interim_before_after` (MEA-16).
 - The reason of an undecided quantity names the true cause: no metric rows, rows without trusted cost or carbon, or hours below the 50% coverage threshold (with count and best coverage); request quantities are no longer called "trusted" (MEA-10).
 - The `co2e_factor_fallback` confounder no longer lowers the confidence of the cost verdict: it only touches the CO2e valuation.
 - The drift monitor closes a realized change only when the requests or limits changed (or the workload was recreated with other resources); a template change with the same resources keeps the change realized and accruing and records an informational `template_change` event. For changes recorded before the resources digest, the live container requests are read before closing (MEA-08).

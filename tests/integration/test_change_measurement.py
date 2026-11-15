@@ -714,3 +714,106 @@ async def test_accelerated_demo_windows_decide_through_the_service(database):
     assert snapshot is not None and snapshot.verify_digest()
     # Replica-hours of 5-minute slots: 2 replicas over the 6-hour baseline.
     assert snapshot.health["replica_hours"] == pytest.approx(12.0, rel=0.02)
+
+
+class _OomHealth:
+    """Health collector: ``before`` OOM-killed restarts in windows before ``completed``, ``after`` after it."""
+
+    def __init__(self, completed, before: int, after: int) -> None:
+        self.completed, self.before, self.after = completed, before, after
+
+    async def collect(self, **kwargs):
+        from greenkube.models.verification import WorkloadHealthObservation
+
+        kills = self.before if kwargs["start"] < self.completed else self.after
+        return WorkloadHealthObservation(
+            oom_kill_count=1 if kills else 0, oom_restart_count=kills, readiness_ratio=1.0, throttling_ratio=0.0
+        )
+
+
+@pytest.mark.parametrize(
+    ("kills_after", "state", "status"),
+    [(0, MeasurementState.REALIZED, "verified"), (12, MeasurementState.NOT_REALIZED, "rollback_review")],
+)
+async def test_a_reliability_fix_is_judged_on_its_oom_rate(database, kills_after, state, status):
+    """MEA-14: a memory increase with 12 OOM kills in the 7 days before is decided on the kill rate after it."""
+    from greenkube.models.evidence import RecommendationEvidence
+
+    scenario = Scenario(database)
+    completed = scenario.completed
+    scenario.verifier.health_collector = _OomHealth(completed, 12, kills_after)
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed), memory_request=1024**3)
+    scenario.add_rows(TimeWindow(start=completed, end=completed + timedelta(days=9)), memory_request=2 * 1024**3)
+    evidence = RecommendationEvidence(oom_events=12, observation_window_seconds=7 * 86400)
+    change, applied = await scenario.apply(
+        fields={
+            RecommendationType.RIGHTSIZING_CPU: {
+                "current_cpu_request_millicores": 500,
+                "recommended_cpu_request_millicores": 1000,
+                "evidence": evidence,
+            },
+            RecommendationType.RIGHTSIZING_MEMORY: {
+                "current_memory_request_bytes": 1024**3,
+                "recommended_memory_request_bytes": 2 * 1024**3,
+                "evidence": evidence,
+            },
+        }
+    )
+    await scenario.service.run_due(now=completed + timedelta(hours=2))
+    status_row = await scenario.changes.get_status(change.change_id)
+    assert status_row is not None and status_row.post_window_end is not None
+    await scenario.service.run_due(now=status_row.post_window_end + DECISION_GRACE)
+
+    status_row = await scenario.changes.get_status(change.change_id)
+    assert status_row is not None and status_row.state is state
+    (measurement,) = await scenario.changes.list_measurements(change.change_id)
+    assert measurement.counterfactual_params["objective"] == "reliability"
+    cost = measurement.estimate("allocated_cost")
+    assert cost is not None and cost.rate_per_hour is not None and cost.rate_per_hour < 0
+    assert measurement.counterfactual_params["cost_of_fix_annual"] > 0
+    records = await scenario.records()
+    assert {record_status(record) for record in records} == {status}
+    # The cost of the fix is never claimed as a saving.
+    assert all((record.measured_cost_saved or 0.0) <= 0.0 for record in records)
+    rows = await scenario.measurements.list_for_change(change.change_id)
+    assert all(row.estimates[0].claimed_annualized == 0.0 for row in rows)
+
+
+async def test_applied_records_without_a_change_are_adopted_by_change_measurement(database):
+    """MEA-16: an applied, undecided record without a change id gets a change; the interim verifier skips it."""
+    scenario = Scenario(database)
+    completed = scenario.completed
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed))
+    scenario.add_rows(
+        TimeWindow(start=completed, end=completed + timedelta(days=9)), cpu_request=300, memory_request=1024**3
+    )
+    await scenario.reco_repo.save_recommendations(
+        [
+            RecommendationRecord(
+                type=RecommendationType.RIGHTSIZING_CPU,
+                pod_name="api",
+                namespace="prod",
+                scope="workload",
+                owner_kind="Deployment",
+                owner_name="api",
+                container_name="api",
+                description="oversized",
+                current_cpu_request_millicores=1000,
+                recommended_cpu_request_millicores=300,
+                potential_savings_cost=900.0,
+            )
+        ]
+    )
+    (record,) = await scenario.records()
+    assert record.id is not None
+    # Applied the legacy way: no change id (before change measurement shipped).
+    await scenario.lifecycle.apply(record.id, actual_cpu=300, application_method="manual", applied_at=completed)
+
+    await scenario.service.run_due(now=completed + timedelta(hours=2))
+
+    (record,) = await scenario.records()
+    change_id = (record.baseline.model_dump() if record.baseline is not None else {}).get("change_id")
+    assert change_id
+    change = await scenario.changes.get_change(change_id)
+    assert change is not None and change.recommendation_ids == [record.id]
+    assert await scenario.verifier.verify_due() == []

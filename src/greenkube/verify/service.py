@@ -80,10 +80,14 @@ from greenkube.verify.model import (
 from greenkube.verify.series import floor_hour, hourly_buckets, price_card, utc_hour
 from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
+    OBJECTIVE_RELIABILITY,
+    OBJECTIVE_SAVINGS,
     MeasurementSettings,
     ReliabilityOutcome,
     SavingsMeasurementStrategy,
+    change_objective,
     increase_reliability_detail,
+    reliability_decision,
     strategy_for,
 )
 
@@ -747,6 +751,8 @@ class ChangeMeasurementService:
             return []
         moment = ensure_utc(now) if now is not None else self._now()
         updated: List[RecommendationRecord] = []
+        # Applies the change pipeline never recorded (before it shipped, or by hand) join it (MEA-16).
+        await self._adopt_unmanaged(moment)
         # Changes with a recommendation awaiting its measurement (decided changes need nothing else).
         awaiting = await self._repair_unrecorded(moment)
         for state, handler, only_awaiting in (
@@ -772,6 +778,46 @@ class ChangeMeasurementService:
                 except Exception as exc:
                     logger.warning("Measurement of change %s failed: %s", status.change_id, exc)
         return updated
+
+    async def _adopt_unmanaged(self, now: datetime) -> int:
+        """Give every applied, undecided recommendation without a change id a recorded change (MEA-16).
+
+        Such records (applied before change measurement shipped, or by a client
+        that bypassed ``PATCH /apply``) would otherwise be judged by the interim
+        verifier. The records of one change (same container, same plan or
+        landed together) share one change id, stored on the recommendation so
+        the interim verifier leaves them alone; the change row itself is
+        written by :meth:`_repair_unrecorded`. Returns the number adopted.
+        """
+        from greenkube.core.optimization.verifier import attribution_groups, change_id_of
+
+        try:
+            records = await self.lifecycle.repo.get_recommendations_by_statuses(sorted(_AWAITING_STATUSES))
+        except Exception as exc:
+            logger.warning("Could not read applied recommendations: %s", exc)
+            return 0
+        unmanaged = [
+            record
+            for record in records or []
+            if record.id is not None
+            and record.applied_at is not None
+            and _awaiting(record)
+            and change_id_of(record) is None
+        ]
+        adopted = 0
+        for group in attribution_groups(unmanaged):
+            change_id = uuid.uuid4().hex
+            for record in group:
+                assert record.id is not None
+                baseline = {**_baseline(record), "change_id": change_id, "change_adopted_at": now.isoformat()}
+                try:
+                    await self.lifecycle.repo.update_recommendation_fields(record.id, {"baseline": baseline})
+                    adopted += 1
+                except Exception as exc:
+                    logger.warning("Could not adopt recommendation %s into change %s: %s", record.id, change_id, exc)
+        if adopted:
+            logger.info("Adopted %d applied recommendation(s) into change measurement.", adopted)
+        return adopted
 
     async def _repair_unrecorded(self, now: datetime) -> set[str]:
         """Record changes whose recommendations were applied but whose change row was never written.
@@ -1146,16 +1192,34 @@ class ChangeMeasurementService:
             if awaiting
             else ([], None)
         )
+        if reliability is None and not awaiting and change_objective(in_effect) == OBJECTIVE_RELIABILITY:
+            # MEA-14: members already flagged by the interim health check still need the fix's outcome.
+            _, reliability = await self._health_and_reliability(
+                in_effect,
+                ensure_utc(plan.post.start),
+                ensure_utc(plan.post.end),
+                baseline=snapshot.health,
+                post_replica_hours=_replica_hours(post_buckets, self.settings.slot_seconds),
+            )
         counterfactual_params = dict(result.counterfactual_params)
         # Measured savings are allocated; the realization factor of the projections says how much of
         # them is expected on the bill (realized_billed is not measured yet, C10).
         counterfactual_params["projection_basis"] = PROJECTION_BASIS
         counterfactual_params["realization_factor"] = realization_factor(in_effect)
         reasons = list(result.reasons)
+        outcome = result.outcome
         if reliability is not None:
             # The outcome of a reliability increase (H1); its cost stays in the estimates, as a cost.
             counterfactual_params["reliability"] = reliability.as_dict()
             reasons.append(f"reliability ({reliability.outcome.value}): {reliability.reason}")
+        # MEA-14: a change whose members all raise a request is judged on its reliability outcome.
+        decision = reliability_decision(in_effect, result.outcome, result.estimates, reliability, gates)
+        if decision is not None:
+            outcome = decision.outcome
+            counterfactual_params.update(decision.params)
+            reasons = decision.reasons + [reason for reason in reasons if not reason.startswith("reliability (")]
+        else:
+            counterfactual_params["objective"] = OBJECTIVE_SAVINGS
         estimates = {item.quantity: item for item in result.estimates}
         allocations = []
         for share in allocate(in_effect, result.estimates):
@@ -1192,7 +1256,7 @@ class ChangeMeasurementService:
             confidence=confidence_score(confounders, result.coverage, load),
             health=gates,
             allocations=allocations,
-            outcome=result.outcome,
+            outcome=outcome,
             reasons=reasons,
             supersedes_measurement_id=previous[-1].measurement_id if previous else None,
             decided_at=now,
@@ -1334,6 +1398,8 @@ class ChangeMeasurementService:
         allocation = next((item for item in measurement.allocations if item.recommendation_id == member.id), None)
         failed = [gate for gate in measurement.health if gate.status is HealthGateStatus.FAILED] if gates_apply else []
         reasons = list(measurement.reasons)
+        # MEA-14: a reliability fix is verified on its reliability outcome; its cost is never claimed.
+        reliability = measurement.counterfactual_params.get("objective") == OBJECTIVE_RELIABILITY
         if allocation is None:
             outcome = MeasurementOutcome.INCONCLUSIVE
             reasons = ["recommendation joined the change after it was measured"]
@@ -1346,7 +1412,8 @@ class ChangeMeasurementService:
             share = allocation.share
             basis = allocation.basis
             if (
-                measurement.outcome is ChangeOutcome.REALIZED
+                not reliability
+                and measurement.outcome is ChangeOutcome.REALIZED
                 and estimate is not None
                 and not estimate.claimed
                 and estimate.outcome is not ChangeOutcome.REALIZED
@@ -1362,14 +1429,18 @@ class ChangeMeasurementService:
         if failed:
             outcome = MeasurementOutcome.ROLLBACK_REVIEW
             reasons = [gate.detail for gate in failed]
-        cost = _quantity_estimate("cost", "currency", basis, share, estimate, outcome, allocated_projection(member))
+        cost = _quantity_estimate(
+            "cost", "currency", basis, share, estimate, outcome, allocated_projection(member), claimed=not reliability
+        )
         co2e_source = measurement.estimate("co2e_g")
         # The measured CO2e (operational, allocated by the Impact Model like the
         # projection) is claimed only when its own interval shows a saving, and
         # is compared with the projected components the measured rows carry.
         co2e_outcome = outcome
-        if outcome is MeasurementOutcome.REALIZED and (
-            co2e_source is None or co2e_source.outcome is not ChangeOutcome.REALIZED
+        if (
+            not reliability
+            and outcome is MeasurementOutcome.REALIZED
+            and (co2e_source is None or co2e_source.outcome is not ChangeOutcome.REALIZED)
         ):
             co2e_outcome = (
                 _OUTCOME_TO_RECOMMENDATION.get(co2e_source.outcome, MeasurementOutcome.INCONCLUSIVE)
@@ -1386,6 +1457,7 @@ class ChangeMeasurementService:
             co2e_source,
             co2e_outcome,
             _measurable_co2e(member, _co2e_components_of(measurement)),
+            claimed=not reliability,
         )
         windows = {
             "baseline": {

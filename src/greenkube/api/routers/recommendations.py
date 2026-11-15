@@ -387,6 +387,28 @@ async def get_recommendation_detail(
     return decided
 
 
+def get_change_recorder_factory():
+    """Builder of the change-measurement service that records a manual apply as a change (MEA-16).
+
+    ``None`` when ``CHANGE_MEASUREMENT_ENABLED`` is off: the interim verifier
+    then judges manual applies.
+    """
+    config = get_config()
+    if not getattr(config, "CHANGE_MEASUREMENT_ENABLED", True):
+        return None
+
+    def build(lifecycle):
+        from greenkube.core.factory import get_combined_metrics_repository
+        from greenkube.storage.change_repository import get_change_repository
+        from greenkube.verify.service import ChangeMeasurementService
+
+        return ChangeMeasurementService(
+            lifecycle, get_combined_metrics_repository(), get_change_repository(), config=config
+        )
+
+    return build
+
+
 @router.patch(
     "/recommendations/{rec_id}/apply",
     dependencies=[Depends(require_scope(Scope.WRITE))],
@@ -397,6 +419,7 @@ async def apply_recommendation(
     request: ApplyRecommendationRequest,
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
     actor: str = Depends(get_authenticated_actor),
+    change_recorder=Depends(get_change_recorder_factory),
 ):
     """Mark a recommendation as applied.
 
@@ -408,10 +431,18 @@ async def apply_recommendation(
     the recommendation (e.g., reducing CPU to 50m instead of the suggested 40m).
     Applying freezes the verification baseline and starts the observation window.
     Only ``active`` and ``pr_open`` recommendations can be applied (409 otherwise).
+
+    With change measurement on, the apply is recorded as a change (application
+    method ``manual``, MEA-16) with its baseline snapshot and measured by the
+    change pipeline like a detected change; if recording fails, the lifecycle
+    job records it from the change id stored on the recommendation.
     """
+    import uuid
+
     from greenkube.core.optimization.lifecycle import RecommendationLifecycle, RecommendationTransitionError
 
     lifecycle = RecommendationLifecycle(reco_repo)
+    change_id = uuid.uuid4().hex if change_recorder is not None else None
     declared = await _validate_declared_savings(rec_id, request, reco_repo)
     try:
         # Declared savings never reach the projection columns: those keep the
@@ -424,11 +455,18 @@ async def apply_recommendation(
             cost_saved=None,
             application_method=request.application_method or "manual",
             actor=actor,
+            change_id=change_id,
         )
     except RecommendationTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    if change_recorder is not None and change_id is not None:
+        try:
+            await change_recorder(lifecycle).record_change(change_id, [applied])
+        except Exception as exc:
+            # The record carries the change id: the lifecycle job's repair records the change.
+            logger.warning("Change %s of recommendation %s is recorded later: %s", change_id, rec_id, exc)
     if declared is not None:
         try:
             applied = await record_user_declared_savings(reco_repo, applied, declared)
