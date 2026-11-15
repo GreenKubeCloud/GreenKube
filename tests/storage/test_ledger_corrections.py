@@ -161,3 +161,64 @@ async def test_a_reversal_with_the_wrong_sign_fails_verification_and_the_head_is
     await ledger.repo.append(CLUSTER_UID, CLUSTER, [wrong])
     failed = await verify_chain(ledger.repo, CLUSTER_UID)
     assert not failed.ok and failed.reason == "reversal_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_re_measurement_restates_from_the_new_measurement(ledger: LedgerDb, monkeypatch):
+    # LED-03: verified at 0.01/h by m1, re-measured verified at 0.004/h by m2 -> restated at m2, once.
+    from greenkube.storage.ledger_repository import Provenance
+
+    pending = _allocated_record(9, applied_hours_ago=10, realization=1.0)
+    await _attributor(ledger, hours=20).accrue([pending], now=_hour(0) + timedelta(minutes=3))
+    current = {"measurement": "m1"}
+    original = ledger.repo.provenance
+
+    async def provenance(ids):
+        found = await original(ids)
+        return {rec_id: Provenance(measurement_id=current["measurement"]) for rec_id in found}
+
+    monkeypatch.setattr(ledger.repo, "provenance", provenance)
+    first = pending.model_copy(
+        update={
+            "status": RecommendationStatus.VERIFIED,
+            "verified_at": _hour(0),
+            "verification_status": "passed",
+            "measured_cost_saved": 0.01 * HOURS_PER_YEAR,
+        }
+    )
+    await _projector(ledger, records=[first]).sync(full=True)
+    assert await _net_of(ledger, 9, METHOD_MEASURED_ALLOCATED) == pytest.approx(0.10, rel=1e-9)
+
+    current["measurement"] = "m2"
+    second = first.model_copy(update={"measured_cost_saved": 0.004 * HOURS_PER_YEAR})
+    projector = _projector(ledger, records=[second])
+    await projector.sync(full=True)
+    assert await _net_of(ledger, 9, METHOD_MEASURED_ALLOCATED) == pytest.approx(0.04, rel=1e-9)
+    assert await _net_of(ledger, 9, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+    assert (await projector.sync(full=True)).written == 0
+    assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_refuted_projection_verified_by_a_re_measurement_gets_its_measured_amount(ledger: LedgerDb):
+    pending = _allocated_record(10, applied_hours_ago=10, realization=1.0)
+    await _attributor(ledger, hours=20).accrue([pending], now=_hour(0) + timedelta(minutes=3))
+    refuted = pending.model_copy(update={"verification_status": "failed", "verification_window_end": _hour(0)})
+    await _projector(ledger, records=[refuted]).sync(full=True)
+    assert await _net_of(ledger, 10, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+
+    verified = pending.model_copy(
+        update={
+            "status": RecommendationStatus.VERIFIED,
+            "verified_at": _hour(0),
+            "verification_status": "passed",
+            "measured_cost_saved": 0.008 * HOURS_PER_YEAR,
+        }
+    )
+    projector = _projector(ledger, records=[verified])
+    await projector.sync(full=True)
+    assert await _net_of(ledger, 10, METHOD_MEASURED_ALLOCATED) == pytest.approx(0.08, rel=1e-9)
+    assert await _net_of(ledger, 10, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+    assert (await projector.sync(full=True)).written == 0

@@ -459,9 +459,84 @@ class LedgerProjector:
                 )
             )
         drafts.extend(await self._slot_restatements(identity, records, provenance))
+        drafts.extend(await self._remeasured(identity, records, provenance))
         if drafts:
             inserted = await self.repo.append(identity.cluster_uid, identity.cluster_name, drafts, now=self._now())
             result.restated += len(inserted)
+
+    async def _remeasured(
+        self, identity: ClusterIdentity, records: Dict[int, Any], provenance: Dict[int, Provenance]
+    ) -> List[LedgerEntryDraft]:
+        """Restate again from the latest measurement (LED-03).
+
+        A restatement written from an earlier measurement (another
+        ``measurement_id``) is reversed and replaced at the current measured
+        rate (key ``...:{measurement_id}``). A projection refuted by an earlier
+        ``not_realized`` verdict and now verified by a re-measurement gets its
+        measured amount (its projection stays reversed).
+        """
+        drafts: List[LedgerEntryDraft] = []
+        for entry in await self.repo.active_measurement_corrections(identity.cluster_uid, records):
+            rec_id = entry.recommendation_id
+            record = records.get(rec_id) if rec_id is not None else None
+            if record is None or rec_id is None:
+                continue
+            source = provenance.get(rec_id, Provenance())
+            current = source.measurement_id
+            if entry.reason == REASON_NOT_REALIZED:
+                if entry.period_end > ensure_utc(record.verified_at):
+                    continue
+                target_key = f"restatement:{entry.reverses_entry_id}:{current or 'latest'}"
+            elif current is None or entry.measurement_id == current:
+                continue
+            elif entry.restates_entry_id:
+                target_key = f"restatement:{entry.restates_entry_id}:{current}"
+            else:
+                slot = format_time(entry.slot_start or entry.period_start)
+                target_key = f"restatement:slot:{rec_id}:{slot}:{entry.quantity}:{current}"
+            if target_key == entry.entry_key:
+                continue
+            annual = record.measured_cost_saved if entry.quantity == QUANTITY_COST else record.measured_co2e_saved_grams
+            if annual is None:
+                continue
+            if entry.reason != REASON_NOT_REALIZED:
+                drafts.append(
+                    replace(
+                        reversal_of(entry, REASON_RESTATEMENT, created_by="ledger-restatement"),
+                        book=BOOK_RESTATEMENT,
+                        measurement_id=current,
+                    )
+                )
+            seconds = (ensure_utc(entry.period_end) - ensure_utc(entry.period_start)).total_seconds()
+            drafts.append(
+                LedgerEntryDraft(
+                    entry_key=target_key,
+                    group_key=f"{target_key}:group",
+                    entry_kind=ENTRY_RESTATEMENT,
+                    book=BOOK_RESTATEMENT,
+                    reason=REASON_RESTATEMENT,
+                    method=METHOD_MEASURED_ALLOCATED,
+                    quantity=entry.quantity,
+                    value=float(annual) * seconds / SECONDS_PER_YEAR,
+                    unit=entry.unit,
+                    currency=entry.currency,
+                    method_version=source.method_version or LEDGER_WRITER_VERSION,
+                    period_start=entry.period_start,
+                    period_end=entry.period_end,
+                    slot_start=entry.slot_start,
+                    created_by="ledger-restatement",
+                    recommendation_id=rec_id,
+                    recommendation_ids=list(source.recommendation_ids or entry.recommendation_ids),
+                    namespace=entry.namespace,
+                    recommendation_type=entry.recommendation_type,
+                    change_id=source.change_id or entry.change_id,
+                    measurement_id=current,
+                    pr_url=source.pr_url or entry.pr_url,
+                    restates_entry_id=entry.restates_entry_id or entry.reverses_entry_id,
+                    basis=BASIS_ALLOCATED,
+                )
+            )
+        return drafts
 
     async def _slot_restatements(
         self,

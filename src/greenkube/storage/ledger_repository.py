@@ -549,6 +549,27 @@ class LedgerRepository:
                 facts[str(row["change_id"])] = fact
         return facts
 
+    async def active_measurement_corrections(
+        self, cluster_uid: str, recommendation_ids: Iterable[int]
+    ) -> List[LedgerEntry]:
+        """Restatements and ``not_realized`` reversals of ``recommendation_ids`` that nothing reverses yet."""
+        ids = sorted({int(item) for item in recommendation_ids})
+        result: List[LedgerEntry] = []
+        for offset in range(0, len(ids), _CHUNK):
+            chunk = ids[offset : offset + _CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = await self._select(
+                f"SELECT {_SELECT_E} FROM savings_ledger_entries e "
+                f"WHERE e.cluster_uid = ? AND e.recommendation_id IN ({placeholders}) "
+                f"AND ((e.entry_kind = 'restatement' AND e.reason = '{REASON_RESTATEMENT}') "
+                "OR e.reason = 'not_realized') "
+                "AND NOT EXISTS (SELECT 1 FROM savings_ledger_entries r WHERE r.reverses_entry_id = e.entry_id) "
+                "ORDER BY e.seq",
+                [cluster_uid, *chunk],
+            )
+            result.extend(self._entry(row) for row in rows)
+        return result
+
     async def unreinstated_supersessions(
         self, cluster_uid: str, recommendation_ids: Iterable[int]
     ) -> List[LedgerEntry]:
