@@ -78,6 +78,7 @@ def test_a_large_cut_ranks_above_a_tiny_cut_on_fixed_nodes():
     components = large["components"]
     assert components["allocated_cost_annual"] == pytest.approx(473.04)
     assert components["billable_cost_annual"] == pytest.approx(0.0)
+    assert components["projection_confidence"] == pytest.approx(0.9)
 
 
 def test_the_api_exposes_allocated_and_billable_projections_and_the_fixed_nodes_note():

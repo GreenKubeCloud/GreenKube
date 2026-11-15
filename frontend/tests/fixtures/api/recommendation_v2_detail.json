@@ -282,6 +282,7 @@
       "p_incident_now": null,
       "posterior_alpha": 2.0,
       "posterior_beta": 2.0,
+      "projection_confidence": null,
       "released_capacity_value_annual": 0.0,
       "risk_aversion": 1.0,
       "risk_level": "medium",

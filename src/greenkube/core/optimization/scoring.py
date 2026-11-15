@@ -366,6 +366,10 @@ def compute_value(
             "carbon_price_per_tonne": params.carbon_price_per_tonne,
             "carbon_value_annual": round(carbon_value, 4),
             "confidence": _finite(getattr(rec, "confidence", None)),
+            # IMP-03: the projection's own input confidence (price tier, short coverage), carried apart.
+            "projection_confidence": (
+                _finite(rec.impact.get("confidence")) if isinstance(getattr(rec, "impact", None), Mapping) else None
+            ),
             "risk_level": risk_level,
             "risk_success_factor": RISK_SUCCESS_FACTOR.get(risk_level, RISK_SUCCESS_FACTOR["medium"]),
             "track_record": (
