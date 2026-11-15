@@ -44,6 +44,26 @@ Skip = Tuple["TargetKey", Optional[str], str, str]
 
 _SIGNAL_LABELS = {"oom_kills": "OOM kills", "restarts": "restarts", "throttling": "CPU throttling"}
 
+#: Skip code: the container's OOM kills happened under a previous memory request or limit (REC-02).
+OOM_KILLS_BEFORE_CHANGE = "oom_kills_before_change"
+
+
+def stale_oom_diagnostics(skipped: List[Skip]) -> List[Dict[str, Any]]:
+    """Source-run diagnostic of the containers whose OOM kills predate their current limit (REC-02)."""
+    stale = [skip for skip in skipped if skip[3] == OOM_KILLS_BEFORE_CHANGE]
+    if not stale:
+        return []
+    return [
+        {
+            "level": "info",
+            "code": OOM_KILLS_BEFORE_CHANGE,
+            "message": f"{len(stale)} container(s) were OOM-killed in the lookback only under a previous memory "
+            "request or limit: those kills are not held against the current limit (no further increase until a "
+            "kill happens under it).",
+            "count": len(stale),
+        }
+    ]
+
 
 def reliability_diagnostics(
     skipped: List[Skip], signal_status: Mapping[str, str], snapshot: Optional["UsageSnapshot"] = None
@@ -185,7 +205,10 @@ class MemoryRightsizingAnalyzer(Analyzer):
 
     def scan_diagnostics(self) -> List[Dict[str, Any]]:
         """Decreases withheld for unknown reliability signals in the last scan."""
-        return reliability_diagnostics(self.skipped, self._signal_status, self._snapshot)
+        return [
+            *reliability_diagnostics(self.skipped, self._signal_status, self._snapshot),
+            *stale_oom_diagnostics(self.skipped),
+        ]
 
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
@@ -213,6 +236,18 @@ class MemoryRightsizingAnalyzer(Analyzer):
             proposal = memory_proposal(cfg, summary, pod_summary)
             if proposal is None:
                 record_withheld_decrease(self.skipped, cfg, summary, pod_summary, "memory", context)
+            if summary.oom_kills_before_change and (proposal is None or "oom_kills" not in proposal.triggers):
+                self.skipped.append((target, container_name, "memory", OOM_KILLS_BEFORE_CHANGE))
+                LOG.info(
+                    "Memory of %s/%s/%s container %r: %d OOM kill(s) happened under a previous request or limit, "
+                    "not under the current limit (%s): no OOM-driven increase.",
+                    ns,
+                    target_kind,
+                    target_name,
+                    container_name,
+                    summary.oom_kills_before_change,
+                    f"{summary.memory_limit // MIB}MiB" if summary.memory_limit else "none",
+                )
             stats = proposal.stats if proposal is not None and proposal.stats is not None else summary.memory
             if proposal is None or stats is None:
                 continue

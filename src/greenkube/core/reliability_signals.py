@@ -152,6 +152,10 @@ class ReliabilitySignals:
     restarts_known: bool = False
     #: Outcome per signal name (:data:`SIGNAL_NAMES`): ``ok``, ``failed`` or ``unavailable``.
     status: Dict[str, str] = field(default_factory=dict)
+    #: Time (epoch seconds) of the last OOM kill / restart of each container in the lookback
+    #: (REC-02). Absent when the query failed: the kills and restarts then all count.
+    last_oom_kill: Dict[Tuple[TargetKey, str], float] = field(default_factory=dict)
+    last_restart: Dict[Tuple[TargetKey, str], float] = field(default_factory=dict)
 
 
 def _value(item: Mapping[str, Any]) -> Optional[float]:
@@ -181,6 +185,28 @@ def _per_container(
         if target is not None:
             totals[(target, container)] += value
     return dict(totals)
+
+
+def _latest_per_container(
+    results: Optional[List[Dict[str, Any]]], known: Iterable[TargetKey], *, at: datetime, window_seconds: float
+) -> Dict[Tuple[TargetKey, str], float]:
+    """Latest epoch time per known target container (the pods of one target: their maximum).
+
+    A value outside the lookback (a malformed answer) is dropped: unknown, never "old".
+    """
+    known = set(known)
+    lowest, highest = at.timestamp() - window_seconds - 86400, at.timestamp() + 3600
+    latest: Dict[Tuple[TargetKey, str], float] = {}
+    for item in results or []:
+        metric = item.get("metric") or {}
+        namespace, pod, container = metric.get("namespace"), metric.get("pod"), metric.get("container")
+        value = _value(item)
+        if not namespace or not pod or not container or value is None or not lowest <= value <= highest:
+            continue
+        target = target_for_pod(namespace, pod, known)
+        if target is not None:
+            latest[(target, container)] = max(latest.get((target, container), 0.0), value)
+    return latest
 
 
 async def _safe_query(query: QueryFunction, promql: str, at: datetime) -> Optional[List[Dict[str, Any]]]:
@@ -234,12 +260,41 @@ async def read_prometheus_signals(
     else:
         signals.status["oom_kills"] = SIGNAL_FAILED if ksm_scraped else ksm_status
 
+    # REC-02: when each container was last OOM-killed / restarted, so kills and restarts that
+    # predate its current request and limit (an OOM fix) are not held against them.
+    last_ksm_oom = await _safe_query(
+        query,
+        "max by (namespace, pod, container) (max_over_time(timestamp("
+        f"(round(increase(kube_pod_container_status_restarts_total[{OOM_STEP}])) > 0) "
+        "and on (namespace, pod, container) "
+        f'(kube_pod_container_status_last_terminated_reason{{reason="OOMKilled"}} > 0))[{window}:{OOM_STEP}]))',
+        at,
+    )
+    last_cadvisor_oom = await _safe_query(
+        query,
+        "max by (namespace, pod, container) (max_over_time(timestamp("
+        f"increase(container_oom_events_total{{{_CONTAINERS}}}[{OOM_STEP}]) > 0)[{window}:{OOM_STEP}]))",
+        at,
+    )
+    if last_ksm_oom is not None and last_cadvisor_oom is not None:
+        for source in (last_ksm_oom, last_cadvisor_oom):
+            for key, value in _latest_per_container(source, known, at=at, window_seconds=window_seconds).items():
+                signals.last_oom_kill[key] = max(signals.last_oom_kill.get(key, 0.0), value)
+
     restarts = await _safe_query(
         query,
         "max by (namespace, pod, container) "
         f"(round(increase(kube_pod_container_status_restarts_total{{{_CONTAINERS}}}[{window}])))",
         at,
     )
+    last_restart = await _safe_query(
+        query,
+        "max by (namespace, pod, container) (max_over_time(timestamp("
+        f"round(increase(kube_pod_container_status_restarts_total{{{_CONTAINERS}}}[{OOM_STEP}])) > 0)"
+        f"[{window}:{OOM_STEP}]))",
+        at,
+    )
+    signals.last_restart = _latest_per_container(last_restart, known, at=at, window_seconds=window_seconds)
     signals.restarts = {
         key: int(round(value)) for key, value in _per_container(restarts, known).items() if round(value) > 0
     }
@@ -319,8 +374,64 @@ def _by_target(values: Mapping[Tuple[TargetKey, str], Any]) -> Dict[TargetKey, D
     return grouped
 
 
+def _since_change(count: int, last: Optional[float], since: Optional[datetime]) -> Tuple[int, Optional[int]]:
+    """``(counted, left out)``: events whose last one predates ``since`` are left out (REC-02).
+
+    With an unknown last time, or no change in the lookback, everything counts.
+    """
+    if not count or last is None or since is None or last >= since.timestamp():
+        return count, None
+    return 0, count
+
+
+def _latest(*values: Optional[datetime]) -> Optional[datetime]:
+    known = [value for value in values if value is not None]
+    return max(known) if known else None
+
+
+def _current_config_signals(snapshot: UsageSnapshot, signals: ReliabilitySignals) -> None:
+    """Moves to ``*_before_change`` the kills and restarts of a previous configuration (REC-02).
+
+    An OOM kill proves something only about the memory limit it happened under:
+    kills whose last one predates the container's current memory request and
+    limit (``memory_config_since``) are not counted. Restarts likewise before
+    its current requests and limits (``resources_config_since``).
+    """
+    for target, containers in snapshot.summaries.items():
+        for name, summary in containers.items():
+            if name == POD_LEVEL:
+                continue
+            key = (target, name)
+            _, kills_before = _since_change(
+                signals.oom_kills.get(key, 0), signals.last_oom_kill.get(key), summary.memory_config_since
+            )
+            restart_since = _latest(summary.resources_config_since, summary.memory_config_since)
+            _, restarts_before = _since_change(
+                signals.restarts.get(key, 0), signals.last_restart.get(key), restart_since
+            )
+            if kills_before:
+                summary.oom_kills_before_change = kills_before
+                signals.oom_kills.pop(key, None)
+                logger.info(
+                    "%d OOM kill(s) of %s/%s/%s container %r predate its current memory request and limit "
+                    "(since %s): not counted.",
+                    kills_before,
+                    *target,
+                    name,
+                    summary.memory_config_since,
+                )
+            if restarts_before:
+                summary.restarts_before_change = restarts_before
+                signals.restarts.pop(key, None)
+
+
 def apply_signals(snapshot: UsageSnapshot, signals: ReliabilitySignals) -> None:
-    """Fills the snapshot's summaries; the pod-level summary gets the totals over its containers."""
+    """Fills the snapshot's summaries; the pod-level summary gets the totals over its containers.
+
+    Kills and restarts that happened under a previous request or limit of the
+    container are left out first (:func:`_current_config_signals`, REC-02).
+    """
+    _current_config_signals(snapshot, signals)
     kills_by_target = _by_target(signals.oom_kills)
     restarts_by_target = _by_target(signals.restarts)
     throttled_by_target = _by_target(signals.throttled)

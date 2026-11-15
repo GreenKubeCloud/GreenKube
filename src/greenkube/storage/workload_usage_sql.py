@@ -13,7 +13,7 @@ as :func:`greenkube.core.workload_usage.nearest_rank`.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.models.provenance import cost_source_aggregate_sql
@@ -216,6 +216,22 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
         for p in USAGE_PERCENTILES:
             percentile_columns.append(f"MAX({resource}_usage_p{p}) AS {alias}_p{p}")
         percentile_columns.append(f"MAX({resource}_usage_max) AS {alias}_max")
+    # REC-02: the latest hour's requests and limits, and the last hour that had other values (the
+    # same rule as ``_config_since`` in core/workload_usage.py: requests default to 0, limits to NULL).
+    defaults = {"cpu_request": "0", "memory_request": "0", "cpu_limit": "-1", "memory_limit": "-1"}
+    current_config = [
+        f"FIRST_VALUE({column}) OVER ({partition} ORDER BY hour_bucket DESC) AS current_{column}" for column in defaults
+    ]
+
+    def _differs(columns: Sequence[str]) -> str:
+        return " OR ".join(
+            f"COALESCE({column}, {defaults[column]}) <> COALESCE(current_{column}, {defaults[column]})"
+            for column in columns
+        )
+
+    known_request = "(COALESCE(memory_request, 0) > 0 OR COALESCE(cpu_request, 0) > 0)"
+    memory_differs = _differs(("memory_request", "memory_limit"))
+    resources_differ = _differs(tuple(defaults))
     return f"""
         WITH scoped AS (
             SELECT workload_usage_hourly.*,
@@ -259,6 +275,7 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
                 MAX(hour_bucket) OVER ({partition}) AS last_hour,
                 SUM(CASE WHEN cpu_n > 0 THEN 1 ELSE 0 END) OVER ({partition}) AS cpu_hours,
                 SUM(CASE WHEN mem_n > 0 THEN 1 ELSE 0 END) OVER ({partition}) AS mem_hours,
+                {", ".join(current_config)},
                 {", ".join(ranks)}
             FROM hourly
         )
@@ -282,6 +299,8 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
                 WHEN MAX(restart_increase_unknown) = 1 THEN NULL
                 ELSE SUM(COALESCE(restart_increase, 0)) END AS restart_increase,
             MAX(restart_increase_unknown) AS restart_increase_legacy,
+            MAX(CASE WHEN {known_request} AND ({memory_differs}) THEN hour_bucket END) AS memory_changed_hour,
+            MAX(CASE WHEN {known_request} AND ({resources_differ}) THEN hour_bucket END) AS resources_changed_hour,
             SUM(total_cost) AS total_cost,
             SUM(co2e_grams) AS co2e_grams,
             SUM(embodied_co2e_grams) AS embodied_co2e_grams,
@@ -409,6 +428,11 @@ def _stats(row: Mapping[str, Any], alias: str, sq: bool) -> Optional[UsageStats]
     )
 
 
+def _hour_end(bucket: Optional[datetime]) -> Optional[datetime]:
+    """End of an hour bucket, or None (REC-02: since when the configuration is current)."""
+    return bucket + timedelta(hours=1) if bucket is not None else None
+
+
 def summary_from_row(row: Mapping[str, Any], decode_time: Callable[[Any], Optional[datetime]]) -> WorkloadUsageSummary:
     intensity_n = int(row["intensity_n"] or 0)
     return WorkloadUsageSummary(
@@ -432,6 +456,8 @@ def summary_from_row(row: Mapping[str, Any], decode_time: Callable[[Any], Option
         restart_count=_i(row["restart_count"]),
         restart_increase=_i(row["restart_increase"]),
         restart_increase_legacy=bool(row["restart_increase_legacy"] or 0),
+        memory_config_since=_hour_end(decode_time(row["memory_changed_hour"])),
+        resources_config_since=_hour_end(decode_time(row["resources_changed_hour"])),
         total_cost=float(row["total_cost"] or 0.0),
         co2e_grams=float(row["co2e_grams"] or 0.0),
         embodied_co2e_grams=float(row["embodied_co2e_grams"] or 0.0),

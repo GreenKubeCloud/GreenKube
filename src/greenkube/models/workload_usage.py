@@ -180,6 +180,17 @@ class WorkloadUsageSummary:
     #: An hour of the lookback was rolled before migration 0130 (restart count without
     #: per-pod increase) and could not be re-rolled: ``restart_increase`` is None for that.
     restart_increase_legacy: bool = False
+    #: Since when the container runs with its current memory request and limit (REC-02): the end
+    #: of the last observed hour that had another value. None when the whole lookback ran with them.
+    memory_config_since: Optional[datetime] = None
+    #: The same for any request or limit (CPU or memory): a new pod template, so restarts before it
+    #: happened under another configuration (REC-02).
+    resources_config_since: Optional[datetime] = None
+    #: OOM kills of the lookback that happened before ``memory_config_since`` and are therefore not
+    #: counted in ``oom_kill_count`` (REC-02). None when none were left out.
+    oom_kills_before_change: Optional[int] = None
+    #: Restarts left out of ``restarts_in_window`` because they predate ``resources_config_since``.
+    restarts_before_change: Optional[int] = None
     throttling_ratio: Optional[float] = None
     #: Why the container is believed to run a JVM (``JAVA_TOOL_OPTIONS``, ``-Xmx``, image name), None when not.
     jvm_hint: Optional[str] = None
