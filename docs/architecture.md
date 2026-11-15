@@ -620,7 +620,9 @@ The controller's `collect_metrics` job is the only production writer of usage, e
 
 1. **Catch-up planning** (`core/collection.py`, `MetricsCollectionJob`):
    ```
+   cluster   = installation.cluster_uid   # kube-system namespace UID, resolved before the loop (COL-02)
    watermark = collection_watermarks[(cluster, "combined_metrics")].last_complete_end
+               └─ none: resume after the newest stored row inside the horizon, else backfill the horizon
    windows   = [watermark, align(now - COLLECTION_SAFETY_LAG))   # half-open, step-aligned
                └─ bounded by COLLECTION_MAX_BACKFILL (older windows counted as gaps)
                └─ split into ~1h chunks, oldest first

@@ -80,7 +80,7 @@ Set `CLUSTER_NAME` (Helm: `config.clusterName`) to use a stable cluster label. W
 1. On a single-node cluster (minikube, kind, k3s), the name of that node.
 2. A recognized EKS, GKE, AKS, Cluster API or minikube cluster-name label on a node.
 3. `default` on any other multi-node cluster, so every GreenKube pod uses the same name whatever node it runs on.
-4. When the nodes cannot be read (no RBAC, out of cluster): `K8S_NODE_NAME` (the chart injects the node hosting the pod), else `default`.
+4. When the nodes cannot be read (no RBAC, out of cluster, API not reachable yet at start): `default`, never the node hosting the pod.
 
 The name also keys the collection watermark, the GitOps bindings and the savings ledger: set it before the first install of a multi-node cluster rather than after.
 

@@ -164,6 +164,12 @@ migrates the schema (`config.db.schema`, default `public`) under a PostgreSQL ad
 `greenkube demo` and local development only; the chart no longer offers it (see
 [Upgrading](upgrading.md#from-a-sqlite-install)).
 
+**One database schema per cluster.** Metric rows carry no cluster column, so two clusters must never share a
+schema: give each install its own `config.db.schema` (or database). The controller records the cluster a schema
+belongs to (the `kube-system` namespace UID, table `installation`) at its first start and refuses to collect
+into a schema of another cluster, with an explicit error in its log. To move a database to a new cluster on
+purpose, set `config.collection.allowClusterUidChange: true` for one start, then back to `false`.
+
 ## Optional: Ingress and TLS
 
 Route one hostname to the API Service; the dashboard and the API share the origin, so no CORS is needed:

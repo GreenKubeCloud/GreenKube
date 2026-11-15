@@ -46,6 +46,20 @@ async def get_collection_watermark_repository() -> CollectionWatermarkRepository
     return create_collection_watermark_repository(get_db_manager(), get_config().DB_TYPE)
 
 
+async def collection_key() -> str:
+    """Key of the collection records: the installation identity, else ``CLUSTER_NAME`` (before the first run)."""
+    from greenkube.core.cluster_identity import cached_installation_identity
+    from greenkube.core.db import get_db_manager
+    from greenkube.storage.installation_repository import create_installation_repository
+
+    cached = cached_installation_identity()
+    if cached is not None:
+        return cached.cluster_uid
+    config = get_config()
+    stored = await create_installation_repository(get_db_manager(), config.DB_TYPE).get()
+    return stored.cluster_uid if stored is not None else collection_cluster_key(config)
+
+
 @router.get("/collection/coverage", response_model=CollectionCoverageResponse)
 async def collection_coverage(
     start: Optional[datetime] = Query(None, description="Period start (default: 24 h before end)."),
@@ -66,7 +80,7 @@ async def collection_coverage(
         raise HTTPException(status_code=400, detail="end must be after start.")
     if period_end - period_start > MAX_COVERAGE_PERIOD:
         raise HTTPException(status_code=400, detail="The period may span at most 366 days.")
-    cluster = collection_cluster_key(config)
+    cluster = await collection_key()
     records = await windows.list_overlapping(cluster, METRICS_WATERMARK_SOURCE, period_start, period_end)
     coverage = compute_coverage(records, period_start, period_end, step)
     return CollectionCoverageResponse(
@@ -94,8 +108,7 @@ async def collection_status(
     windows: CollectionWindowRepository, watermarks: CollectionWatermarkRepository
 ) -> CollectionStatusResponse:
     """Watermark, lag and the most recent gap or failed step of the metric collection."""
-    config = get_config()
-    cluster = collection_cluster_key(config)
+    cluster = await collection_key()
     watermark = await watermarks.get(cluster, METRICS_WATERMARK_SOURCE)
     hole = await windows.last_hole(cluster, METRICS_WATERMARK_SOURCE)
     now = datetime.now(timezone.utc)

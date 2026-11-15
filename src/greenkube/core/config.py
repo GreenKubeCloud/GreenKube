@@ -266,6 +266,9 @@ class Config(BaseSettings):
     # Consecutive failed Kubernetes pod/node list attempts for one window before it is
     # stored in degraded mode (rows flagged, reason k8s_list_failed) instead of retried.
     COLLECTION_K8S_LIST_MAX_FAILURES: int = Field(3, ge=1)
+    # Adopt this database although its installation row holds another cluster's kube-system UID
+    # (COL-02, STO-09). Set once after moving a database to a new cluster, then unset.
+    ALLOW_CLUSTER_UID_CHANGE: bool = False
     PROMETHEUS_VERIFY_CERTS: bool = True
     PROMETHEUS_NODE_INSTANCE_LABEL: str = "label_node_kubernetes_io_instance_type"
 
@@ -1155,8 +1158,11 @@ class Config(BaseSettings):
         2. A well-known cluster-name label on a node (EKS, GKE, AKS, Cluster API).
         3. Any other multi-node cluster: ``"default"``; set config.clusterName
            for a readable name.
-        4. Nodes unreadable (no RBAC, out of cluster): ``K8S_NODE_NAME``
-           (Downward API), else ``"default"``.
+        4. Nodes unreadable (no RBAC, out of cluster, API not reachable yet):
+           ``"default"``, never the node of the pod (COL-02).
+
+        The name is a display label: watermarks and collection records are
+        keyed by the installation identity (``core/cluster_identity.py``).
 
         Never raises — detection failures are logged at DEBUG level.
         """
@@ -1183,11 +1189,12 @@ class Config(BaseSettings):
                 )
                 return "default"
 
-        node_name = os.getenv("K8S_NODE_NAME", "")
-        if node_name:
-            logger.debug("Auto-detected cluster name from K8S_NODE_NAME: %s", node_name)
-            return node_name
-
+        # Never the pod's node (K8S_NODE_NAME): a node list that fails or is slow at start
+        # would give every rescheduled pod another name (COL-02).
+        logger.info(
+            "Could not read the nodes to detect the cluster name: using 'default' "
+            "(set config.clusterName / CLUSTER_NAME for a readable name)."
+        )
         return "default"
 
     @staticmethod

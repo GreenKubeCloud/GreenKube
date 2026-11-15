@@ -77,6 +77,11 @@ def wired(client, records, monkeypatch):
         return _Watermarks(BASE + 12 * STEP)
 
     client.app.dependency_overrides[collection_router.get_collection_window_repository] = _windows
+
+    async def _key():
+        return collection_cluster_key(get_config())
+
+    monkeypatch.setattr(collection_router, "collection_key", _key)
     monkeypatch.setattr(collection_router, "get_collection_window_repository", _windows)
     monkeypatch.setattr(collection_router, "get_collection_watermark_repository", _watermarks)
     monkeypatch.setattr(get_config(), "PROMETHEUS_QUERY_RANGE_STEP", "5m", raising=False)

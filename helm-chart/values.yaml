@@ -497,6 +497,10 @@ config:
     # before it is stored in degraded mode (rows flagged metadata_source=missing,
     # reason k8s_list_failed) instead of being retried until it becomes a gap.
     k8sListMaxFailures: 3
+    # The database records the cluster it belongs to (kube-system namespace UID);
+    # a controller of another cluster refuses to collect into it. Set true once to
+    # adopt a database moved to a new cluster, then set it back to false.
+    allowClusterUidChange: false
 
   # Comma-separated list of allowed CORS origins. Empty (default) keeps the API
   # same-origin: the bundled UI needs no CORS. List exact origins (for example

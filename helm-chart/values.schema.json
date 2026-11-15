@@ -304,7 +304,8 @@
         "collection": {
           "type": "object",
           "properties": {
-            "k8sListMaxFailures": {"type": "integer", "minimum": 1}
+            "k8sListMaxFailures": {"type": "integer", "minimum": 1},
+            "allowClusterUidChange": {"type": "boolean"}
           }
         },
         "opencost": {

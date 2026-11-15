@@ -287,6 +287,8 @@ class MetricsCollectionJob:
         try:
             watermark = await self.watermark_repository.get(self.cluster_uid, self.source)
             await self._seed_window_records(now)
+            if watermark is None and last is None:
+                watermark = await self._resume_from_stored_rows(now)
             plan = self._plan(now, watermark, last)
             report.windows_planned = len(plan.windows)
             report.planned_from = plan.windows[0].start if plan.windows else None
@@ -317,6 +319,29 @@ class MetricsCollectionJob:
             report.watermark = watermark.last_complete_end if watermark else None
             collection_telemetry.set_watermark_lag(self.source, now, report.watermark)
         return report
+
+    async def _resume_from_stored_rows(self, now: datetime) -> CollectionWatermark | None:
+        """Without a watermark, start after the newest stored row instead of re-collecting the horizon (COL-02).
+
+        A lost or re-keyed watermark must not re-collect (and degrade) windows
+        that already have rows.  Returns an in-memory watermark at the end of
+        the newest stored step inside the backfill horizon, or ``None``.
+        """
+        if self.window_repository is None:
+            return None
+        horizon_start = align_down(now - self.max_backfill, self.step)
+        stored = await self.window_repository.stored_metric_timestamps(since=horizon_start)
+        latest = max((ts for ts in stored if ts < now), default=None)
+        if latest is None:
+            return None
+        resume_at = align_down(latest, self.step) + self.step
+        logger.warning(
+            "No collection watermark for %s under %s; resuming after the newest stored row (%s).",
+            self.source,
+            self.cluster_uid,
+            resume_at.isoformat(),
+        )
+        return CollectionWatermark(self.cluster_uid, self.source, resume_at, now)
 
     async def _write_rows(self, rows: list[CombinedMetric]) -> int:
         """Write a collected window; its container rows replace the stored ones of its pods (review 4)."""
