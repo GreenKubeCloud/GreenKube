@@ -474,12 +474,16 @@ def restart_deltas(
         base = (getattr(row, "namespace", None), getattr(row, "pod_name", None))
         return (*base, getattr(row, "container_name", None)) if per_container else base
 
+    def order(row: Any) -> float:
+        # Rows without a timestamp (in-memory rows) sort first, in input order.
+        timestamp = getattr(row, "timestamp", None)
+        return timestamp.timestamp() if isinstance(timestamp, datetime) else float("-inf")
+
     stamped = [(row, False) for row in context_rows] + [(row, True) for row in rows]
-    stamped = [item for item in stamped if isinstance(getattr(item[0], "timestamp", None), datetime)]
     if not stamped:
         return {}
-    first = min(item[0].timestamp for item in stamped)
-    stamped.sort(key=lambda item: (item[0].timestamp, item[1]))
+    first = min(order(item[0]) for item in stamped)
+    stamped.sort(key=lambda item: (order(item[0]), item[1]))
     last: Dict[Tuple[Any, ...], int] = {}
     deltas: Dict[int, int] = {}
     for row, own in stamped:
@@ -490,7 +494,7 @@ def restart_deltas(
         previous = last.get(pod)
         if previous is not None:
             delta = count - previous if count >= previous else count
-        elif row.timestamp > first:
+        elif order(row) > first:
             delta = count
         else:
             delta = 0

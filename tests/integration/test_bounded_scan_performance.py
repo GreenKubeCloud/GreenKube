@@ -180,6 +180,7 @@ def _hour_rows(hour: datetime, targets: list[tuple[str, str, str, int]]) -> list
                         cpu_limit=2000 if container else None,
                         memory_limit=2048 * MIB if container else None,
                         restart_count=0,
+                        restart_increase=0,
                         total_cost=0.05 * scale,
                         cost_cpu=0.03 * scale,
                         cost_ram=0.02 * scale,
