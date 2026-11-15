@@ -62,7 +62,12 @@ from greenkube.signals.sdk import CollectContext, Source, SourceDeps
 if TYPE_CHECKING:
     from greenkube.core.config import Config
     from greenkube.storage.base_optimization_run_repository import OptimizationRunRepository
-    from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
+    from greenkube.storage.base_repository import (
+        CombinedMetricsRepository,
+        NodeRepository,
+        RecommendationRepository,
+        UpsertOutcome,
+    )
     from greenkube.storage.base_signal_repository import SignalRepository
 
 logger = logging.getLogger(__name__)
@@ -422,7 +427,10 @@ class OptimizationEngine:
         Returns the diff against the active set of the scanned scope and the
         recommendations actually written (a last known record is kept instead
         of a more aggressive proposal while one of its sources is incomplete,
-        see :meth:`_preserve_last_known`). Raises on
+        see :meth:`_preserve_last_known`). A record the repository did not
+        write as an active row (absorbed by an applied change, held behind an
+        open pull request, or ignored) is neither returned nor in the diff
+        (REC-01). Raises on
         repository errors so the run can be recorded as failed.
         """
         # Expire actives whose TTL elapsed before reconciling so they are not
@@ -441,7 +449,9 @@ class OptimizationEngine:
         kept = apply_revision_hysteresis(kept, previous)
         records = [self._record(r) for r in kept]
         if records:
-            await reco_repo.upsert_recommendations(records)
+            outcomes: List["UpsertOutcome"] = []
+            await reco_repo.upsert_recommendations(records, outcomes=outcomes)
+            kept, records = _written_only(kept, records, outcomes)
             await self._attach_persisted_actions(kept, reco_repo, namespace)
             action_records = [
                 self._record(recommendation) for recommendation in kept if recommendation.action is not None
@@ -786,6 +796,32 @@ class ReliabilityGuard:
             elif proposed > current and resource == "memory" and key in self.oom_unknown:
                 protect.append(record)
         return retire, protect
+
+
+def _written_only(
+    kept: List[Recommendation], records: List[RecommendationRecord], outcomes: Sequence["UpsertOutcome"]
+) -> Tuple[List[Recommendation], List[RecommendationRecord]]:
+    """The recommendations and records the repository really wrote as active rows (REC-01).
+
+    A record absorbed by an applied change, held behind an open pull request
+    or ignored by the user is not written: it must not be reported as kept,
+    counted in the run, or shown as ``new`` by the run diff. A repository that
+    reports no outcome per record (an older implementation) keeps everything.
+    """
+    if len(outcomes) != len(records):
+        return kept, records
+    pairs = [(rec, record) for rec, record, outcome in zip(kept, records, outcomes) if outcome.written]
+    for record, outcome in zip(records, outcomes):
+        if not outcome.written:
+            logger.info(
+                "%s recommendation for %s/%s not written (%s): %s.",
+                record.type.value if hasattr(record.type, "value") else record.type,
+                record.namespace,
+                record.pod_name or record.owner_name,
+                outcome.action,
+                outcome.reason or "matched an existing row",
+            )
+    return [rec for rec, _ in pairs], [record for _, record in pairs]
 
 
 def _run_status(outcomes: List[SourceRunOutcome]) -> OptimizationRunStatus:

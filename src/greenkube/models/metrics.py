@@ -559,6 +559,17 @@ class RecommendationRecord(BaseModel):
     # Ignore lifecycle fields
     ignored_at: Optional[datetime] = Field(None, description="When the recommendation was ignored.")
     ignored_reason: Optional[str] = Field(None, description="Reason for ignoring the recommendation.")
+    # Link to the applied change this advice follows (REC-01)
+    previous_recommendation_id: Optional[int] = Field(
+        None,
+        description=(
+            "The applied recommendation of the same target and type this advice follows, when it was "
+            "inserted after that change (for example an OOM-driven increase after a decrease)."
+        ),
+    )
+    previous_change_id: Optional[str] = Field(
+        None, description="The recorded change (change_id) of previous_recommendation_id, when one is recorded."
+    )
     # Apply / verification lifecycle fields (Phase 3)
     application_method: Optional[str] = Field(
         None, description="How the change landed: manual, detected, pr_merge, webhook, polling."

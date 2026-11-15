@@ -201,6 +201,8 @@ RECORD_COLUMNS: tuple = (
     "consensus",
     "revision",
     "fingerprint_v4",
+    "previous_recommendation_id",
+    "previous_change_id",
 )
 
 #: Recommendation v2 columns refreshed with the proposal (E4, E6). ``revision``
@@ -337,6 +339,8 @@ def record_values(record: RecommendationRecord, encode_datetime=lambda value: va
         "consensus": to_json(record.consensus),
         "revision": record.revision,
         "fingerprint_v4": record.fingerprint_v4,
+        "previous_recommendation_id": record.previous_recommendation_id,
+        "previous_change_id": record.previous_change_id,
     }
 
 
@@ -410,6 +414,8 @@ def row_to_record(row: Any) -> RecommendationRecord:
         consensus=_as_dict(_get(row, "consensus")),
         revision=max(1, int(_get(row, "revision", 1) or 1)),
         fingerprint_v4=_get(row, "fingerprint_v4"),
+        previous_recommendation_id=_get(row, "previous_recommendation_id"),
+        previous_change_id=_get(row, "previous_change_id"),
     )
 
 

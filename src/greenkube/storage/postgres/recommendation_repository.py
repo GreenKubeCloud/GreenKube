@@ -30,7 +30,7 @@ from ...models.metrics import (
     RecommendationType,
 )
 from ...models.recommendation_v2 import RecommendationRevision
-from ..base_repository import RecommendationRepository
+from ..base_repository import RecommendationRepository, UpsertOutcome
 from ..recommendation_mapper import (
     ACTIVE_UPSERT_COLUMNS,
     RECORD_COLUMNS,
@@ -117,6 +117,35 @@ def _identity_key(record: RecommendationRecord) -> tuple:
     )
 
 
+#: The active row of a record identity.
+_ACTIVE_SELECT_QUERY = (
+    "SELECT * FROM recommendation_history "
+    "WHERE fingerprint = $1 "
+    "AND COALESCE(scope, 'pod') = $2 "
+    "AND namespace IS NOT DISTINCT FROM $3 "
+    "AND pod_name IS NOT DISTINCT FROM $4 "
+    "AND container_name IS NOT DISTINCT FROM $5 "
+    "AND target_node IS NOT DISTINCT FROM $6 "
+    "AND type = $7 "
+    "AND status = 'active' "
+    "ORDER BY id LIMIT 1"
+)
+
+#: The open pull request, else the latest recorded change, of a target (pull request first).
+_RECORDED_SELECT_QUERY = """
+    SELECT * FROM recommendation_history
+    WHERE COALESCE(scope, 'pod') = $1
+      AND namespace IS NOT DISTINCT FROM $2
+      AND pod_name IS NOT DISTINCT FROM $3
+      AND container_name IS NOT DISTINCT FROM $4
+      AND target_node IS NOT DISTINCT FROM $5
+      AND type = $6
+      AND (status = 'pr_open' OR status = ANY($7::text[]))
+    ORDER BY (status = 'pr_open') DESC, applied_at DESC NULLS LAST, id DESC
+    LIMIT 1
+"""
+
+
 class PostgresRecommendationRepository(RecommendationRepository):
     """PostgreSQL implementation for recommendation lifecycle storage."""
 
@@ -154,7 +183,9 @@ class PostgresRecommendationRepository(RecommendationRepository):
             logger.info("Saved %d recommendation records to PostgreSQL.", len(records))
             return len(records)
 
-    async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
+    async def upsert_recommendations(
+        self, records: List[RecommendationRecord], outcomes: Optional[List[UpsertOutcome]] = None
+    ) -> int:
         """Inserts or updates active recommendations using their full target identity.
 
         Uses IS NOT DISTINCT FROM for NULL-safe matching so namespace, node,
@@ -165,190 +196,184 @@ class PostgresRecommendationRepository(RecommendationRepository):
         recommendation only has ``updated_at`` refreshed (and, for issues that
         reappeared, its savings stopped); its ``current_*`` baseline and the
         ``actual_*`` values detected after the change are never rewritten. A
-        rightsizing that restates a change already verifying or verified
-        (see :func:`absorbs_regenerated_recommendation`) is dropped.
+        rightsizing that restates a change already applied, verifying or
+        verified (see :func:`absorbs_regenerated_recommendation`) is dropped;
+        any other rightsizing advice for that target is inserted with
+        ``previous_recommendation_id`` and ``previous_change_id`` naming the
+        recorded change it follows (REC-01).
 
         Args:
             records: List of RecommendationRecord objects to upsert.
+            outcomes: When given, one :class:`UpsertOutcome` per record is appended.
 
         Returns:
-            The number of records inserted or updated.
+            The number of records that have an active row after the call.
         """
         if not records:
             return 0
 
+        reported: List[UpsertOutcome] = []
+        async with self.db_manager.connection_scope() as conn:
+            for r in records:
+                reported.append(await self._upsert_one(conn, r))
+        written = sum(1 for outcome in reported if outcome.written)
+        if outcomes is not None:
+            outcomes.extend(reported)
+        logger.info("Upserted %d recommendation records in PostgreSQL (%d written).", len(records), written)
+        return written
+
+    async def _upsert_one(self, conn, r: RecommendationRecord) -> UpsertOutcome:
+        """Upserts one record and says what happened to it (see :meth:`upsert_recommendations`)."""
         now = datetime.now(timezone.utc)
         set_columns = ACTIVE_UPSERT_COLUMNS + ("revision", "updated_at")
         update_query = "UPDATE recommendation_history SET {} WHERE id = ${} AND status = 'active'".format(
             ", ".join(f"{column} = ${index}" for index, column in enumerate(set_columns, start=1)),
             len(set_columns) + 1,
         )
-        active_select_query = (
-            "SELECT * FROM recommendation_history "
-            "WHERE fingerprint = $1 "
-            "AND COALESCE(scope, 'pod') = $2 "
-            "AND namespace IS NOT DISTINCT FROM $3 "
-            "AND pod_name IS NOT DISTINCT FROM $4 "
-            "AND container_name IS NOT DISTINCT FROM $5 "
-            "AND target_node IS NOT DISTINCT FROM $6 "
-            "AND type = $7 "
-            "AND status = 'active' "
-            "ORDER BY id LIMIT 1"
-        )
-        insert_query = ("INSERT INTO recommendation_history ({}) VALUES ({}) ON CONFLICT DO NOTHING").format(
+        insert_query = (
+            "INSERT INTO recommendation_history ({}) VALUES ({}) ON CONFLICT DO NOTHING RETURNING id"
+        ).format(
             ", ".join(RECORD_COLUMNS),
             ", ".join(f"${index}" for index in range(1, len(RECORD_COLUMNS) + 1)),
         )
-        async with self.db_manager.connection_scope() as conn:
-            # A PR in flight wins over an older applied row of the same target.
-            applied_select_query = """
-                SELECT * FROM recommendation_history
-                WHERE COALESCE(scope, 'pod') = $1
-                  AND namespace IS NOT DISTINCT FROM $2
-                  AND pod_name IS NOT DISTINCT FROM $3
-                  AND container_name IS NOT DISTINCT FROM $4
-                  AND target_node IS NOT DISTINCT FROM $5
-                  AND type = $6
-                  AND (status = 'pr_open' OR status = ANY($7::text[]))
-                ORDER BY (status = 'pr_open') DESC, applied_at DESC NULLS LAST, id DESC
-                LIMIT 1
-            """
-            applied_update_query = """
+        type_val = _type_value(r)
+        status_val = _status_value(r)
+        values = record_values(r)
+        existing = await conn.fetchrow(
+            _ACTIVE_SELECT_QUERY,
+            r.fingerprint,
+            r.scope or "pod",
+            r.namespace,
+            r.pod_name,
+            r.container_name,
+            r.target_node,
+            type_val,
+        )
+        if existing is not None:
+            stored = row_to_record(existing)
+            decision = decide(stored, r, frozen=is_frozen(existing["status"], existing["action_status"]))
+            if decision.action == "revise":
+                update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
+                    decision.revision,
+                    now,
+                    existing["id"],
+                ]
+                async with conn.transaction():
+                    # Guarded: a plan opened since the read freezes the record (E7).
+                    result = await conn.execute(f"{update_query} AND {NO_OPEN_PLAN_SQL}", *update_params)
+                    revised = not str(result).endswith(" 0")
+                    if revised:
+                        await self._settle_revision(conn, stored, True, now)
+                if revised:
+                    return UpsertOutcome(r.fingerprint, "revised", existing["id"])
+                decision = RevisionDecision("queue", decision.revision)
+            if decision.action == "refresh":
+                update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
+                    decision.revision,
+                    now,
+                    existing["id"],
+                ]
+                async with conn.transaction():
+                    await self._settle_revision(conn, stored, False, now)
+                    # Guarded like a revision: a plan opened since the read freezes the record (E7).
+                    result = await conn.execute(f"{update_query} AND {NO_OPEN_PLAN_SQL}", *update_params)
+                if not str(result).endswith(" 0"):
+                    return UpsertOutcome(r.fingerprint, "refreshed", existing["id"])
+                decision = RevisionDecision("keep", decision.revision)
+            if decision.action == "queue":
+                await self._queue_revision(conn, stored, r, decision.revision, now)
+            else:
+                await self._settle_revision(conn, stored, False, now)
+            # A record never changes under an open plan (E7), not even its shared action, but the
+            # scan still saw its target: keep it alive so it does not expire while the plan is open.
+            await conn.execute(
+                "UPDATE recommendation_history SET expires_at = COALESCE($1, expires_at), updated_at = $2 "
+                "WHERE id = $3",
+                values["expires_at"],
+                now,
+                existing["id"],
+            )
+            return UpsertOutcome(r.fingerprint, "queued" if decision.action == "queue" else "kept", existing["id"])
+
+        # A PR in flight wins over an older applied row of the same target.
+        recorded_row = await conn.fetchrow(
+            _RECORDED_SELECT_QUERY,
+            r.scope or "pod",
+            r.namespace,
+            r.pod_name,
+            r.container_name,
+            r.target_node,
+            type_val,
+            list(RECORDED_CHANGE_STATUSES),
+        )
+        if recorded_row and recorded_row["status"] == RecommendationStatus.PR_OPEN.value:
+            # Frozen while its pull request is open (or merged and syncing): newer advice is queued.
+            stored = row_to_record(recorded_row)
+            decision = decide(stored, r, frozen=True)
+            if decision.action == "queue":
+                await self._queue_revision(conn, stored, r, decision.revision, now)
+            else:
+                await self._settle_revision(conn, stored, False, now)
+            return UpsertOutcome(r.fingerprint, "pr_open", recorded_row["id"], "held behind an open pull request")
+        previous_id: Optional[int] = None
+        if recorded_row and is_rightsizing_type(recorded_row["type"]):
+            # REC-01: a recorded rightsizing only absorbs a restatement of its change.
+            if absorbs_regenerated_recommendation(row_to_record(recorded_row), r, now):
+                # The scan restates a change already recorded (lagging rollup):
+                # never offer it again nor record it as a second change.
+                if recorded_row["status"] == RecommendationStatus.APPLIED.value:
+                    await conn.execute(
+                        "UPDATE recommendation_history SET updated_at = $1 WHERE id = $2 AND status = 'applied'",
+                        now,
+                        recorded_row["id"],
+                    )
+                logger.info(
+                    "%s advice for %s/%s restates the change of recommendation %s: not inserted.",
+                    recorded_row["type"],
+                    r.namespace,
+                    r.pod_name,
+                    recorded_row["id"],
+                )
+                return UpsertOutcome(r.fingerprint, "absorbed", recorded_row["id"], "restates a recorded change")
+            previous_id = recorded_row["id"]
+            logger.info(
+                "New %s advice for %s/%s after recorded recommendation %s: inserted.",
+                recorded_row["type"],
+                r.namespace,
+                r.pod_name,
+                previous_id,
+            )
+        elif recorded_row and recorded_row["status"] == RecommendationStatus.APPLIED.value:
+            refreshed = refresh_applied_recommendation(row_to_record(recorded_row), r, observed_at=now)
+            await conn.execute(
+                """
                 UPDATE recommendation_history SET
                     carbon_saved_co2e_grams = $1,
                     cost_saved = $2,
                     updated_at = $3
                 WHERE id = $4 AND status = 'applied'
-            """
-            count = 0
-            for r in records:
-                type_val = _type_value(r)
-                status_val = _status_value(r)
+                """,
+                refreshed.carbon_saved_co2e_grams,
+                refreshed.cost_saved,
+                refreshed.updated_at,
+                refreshed.id,
+            )
+            return UpsertOutcome(r.fingerprint, "applied", recorded_row["id"], "the target of an applied change")
 
-                values = record_values(r)
-                existing = await conn.fetchrow(
-                    active_select_query,
-                    r.fingerprint,
-                    r.scope or "pod",
-                    r.namespace,
-                    r.pod_name,
-                    r.container_name,
-                    r.target_node,
-                    type_val,
-                )
-                if existing is not None:
-                    stored = row_to_record(existing)
-                    decision = decide(stored, r, frozen=is_frozen(existing["status"], existing["action_status"]))
-                    if decision.action == "revise":
-                        update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
-                            decision.revision,
-                            now,
-                            existing["id"],
-                        ]
-                        async with conn.transaction():
-                            # Guarded: a plan opened since the read freezes the record (E7).
-                            result = await conn.execute(f"{update_query} AND {NO_OPEN_PLAN_SQL}", *update_params)
-                            revised = not str(result).endswith(" 0")
-                            if revised:
-                                await self._settle_revision(conn, stored, True, now)
-                        if revised:
-                            count += 1
-                            continue
-                        decision = RevisionDecision("queue", decision.revision)
-                    if decision.action == "refresh":
-                        update_params = [values[column] for column in ACTIVE_UPSERT_COLUMNS] + [
-                            decision.revision,
-                            now,
-                            existing["id"],
-                        ]
-                        async with conn.transaction():
-                            await self._settle_revision(conn, stored, False, now)
-                            # Guarded like a revision: a plan opened since the read freezes the record (E7).
-                            result = await conn.execute(f"{update_query} AND {NO_OPEN_PLAN_SQL}", *update_params)
-                        if not str(result).endswith(" 0"):
-                            count += 1
-                            continue
-                        decision = RevisionDecision("keep", decision.revision)
-                    if decision.action == "queue":
-                        await self._queue_revision(conn, stored, r, decision.revision, now)
-                    else:
-                        await self._settle_revision(conn, stored, False, now)
-                    # A record never changes under an open plan (E7), not even its shared action, but the
-                    # scan still saw its target: keep it alive so it does not expire while the plan is open.
-                    await conn.execute(
-                        "UPDATE recommendation_history SET expires_at = COALESCE($1, expires_at), updated_at = $2 "
-                        "WHERE id = $3",
-                        values["expires_at"],
-                        now,
-                        existing["id"],
-                    )
-                    count += 1
-                    continue
-
-                applied_row = await conn.fetchrow(
-                    applied_select_query,
-                    r.scope or "pod",
-                    r.namespace,
-                    r.pod_name,
-                    r.container_name,
-                    r.target_node,
-                    type_val,
-                    list(RECORDED_CHANGE_STATUSES),
-                )
-                if applied_row and applied_row["status"] == RecommendationStatus.PR_OPEN.value:
-                    # Frozen while its pull request is open (or merged and syncing): newer advice is queued.
-                    stored = row_to_record(applied_row)
-                    decision = decide(stored, r, frozen=True)
-                    if decision.action == "queue":
-                        await self._queue_revision(conn, stored, r, decision.revision, now)
-                    else:
-                        await self._settle_revision(conn, stored, False, now)
-                    count += 1
-                    continue
-                if (
-                    applied_row
-                    and applied_row["status"] == RecommendationStatus.APPLIED.value
-                    and is_rightsizing_type(applied_row["type"])
-                    and not absorbs_regenerated_recommendation(row_to_record(applied_row), r, now)
-                ):
-                    # REC-01: an applied rightsizing only absorbs a restatement of its change.
-                    logger.info(
-                        "New %s advice for %s/%s after applied recommendation %s: inserted.",
-                        applied_row["type"],
-                        r.namespace,
-                        r.pod_name,
-                        applied_row["id"],
-                    )
-                    applied_row = None
-                if applied_row and applied_row["status"] != RecommendationStatus.APPLIED.value:
-                    if absorbs_regenerated_recommendation(row_to_record(applied_row), r, now):
-                        # The scan restates a change already recorded (lagging rollup):
-                        # never offer it again nor record it as a second change.
-                        continue
-                    applied_row = None
-                if applied_row:
-                    refreshed = refresh_applied_recommendation(row_to_record(applied_row), r, observed_at=now)
-                    await conn.execute(
-                        applied_update_query,
-                        refreshed.carbon_saved_co2e_grams,
-                        refreshed.cost_saved,
-                        refreshed.updated_at,
-                        refreshed.id,
-                    )
-                    count += 1
-                    continue
-
-                values["status"] = status_val
-                values["created_at"] = values["created_at"] or now
-                values["updated_at"] = now
-                insert_result = await conn.execute(insert_query, *(values[column] for column in RECORD_COLUMNS))
-                if insert_result == "INSERT 0 0":
-                    # Lost a race with a concurrent upsert; the row already exists.
-                    continue
-                count += 1
-
-            logger.info("Upserted %d recommendation records in PostgreSQL.", count)
-            return count
+        values["status"] = status_val
+        values["created_at"] = values["created_at"] or now
+        values["updated_at"] = now
+        if previous_id is not None:
+            values["previous_recommendation_id"] = previous_id
+            values["previous_change_id"] = await conn.fetchval(
+                "SELECT change_id FROM change_members WHERE recommendation_id = $1 ORDER BY added_at DESC LIMIT 1",
+                previous_id,
+            )
+        inserted_id = await conn.fetchval(insert_query, *(values[column] for column in RECORD_COLUMNS))
+        if inserted_id is None:
+            # Lost a race with a concurrent upsert; the row already exists.
+            return UpsertOutcome(r.fingerprint, "conflict")
+        return UpsertOutcome(r.fingerprint, "inserted", inserted_id)
 
     @staticmethod
     async def _queue_revision(
