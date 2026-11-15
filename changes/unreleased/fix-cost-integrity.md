@@ -2,6 +2,7 @@
 - An OpenCost outage, rejected request (HTTP 401, 503), invalid answer or an empty answer after OpenCost priced earlier windows no longer switches the window to a trusted list-price cost silently: the rows keep a modeled cost labelled `opencost_pending` (never trusted), the step records carry `cost_status = opencost_pending`, and the collection job re-prices the window from OpenCost once it answers again (COST-01, RECON-09).
 - `OpenCostCollector.collect()` raises `OpenCostUnavailableError` instead of returning an empty list when the configured or discovered OpenCost fails, and reports `last_status` (`ok`, `empty`, `not_configured`).
 - OpenCost allocations that carry no usable cost (no running time, a zero for a pod with requests or usage, or a sub-precision figure that cannot be rebuilt from node prices) are stored with `cost_source = none` and get the modeled cost, instead of a trusted `opencost` zero or rounded value; `is_cost_trusted` refuses a zero OpenCost cost on any row with usage (COST-05, RECON-11).
+- In windows of several steps (catch-up, backfill) each row receives its pod's OpenCost cost by the pod's running seconds inside the row's step, so the stored cost of a window equals OpenCost's allocation whatever the chunking; pods that covered steps only partly were over-costed (COL-10, RECON-08). `CALCULATION_VERSION` `+range.7`.
 
 ### Added
 - Migration 0155 adds `collection_windows.cost_status`; gauge `greenkube_collection_cost_pending_steps`; counter `greenkube_opencost_unrebuilt_allocations_total`.

@@ -18,7 +18,7 @@ from ..collectors.opencost_collector import (
     OPENCOST_STATUS_EMPTY,
     OPENCOST_STATUS_OK,
     OpenCostCollector,
-    opencost_step_share,
+    opencost_step_shares,
 )
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
@@ -65,7 +65,10 @@ logger = logging.getLogger(__name__)
 #: without sample no longer drops the container rows of its siblings.  COL-09: pods with pod-level series
 #: only are kept when other pods have container series.  ``+range.5`` rows are
 #: not rewritten: re-collect a window inside Prometheus retention to apply it.
-CALCULATION_VERSION = f"{__version__}+range.6"
+#: range.7 (COL-10): a pod's OpenCost cost is spread over the steps of a multi-step window by its running
+#: seconds in each step (OpenCost ``start``/``end``), not ``step / running time`` per row.  ``+range.6``
+#: rows of catch-up and backfill windows keep their cost: re-collect a window inside retention to apply it.
+CALCULATION_VERSION = f"{__version__}+range.7"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
@@ -1225,14 +1228,11 @@ class HistoricalRangeProcessor:
             logger.warning("Failed to prepare embodied data: %s. Embodied emissions will be 0.", e)
             boavizta_cache = {}
 
-        # Cost data
-        range_seconds = (end_dt - start_dt).total_seconds()
+        # Cost data: each row gets its pod's running share of the window allocation (COL-10).
+        step_delta = timedelta(seconds=chosen_step_sec)
         cost_map, cost_pending = await self._collect_costs(start_dt, end_dt)
         # Reconciliation against the OpenCost total of the window (COL-03 step 4): an allocation
         # of a pod that gets no row (no sample of any kind) is not stored, so it must be counted.
-        opencost_window_total = sum(
-            cost.total_cost for cost in cost_map.values() if cost.source != CostSource.NONE.value
-        )
         attributed_cost_by_step: dict[int, float] = defaultdict(float)
 
         # Per-pod persistent storage (PVC) request/usage — best-effort.
@@ -1528,7 +1528,7 @@ class HistoricalRangeProcessor:
                     cost_metric = cost_map.get(pod_key)
                     costs = cost_fields(
                         cost_metric,
-                        opencost_step_share(cost_metric, chosen_step_sec, range_seconds) if cost_metric else 1.0,
+                        opencost_step_shares(cost_metric, [ts], step_delta)[ts] if cost_metric else 1.0,
                         self._config.DEFAULT_COST,
                     )
                     if cost_metric is not None and cost_metric.source != CostSource.NONE.value:
@@ -1743,10 +1743,20 @@ class HistoricalRangeProcessor:
         # lost the Lease during the Prometheus queries writes nothing.
         self.last_idle_metrics = idle_rows
         if cost_map:
-            per_step_total = opencost_window_total / window.steps
+            # The OpenCost total expected in each step follows the pods' running time (COL-10).
+            step_starts = list(window.sample_starts())
+            expected_by_step: dict[datetime, float] = defaultdict(float)
+            for cost in cost_map.values():
+                if cost.source == CostSource.NONE.value:
+                    continue
+                for step_start, share in opencost_step_shares(cost, step_starts, step_delta).items():
+                    expected_by_step[step_start] += cost.total_cost * share
             self.last_cost_reconciliation = {
-                step_start: (per_step_total, attributed_cost_by_step.get(int(step_start.timestamp()), 0.0))
-                for step_start in window.sample_starts()
+                step_start: (
+                    expected_by_step.get(step_start, 0.0),
+                    attributed_cost_by_step.get(int(step_start.timestamp()), 0.0),
+                )
+                for step_start in step_starts
             }
         if namespace:
             combined = [c for c in combined if c.namespace == namespace]

@@ -1,7 +1,7 @@
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import httpx
@@ -363,6 +363,8 @@ def _allocation_to_cost_metric(
         window_start=_parse_time(window.get("start")),
         window_end=_parse_time(window.get("end")),
         minutes=_number(minutes) if minutes is not None else None,
+        running_start=_parse_time(item.get("start")),
+        running_end=_parse_time(item.get("end")),
         source=source,
     )
 
@@ -385,6 +387,48 @@ def opencost_step_share(cost: CostMetric, step_seconds: float, window_seconds: f
     if not running_seconds or running_seconds <= 0 or step_seconds <= 0:
         return 1.0
     return min(1.0, step_seconds / running_seconds)
+
+
+def _running_interval(cost: CostMetric) -> Optional[tuple[datetime, datetime]]:
+    """The pod's running interval inside the allocation window (``None`` when OpenCost did not report it)."""
+    if cost.running_start is None or cost.running_end is None:
+        return None
+    start, end = cost.running_start, cost.running_end
+    if cost.window_start is not None:
+        start = max(start, cost.window_start)
+    if cost.window_end is not None:
+        end = min(end, cost.window_end)
+    return (start, end) if end > start else None
+
+
+def opencost_step_shares(cost: CostMetric, step_starts: Sequence[datetime], step: timedelta) -> Dict[datetime, float]:
+    """Fraction of a window allocation that belongs to each step ``[s, s + step)`` of ``step_starts`` (COL-10).
+
+    The share of a step is the pod's running seconds inside the step divided
+    by its running seconds in the window (OpenCost's ``start`` and ``end``),
+    so the shares of all the steps the pod ran in sum to 1, whatever the
+    number of rows and however the window was chunked: a pod that ran 3 of
+    its 7 minutes in a step gets 3/7 of the cost there. A step the pod did
+    not run in gets 0; the share of a running step without a row stays out
+    of the stored rows and shows in the cost reconciliation (COL-03). Without
+    a running interval the former rule applies (:func:`opencost_step_share`).
+    """
+    interval = _running_interval(cost)
+    if interval is None:
+        window_seconds = (
+            (cost.window_end - cost.window_start).total_seconds()
+            if cost.window_start is not None and cost.window_end is not None
+            else 0.0
+        )
+        share = opencost_step_share(cost, step.total_seconds(), window_seconds)
+        return {start: share for start in step_starts}
+    start, end = interval
+    running = (end - start).total_seconds()
+    shares: Dict[datetime, float] = {}
+    for step_start in step_starts:
+        overlap = (min(end, step_start + step) - max(start, step_start)).total_seconds()
+        shares[step_start] = max(overlap, 0.0) / running
+    return shares
 
 
 class OpenCostCollector(BaseCollector):
