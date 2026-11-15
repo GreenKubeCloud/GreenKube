@@ -1,7 +1,7 @@
 """CPU rightsizing: requests far above usage (decrease) or too close to it (increase)."""
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.core.optimization.analyzers.rightsizing import cpu_proposal, skipped_increase
@@ -20,6 +20,7 @@ from greenkube.models.workload_usage import POD_LEVEL
 if TYPE_CHECKING:
     from greenkube.core.config import Config
     from greenkube.core.optimization.context import OptimizationContext
+    from greenkube.models.workload_usage import UsageSnapshot
 
 LOG = logging.getLogger(__name__)
 
@@ -34,10 +35,11 @@ class CpuRightsizingAnalyzer(Analyzer):
         #: Targets whose usage calls for a change that was not proposed, with the reason.
         self.skipped: List[Skip] = []
         self._signal_status: Dict[str, str] = {}
+        self._snapshot: Optional["UsageSnapshot"] = None
 
     def scan_diagnostics(self) -> List[Dict[str, Any]]:
         """Decreases withheld for unknown reliability signals in the last scan."""
-        return reliability_diagnostics(self.skipped, self._signal_status)
+        return reliability_diagnostics(self.skipped, self._signal_status, self._snapshot)
 
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
@@ -47,6 +49,7 @@ class CpuRightsizingAnalyzer(Analyzer):
 
         snapshot = context.usage_snapshot()
         self._signal_status = dict(snapshot.reliability_signal_status)
+        self._snapshot = snapshot
         for target, container_name, summary in context.iter_container_summaries():
             ns, target_kind, target_name = target
             skip = skipped_increase(cfg, summary, "cpu")

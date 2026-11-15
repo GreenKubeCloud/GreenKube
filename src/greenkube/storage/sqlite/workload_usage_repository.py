@@ -133,6 +133,39 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
             for row in rows
         ]
 
+    async def read_last_restart_counts(self, hour: datetime, pods: Sequence[Tuple[str, str]]) -> List[UsageInputRow]:
+        hour = ensure_utc(hour)
+        bound = _encode(hour)
+        found: List[UsageInputRow] = []
+        for namespace, pod_name in pods:
+            # Index-backed (namespace, pod_name, timestamp): one row per pod, however old.
+            raw = await self._fetch(
+                'SELECT "timestamp", restart_count FROM combined_metrics WHERE namespace = ? AND pod_name = ? '
+                'AND "timestamp" < ? AND restart_count IS NOT NULL ORDER BY "timestamp" DESC LIMIT 1',
+                (namespace, pod_name, bound),
+            )
+            hourly = await self._fetch(
+                "SELECT hour_bucket, restart_count FROM combined_metrics_hourly WHERE namespace = ? AND pod_name = ? "
+                "AND hour_bucket < ? AND restart_count IS NOT NULL ORDER BY hour_bucket DESC LIMIT 1",
+                (namespace, pod_name, bound),
+            )
+            candidates = [(_decode(row[0]), _count(row[1])) for row in (*raw, *hourly)]
+            candidates = [item for item in candidates if item[0] is not None and item[1] is not None]
+            if candidates:
+                timestamp, count = max(candidates, key=lambda item: item[0])
+                found.append(
+                    UsageInputRow(namespace=namespace, pod_name=pod_name, timestamp=timestamp, restart_count=count)
+                )
+        return found
+
+    async def legacy_restart_hours(self, start: datetime, end: datetime) -> List[datetime]:
+        rows = await self._fetch(
+            "SELECT DISTINCT hour_bucket FROM workload_usage_hourly WHERE hour_bucket >= ? AND hour_bucket < ? "
+            "AND restart_count IS NOT NULL AND restart_increase IS NULL",
+            (_encode(ensure_utc(start)), _encode(ensure_utc(end))),
+        )
+        return [value for value in (_decode(row[0]) for row in rows) if value is not None]
+
     async def read_hourly_restart_context(self, hour: datetime) -> List[UsageInputRow]:
         previous = ensure_utc(hour) - timedelta(hours=1)
         rows = await self._fetch(

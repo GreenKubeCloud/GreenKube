@@ -1,5 +1,5 @@
 ### Added
-- Usage summaries carry `restart_increase`, the restarts over the lookback from the rollup, as the fallback when the scan's reliability signals are unknown (SQLite and PostgreSQL). The rollup stores each hour's per-pod restart increase in the new column `workload_usage_hourly.restart_increase` (migration 0130): each pod's count is compared with its own previous count, never the highest count across replicas.
+- Usage summaries carry `restart_increase`, the restarts over the lookback from the rollup, as the fallback when the scan's reliability signals are unknown (SQLite and PostgreSQL). The rollup stores each hour's per-pod restart increase in the new column `workload_usage_hourly.restart_increase` (migration 0130): each pod's count is compared with its own last stored count, however old (a collection gap or a missing hour never hides restarts), never with the highest count across replicas.
 - Risk factor and eligibility blocker `oom_history_unknown`: a memory decrease whose OOM history could not be read is at least medium risk and never becomes a pull request. A second factor (`oom_unknown_no_usage_summary`, `oom_unknown_signal_failed`, `oom_unknown_signal_unavailable`) names the cause, and the blocker's message and fix are worded after it.
 - Rightsizing source runs report a `reliability_signals_unknown` warning diagnostic naming the reliability signals that failed.
 
@@ -12,4 +12,4 @@
 
 ### Changed
 - Upgrade: on the first scan after the upgrade, an active native CPU or memory decrease whose container has no readable restart/OOM history is retired (marked stale) with the reason `reliability_signals_unknown`.
-- Upgrade: hours rolled before migration 0130 carry no per-pod restart increase: while the lookback still holds such an hour with a restart count, the rollup restart history is unknown, so a decrease whose scan signals are also unknown is withheld. The history becomes available as the lookback fills with newly rolled hours.
+- Upgrade: hours rolled before migration 0130 carry no per-pod restart increase. The rollup re-rolls those it can rebuild from stored raw or compressed hourly rows on its first run after the upgrade; an hour whose rows are gone keeps an unknown restart history, so a decrease whose scan signals are also unknown is withheld, and the `reliability_signals_unknown` diagnostic says how many are due to the upgrade.

@@ -281,6 +281,7 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
             CASE WHEN COUNT(restart_count) = 0 AND COUNT(restart_increase) = 0 THEN NULL
                 WHEN MAX(restart_increase_unknown) = 1 THEN NULL
                 ELSE SUM(COALESCE(restart_increase, 0)) END AS restart_increase,
+            MAX(restart_increase_unknown) AS restart_increase_legacy,
             SUM(total_cost) AS total_cost,
             SUM(co2e_grams) AS co2e_grams,
             SUM(embodied_co2e_grams) AS embodied_co2e_grams,
@@ -430,6 +431,7 @@ def summary_from_row(row: Mapping[str, Any], decode_time: Callable[[Any], Option
         memory_limit=_i(row["latest_memory_limit"]),
         restart_count=_i(row["restart_count"]),
         restart_increase=_i(row["restart_increase"]),
+        restart_increase_legacy=bool(row["restart_increase_legacy"] or 0),
         total_cost=float(row["total_cost"] or 0.0),
         co2e_grams=float(row["co2e_grams"] or 0.0),
         embodied_co2e_grams=float(row["embodied_co2e_grams"] or 0.0),

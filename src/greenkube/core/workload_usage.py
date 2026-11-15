@@ -446,7 +446,11 @@ def _restart_value(row: Any) -> Optional[int]:
 
 
 def restart_deltas(
-    rows: Iterable[Any], context_rows: Iterable[Any] = (), *, per_container: bool = False
+    rows: Iterable[Any],
+    context_rows: Iterable[Any] = (),
+    *,
+    per_container: bool = False,
+    collection_started: bool = False,
 ) -> Dict[int, int]:
     """Restart increase of each row since the previous known count of the same pod (REC-04).
 
@@ -459,13 +463,15 @@ def restart_deltas(
     * a drop is a counter reset (the pod was recreated under the same name):
       it adds the new count;
     * a pod without any previous known count adds its whole count when
-      collection had already started (an earlier sample of any pod exists): a
-      new pod starts at zero, and a pod whose previous count is unknown (a
-      collection gap) is not known to be clean. At the very first sample, the
-      count is the baseline (0 added).
+      collection had already started (``collection_started``: older stored
+      rows exist, or an earlier sample of any pod is among the rows): a new pod
+      starts at zero, and a pod whose previous count is unknown is not known to
+      be clean. At the very first sample, the count is the baseline (0 added).
 
-    ``context_rows`` are the rows just before ``rows`` (the previous hour): they
-    give previous counts and are not returned. Overcounting never allows a
+    ``context_rows`` give previous counts and are not returned: the rows just
+    before ``rows`` and, for pods without a count there, each pod's last stored
+    count however old (a collection gap or a missing hour never hides the
+    restarts that happened in it). Overcounting never allows a
     decrease, so every unknown counts as restarts (fail closed).
     """
     rows = list(rows)
@@ -494,7 +500,7 @@ def restart_deltas(
         previous = last.get(pod)
         if previous is not None:
             delta = count - previous if count >= previous else count
-        elif order(row) > first:
+        elif collection_started or order(row) > first:
             delta = count
         else:
             delta = 0
@@ -520,6 +526,8 @@ def rollup_rows(
     source: str = "raw",
     warmup_seconds: float = 0.0,
     context_rows: Iterable[Any] = (),
+    restart_context_rows: Optional[Iterable[Any]] = None,
+    collection_started: bool = False,
 ) -> List[WorkloadUsageHour]:
     """Aggregates metric rows into hourly rows per target, container and node.
 
@@ -543,7 +551,10 @@ def rollup_rows(
     container_rows = list(container_rows)
     context_rows = list(context_rows)
     warm = warmup_windows([*context_rows, *pod_rows], warmup_seconds)
-    deltas = restart_deltas(pod_rows, context_rows)
+    # Restart increases compare each pod with its last known count (``restart_context_rows``,
+    # by default the warm-up context); ``collection_started``: older stored rows exist.
+    restart_context = context_rows if restart_context_rows is None else list(restart_context_rows)
+    deltas = restart_deltas(pod_rows, restart_context, collection_started=collection_started)
     deltas.update(restart_deltas(container_rows, per_container=True))
     pods_at: Dict[Tuple[str, str, Any], Any] = {}
     pods_in_hour: Dict[Tuple[str, str, Optional[datetime]], Any] = {}
@@ -821,6 +832,7 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             memory_limit=last.memory_limit,
             restart_count=_restart_max(ordered),
             restart_increase=_restart_increase(ordered),
+            restart_increase_legacy=any(item.restart_increase_unknown for item in ordered),
             total_cost=sum(item.total_cost for item in ordered),
             co2e_grams=sum(item.co2e_grams for item in ordered),
             embodied_co2e_grams=sum(item.embodied_co2e_grams for item in ordered),
@@ -898,6 +910,8 @@ class RollupResult:
     end: Optional[datetime] = None
     #: Hours older than the refresh window re-rolled because they received rows.
     late_hours: int = 0
+    #: Hours rolled before migration 0130 re-rolled to store their per-pod restart increase.
+    legacy_hours: int = 0
 
 
 class WorkloadUsageRollup:
@@ -927,6 +941,15 @@ class WorkloadUsageRollup:
         self.step_seconds = step_seconds
         self.backfill_hours = max(int(backfill_hours), 1)
         self.warmup_seconds = max(float(warmup_seconds or 0.0), 0.0)
+
+    async def _restart_context(self, hour: datetime, pod_rows: Sequence[Any], context: Sequence[Any]) -> List[Any]:
+        """Previous restart counts of the hour's pods: the context rows, plus each pod's last
+        stored count however old when the context has none for it (collection gap, missing hour)."""
+        known = {(row.namespace, row.pod_name) for row in context if _restart_value(row) is not None}
+        missing = sorted({(row.namespace, row.pod_name) for row in pod_rows} - known)
+        if not missing:
+            return list(context)
+        return [*context, *await self.repository.read_last_restart_counts(hour, missing)]
 
     async def refresh(
         self, now: Optional[datetime] = None, *, refresh_hours: int = DEFAULT_REFRESH_HOURS
@@ -958,11 +981,23 @@ class WorkloadUsageRollup:
         hours = {start + timedelta(hours=offset) for offset in range(int((end - start) / timedelta(hours=1)))}
         late = {floor_hour(hour) for hour in written if max(earliest, floor_input) <= floor_hour(hour) < start}
         hours |= late
+        # Hours rolled before migration 0130 carry no per-pod restart increase: re-roll
+        # those the stored rows can still rebuild (REC-04), once.
+        legacy = {
+            floor_hour(hour) for hour in await self.repository.legacy_restart_hours(max(earliest, floor_input), start)
+        } - hours
+        hours |= legacy
         result = RollupResult(start=min(hours) if hours else start, end=end, late_hours=len(late))
+        result.legacy_hours = len(legacy)
+        if legacy:
+            logger.info("Workload usage rollup: re-rolling %d hours rolled before migration 0130.", len(legacy))
         if late:
             logger.info("Workload usage rollup: re-rolling %d hours that received late rows.", len(late))
         for hour in sorted(hours):
             pod_rows, container_rows, source = await self.repository.read_hour_inputs(hour)
+            if hour in legacy and not (pod_rows or container_rows):
+                # Inputs no longer stored: keep the rolled hour as it is.
+                continue
             context: List[Any] = []
             if pod_rows:
                 # The previous restart count of each pod: per-pod restart increases
@@ -973,6 +1008,7 @@ class WorkloadUsageRollup:
                 else:
                     step = max(self.step_seconds, 1.0)
                     context = await self.repository.read_restart_context(hour, max(self.warmup_seconds, step) + step)
+            restart_context = await self._restart_context(hour, pod_rows, context)
             rows = (
                 rollup_rows(
                     pod_rows,
@@ -981,6 +1017,8 @@ class WorkloadUsageRollup:
                     source=source,
                     warmup_seconds=self.warmup_seconds,
                     context_rows=context,
+                    restart_context_rows=restart_context,
+                    collection_started=oldest_input < hour,
                 )
                 if pod_rows or container_rows
                 else []

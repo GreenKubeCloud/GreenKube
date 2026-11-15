@@ -572,3 +572,110 @@ async def test_hours_rolled_before_the_per_pod_increase_make_the_restart_history
     api = ("shop", "Deployment", "api")
     assert snapshot.summaries[api][""].restart_increase is None
     assert reference.summaries[api][""].restart_increase is None
+
+
+def _timed_rows(start: datetime, samples: list[tuple[int, int, int]]) -> list[CombinedMetric]:
+    """Pod rows of ``api-1`` at ``(hour, minute, restart_count)``."""
+    return [
+        _row(start + timedelta(hours=hour, minutes=minute), pod_name="api-1", restart_count=count)
+        for hour, minute, count in samples
+    ]
+
+
+#: GreenKube down 0:50 -> 1:10 while the pod restarts twice (1 -> 3).
+_BOUNDARY_GAP = (
+    [(0, minute, 1) for minute in range(0, 50, 5)]
+    + [(1, minute, 3) for minute in range(10, 60, 5)]
+    + [(2, minute, 3) for minute in range(0, 60, 5)]
+)
+#: A whole hour missing while the pod restarts three times (1 -> 4).
+_MISSING_HOUR = [(0, minute, 1) for minute in range(0, 60, 5)] + [(2, minute, 4) for minute in range(0, 60, 5)]
+
+
+@pytest.mark.parametrize(
+    ("samples", "expected"), [(_BOUNDARY_GAP, 2), (_MISSING_HOUR, 3)], ids=["boundary-gap", "missing-hour"]
+)
+async def test_restarts_across_a_collection_gap_are_counted_on_sql_and_python(db, samples, expected):
+    """REC-04 review 2: a gap longer than the restart context never hides the restarts in it."""
+    start = _base_hour()
+    repository, _ = await _rolled(db, _timed_rows(start, samples), start, hours=3)
+
+    window = (start - timedelta(hours=1), start + timedelta(hours=5))
+    snapshot = await repository.read_usage_snapshot(*window)
+    reference = summarize(await repository.read_hours(*window))
+
+    api = ("shop", "Deployment", "api")
+    assert snapshot.summaries[api][""].restart_increase == reference.summaries[api][""].restart_increase == expected
+
+
+async def test_restarts_across_a_missing_hour_are_counted_from_the_hourly_tables(db, monkeypatch):
+    """REC-04 review 2: the same on hours re-rolled from the compressed hourly tables."""
+    start = floor_hour(datetime.now(timezone.utc) - timedelta(days=10))
+    await _metrics_repo(db).write_combined_metrics(_timed_rows(start, _MISSING_HOUR))
+    monkeypatch.setenv("METRICS_RAW_RETENTION_DAYS", "1")
+    await MetricsCompressor(db, Config(), rollup_enabled=False).run(now=datetime.now(timezone.utc))
+    repository = create_workload_usage_repository(db, db.db_type)
+    assert (await repository.read_hour_inputs(start + timedelta(hours=2)))[2] == "hourly"
+
+    await WorkloadUsageRollup(repository, backfill_hours=14 * 24).refresh(now=datetime.now(timezone.utc))
+
+    window = (start - timedelta(hours=1), start + timedelta(hours=4))
+    snapshot = await repository.read_usage_snapshot(*window)
+    reference = summarize(await repository.read_hours(*window))
+    api = ("shop", "Deployment", "api")
+    assert snapshot.summaries[api][""].restart_increase == reference.summaries[api][""].restart_increase == 3
+
+
+async def _null_increase(db, hour: datetime) -> None:
+    """Make ``hour`` look rolled before migration 0130 (restart count, no increase)."""
+    bucket = hour if db.db_type == "postgres" else to_iso_z(hour)
+    async with db.connection_scope() as conn:
+        if db.db_type == "postgres":
+            await conn.execute(
+                "UPDATE workload_usage_hourly SET restart_increase = NULL WHERE hour_bucket = $1", bucket
+            )
+        else:
+            await conn.execute(
+                "UPDATE workload_usage_hourly SET restart_increase = NULL WHERE hour_bucket = ?", (bucket,)
+            )
+            await conn.commit()
+
+
+async def test_refresh_rerolls_hours_rolled_before_the_per_pod_increase(db):
+    """REC-04 review 2: pre-0130 hours that stored rows can rebuild are re-rolled on upgrade."""
+    start = _base_hour()
+    repository, _ = await _rolled(db, _per_pod_rows(start, {"api-1": [1, 1, 2]}), start, hours=3)
+    await _null_increase(db, start)
+    window = (start - timedelta(hours=1), start + timedelta(hours=5))
+    assert (await repository.read_usage_snapshot(*window)).summaries[("shop", "Deployment", "api")][
+        ""
+    ].restart_increase is None
+
+    result = await WorkloadUsageRollup(repository).refresh(now=start + timedelta(hours=3, minutes=30), refresh_hours=1)
+
+    assert result.legacy_hours == 1
+    summary = (await repository.read_usage_snapshot(*window)).summaries[("shop", "Deployment", "api")][""]
+    assert summary.restart_increase == 1
+    assert summary.restart_increase_legacy is False
+
+
+async def test_pre_0130_hours_without_stored_rows_stay_unknown_and_are_flagged(db):
+    start = _base_hour()
+    repository, _ = await _rolled(db, _per_pod_rows(start, {"api-1": [1, 1, 2]}), start, hours=3)
+    await _null_increase(db, start)
+    async with db.connection_scope() as conn:
+        if db.db_type == "postgres":
+            await conn.execute("DELETE FROM combined_metrics WHERE timestamp < $1", start + timedelta(hours=1))
+        else:
+            await conn.execute(
+                'DELETE FROM combined_metrics WHERE "timestamp" < ?', (to_iso_z(start + timedelta(hours=1)),)
+            )
+            await conn.commit()
+
+    await WorkloadUsageRollup(repository).refresh(now=start + timedelta(hours=3, minutes=30), refresh_hours=1)
+
+    window = (start - timedelta(hours=1), start + timedelta(hours=5))
+    summary = (await repository.read_usage_snapshot(*window)).summaries[("shop", "Deployment", "api")][""]
+    reference = summarize(await repository.read_hours(*window)).summaries[("shop", "Deployment", "api")][""]
+    assert summary.restart_increase is None and reference.restart_increase is None
+    assert summary.restart_increase_legacy is True and reference.restart_increase_legacy is True

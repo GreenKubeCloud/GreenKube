@@ -177,6 +177,9 @@ class WorkloadUsageSummary:
     #: a restart count or an hour was rolled before migration 0130. Fallback when the
     #: signals above are unknown.
     restart_increase: Optional[int] = None
+    #: An hour of the lookback was rolled before migration 0130 (restart count without
+    #: per-pod increase) and could not be re-rolled: ``restart_increase`` is None for that.
+    restart_increase_legacy: bool = False
     throttling_ratio: Optional[float] = None
     #: Why the container is believed to run a JVM (``JAVA_TOOL_OPTIONS``, ``-Xmx``, image name), None when not.
     jvm_hint: Optional[str] = None

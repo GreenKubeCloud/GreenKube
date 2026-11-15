@@ -393,3 +393,20 @@ def test_evidence_records_zero_oom_kills_when_the_rollup_proves_none() -> None:
     assert _known_oom_events(container, context) == 0
     snapshot.summaries[TARGET][""] = _summary(container_name="", restart_increase=None)
     assert _known_oom_events(container, context) is None
+
+
+def test_the_withheld_diagnostic_names_the_upgrade_when_pre_0130_hours_hide_the_history() -> None:
+    """REC-04 review 2: history unknown because of the upgrade is said so, not only "could not be read"."""
+    container = _summary(oom_kill_count=None, restarts_in_window=None, restart_increase=None)
+    snapshot = _snapshot(container)
+    snapshot.summaries[TARGET][""] = _summary(container_name="", restart_increase=None, restart_increase_legacy=True)
+    context = OptimizationContext(config=Config(), usage=snapshot, analysis_window_seconds=14 * 86400)
+    analyzer = MemoryRightsizingAnalyzer(context.config)
+    assert analyzer.analyze(context) == []
+    [diagnostic] = analyzer.scan_diagnostics()
+    assert "1 of them because hours rolled before the upgrade (migration 0130)" in diagnostic["message"]
+
+    snapshot.summaries[TARGET][""] = _summary(container_name="", restart_increase=None)
+    analyzer.analyze(context)
+    [diagnostic] = analyzer.scan_diagnostics()
+    assert "upgrade" not in diagnostic["message"]
