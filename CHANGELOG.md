@@ -148,6 +148,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - Overview leads with measured savings, pending verification and projected opportunity, never summed; savings read **Measured allocated savings** ("Realized" is reserved for billed savings); navigation is Overview, Recommendations, Changes, Ledger, Footprint, Automation, Sources, Setup, Settings (`/report` and `/nodes` redirect under `/footprint`).
 - Sort options are labelled truthfully (**Ranking score (default)**, projected cost and CO₂e sorts); closing an unapproved plan preview discards it.
 - The Settings page and connectivity popup are read-only (configuration as code); the API client uses session cookies and CSRF tokens; one card each for Argo CD and Flux.
+- A memory decrease whose OOM history could not be read (`oom_history_unknown`) is now an eligibility warning instead of a blocker: a person may open its pull request. The warning names the cause (`oom_unknown_no_usage_summary`, `oom_unknown_signal_failed`, `oom_unknown_signal_unavailable`) and what to check before merging; the UI shows it on the recommendation, the detail page and the plan review, and the pull-request summary repeats it.
 
 ### Deprecated
 - `refresh=true` on recommendation reads (only queues a run).
@@ -195,6 +196,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 **UI and API**
 - The API key is no longer asked after every reload; page loads no longer trigger full scans; `401` always opens sign-in; namespace filters are consistent; amounts no longer hard-code `$`; viewers no longer see mutating actions; pull-request links land on real pages with the Gitea web URL.
 - `GET /api/v1/recommendations/active?source=` matches consensus sources; the time to the first pull request is no longer overstated. Stale documentation corrected; the methodology states the known false-`realized` rates of a 7-day baseline.
+- `automation.autoApprove` never approves a plan whose recommendation carries `oom_history_unknown` (new `auto_approve_blockers` code `oom_history_unknown`); before, a `maxRisk: medium` policy could approve such a decrease automatically.
 
 ### Security
 - Wildcard CORS is never combined with credentials; CORS is same-origin by default.
