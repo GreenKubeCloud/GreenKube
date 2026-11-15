@@ -405,7 +405,8 @@ async def run_recommendation_lifecycle() -> None:
                 try:
                     await savings_repo.supersede_for_recommendation(rec_id)
                 except Exception as exc:
-                    logger.warning("Could not supersede savings for recommendation %s: %s", rec_id, exc)
+                    # Fast path only: the ledger-chain loop supersedes it from its state (LED-08).
+                    logger.warning("Could not supersede savings for recommendation %s yet: %s", rec_id, exc)
     except Exception as e:
         logger.error("Recommendation lifecycle task failed: %s", e)
         report_loop_failure(e)
