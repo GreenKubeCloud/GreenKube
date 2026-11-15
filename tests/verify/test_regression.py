@@ -131,7 +131,7 @@ def test_load_growth_is_not_credited_as_a_saving():
     assert cost.outcome is not ChangeOutcome.REALIZED
 
 
-def _charged_scenario(*, post_request: float, seed: int, post_scale: float = 1.2):
+def _charged_scenario(*, post_request: float, seed: int, post_scale: float = 1.2, usage_per_load: float = 0.008):
     """Request-priced buckets whose CPU usage follows the load and exceeds the request at peaks.
 
     The allocator charges ``max(request, usage)`` at 0.03 per core-hour plus
@@ -148,7 +148,7 @@ def _charged_scenario(*, post_request: float, seed: int, post_scale: float = 1.2
         for hour, value in load.items():
             if not start <= hour < end:
                 continue
-            usage = 0.005 * value
+            usage = usage_per_load * value
             charged = max(request, usage)
             out.append(
                 HourBucket(
@@ -184,14 +184,22 @@ def _charged_scenario(*, post_request: float, seed: int, post_scale: float = 1.2
         seed_parts=(change.change_id, seed),
     )
     truth = math.fsum(
-        (max(1.0, 0.005 * value) - max(post_request, 0.005 * value)) * 0.03 for value in post_load.values()
+        (max(1.0, usage_per_load * value) - max(post_request, usage_per_load * value)) * 0.03
+        for value in post_load.values()
     ) / len(post_load)
-    return result, {item.quantity: item for item in result.estimates}, truth
+    # Share of baseline and post hours whose usage is above the 1-core baseline request (charged branch).
+    above = (
+        sum(usage_per_load * value > 1.0 for value in pre_load.values()) / len(pre_load),
+        sum(usage_per_load * value > 1.0 for value in post_load.values()) / len(post_load),
+    )
+    return result, {item.quantity: item for item in result.estimates}, truth, above
 
 
 def test_load_growth_above_the_request_is_not_credited_on_the_claimed_cost():
     """Usage above the request follows the load: a busier post-window with unchanged requests saves nothing."""
-    result, estimates, _ = _charged_scenario(post_request=1.0, seed=21)
+    result, estimates, _, above = _charged_scenario(post_request=1.0, seed=21)
+    # The charged branch is exercised (review wp07-3 F2): usage above the request in a real share of hours.
+    assert above[0] >= 0.2 and above[1] >= 0.3
     claimed = estimates["allocated_cost"]
     assert claimed.claimed and claimed.method == METHOD_OLS
     assert claimed.ci_low is not None and claimed.ci_low <= 0.0
@@ -199,7 +207,8 @@ def test_load_growth_above_the_request_is_not_credited_on_the_claimed_cost():
 
 
 def test_a_request_cut_under_load_growth_claims_the_charged_saving():
-    result, estimates, truth = _charged_scenario(post_request=0.5, seed=22)
+    result, estimates, truth, above = _charged_scenario(post_request=0.5, seed=23)
+    assert above[1] >= 0.3
     claimed = estimates["allocated_cost"]
     assert claimed.ci_low is not None and claimed.ci_high is not None
     assert claimed.ci_low <= truth <= claimed.ci_high
