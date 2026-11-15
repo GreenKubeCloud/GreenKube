@@ -81,7 +81,9 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
                     reason = EXCLUDED.reason,
                     opencost_total_cost = EXCLUDED.opencost_total_cost,
                     attributed_cost = EXCLUDED.attributed_cost,
-                    collected_at = EXCLUDED.collected_at""",
+                    collected_at = EXCLUDED.collected_at
+                -- A re-collection without data (beyond retention) never downgrades stored rows.
+                WHERE NOT (collection_windows.status = 'collected' AND EXCLUDED.status = 'failed')""",
                 params,
             )
         return len(params)

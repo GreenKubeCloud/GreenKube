@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from greenkube.storage.base_collection_window_repository import (
     STATUS_FAILED,
@@ -88,7 +88,9 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
                     reason = excluded.reason,
                     opencost_total_cost = excluded.opencost_total_cost,
                     attributed_cost = excluded.attributed_cost,
-                    collected_at = excluded.collected_at""",
+                    collected_at = excluded.collected_at
+                -- A re-collection without data (beyond retention) never downgrades stored rows.
+                WHERE NOT (collection_windows.status = 'collected' AND excluded.status = 'failed')""",
                 params,
             )
             await conn.commit()
@@ -157,8 +159,14 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
     async def stored_metric_timestamps(self, since: datetime | None = None) -> list[datetime]:
         """Distinct timestamps of the stored pod rows."""
         query = 'SELECT DISTINCT "timestamp" FROM combined_metrics WHERE "timestamp" IS NOT NULL'
+        params: tuple[str, ...] = ()
+        if since is not None:
+            # Stored timestamps are ISO-8601 UTC strings: compare on the fixed-width prefix
+            # (one second earlier keeps every format, the exact check below trims it).
+            query += ' AND "timestamp" >= ?'
+            params = ((ensure_utc(since) - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S"),)
         async with self.db_manager.connection_scope() as conn:
-            async with conn.execute(query) as cursor:
+            async with conn.execute(query, params) as cursor:
                 rows = await cursor.fetchall()
         values = {ensure_utc(row[0]) for row in rows if row[0]}
         if since is not None:

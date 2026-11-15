@@ -121,6 +121,20 @@ async def test_records_are_upserted_listed_retried_and_expired(database):
 
 
 @pytest.mark.asyncio
+async def test_a_failed_recollection_never_downgrades_a_collected_step(database):
+    """Review 3: --last beyond Prometheus retention finds no data for a step whose rows are stored."""
+    backend, manager = database
+    repo = create_collection_window_repository(manager, backend)
+    await repo.record([_record(BASE, STATUS_COLLECTED)])
+
+    await repo.record([_record(BASE, STATUS_FAILED, reason=REASON_NO_SCRAPE_DATA)])
+
+    (record,) = await repo.list_overlapping("c1", SOURCE, BASE, BASE + STEP)
+    assert record.status == STATUS_COLLECTED and record.pod_rows == 3
+    assert await repo.last_hole("c1", SOURCE) is None
+
+
+@pytest.mark.asyncio
 async def test_stored_metric_timestamps_are_distinct(database):
     backend, manager = database
     repo = create_collection_window_repository(manager, backend)
