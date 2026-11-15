@@ -106,6 +106,11 @@ IDLE_METRIC_COLUMNS: tuple[str, ...] = (
 )
 
 
+def _utc_trunc(unit: str, column: str) -> str:
+    """``date_trunc`` in UTC whatever the session time zone (STO-10)."""
+    return f"(date_trunc('{unit}', {column} AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"
+
+
 def _container_metric_from_row(
     row: Mapping[str, Any],
     *,
@@ -952,11 +957,11 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 if namespace:
                     query = """
                         SELECT DISTINCT year FROM (
-                            SELECT EXTRACT(YEAR FROM timestamp)::int AS year
+                            SELECT EXTRACT(YEAR FROM timestamp AT TIME ZONE 'UTC')::int AS year
                             FROM combined_metrics
                             WHERE timestamp IS NOT NULL AND namespace = $1
                             UNION
-                            SELECT EXTRACT(YEAR FROM hour_bucket)::int AS year
+                            SELECT EXTRACT(YEAR FROM hour_bucket AT TIME ZONE 'UTC')::int AS year
                             FROM combined_metrics_hourly
                             WHERE hour_bucket IS NOT NULL AND namespace = $1
                         ) AS metric_years
@@ -967,11 +972,11 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 else:
                     query = """
                         SELECT DISTINCT year FROM (
-                            SELECT EXTRACT(YEAR FROM timestamp)::int AS year
+                            SELECT EXTRACT(YEAR FROM timestamp AT TIME ZONE 'UTC')::int AS year
                             FROM combined_metrics
                             WHERE timestamp IS NOT NULL
                             UNION
-                            SELECT EXTRACT(YEAR FROM hour_bucket)::int AS year
+                            SELECT EXTRACT(YEAR FROM hour_bucket AT TIME ZONE 'UTC')::int AS year
                             FROM combined_metrics_hourly
                             WHERE hour_bucket IS NOT NULL
                         ) AS metric_years
@@ -1130,8 +1135,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 trunc_unit = _GRAN_TRUNC.get(granularity or "", None)
                 if trunc_unit:
                     # Group by identity cols + time bucket
-                    raw_ts_expr = f"date_trunc('{trunc_unit}', timestamp)"
-                    hourly_ts_expr = f"date_trunc('{trunc_unit}', hour_bucket)"
+                    raw_ts_expr = _utc_trunc(trunc_unit, "timestamp")
+                    hourly_ts_expr = _utc_trunc(trunc_unit, "hour_bucket")
                 else:
                     raw_ts_expr = "NULL::timestamptz"
                     hourly_ts_expr = "NULL::timestamptz"
@@ -1260,7 +1265,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 union_query = " UNION ALL ".join(parts)
                 query = f"""
                     SELECT
-                        date_trunc('{trunc_unit}', ts) AS ts_bucket,
+                        {_utc_trunc(trunc_unit, "ts")} AS ts_bucket,
                         COALESCE(SUM(co2e_grams), 0)          AS co2e_grams,
                         COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
                         COALESCE(SUM(total_cost), 0)          AS total_cost,

@@ -2,6 +2,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import aiosqlite
 import asyncpg
@@ -72,6 +73,27 @@ async def _rollback_quietly(connection: aiosqlite.Connection) -> None:
         logger.exception("SQLite rollback after a failed database scope failed.")
 
 
+async def warn_on_exhausting_sequences(connection: Any, threshold: float = 0.5) -> list[str]:
+    """Log a warning for every sequence of the schema above ``threshold`` of its maximum (STO-05).
+
+    Returns the names of those sequences.
+    """
+    rows = await connection.fetch(
+        "SELECT sequencename, last_value, max_value FROM pg_sequences "
+        "WHERE schemaname = current_schema() AND last_value IS NOT NULL AND last_value > max_value * $1::float8",
+        threshold,
+    )
+    for row in rows:
+        logger.warning(
+            "Sequence %s is at %d of %d (%.0f%%): writes fail once it reaches its maximum.",
+            row["sequencename"],
+            row["last_value"],
+            row["max_value"],
+            100.0 * row["last_value"] / row["max_value"],
+        )
+    return [row["sequencename"] for row in rows]
+
+
 @dataclass(frozen=True)
 class SchemaStatus:
     """Migration state of the connected database."""
@@ -127,6 +149,8 @@ class DatabaseManager:
                         server_settings={
                             "search_path": self.config.DB_SCHEMA,
                             "statement_timeout": str(self.config.DB_STATEMENT_TIMEOUT_MS),
+                            # Day, week, month and year buckets are UTC whatever the server default (STO-10).
+                            "timezone": "UTC",
                         },
                     )
                     await self.setup_postgres()
@@ -268,6 +292,7 @@ class DatabaseManager:
             await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
             await MigrationRunner("postgres").run(connection)
             self._schema_current = True
+            await warn_on_exhausting_sequences(connection)
             if await pending_online_upgrades(connection):
                 self._online_upgrade_task = asyncio.create_task(self._complete_online_upgrades())
 

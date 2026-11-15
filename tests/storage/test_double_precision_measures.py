@@ -29,7 +29,7 @@ async def _schema(connection, prefix: str) -> str:
     return schema
 
 
-async def _migrate(connection, *, up_to: int | None = None, after: int = 0) -> None:
+async def _migrate(connection, *, up_to: int | None = None, after: int = -1) -> None:
     runner = MigrationRunner("postgres")
     await runner._ensure_migrations_table(connection)
     for version, name, sql in runner._discover_scripts():
@@ -108,8 +108,9 @@ async def test_large_tables_are_upgraded_online_in_batches_with_a_bounded_swap_l
             )
         # Force the online path whatever the table size.
         await connection.execute("SET greenkube.online_upgrade_min_bytes = '0'")
-        await _migrate(connection, after=144)
+        await _migrate(connection, after=144, up_to=145)
         await connection.execute("RESET greenkube.online_upgrade_min_bytes")
+        await _migrate(connection, after=145)
 
         assert set((await pending_online_upgrades(connection))["combined_metrics"]) == set(MEASURES)
         assert set((await _measure_types(connection)).values()) == {"real"}

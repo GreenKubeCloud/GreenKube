@@ -73,6 +73,17 @@ longer drift. Changing the type rewrites the table under an exclusive lock:
 
 Stored values keep their 7 significant digits. SQLite is not affected (its `REAL` is already 8 bytes).
 
+### 64-bit ids (PostgreSQL)
+
+Migration 0147 turns every `integer` id column and its sequence into `bigint`. The sequences change at once.
+Tables of at most 256 MB are rewritten inside the migration batch (seconds). `combined_metrics` and
+`combined_metrics_hourly` above 256 MB are converted online like the measures above: a `bigint` shadow column
+`id__i8` kept equal by a trigger, a batched backfill, a unique index built with `CREATE INDEX CONCURRENTLY`, then a
+short swap that re-creates the primary key on that index. Until the swap, these two tables keep their 32-bit
+column. The concurrent index build waits for transactions already open in the database (it does not block
+writers); a session left `idle in transaction` delays it. At every start the controller logs a warning for any
+sequence above half of its maximum.
+
 ### Deprecated values (accepted for this minor release)
 
 An upgrade that reuses a 0.3.x values file keeps working: the chart maps the old keys and lists each one under
