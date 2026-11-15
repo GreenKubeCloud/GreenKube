@@ -368,9 +368,15 @@ class ReservationAwareImpactModel:
         if isinstance(change, ContainerResourceChange):
             return self._project_container_resources(baseline, change, pool)
         if isinstance(change, WorkloadDeletion):
-            return self._project_sample_removal(
-                baseline, baseline.samples, ChangeKind.WORKLOAD_DELETION, pool, 1.0, "deletion"
+            # IMP-05: deleting pods releases reserved capacity like cutting their requests to zero; the
+            # bill only falls when a node goes away, so the pool's factor applies (usage-based terms and
+            # per-asset costs keep a factor of 1, see _finalize).
+            factor, source, reasons, pools = pool.realization_for(baseline.samples)
+            delta = self._project_sample_removal(
+                baseline, baseline.samples, ChangeKind.WORKLOAD_DELETION, pool, factor, source, removal=True
             )
+            _record_realization(delta, reasons, pools)
+            return delta
         if isinstance(change, ReplicaScheduleChange):
             removed = [
                 sample
@@ -471,6 +477,7 @@ class ReservationAwareImpactModel:
         pool: NodePoolContext,
         realization_factor: float,
         realization_source: str,
+        removal: bool = False,
     ) -> ImpactDelta:
         acc = _Accumulator()
         for sample in samples:
@@ -512,6 +519,7 @@ class ReservationAwareImpactModel:
             realization_factor=realization_factor,
             realization_source=realization_source,
             co2e_basis="allocated_share_released",
+            removal=removal,
         )
 
     def _project_asset_deletion(self, change: AssetDeletion, pool: NodePoolContext) -> ImpactDelta:
@@ -625,14 +633,36 @@ class ReservationAwareImpactModel:
         co2e_basis: str,
         realization_source: Optional[str] = None,
         node_hours: float = 0.0,
+        removal: bool = False,
     ) -> ImpactDelta:
+        """Annualizes an accumulated projection and applies the realization factor.
+
+        With ``removal`` (a workload deletion, IMP-05) the factor applies to the
+        reservation-driven parts only: per-asset costs (storage, LoadBalancer,
+        network) and the usage-based CO2e (dynamic CPU and GPU power, no longer
+        consumed) are saved whole, the reserved CPU, memory and other cost and the
+        idle, memory and embodied CO2e at the pool factor.
+        """
         window_hours = annualized.hours
         factor = HOURS_PER_YEAR / window_hours if window_hours > 0 else 0.0
         realization = min(max(float(realization_factor), 0.0), 1.0)
         cost = acc.cost.scaled(factor)
         co2e = acc.co2e.scaled(factor)
-        expected_cost = cost.total * realization
-        expected_co2e = co2e.total * realization
+        expected_breakdown: Optional[Co2eBreakdown] = None
+        if removal:
+            per_asset = cost.storage + cost.lb + cost.network
+            expected_cost = (cost.total - per_asset) * realization + per_asset
+            expected_breakdown = Co2eBreakdown(
+                idle_operational=co2e.idle_operational * realization,
+                dynamic_operational=co2e.dynamic_operational,
+                embodied=co2e.embodied * realization,
+                memory_operational=co2e.memory_operational * realization,
+                gpu_operational=co2e.gpu_operational,
+            )
+            expected_co2e = expected_breakdown.total
+        else:
+            expected_cost = cost.total * realization
+            expected_co2e = co2e.total * realization
         confidence = acc.confidence_weighted / acc.weight_hours if acc.weight_hours > 0 else 0.0
         confidence *= annualized.confidence_scale
         currencies = sorted(acc.currencies) or [pool.currency]
@@ -683,6 +713,7 @@ class ReservationAwareImpactModel:
             currency=currency,
             confidence=round(confidence, 4),
             assumptions=assumptions,
+            co2e_expected_breakdown_annual_g=expected_breakdown,
         )
 
 

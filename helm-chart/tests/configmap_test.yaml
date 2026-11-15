@@ -818,6 +818,20 @@ tests:
           path: data.CARBON_PRICE_PER_TONNE
           value: "85"
 
+  - it: should render an empty autoscaler hint by default and a declared one (IMP-12)
+    asserts:
+      - equal:
+          path: data.IMPACT_AUTOSCALER_HINT
+          value: ""
+
+  - it: should render a declared autoscaler hint
+    set:
+      impact.autoscalerHint: cluster_autoscaler
+    asserts:
+      - equal:
+          path: data.IMPACT_AUTOSCALER_HINT
+          value: cluster_autoscaler
+
   - it: should omit unset impact settings so the application defaults apply
     set:
       impact.realizationFactor: null

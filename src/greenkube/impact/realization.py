@@ -85,6 +85,16 @@ NODE_BLOCKING_ANNOTATIONS = {
 #: Pool of nodes managed by the Cluster Autoscaler (or by nothing).
 CLUSTER_POOL = "__cluster__"
 
+#: ``IMPACT_AUTOSCALER_HINT`` values (IMP-12) and the factor each declares for nodes outside Karpenter pools.
+HINT_NONE = "none"
+HINT_CLUSTER_AUTOSCALER = "cluster_autoscaler"
+HINT_KARPENTER = "karpenter"
+HINT_FACTORS = {
+    HINT_NONE: FACTOR_NO_AUTOSCALER,
+    HINT_CLUSTER_AUTOSCALER: FACTOR_CLUSTER_AUTOSCALER,
+    HINT_KARPENTER: FACTOR_KARPENTER_CONSOLIDATING,
+}
+
 #: ``RealizationInputs.unavailable`` names of the inputs that decide a pool's autoscaler.
 UNAVAILABLE_CLUSTER_AUTOSCALER = "Cluster Autoscaler status"
 UNAVAILABLE_KARPENTER_POOLS = "Karpenter NodePools"
@@ -359,13 +369,18 @@ def resolve_realization(
     now: Optional[datetime] = None,
     *,
     previous: Optional[RealizationContext] = None,
+    autoscaler_hint: Optional[str] = None,
 ) -> RealizationContext:
     """Computes the per-pool realization factors (pure).
 
     An autoscaler input that could not be read (RBAC, timeout) does not count
     as "no autoscaler": the affected pools keep their ``previous`` observation
-    or the unobserved factor.
+    or the unobserved factor. ``autoscaler_hint`` (``IMPACT_AUTOSCALER_HINT``,
+    IMP-12) declares the autoscaler of the nodes outside Karpenter pools when
+    detection does not see it (a Cluster Autoscaler with another status
+    ConfigMap, a managed autoscaler that publishes nothing).
     """
+    hint = (autoscaler_hint or "").strip().lower() or None
     now = now or datetime.now(timezone.utc)
     karpenter = {pool.name: pool for pool in inputs.karpenter_pools or ()}
     node_pools: Dict[str, str] = {}
@@ -470,6 +485,24 @@ def resolve_realization(
                 pools[name] = _unread_pool(name, names, UNAVAILABLE_KARPENTER_POOLS, previous)
 
     # Nodes outside Karpenter pools: Cluster Autoscaler, or fixed nodes.
+    if ca is None and hint in (HINT_CLUSTER_AUTOSCALER, HINT_KARPENTER):
+        hinted = HINT_FACTORS[hint]
+        hinted_blockers = list(blockers.get(CLUSTER_POOL, []))
+        hinted_reasons = [f"IMPACT_AUTOSCALER_HINT={hint}: autoscaler declared by the configuration, not detected"]
+        if hinted_blockers:
+            hinted *= BLOCKER_MULTIPLIER
+            hinted_reasons.extend(_summarize(hinted_blockers))
+        pools[CLUSTER_POOL] = PoolRealization(
+            pool=CLUSTER_POOL,
+            factor=hinted,
+            autoscaler=hint,
+            reasons=tuple(hinted_reasons),
+            nodes=tuple(sorted(members.get(CLUSTER_POOL, []))),
+            blocked=bool(hinted_blockers),
+        )
+        return RealizationContext(
+            pools=pools, node_pools=node_pools, default_pool=CLUSTER_POOL, observed_at=now, notes=notes
+        )
     if ca is None and UNAVAILABLE_CLUSTER_AUTOSCALER in inputs.unavailable:
         pools[CLUSTER_POOL] = _unread_pool(
             CLUSTER_POOL, members.get(CLUSTER_POOL, []), UNAVAILABLE_CLUSTER_AUTOSCALER, previous
@@ -596,6 +629,57 @@ class RealizationCollector(Protocol):
     async def collect(self) -> Optional[RealizationInputs]: ...
 
 
+#: A stored context older than this is not restored after a restart (IMP-12).
+STORED_CONTEXT_MAX_AGE = timedelta(hours=24)
+
+
+def context_to_dict(context: RealizationContext) -> Dict[str, Any]:
+    """JSON form of a realization context (stored in ``realization_context``, IMP-12)."""
+    return {
+        "pools": {name: {**pool.to_dict(), "nodes": list(pool.nodes)} for name, pool in sorted(context.pools.items())},
+        "node_pools": dict(sorted(context.node_pools.items())),
+        "default_pool": context.default_pool,
+        "observed_at": context.observed_at.isoformat(),
+        "notes": list(context.notes),
+    }
+
+
+def context_from_dict(data: Mapping[str, Any], observed_at: datetime) -> Optional[RealizationContext]:
+    """The context stored by :func:`context_to_dict`; ``None`` when it cannot be read back."""
+    try:
+        pools = {
+            str(name): PoolRealization(
+                pool=str(values["pool"]),
+                factor=float(values["factor"]),
+                autoscaler=str(values.get("autoscaler") or "none"),
+                reasons=tuple(str(reason) for reason in values.get("reasons") or ()),
+                nodes=tuple(str(node) for node in values.get("nodes") or ()),
+                consolidation_policy=values.get("consolidation_policy"),
+                blocked=bool(values.get("blocked")),
+                observed_cost=values.get("observed_cost"),
+            )
+            for name, values in (data.get("pools") or {}).items()
+        }
+        default_pool = str(data["default_pool"])
+        if default_pool not in pools:
+            return None
+        return RealizationContext(
+            pools=pools,
+            node_pools={str(node): str(pool) for node, pool in (data.get("node_pools") or {}).items()},
+            default_pool=default_pool,
+            observed_at=observed_at,
+            notes=tuple(str(note) for note in data.get("notes") or ()),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+class RealizationContextStore(Protocol):
+    async def save_context(self, observed_at: datetime, payload: Dict[str, Any]) -> None: ...
+
+    async def load_context(self) -> Optional[Tuple[datetime, Dict[str, Any]]]: ...
+
+
 @dataclass
 class _State:
     context: Optional[RealizationContext] = None
@@ -603,6 +687,64 @@ class _State:
 
 
 _STATE = _State()
+_STORE: Dict[str, Any] = {"store": None}
+
+
+def register_realization_store(store: Optional[RealizationContextStore]) -> None:
+    """Where refreshed contexts are persisted and restored from (IMP-12); ``None`` disables it."""
+    _STORE["store"] = store
+
+
+async def restore_realization_context(
+    store: Optional[RealizationContextStore] = None, *, now: Optional[datetime] = None
+) -> Optional[RealizationContext]:
+    """Loads the stored context when this process has not observed the cluster yet (IMP-12).
+
+    A context younger than :data:`STORED_CONTEXT_MAX_AGE` replaces the
+    unobserved factor 1.0 after a restart; its pools say it was restored. The
+    next refresh still reads the cluster. Read failures are logged and keep the
+    process state.
+    """
+    if _STATE.context is not None:
+        return _STATE.context
+    store = store or _STORE["store"]
+    if store is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    try:
+        stored = await store.load_context()
+    except Exception as error:
+        logger.warning("Could not read the stored realization context: %s", error)
+        return None
+    if stored is None:
+        return None
+    observed_at, payload = stored
+    if now - observed_at > STORED_CONTEXT_MAX_AGE:
+        logger.info("Stored realization context from %s is older than 24 h: not restored.", observed_at)
+        return None
+    context = context_from_dict(payload, observed_at)
+    if context is None:
+        logger.warning("The stored realization context could not be read back: not restored.")
+        return None
+    note = f"restored after a restart from the context observed at {observed_at.isoformat()}"
+    context = replace(
+        context,
+        pools={name: replace(pool, reasons=(*pool.reasons, note)) for name, pool in context.pools.items()},
+    )
+    if _STATE.context is None:
+        _STATE.context = context
+    logger.info("Realization context restored from %s.", observed_at.isoformat())
+    return _STATE.context
+
+
+async def _persist(context: RealizationContext) -> None:
+    store = _STORE["store"]
+    if store is None:
+        return
+    try:
+        await store.save_context(context.observed_at, context_to_dict(context))
+    except Exception as error:
+        logger.warning("Could not store the realization context: %s", error)
 
 
 def current_realization_context() -> Optional[RealizationContext]:
@@ -657,8 +799,12 @@ async def refresh_realization_context(
         inputs = None
     if inputs is None:
         return _STATE.context
-    context = resolve_realization(inputs, now, previous=_STATE.context)
+    hint = getattr(config, "IMPACT_AUTOSCALER_HINT", None) if config is not None else None
+    context = resolve_realization(
+        inputs, now, previous=_STATE.context, autoscaler_hint=hint if isinstance(hint, str) else None
+    )
     _STATE.context = context
+    await _persist(context)
     logger.info(
         "Realization context: %s",
         ", ".join(f"{name}={pool.factor:g}" for name, pool in sorted(context.pools.items())),

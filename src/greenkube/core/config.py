@@ -462,6 +462,10 @@ class Config(BaseSettings):
     # derive it from the cluster's autoscalers, consolidation policies and
     # disruption blockers; a value pins it for every projection.
     IMPACT_REALIZATION_FACTOR: Optional[float] = None
+    # Autoscaler of the nodes outside Karpenter pools when detection cannot see it
+    # (IMP-12): none | cluster_autoscaler | karpenter. Empty: detected from the
+    # Cluster Autoscaler status ConfigMap and Karpenter NodePools.
+    IMPACT_AUTOSCALER_HINT: str = ""
     # Memory power per GiB of node memory (MemoryPowerModel, roadmap B5). The
     # default is the Cloud Carbon Footprint coefficient (0.392 W/GB).
     POWER_MEMORY_W_PER_GIB: float = 0.392
@@ -911,6 +915,14 @@ class Config(BaseSettings):
         if not re.fullmatch(r"[A-Z]{3}", currency):
             raise ValueError("IMPACT_PRICING_CURRENCY must be a three-letter currency code (e.g. USD, EUR).")
         return currency
+
+    @field_validator("IMPACT_AUTOSCALER_HINT", mode="after")
+    @classmethod
+    def _validate_autoscaler_hint(cls, value: str) -> str:
+        hint = (value or "").strip().lower()
+        if hint and hint not in ("none", "cluster_autoscaler", "karpenter"):
+            raise ValueError("IMPACT_AUTOSCALER_HINT must be empty, none, cluster_autoscaler or karpenter.")
+        return hint
 
     @field_validator("IMPACT_REALIZATION_FACTOR", mode="after")
     @classmethod

@@ -265,11 +265,64 @@ class TestProjection:
         assert delta.realization_factor == 0.5
         assert delta.assumptions["realization_factor_source"] == SOURCE_CONFIG
 
-    def test_deletions_stay_fully_realized(self):
-        set_realization_context(resolve_realization(RealizationInputs(nodes=[NodeObservation("k1")]), NOW))
+    def test_autoscaler_hint_declares_a_cluster_autoscaler_without_its_configmap(self):
+        # IMP-12: IMPACT_AUTOSCALER_HINT=cluster_autoscaler yields factor 0.6 without the ConfigMap.
+        context = resolve_realization(
+            RealizationInputs(nodes=[NodeObservation("k1")]), NOW, autoscaler_hint="cluster_autoscaler"
+        )
+        pool = context.pools[CLUSTER_POOL]
+        assert pool.factor == pytest.approx(0.6)
+        assert pool.autoscaler == "cluster_autoscaler"
+        assert any("IMPACT_AUTOSCALER_HINT" in reason for reason in pool.reasons)
+        # Without the hint the same cluster is fixed nodes.
+        assert resolve_realization(RealizationInputs(nodes=[NodeObservation("k1")]), NOW).pools[
+            CLUSTER_POOL
+        ].factor == pytest.approx(0.0)
+
+    async def test_refresh_passes_the_configured_hint(self):
+        context = await refresh_realization_context(
+            Config(IMPACT_AUTOSCALER_HINT="karpenter"),
+            collector=_FakeCollector(RealizationInputs(nodes=[NodeObservation("k1")])),
+            now=NOW,
+            force=True,
+        )
+        assert context is not None and context.pools[CLUSTER_POOL].factor == pytest.approx(0.8)
+
+    def test_deletions_on_fixed_nodes_save_only_the_usage_based_terms(self):
+        # IMP-05: deleting pods releases reserved capacity exactly like cutting their requests to zero.
+        set_realization_context(
+            resolve_realization(RealizationInputs(nodes=[NodeObservation("k1"), NodeObservation("c1")]), NOW)
+        )
         projector, rows = self._projector()
         delta = projector.workload_deletion(projector.workload_ref("prod", "Deployment", "api"), rows)
-        assert delta.realization_factor == 1.0
+        assert delta.allocated_cost_annual > 0
+        assert delta.realization_factor == 0.0
+        assert delta.expected_billable_cost_annual == 0.0
+        assert delta.assumptions["realization_factor_source"] == SOURCE_CONTEXT
+        breakdown = delta.co2e_breakdown_annual_g
+        assert delta.co2e_expected_annual_g == pytest.approx(breakdown.dynamic_operational + breakdown.gpu_operational)
+        assert delta.co2e_expected_annual_g > 0
+        assert delta.co2e_measurable_expected_annual_g == pytest.approx(breakdown.dynamic_operational)
+
+    def test_deletions_with_cluster_autoscaler_keep_per_asset_costs_whole(self):
+        from greenkube.impact.types import ChangeKind, CostBreakdown
+
+        set_realization_context(
+            resolve_realization(
+                RealizationInputs(
+                    nodes=[NodeObservation("k1"), NodeObservation("c1")],
+                    cluster_autoscaler=ClusterAutoscalerObservation(CA_TEXT),
+                ),
+                NOW,
+            )
+        )
+        projector, rows = self._projector()
+        delta = projector.workload_deletion(projector.workload_ref("prod", "Deployment", "api"), rows)
+        assert delta.kind is ChangeKind.WORKLOAD_DELETION
+        cost: CostBreakdown = delta.cost_breakdown_annual
+        expected = 0.6 * (cost.cpu + cost.ram + cost.gpu + cost.other) + cost.storage + cost.lb + cost.network
+        assert delta.realization_factor == pytest.approx(0.6)
+        assert delta.expected_billable_cost_annual == pytest.approx(expected)
 
 
 class _FakeCollector:

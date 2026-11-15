@@ -22,8 +22,10 @@ from greenkube.models.provenance import CostSource, PowerSource
 #: every allocated metric row. Bump the major version when an existing formula
 #: changes the numbers it produces, the minor version when a new component is
 #: added and existing components keep their values (1.1.0: memory and GPU power,
-#: 2.0.0: projections annualize over the target's observed coverage).
-IMPACT_MODEL_VERSION = "2.0.0"
+#: 2.0.0: projections annualize over the target's observed coverage, 3.0.0: workload
+#: deletions take the pool's realization factor for their reserved parts, IMP-05, and
+#: ``capacity_released`` gains ``storage_gib`` and ``load_balancers``; allocations are unchanged).
+IMPACT_MODEL_VERSION = "3.0.0"
 
 #: Name of the synthetic workload that receives unreserved node capacity.
 IDLE_WORKLOAD_NAME = "__idle__"
@@ -544,6 +546,9 @@ class ImpactDelta:
     confidence: float
     assumptions: Dict[str, Any] = field(default_factory=dict)
     model_version: str = IMPACT_MODEL_VERSION
+    #: Expected CO2e per component when the factor differs between components (a workload
+    #: deletion keeps its usage-based power whole, IMP-05); ``None``: every component x the factor.
+    co2e_expected_breakdown_annual_g: Optional[Co2eBreakdown] = None
 
     @property
     def co2e_components_annual_g(self) -> Dict[str, float]:
@@ -555,6 +560,9 @@ class ImpactDelta:
         """Expected annual CO2e of the components a change measurement can see (None when not modeled)."""
         if not self.co2e_modeled:
             return None
+        if self.co2e_expected_breakdown_annual_g is not None:
+            expected = co2e_components(self.co2e_expected_breakdown_annual_g)
+            return sum(expected[name] for name in MEASURED_CO2E_COMPONENTS)
         components = self.co2e_components_annual_g
         return sum(components[name] for name in MEASURED_CO2E_COMPONENTS) * self.realization_factor
 
@@ -577,6 +585,11 @@ class ImpactDelta:
             "co2e_components_annual_g": self.co2e_components_annual_g,
             "co2e_measurable_components": list(MEASURED_CO2E_COMPONENTS),
             "co2e_measurable_expected_annual_g": self.co2e_measurable_expected_annual_g,
+            **(
+                {"co2e_expected_breakdown_annual_g": self.co2e_expected_breakdown_annual_g.to_dict()}
+                if self.co2e_expected_breakdown_annual_g is not None
+                else {}
+            ),
             "carbon_price_per_tonne": self.carbon_price_per_tonne,
             "value_annual": self.value_annual,
             "confidence": self.confidence,

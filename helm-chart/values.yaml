@@ -798,6 +798,11 @@ impact:
   # cluster (Cluster Autoscaler status, Karpenter consolidation policies,
   # do-not-disrupt annotations and blocking PDBs); set a value to pin it.
   realizationFactor: null
+  # Autoscaler of the nodes outside Karpenter pools when detection cannot see it
+  # (a Cluster Autoscaler with another status ConfigMap, a managed autoscaler
+  # that publishes nothing): none | cluster_autoscaler | karpenter. Empty:
+  # detected from kube-system/cluster-autoscaler-status and Karpenter NodePools.
+  autoscalerHint: ""
   # Memory power per GiB of node memory (W/GiB). Default: the Cloud Carbon
   # Footprint memory coefficient.
   memoryWattsPerGiB: 0.392
