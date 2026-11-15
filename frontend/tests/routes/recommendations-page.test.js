@@ -6,7 +6,7 @@ import { act, fireEvent, render, screen } from '@testing-library/svelte';
 import RecommendationsPage from '../../src/routes/recommendations/+page.svelte';
 import * as api from '$lib/api.js';
 import { resetOptimizationRunsSupport } from '$lib/optimizationRuns.js';
-import { currentUser } from '$lib/stores.js';
+import { currentUser, demoMode } from '$lib/stores.js';
 
 vi.mock('$lib/api.js', () => ({
 	discardAutomationPlan: vi.fn(),
@@ -731,6 +731,47 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			'title',
 			'The proposed change does not target one named container of the workload. Rescan once the container metrics are collected.'
 		);
+	});
+
+	it('replaces per-card automation diagnostics with one demo notice in demo mode only', async () => {
+		const demoRecommendation = actionReadyRecommendation();
+		demoRecommendation.eligibility = {
+			can_open_pr: false,
+			delivery_modes: ['manual'],
+			blockers: [
+				{ code: 'action_unavailable', message: 'No typed container-resources change could be built.' },
+				{ code: 'automation_not_configured', message: 'The automation plan service is not available.' }
+			],
+			warnings: [],
+			recommendation_ids: null
+		};
+		api.getActiveRecommendations.mockResolvedValue([demoRecommendation]);
+		demoMode.set(true);
+		try {
+			render(RecommendationsPage);
+			await screen.findByText('CPU usage is consistently low');
+			expect(screen.getByTestId('demo-notice')).toHaveTextContent('pull requests are disabled in the demo');
+			expect(screen.queryByTestId('eligibility-blockers')).not.toBeInTheDocument();
+		} finally {
+			demoMode.set(false);
+		}
+	});
+
+	it('keeps the automation diagnostics on a real install', async () => {
+		const realRecommendation = actionReadyRecommendation();
+		realRecommendation.eligibility = {
+			can_open_pr: false,
+			delivery_modes: ['manual'],
+			blockers: [{ code: 'automation_not_configured', message: 'The automation plan service is not available.' }],
+			warnings: [],
+			recommendation_ids: null
+		};
+		api.getActiveRecommendations.mockResolvedValue([realRecommendation]);
+
+		render(RecommendationsPage);
+		await screen.findByText('CPU usage is consistently low');
+		expect(screen.queryByTestId('demo-notice')).not.toBeInTheDocument();
+		expect(screen.getByTestId('eligibility-blockers')).toHaveTextContent('The automation plan service is not available.');
 	});
 
 	it('trusts the server eligibility instead of re-checking the action client-side', async () => {

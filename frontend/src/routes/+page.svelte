@@ -1,8 +1,9 @@
 <script>
 	import { onDestroy } from 'svelte';
-	import { selectedNamespace } from '$lib/stores.js';
+	import { demoMode, selectedNamespace } from '$lib/stores.js';
 	import { getActiveRecommendations, getRecommendationSavings, getOpenPullRequests, listChanges } from '$lib/api.js';
 	import { formatCO2, formatCost } from '$lib/utils/format.js';
+	import { savingPhrase } from '$lib/savingsVocabulary.js';
 	import Filters from '$lib/components/Filters.svelte';
 	import SavingsHero from '$lib/components/SavingsHero.svelte';
 	import StatusPill from '$lib/components/StatusPill.svelte';
@@ -148,7 +149,7 @@
 			{/if}
 			<ol class="divide-y divide-dark-700/50">
 				{#each topRecommendations as rec, index (rec.id ?? index)}
-					{@const hint = deliveryHint(rec)}
+					{@const hint = deliveryHint(rec, $demoMode)}
 					{@const evText = describeExpectedValue(rec)}
 					<li class="py-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
 						<span class="text-xs text-dark-500 w-5 shrink-0" aria-hidden="true">{index + 1}.</span>
@@ -187,7 +188,7 @@
 								{#if rec.projection_note}<p class="text-[10px] text-dark-500">{rec.projection_note}</p>{/if}
 							{/if}
 							{#if rec.potential_savings_co2e_grams}
-								<p class="text-xs text-green-400 whitespace-nowrap">−{formatCO2(rec.potential_savings_co2e_grams)} CO₂e/yr</p>
+								<p class="text-xs text-green-400 whitespace-nowrap">{savingPhrase(rec.potential_savings_co2e_grams, formatCO2, { suffix: ' CO₂e/yr' })}</p>
 							{/if}
 						</div>
 					</li>

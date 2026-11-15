@@ -7,6 +7,7 @@
 	import StatusPill from '$lib/components/StatusPill.svelte';
 	import MeasurementTable from '$lib/components/MeasurementTable.svelte';
 	import ReleasedCapacity from '$lib/components/ReleasedCapacity.svelte';
+	import { demoMode } from '$lib/stores.js';
 
 	/** @type {{planId: string}} */
 	export let data;
@@ -102,7 +103,10 @@
 			<!-- Plan -->
 			<section class="card space-y-3" aria-labelledby="plan-heading" data-testid="plan">
 				<h2 id="plan-heading" class="text-sm font-semibold uppercase tracking-wider text-dark-300">Plan</h2>
-				{#if planError}
+				{#if planError && $demoMode}
+					<!-- The demo records changes without a GitOps plan service: say so once, not as an error. -->
+					<p class="text-xs text-dark-400" data-testid="plan-demo">Demo data: the plan and its diff are not stored in the demo.</p>
+				{:else if planError}
 					<p class="text-xs text-amber-300" role="alert">{planError}</p>
 				{:else if plan}
 					<dl class="grid grid-cols-2 gap-2 text-xs">

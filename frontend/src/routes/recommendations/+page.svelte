@@ -1,5 +1,5 @@
 <script>
-	import { currentUser, hasScope, selectedNamespace } from '$lib/stores.js';
+	import { currentUser, demoMode, hasScope, selectedNamespace } from '$lib/stores.js';
 	import { onDestroy, onMount } from 'svelte';
 	import {
 		getActiveRecommendations,
@@ -45,7 +45,7 @@
 	import DataState from '$lib/components/DataState.svelte';
 	import { capacitySummary } from '$lib/releasedCapacity.js';
 	import { etaFrom } from '$lib/overview.js';
-	import { SAVINGS_TERMS, realizationText, savingsFigures } from '$lib/savingsVocabulary.js';
+	import { SAVINGS_TERMS, realizationText, savingPhrase, savingsFigures, visibleDiagnostics } from '$lib/savingsVocabulary.js';
 
 	// --- State ---
 	let activeRecs = [];
@@ -1788,7 +1788,7 @@
 	<div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
 		<div>
 			<h1 class="text-2xl font-bold text-dark-100">Recommendations</h1>
-			<p class="text-sm text-dark-500 mt-1">Actionable suggestions to reduce your cluster's environmental footprint</p>
+			<p class="text-sm text-dark-500 mt-1">Ranked, evidence-backed changes, ready as pull requests</p>
 		</div>
 		<div class="flex items-center gap-3 flex-wrap">
 			<label class="flex items-center gap-2 text-xs text-dark-400">
@@ -1899,7 +1899,11 @@
 		{/if}
 	</div>
 
-	{#if automationStatusError || (automationStatus === null && !loading)}
+	{#if $demoMode}
+		<div class="card text-sm text-dark-300" role="status" data-testid="demo-notice">
+			Demo data: pull requests are disabled in the demo. Install GreenKube in your cluster to open them.
+		</div>
+	{:else if automationStatusError || (automationStatus === null && !loading)}
 		<div class="card text-sm text-amber-300" role="alert">
 			GitOps automation status is unavailable. Pull-request previews are disabled; check the Automation page and API health.
 		</div>
@@ -2065,10 +2069,10 @@
 										<!-- Savings chips -->
 										<div class="flex items-center gap-3 shrink-0">
 											{#if rec.carbon_saved_co2e_grams}
-												<span class="text-xs font-semibold text-green-400">-{formatCO2(rec.carbon_saved_co2e_grams)}</span>
+												<span class="text-xs font-semibold text-green-400">{savingPhrase(rec.carbon_saved_co2e_grams, formatCO2, { verb: 'saved', suffix: ' CO₂e/yr' })}</span>
 											{/if}
 											{#if rec.cost_saved}
-												<span class="text-xs text-blue-400">-{formatCost(rec.cost_saved)}</span>
+												<span class="text-xs text-blue-400">{savingPhrase(rec.cost_saved, formatCost, { verb: 'saved' })}</span>
 											{/if}
 											<span class="text-dark-500 text-xs transition-transform duration-200 {expanded ? 'rotate-180' : ''}">▼</span>
 										</div>
@@ -2269,6 +2273,7 @@
 						{@const topFactor = topRankingFactor(rec.ranking_factors)}
 						{@const evText = describeExpectedValue(rec)}
 						{@const eligibility = eligibilityOf(rec)}
+						{@const diagnostics = visibleDiagnostics(eligibility, $demoMode)}
 						<div class="card hover:border-{cfg.color}-600/30 transition-all duration-200">
 							<div class="flex items-start gap-4">
 								<div class="text-2xl shrink-0 mt-0.5">{cfg.icon}</div>
@@ -2342,19 +2347,19 @@
 											{#if rec.potential_savings_co2e_grams || rec.potential_savings_cost}
 												<div class="text-right">
 													{#if rec.potential_savings_co2e_grams}
-														<p class="text-sm font-bold text-green-400">-{formatCO2(rec.potential_savings_co2e_grams)}</p>
+														<p class="text-sm font-bold text-green-400">{savingPhrase(rec.potential_savings_co2e_grams, formatCO2, { suffix: ' CO₂e/yr' })}</p>
 													{/if}
 													{#if rec.potential_savings_cost && rec.projected_billable_cost_annual === null}
-														<p class="text-xs text-blue-400" data-testid="row-allocated-unknown">allocated: -{formatCost(rec.potential_savings_cost)}</p>
+														<p class="text-xs text-blue-400" data-testid="row-allocated-unknown">allocated: {savingPhrase(rec.potential_savings_cost, formatCost)}</p>
 													{:else if rec.potential_savings_cost}
-														<p class="text-xs text-blue-400">-{formatCost(rec.potential_savings_cost)}</p>
+														<p class="text-xs text-blue-400">{savingPhrase(rec.potential_savings_cost, formatCost)}</p>
 													{/if}
 													{#if rec.projection_note}<p class="text-[10px] text-dark-500" data-testid="row-projection-note">{rec.projection_note}</p>{/if}
 												</div>
 											{:else if rec.projected_allocated_cost_annual > 0}
 												<!-- IMP-03: on fixed nodes the billable projection is 0; show the allocated figure, never hide it. -->
 												<div class="text-right" data-testid="row-allocated-saving">
-													<p class="text-xs text-blue-400">allocated: -{formatCost(rec.projected_allocated_cost_annual)}</p>
+													<p class="text-xs text-blue-400">allocated: {savingPhrase(rec.projected_allocated_cost_annual, formatCost)}</p>
 													{#if rec.projection_note}<p class="text-[10px] text-dark-500">{rec.projection_note}</p>{/if}
 												</div>
 											{/if}
@@ -2426,15 +2431,15 @@
 									<p class="text-sm text-dark-400 mt-2">{rec.reason}</p>
 
 									<!-- Server eligibility (F10): why no pull request, and how to fix it -->
-									{#if activeTab === 'active' && eligibility && (eligibility.blockers.length || eligibility.warnings.length)}
+									{#if activeTab === 'active' && eligibility && (diagnostics.blockers.length || diagnostics.warnings.length)}
 										<ul class="mt-2 space-y-1 text-xs" data-testid="eligibility-blockers">
-											{#each eligibility.blockers as blocker (blocker.code + blocker.message)}
+											{#each diagnostics.blockers as blocker (blocker.code + blocker.message)}
 												<li class="text-dark-400">
 													<span class="text-amber-300">{blocker.message}</span>
 													{#if blocker.fix}<span class="text-dark-500"> — {blocker.fix}</span>{/if}
 												</li>
 											{/each}
-											{#each eligibility.warnings as warning (warning.code + warning.message)}
+											{#each diagnostics.warnings as warning (warning.code + warning.message)}
 												<li class="text-dark-500">
 													<span class="text-yellow-500/80">⚠ {warning.message}</span>
 													{#if warning.fix}<span> — {warning.fix}</span>{/if}

@@ -9,6 +9,7 @@ import { load as loadChange } from '../../src/routes/changes/[plan_id]/+page.js'
 import LedgerPage from '../../src/routes/ledger/+page.svelte';
 import { load as loadLedger } from '../../src/routes/ledger/+page.js';
 import * as api from '$lib/api.js';
+import { demoMode } from '$lib/stores.js';
 
 vi.mock('$lib/api.js', () => {
 	class ApiError extends Error {
@@ -166,6 +167,25 @@ describe('/changes/[plan_id]', () => {
 		render(ChangePage, { props: { data: { planId: 'plan-1' } } });
 		expect(await screen.findByTestId('change')).toHaveTextContent('Deployment shop/api');
 		expect(screen.getByTestId('plan')).toHaveTextContent('no longer stored');
+	});
+
+	it('says once that the demo stores no plan, instead of a plan-service error', async () => {
+		api.getAutomationPlan.mockRejectedValue(new Error('Server-side automation plan service is not configured.'));
+		demoMode.set(true);
+		try {
+			render(ChangePage, { props: { data: { planId: 'plan-1' } } });
+			expect(await screen.findByTestId('plan-demo')).toHaveTextContent('Demo data');
+			expect(screen.getByTestId('plan')).not.toHaveTextContent('not configured');
+		} finally {
+			demoMode.set(false);
+		}
+	});
+
+	it('shows the plan-service error on a real install', async () => {
+		api.getAutomationPlan.mockRejectedValue(new Error('Server-side automation plan service is not configured.'));
+		render(ChangePage, { props: { data: { planId: 'plan-1' } } });
+		expect(await screen.findByRole('alert')).toHaveTextContent('not configured');
+		expect(screen.queryByTestId('plan-demo')).not.toBeInTheDocument();
 	});
 
 	it('shows not found when neither a plan nor a change exists', async () => {

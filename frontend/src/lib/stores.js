@@ -31,6 +31,12 @@ export function hasScope(user, scope) {
 	return scopes.includes('admin') || scopes.includes(scope);
 }
 
+/**
+ * True when the API runs `greenkube demo` (GET /health `demo`): synthetic data,
+ * no cluster and pull requests disabled. Never true on a real install.
+ */
+export const demoMode = writable(false);
+
 /** Services health state — populated on first load and refreshable */
 export const servicesHealth = writable(null);
 
