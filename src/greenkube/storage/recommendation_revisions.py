@@ -90,6 +90,44 @@ def is_frozen(status: Any, action_status: Any) -> bool:
     return status_text == "pr_open" or action_text in OPEN_PLAN_ACTION_STATUSES
 
 
+#: Proposal fields recorded when ignored advice changes (REC-06).
+_IGNORED_CHANGE_FIELDS = (
+    "current_cpu_request_millicores",
+    "recommended_cpu_request_millicores",
+    "current_memory_request_bytes",
+    "recommended_memory_request_bytes",
+    "potential_savings_cost",
+    "potential_savings_co2e_grams",
+)
+
+
+def ignored_advice_change(ignored: RecommendationRecord, incoming: RecommendationRecord) -> Optional[Dict[str, Any]]:
+    """What changed materially in advice the user ignored, or None (REC-06).
+
+    A restatement, or a request change within the revision hysteresis in the
+    same direction, is not a change. Anything else (a move beyond the band,
+    the opposite direction such as an OOM-driven increase after an ignored
+    decrease, other advice) returns the new proposal with the ignored one.
+    """
+    if advice_signature(ignored) == advice_signature(incoming):
+        return None
+    from greenkube.core.optimization.dedup import within_hysteresis
+
+    if within_hysteresis(incoming, ignored):
+        return None
+    details: Dict[str, Any] = {field: getattr(incoming, field) for field in _IGNORED_CHANGE_FIELDS}
+    details["ignored"] = {field: getattr(ignored, field) for field in _IGNORED_CHANGE_FIELDS}
+    details["reason"] = incoming.reason
+    return details
+
+
+def same_ignored_change(details: Dict[str, Any], previous: Any) -> bool:
+    """True when ``previous`` (a stored event's details) already records the proposal of ``details``."""
+    if not isinstance(previous, dict):
+        return False
+    return all(previous.get(field) == details.get(field) for field in _IGNORED_CHANGE_FIELDS[:4])
+
+
 def decide(existing: RecommendationRecord, incoming: RecommendationRecord, *, frozen: bool) -> RevisionDecision:
     """How an incoming proposal is written against the stored record."""
     current = max(1, int(existing.revision or 1))

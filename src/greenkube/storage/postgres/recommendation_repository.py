@@ -24,6 +24,7 @@ from ...models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
     RecommendationEvent,
+    RecommendationEventType,
     RecommendationRecord,
     RecommendationSavingsSummary,
     RecommendationStatus,
@@ -33,7 +34,9 @@ from ...models.recommendation_v2 import RecommendationRevision
 from ..base_repository import RecommendationRepository, UpsertOutcome
 from ..recommendation_mapper import (
     ACTIVE_UPSERT_COLUMNS,
+    CHANGED_WHILE_IGNORED_COLUMN,
     RECORD_COLUMNS,
+    from_json,
     record_values,
     row_to_record,
     sources_from_json,
@@ -46,10 +49,12 @@ from ..recommendation_revisions import (
     RevisionDecision,
     backfill_update,
     decide,
+    ignored_advice_change,
     is_frozen,
     prune_superseded_sql,
     revision_from_row,
     revision_values,
+    same_ignored_change,
 )
 from ..sqlite.recommendation_repository import MUTABLE_COLUMNS
 
@@ -131,6 +136,11 @@ _ACTIVE_SELECT_QUERY = (
     "ORDER BY id LIMIT 1"
 )
 
+#: The latest ignored row of a record identity (REC-06).
+_IGNORED_SELECT_QUERY = _ACTIVE_SELECT_QUERY.replace(
+    "status = 'active' ORDER BY id", "status = 'ignored' ORDER BY id DESC"
+)
+
 #: The open pull request, else the latest recorded change, of a target (pull request first).
 _RECORDED_SELECT_QUERY = """
     SELECT * FROM recommendation_history
@@ -144,6 +154,14 @@ _RECORDED_SELECT_QUERY = """
     ORDER BY (status = 'pr_open') DESC, applied_at DESC NULLS LAST, id DESC
     LIMIT 1
 """
+
+
+#: Statuses whose row retires its open twins first (one open row per fingerprint, REC-06).
+_OPEN_TWIN_STATUSES = frozenset({RecommendationStatus.ACTIVE.value, RecommendationStatus.IGNORED.value})
+
+
+class _TransitionRefused(Exception):
+    """Rolls back a compare-and-swap transition that must not be applied."""
 
 
 class PostgresRecommendationRepository(RecommendationRepository):
@@ -190,7 +208,8 @@ class PostgresRecommendationRepository(RecommendationRepository):
 
         Uses IS NOT DISTINCT FROM for NULL-safe matching so namespace, node,
         pod, and workload recommendations are all deduplicated on the right target.
-        Ignored recommendations are left untouched. A recommendation whose pull
+        Ignored recommendations are left untouched and the same advice is never
+        inserted again beside them (REC-06). A recommendation whose pull
         request is open (``pr_open``) is frozen: its baseline and proposal are
         never rewritten and no duplicate is inserted. A matching applied
         recommendation only has ``updated_at`` refreshed (and, for issues that
@@ -315,6 +334,20 @@ class PostgresRecommendationRepository(RecommendationRepository):
             else:
                 await self._settle_revision(conn, stored, False, now)
             return UpsertOutcome(r.fingerprint, "pr_open", recorded_row["id"], "held behind an open pull request")
+        ignored_row = await conn.fetchrow(
+            _IGNORED_SELECT_QUERY,
+            r.fingerprint,
+            r.scope or "pod",
+            r.namespace,
+            r.pod_name,
+            r.container_name,
+            r.target_node,
+            type_val,
+        )
+        if ignored_row is not None:
+            # REC-06: the user ignored this advice; the next scan never offers it again.
+            await self._note_ignored_advice(conn, row_to_record(ignored_row), r, now)
+            return UpsertOutcome(r.fingerprint, "ignored", ignored_row["id"], "ignored by the user")
         previous_id: Optional[int] = None
         if recorded_row and is_rightsizing_type(recorded_row["type"]):
             # REC-01: a recorded rightsizing only absorbs a restatement of its change.
@@ -374,6 +407,78 @@ class PostgresRecommendationRepository(RecommendationRepository):
             # Lost a race with a concurrent upsert; the row already exists.
             return UpsertOutcome(r.fingerprint, "conflict")
         return UpsertOutcome(r.fingerprint, "inserted", inserted_id)
+
+    @staticmethod
+    async def _note_ignored_advice(
+        conn, ignored: RecommendationRecord, incoming: RecommendationRecord, now: datetime
+    ) -> None:
+        """Keeps an ignored row alive and records once advice that changed materially since (REC-06)."""
+        await conn.execute(
+            "UPDATE recommendation_history SET updated_at = $1, expires_at = COALESCE($2, expires_at) "
+            "WHERE id = $3 AND status = 'ignored'",
+            now,
+            incoming.expires_at,
+            ignored.id,
+        )
+        details = ignored_advice_change(ignored, incoming)
+        if details is None:
+            return
+        last = await conn.fetchval(
+            "SELECT payload FROM recommendation_events WHERE recommendation_id = $1 AND event_type = $2 "
+            "ORDER BY id DESC LIMIT 1",
+            ignored.id,
+            RecommendationEventType.CHANGED_WHILE_IGNORED.value,
+        )
+        if last is not None and same_ignored_change(details, (from_json(last) or {}).get("details")):
+            return
+        await conn.execute(
+            "INSERT INTO recommendation_events (recommendation_id, event_type, actor, payload, created_at) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            ignored.id,
+            RecommendationEventType.CHANGED_WHILE_IGNORED.value,
+            "system",
+            json.dumps({"version": 2, "details": details}, default=str),
+            now,
+        )
+        logger.info("Advice of ignored recommendation %s changed since it was ignored.", ignored.id)
+
+    @staticmethod
+    async def _clear_open_twins(conn, rec_id: int, status: object) -> bool:
+        """Retires the open twins of a row about to become active or ignored (REC-06).
+
+        Must run inside a transaction. One fingerprint has at most one active,
+        ignored or pr_open row (migration 0132). Ignoring an old stale row
+        while the same advice is active again marks that active twin
+        ``stale`` (reason ``superseded_by_ignored``). Returns False, changing
+        nothing, when the same advice is in an open pull request.
+        """
+        status_text = str(getattr(status, "value", status))
+        if status_text not in _OPEN_TWIN_STATUSES:
+            return True
+        twins = await conn.fetch(
+            "SELECT t.id, t.status FROM recommendation_history r "
+            "JOIN recommendation_history t ON t.fingerprint = r.fingerprint AND t.id <> r.id "
+            "WHERE r.id = $1 AND t.status IN ('active', 'ignored', 'pr_open') FOR UPDATE OF t",
+            rec_id,
+        )
+        if any(twin["status"] == RecommendationStatus.PR_OPEN.value for twin in twins):
+            return False
+        now = datetime.now(timezone.utc)
+        for twin in twins:
+            await conn.execute(
+                "UPDATE recommendation_history SET status = 'stale', updated_at = $1 WHERE id = $2", now, twin["id"]
+            )
+            await conn.execute(
+                "INSERT INTO recommendation_events (recommendation_id, event_type, actor, payload, created_at) "
+                "VALUES ($1, $2, $3, $4, $5)",
+                twin["id"],
+                RecommendationEventType.STALE.value,
+                "system",
+                json.dumps({"reason": "superseded_by_ignored", "superseded_by": rec_id}),
+                now,
+            )
+            logger.info("Recommendation %s superseded by its twin %s (%s).", twin["id"], rec_id, status_text)
+        return True
 
     @staticmethod
     async def _queue_revision(
@@ -688,7 +793,7 @@ class PostgresRecommendationRepository(RecommendationRepository):
         """
         async with self.db_manager.connection_scope() as conn:
             params: list = []
-            query = "SELECT * FROM recommendation_history WHERE status = 'ignored'"
+            query = f"SELECT *, {CHANGED_WHILE_IGNORED_COLUMN} FROM recommendation_history WHERE status = 'ignored'"
 
             if namespace:
                 query += " AND namespace = $1"
@@ -851,7 +956,9 @@ class PostgresRecommendationRepository(RecommendationRepository):
         params = [_encode_value(value) for value in filtered.values()]
         params.append(rec_id)
 
-        async with self.db_manager.connection_scope() as conn:
+        async with self.db_manager.connection_scope() as conn, conn.transaction():
+            if "status" in filtered and not await self._clear_open_twins(conn, rec_id, filtered["status"]):
+                raise ValueError(f"Recommendation {rec_id}: the same advice is in an open pull request.")
             updated = await conn.fetchrow(
                 f"UPDATE recommendation_history SET {set_clause} WHERE id = ${len(params)} RETURNING *",
                 *params,
@@ -912,25 +1019,30 @@ class PostgresRecommendationRepository(RecommendationRepository):
             params.append([_encode_value(status) for status in expected_statuses])
             where += f" AND status = ANY(${len(params)}::text[])"
         async with self.db_manager.connection_scope() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    f"UPDATE recommendation_history SET {assignments} WHERE {where} RETURNING *",
-                    *params,
-                )
-                if row is None:
-                    if expected_statuses is not None:
-                        return None
-                    raise ValueError(f"Recommendation {rec_id} not found.")
-                await conn.execute(
-                    """INSERT INTO recommendation_events
+            try:
+                async with conn.transaction():
+                    if "status" in filtered and not await self._clear_open_twins(conn, rec_id, filtered["status"]):
+                        raise _TransitionRefused()
+                    row = await conn.fetchrow(
+                        f"UPDATE recommendation_history SET {assignments} WHERE {where} RETURNING *",
+                        *params,
+                    )
+                    if row is None:
+                        if expected_statuses is not None:
+                            raise _TransitionRefused()
+                        raise ValueError(f"Recommendation {rec_id} not found.")
+                    await conn.execute(
+                        """INSERT INTO recommendation_events
                     (recommendation_id, event_type, actor, payload, created_at)
                     VALUES ($1, $2, $3, $4, $5)""",
-                    rec_id,
-                    event_type,
-                    actor,
-                    json.dumps(payload, default=str),
-                    now,
-                )
+                        rec_id,
+                        event_type,
+                        actor,
+                        json.dumps(payload, default=str),
+                        now,
+                    )
+            except _TransitionRefused:
+                return None
             return row_to_record(row)
 
     async def get_events(self, rec_id: int) -> List[RecommendationEvent]:
@@ -990,7 +1102,9 @@ class PostgresRecommendationRepository(RecommendationRepository):
             The updated RecommendationRecord.
         """
         now = datetime.now(timezone.utc)
-        async with self.db_manager.connection_scope() as conn:
+        async with self.db_manager.connection_scope() as conn, conn.transaction():
+            if not await self._clear_open_twins(conn, rec_id, "ignored"):
+                raise ValueError(f"Recommendation {rec_id}: the same advice is in an open pull request.")
             updated = await conn.fetchrow(
                 """
                 UPDATE recommendation_history SET
@@ -1020,7 +1134,9 @@ class PostgresRecommendationRepository(RecommendationRepository):
             The updated RecommendationRecord.
         """
         now = datetime.now(timezone.utc)
-        async with self.db_manager.connection_scope() as conn:
+        async with self.db_manager.connection_scope() as conn, conn.transaction():
+            if not await self._clear_open_twins(conn, rec_id, "active"):
+                raise ValueError(f"Recommendation {rec_id}: the same advice is in an open pull request.")
             updated = await conn.fetchrow(
                 """
                 UPDATE recommendation_history SET

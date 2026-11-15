@@ -256,6 +256,8 @@ class RecommendationEventType(str, Enum):
     FAILED = "failed"
     #: A recommendation withdrawn because its evidence no longer holds (migration 0063).
     RETIRED = "retired"
+    #: The advice of an ignored recommendation changed materially in a later scan (REC-06).
+    CHANGED_WHILE_IGNORED = "changed_while_ignored"
 
 
 class RiskLevel(str, Enum):
@@ -559,6 +561,13 @@ class RecommendationRecord(BaseModel):
     # Ignore lifecycle fields
     ignored_at: Optional[datetime] = Field(None, description="When the recommendation was ignored.")
     ignored_reason: Optional[str] = Field(None, description="Reason for ignoring the recommendation.")
+    changed_since_ignored: Optional[dict] = Field(
+        None,
+        description=(
+            "On an ignored recommendation: the latest advice a scan produced for it that differs materially "
+            "from the ignored proposal (REC-06), from its changed_while_ignored event. Never persisted."
+        ),
+    )
     # Link to the applied change this advice follows (REC-01)
     previous_recommendation_id: Optional[int] = Field(
         None,

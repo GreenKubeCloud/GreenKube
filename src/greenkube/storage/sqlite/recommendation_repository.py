@@ -26,6 +26,7 @@ from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
     RecommendationEvent,
+    RecommendationEventType,
     RecommendationRecord,
     RecommendationSavingsSummary,
     RecommendationStatus,
@@ -35,7 +36,9 @@ from greenkube.models.recommendation_v2 import RecommendationRevision
 from greenkube.storage.base_repository import RecommendationRepository, UpsertOutcome
 from greenkube.storage.recommendation_mapper import (
     ACTIVE_UPSERT_COLUMNS,
+    CHANGED_WHILE_IGNORED_COLUMN,
     RECORD_COLUMNS,
+    from_json,
     record_values,
     row_to_record,
     sources_from_json,
@@ -48,10 +51,12 @@ from greenkube.storage.recommendation_revisions import (
     RevisionDecision,
     backfill_update,
     decide,
+    ignored_advice_change,
     is_frozen,
     prune_superseded_sql,
     revision_from_row,
     revision_values,
+    same_ignored_change,
 )
 from greenkube.utils.date_utils import to_iso_z
 
@@ -59,6 +64,9 @@ logger = logging.getLogger(__name__)
 
 #: Status predicate of the active listing, optionally with recommendations whose PR is open.
 _ACTIVE_LISTING_PREDICATE = {False: "status = 'active'", True: "status IN ('active', 'pr_open')"}
+
+#: Statuses whose row retires its open twins first (one open row per fingerprint, REC-06).
+_OPEN_TWIN_STATUSES = frozenset({RecommendationStatus.ACTIVE.value, RecommendationStatus.IGNORED.value})
 
 #: Default order of active lists (E2, BUG-20): ranking score, then projected
 #: cost savings, NULLs last on both backends, then a stable id tie-break.
@@ -254,7 +262,8 @@ class SQLiteRecommendationRepository(RecommendationRepository):
     ) -> int:
         """Inserts or updates active recommendations using their full target identity.
 
-        Ignored recommendations are left untouched. A recommendation whose pull
+        Ignored recommendations are left untouched and the same advice is never
+        inserted again beside them (REC-06). A recommendation whose pull
         request is open (``pr_open``) is frozen: its baseline and proposal are
         never rewritten and no duplicate is inserted. A matching applied
         recommendation only has ``updated_at`` refreshed (and, for issues that
@@ -362,6 +371,17 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                 await self._settle_revision(conn, stored, False, now)
             return UpsertOutcome(r.fingerprint, "pr_open", pr_open_row["id"], "held behind an open pull request")
 
+        ignored_where, ignored_params = _identity_where_clause(r, status=RecommendationStatus.IGNORED.value)
+        cursor = await conn.execute(
+            f"SELECT * FROM recommendation_history WHERE {ignored_where} ORDER BY id DESC LIMIT 1",
+            ignored_params,
+        )
+        ignored_row = await cursor.fetchone()
+        if ignored_row:
+            # REC-06: the user ignored this advice; the next scan never offers it again.
+            await self._note_ignored_advice(conn, row_to_record(ignored_row), r, now)
+            return UpsertOutcome(r.fingerprint, "ignored", ignored_row["id"], "ignored by the user")
+
         recorded_where, recorded_params = _identity_where_clause(r, status=RECORDED_CHANGE_STATUSES)
         cursor = await conn.execute(
             f"SELECT * FROM recommendation_history WHERE {recorded_where} "
@@ -426,6 +446,84 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             values["previous_change_id"] = await self._change_of(conn, previous_id)
         cursor = await conn.execute(insert_query, tuple(values[column] for column in RECORD_COLUMNS))
         return UpsertOutcome(r.fingerprint, "inserted", cursor.lastrowid)
+
+    @staticmethod
+    async def _note_ignored_advice(
+        conn, ignored: RecommendationRecord, incoming: RecommendationRecord, now: str
+    ) -> None:
+        """Keeps an ignored row alive and records once advice that changed materially since (REC-06)."""
+        await conn.execute(
+            "UPDATE recommendation_history SET updated_at = ?, expires_at = COALESCE(?, expires_at) "
+            "WHERE id = ? AND status = 'ignored'",
+            (now, to_iso_z(incoming.expires_at) if incoming.expires_at else None, ignored.id),
+        )
+        details = ignored_advice_change(ignored, incoming)
+        if details is None:
+            return
+        cursor = await conn.execute(
+            "SELECT payload FROM recommendation_events WHERE recommendation_id = ? AND event_type = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (ignored.id, RecommendationEventType.CHANGED_WHILE_IGNORED.value),
+        )
+        last = await cursor.fetchone()
+        if last is not None and same_ignored_change(details, (from_json(last["payload"]) or {}).get("details")):
+            return
+        await conn.execute(
+            "INSERT INTO recommendation_events (recommendation_id, event_type, actor, payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                ignored.id,
+                RecommendationEventType.CHANGED_WHILE_IGNORED.value,
+                "system",
+                json.dumps({"version": 2, "details": details}, default=str),
+                now,
+            ),
+        )
+        logger.info("Advice of ignored recommendation %s changed since it was ignored.", ignored.id)
+
+    @staticmethod
+    async def _clear_open_twins(conn, rec_id: int, status: object) -> bool:
+        """Retires the open twins of a row about to become active or ignored (REC-06).
+
+        One fingerprint has at most one active, ignored or pr_open row
+        (migration 0132). Ignoring an old stale row while the same advice is
+        active again marks that active twin ``stale`` (reason
+        ``superseded_by_ignored``). Returns False, changing nothing, when the
+        same advice is in an open pull request: the caller refuses the change.
+        """
+        status_text = str(getattr(status, "value", status))
+        if status_text not in _OPEN_TWIN_STATUSES:
+            return True
+        cursor = await conn.execute("SELECT fingerprint FROM recommendation_history WHERE id = ?", (rec_id,))
+        row = await cursor.fetchone()
+        if row is None or row[0] is None:
+            return True
+        cursor = await conn.execute(
+            "SELECT id, status FROM recommendation_history "
+            "WHERE fingerprint = ? AND id <> ? AND status IN ('active', 'ignored', 'pr_open')",
+            (row[0], rec_id),
+        )
+        twins = list(await cursor.fetchall())
+        if any(twin[1] == RecommendationStatus.PR_OPEN.value for twin in twins):
+            return False
+        now = to_iso_z(datetime.now(timezone.utc))
+        for twin in twins:
+            await conn.execute(
+                "UPDATE recommendation_history SET status = 'stale', updated_at = ? WHERE id = ?", (now, twin[0])
+            )
+            await conn.execute(
+                "INSERT INTO recommendation_events (recommendation_id, event_type, actor, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    twin[0],
+                    RecommendationEventType.STALE.value,
+                    "system",
+                    json.dumps({"reason": "superseded_by_ignored", "superseded_by": rec_id}),
+                    now,
+                ),
+            )
+            logger.info("Recommendation %s superseded by its twin %s (%s).", twin[0], rec_id, status_text)
+        return True
 
     @staticmethod
     async def _change_of(conn, recommendation_id: int) -> Optional[str]:
@@ -766,7 +864,7 @@ class SQLiteRecommendationRepository(RecommendationRepository):
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
             params: list = []
-            query = "SELECT * FROM recommendation_history WHERE status = 'ignored'"
+            query = f"SELECT *, {CHANGED_WHILE_IGNORED_COLUMN} FROM recommendation_history WHERE status = 'ignored'"
 
             if namespace:
                 query += " AND namespace = ?"
@@ -955,6 +1053,8 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             cursor = await conn.execute("SELECT id FROM recommendation_history WHERE id = ?", (rec_id,))
             if not await cursor.fetchone():
                 raise ValueError(f"Recommendation {rec_id} not found.")
+            if "status" in filtered and not await self._clear_open_twins(conn, rec_id, filtered["status"]):
+                raise ValueError(f"Recommendation {rec_id}: the same advice is in an open pull request.")
             await conn.execute(
                 f"UPDATE recommendation_history SET {set_clause} WHERE id = ?",
                 params,
@@ -1019,6 +1119,9 @@ class SQLiteRecommendationRepository(RecommendationRepository):
         async with self.db_manager.connection_scope() as conn:
             conn.row_factory = aiosqlite.Row
             try:
+                if "status" in filtered and not await self._clear_open_twins(conn, rec_id, filtered["status"]):
+                    await conn.rollback()
+                    return None
                 cursor = await conn.execute(
                     f"UPDATE recommendation_history SET {', '.join(f'{k} = ?' for k in filtered)} WHERE {where}",
                     params,
@@ -1110,6 +1213,8 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             cursor = await conn.execute("SELECT id FROM recommendation_history WHERE id = ?", (rec_id,))
             if not await cursor.fetchone():
                 raise ValueError(f"Recommendation {rec_id} not found.")
+            if not await self._clear_open_twins(conn, rec_id, "ignored"):
+                raise ValueError(f"Recommendation {rec_id}: the same advice is in an open pull request.")
 
             await conn.execute(
                 """
@@ -1143,6 +1248,8 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             cursor = await conn.execute("SELECT id FROM recommendation_history WHERE id = ?", (rec_id,))
             if not await cursor.fetchone():
                 raise ValueError(f"Recommendation {rec_id} not found.")
+            if not await self._clear_open_twins(conn, rec_id, "active"):
+                raise ValueError(f"Recommendation {rec_id}: the same advice is in an open pull request.")
 
             await conn.execute(
                 """
