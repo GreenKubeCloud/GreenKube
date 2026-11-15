@@ -855,9 +855,12 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         POD_COST.labels(**labels).set(m.total_cost)
         POD_ENERGY.labels(**labels).set(m.joules)
         POD_CPU_REQUEST.labels(**labels).set(m.cpu_request)
-        POD_CPU_USAGE.labels(**labels).set(m.cpu_usage_millicores or 0)
+        # NULL usage means no sample at the step (COL-03): no series, never a 0.
+        if m.cpu_usage_millicores is not None:
+            POD_CPU_USAGE.labels(**labels).set(m.cpu_usage_millicores)
         POD_MEMORY_REQUEST.labels(**labels).set(m.memory_request)
-        POD_MEMORY_USAGE.labels(**labels).set(m.memory_usage_bytes or 0)
+        if m.memory_usage_bytes is not None:
+            POD_MEMORY_USAGE.labels(**labels).set(m.memory_usage_bytes)
         POD_NETWORK_RX.labels(**labels).set(m.network_receive_bytes or 0.0)
         POD_NETWORK_TX.labels(**labels).set(m.network_transmit_bytes or 0.0)
         POD_DISK_READ.labels(**labels).set(m.disk_read_bytes or 0.0)

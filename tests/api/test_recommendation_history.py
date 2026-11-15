@@ -106,6 +106,7 @@ class TestRecommendationsPersistence:
             total_cost=0.05,
             co2e_grams=0.0,
             joules=100.0,
+            cpu_usage_millicores=0,
             cpu_request=100,
             memory_request=128 * 1024 * 1024,
             timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
