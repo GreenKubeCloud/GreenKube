@@ -7,13 +7,15 @@
 # Every merged change is recorded (/changes, /ledger?change=...) with its
 # baseline snapshot and measured against a counterfactual (roadmap C1-C5)
 # instead of the quickstart's 6-minute verifier. Production needs a 7-day
-# baseline and a 7-day post-window. Here the baseline is 6 hours and the
-# post-window 72 minutes after a 3-minute warm-up, so a change is decided about
-# 80 minutes after the merge (the decision waits one more hour for late
-# samples). A fresh cluster has no baseline for the same hours of the week:
-# expect an honest "inconclusive" outcome, not a measured saving. The
-# recommendation then ends "applied"/"inconclusive", so `make e2e` needs
-# E2E_ALLOW_REGRESSION=1 (and E2E_TIMEOUT_VERDICT above 2 hours) with this file.
+# baseline and a post-window of at least 5 days. Here the baseline is 6 hours
+# and the post-window 72 minutes after a 3-minute warm-up, so a change is
+# decided about 80 minutes after the merge (the decision waits one more hour
+# for late samples). Accelerated measurements bucket the rows into 5-minute
+# slots and compare them with the baseline mean (`flat_mean_accelerated`, demo
+# thresholds: 6 post slots), so the outcome is decided (realized, not realized
+# or inconclusive when the interval straddles the noise floor), and every such
+# measurement records `representative: false`: it shows the pipeline end to
+# end (/changes, /ledger, drift), not a representative saving.
 #
 # DO NOT use these values in production: accelerated windows are rejected unless
 # `accelerated: true` is set, and the controller logs a warning when it is.

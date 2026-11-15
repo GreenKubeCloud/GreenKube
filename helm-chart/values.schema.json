@@ -335,8 +335,8 @@
                 "priorWeekCv": {"type": "number", "minimum": 0, "maximum": 1}
               },
               "if": {"not": {"properties": {"accelerated": {"const": true}}, "required": ["accelerated"]}},
-              "then": {"properties": {"preWindowDays": {"minimum": 7}}},
-              "else": {"properties": {"preWindowDays": {"minimum": 0.041666}}}
+              "then": {"properties": {"preWindowDays": {"minimum": 7}, "postWindowDays": {"minimum": 5}}},
+              "else": {"properties": {"preWindowDays": {"minimum": 0.041666}, "postWindowDays": {"minimum": 0.020833}}}
             },
             "verification": {
               "type": "object",

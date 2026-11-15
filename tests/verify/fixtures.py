@@ -51,6 +51,7 @@ class Settings:
     CHANGE_MEASUREMENT_MIN_COVERAGE: float = 0.8
     CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: int = 300
     CHANGE_MEASUREMENT_EPSILON_RATIO: float = 0.02
+    CHANGE_MEASUREMENT_ACCELERATED: bool = False
     RECOMMENDATION_APPLY_TOLERANCE: float = 0.25
     CURRENCY: str = "USD"
     extra: dict = field(default_factory=dict)

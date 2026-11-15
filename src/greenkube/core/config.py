@@ -105,6 +105,10 @@ def parse_repository_allowlist(value: str) -> tuple[str, ...]:
 
 #: Shortest baseline window (days) an accelerated (demo/quickstart) change measurement accepts: 1 hour.
 ACCELERATED_MIN_PRE_WINDOW_DAYS = 1 / 24
+#: Shortest post-change window (days): a verdict needs 5 complete days of aligned hours (MEA-10).
+MIN_POST_WINDOW_DAYS = 5.0
+#: Shortest accelerated post-change window (days): six 5-minute slots, 30 minutes (MEA-10).
+ACCELERATED_MIN_POST_WINDOW_DAYS = 1 / 48
 
 
 def _scan_interval_seconds(value: str) -> int:
@@ -507,7 +511,8 @@ class Config(BaseSettings):
     # Baseline window (days) ending at the PR merge or plan approval; at least 7 so every hour of the week matches
     # (at least 1 hour with CHANGE_MEASUREMENT_ACCELERATED, see below).
     CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: float = Field(7.0, gt=0)
-    # Post-change window (days) starting after the rollout and its warm-up.
+    # Post-change window (days) starting after the rollout and its warm-up; at least 5 (a verdict needs
+    # 5 days of aligned hours), at least 30 minutes with CHANGE_MEASUREMENT_ACCELERATED.
     CHANGE_MEASUREMENT_POST_WINDOW_DAYS: float = Field(7.0, gt=0)
     # Hours after rollout completion excluded from the post-window.
     CHANGE_MEASUREMENT_WARMUP_HOURS: float = Field(1.0, ge=0)
@@ -1042,10 +1047,25 @@ class Config(BaseSettings):
                     "allows shorter demo windows)."
                 )
             )
+        # MEA-10: a post-window shorter than the verdict's minimum is inconclusive by construction.
+        minimum_post_window = (
+            ACCELERATED_MIN_POST_WINDOW_DAYS if self.CHANGE_MEASUREMENT_ACCELERATED else MIN_POST_WINDOW_DAYS
+        )
+        if self.CHANGE_MEASUREMENT_POST_WINDOW_DAYS < minimum_post_window - 1e-9:
+            raise ValueError(
+                f"CHANGE_MEASUREMENT_POST_WINDOW_DAYS must be at least {minimum_post_window:g} "
+                + (
+                    "(30 minutes) with CHANGE_MEASUREMENT_ACCELERATED."
+                    if self.CHANGE_MEASUREMENT_ACCELERATED
+                    else "(a verdict needs 5 complete days of aligned post-change hours; "
+                    "CHANGE_MEASUREMENT_ACCELERATED allows shorter demo windows)."
+                )
+            )
         if self.CHANGE_MEASUREMENT_ACCELERATED:
             logging.getLogger(__name__).warning(
-                "CHANGE_MEASUREMENT_ACCELERATED is on: change measurements use demo windows and are not "
-                "representative. Do not use it in production."
+                "CHANGE_MEASUREMENT_ACCELERATED is on: change measurements use demo windows, 5-minute slots, "
+                "a flat baseline-mean counterfactual and demo thresholds; their verdicts are labelled "
+                "representative=false. Do not use it in production."
             )
 
         # Cross-field validation

@@ -665,7 +665,7 @@ class ChangeMeasurementService:
 
         plan = self._strategy(change).required_windows(change, self.settings)
         rows = await self._read_workload(change.target, plan.pre)
-        buckets = hourly_buckets(rows, plan.pre, self._step())
+        buckets = hourly_buckets(rows, plan.pre, self._step(), slot_seconds=self.settings.slot_seconds)
         collected = await self._collect_load(
             change, plan.pre, buckets, retry_until=ensure_utc(change.created_at) + LOAD_DRIVER_RETRY, now=now
         )
@@ -731,7 +731,8 @@ class ChangeMeasurementService:
         hours = (ensure_utc(window.end) - ensure_utc(window.start)).total_seconds() / 3600.0
         return freeze_health(
             gates,
-            replica_hours=math.fsum(replica_values) if replica_values else None,
+            # A bucket is one hour, or one slot of accelerated demo windows (MEA-10).
+            replica_hours=math.fsum(replica_values) * self.settings.slot_seconds / 3600.0 if replica_values else None,
             hours=hours,
             oom_restarts=oom_restarts,
         )
@@ -1084,7 +1085,7 @@ class ChangeMeasurementService:
         strategy = self._strategy(change)
         snapshot = await self._ensure_snapshot(change, now)
         post_rows = await self._read_workload(change.target, plan.post)
-        post_buckets = hourly_buckets(post_rows, plan.post, self._step())
+        post_buckets = hourly_buckets(post_rows, plan.post, self._step(), slot_seconds=self.settings.slot_seconds)
         collected = await self._collect_load(
             change,
             plan.post,
@@ -1140,7 +1141,7 @@ class ChangeMeasurementService:
                 ensure_utc(plan.post.start),
                 ensure_utc(plan.post.end),
                 baseline=snapshot.health,
-                post_replica_hours=_replica_hours(post_buckets),
+                post_replica_hours=_replica_hours(post_buckets, self.settings.slot_seconds),
             )
             if awaiting
             else ([], None)
@@ -1557,10 +1558,10 @@ def _excused_baseline_restarts(baseline: Mapping[str, Any], relaxed: Iterable[Op
     return total
 
 
-def _replica_hours(buckets: Sequence[Any]) -> Optional[float]:
-    """Sum of the hourly replica counts of ``buckets`` (``None`` without any)."""
+def _replica_hours(buckets: Sequence[Any], slot_seconds: int = 3600) -> Optional[float]:
+    """Replica-hours of ``buckets``: their replica counts times the bucket length (``None`` without any)."""
     values = [bucket.replicas for bucket in buckets if getattr(bucket, "replicas", None) is not None]
-    return math.fsum(values) if values else None
+    return math.fsum(values) * slot_seconds / 3600.0 if values else None
 
 
 def _quantity_estimate(

@@ -35,6 +35,7 @@ from greenkube.verify.service import DECISION_GRACE, LOAD_DRIVER_RETRY, UNAVAILA
 from greenkube.verify.strategy import HOURS_PER_YEAR
 from tests.verify.fixtures import (  # pyrefly: ignore[missing-import]
     Scenario,
+    Settings,
     change_event,
     hour_now,
     record_status,
@@ -673,3 +674,43 @@ async def test_a_realized_change_answers_a_late_re_measurement_request_explicitl
     ]
     latest = max(rows, key=lambda row: row.sequence)
     assert latest.sequence == 2 and latest.reasons[0].startswith("re-measurement not started")
+
+
+async def test_accelerated_demo_windows_decide_through_the_service(database):
+    """MEA-10: the quickstart windows (6 h baseline, 72 min post, 30 s samples) reach a decided verdict."""
+    settings = Settings(
+        PROMETHEUS_QUERY_RANGE_STEP="30s",
+        CHANGE_MEASUREMENT_PRE_WINDOW_DAYS=0.25,
+        CHANGE_MEASUREMENT_POST_WINDOW_DAYS=0.05,
+        CHANGE_MEASUREMENT_WARMUP_HOURS=0.05,
+        CHANGE_MEASUREMENT_ACCELERATED=True,
+    )
+    scenario = Scenario(database, settings)
+    completed = scenario.completed + timedelta(minutes=7, seconds=30)
+    scenario.completed = completed
+    scenario.decision = completed - timedelta(minutes=20)
+    step = timedelta(seconds=30)
+    scenario.add_rows(TimeWindow(start=completed - timedelta(hours=7), end=completed), step=step)
+    scenario.add_rows(
+        TimeWindow(start=completed, end=completed + timedelta(hours=3)),
+        cpu_request=300,
+        memory_request=1024**3,
+        step=step,
+    )
+    change, applied = await scenario.apply()
+    await scenario.service.run_due(now=completed + timedelta(minutes=10))
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.post_window_end is not None
+    await scenario.service.run_due(now=status.post_window_end + DECISION_GRACE)
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.REALIZED
+    (measurement,) = await scenario.changes.list_measurements(change.change_id)
+    cost = measurement.estimate("allocated_cost")
+    assert cost is not None and cost.method == "flat_mean_accelerated"
+    assert cost.rate_per_hour == pytest.approx(2 * 0.7 * 0.08 + 2 * 1.0 * 0.01, rel=0.05)
+    assert measurement.confidence > 0
+    assert measurement.counterfactual_params["representative"] is False
+    snapshot = await scenario.changes.get_snapshot_for_change(change.change_id)
+    assert snapshot is not None and snapshot.verify_digest()
+    # Replica-hours of 5-minute slots: 2 replicas over the 6-hour baseline.
+    assert snapshot.health["replica_hours"] == pytest.approx(12.0, rel=0.02)

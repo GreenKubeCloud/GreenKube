@@ -47,8 +47,8 @@ config:
     # Change measurement (counterfactual, roadmap C3) needs a 7-day baseline and
     # a 7-day post-window; the quickstart decides with the verifier above, in
     # minutes. To record merged changes on /changes and measure them on
-    # accelerated demo windows instead (decided about 80 minutes after the merge,
-    # usually "inconclusive" on a fresh cluster), add
+    # accelerated demo windows instead (decided about 80 minutes after the merge
+    # on demo thresholds, labelled representative=false), add
     #   -f docs/examples/quickstart/values-change-measurement.yaml
     changeMeasurement:
       enabled: false

@@ -161,6 +161,27 @@ class TestChangeMeasurementWindowConfig:
             with pytest.raises(ValueError, match="CHANGE_MEASUREMENT_PRE_WINDOW_DAYS"):
                 Config(_env_file=None)
 
+    @pytest.mark.parametrize("value", ["0.025", "1", "4.9"])
+    def test_a_post_window_too_short_for_a_verdict_is_rejected(self, value):
+        """MEA-10: a verdict needs 5 days of aligned post-window hours; shorter windows need the demo flag."""
+        with patch.dict(os.environ, {"CHANGE_MEASUREMENT_POST_WINDOW_DAYS": value}, clear=True):
+            with pytest.raises(ValueError, match="CHANGE_MEASUREMENT_POST_WINDOW_DAYS"):
+                Config(_env_file=None)
+
+    @pytest.mark.parametrize(("value", "accepted"), [("0.025", True), ("0.05", True), ("0.01", False)])
+    def test_accelerated_post_windows_need_thirty_minutes(self, value, accepted):
+        env = {
+            "CHANGE_MEASUREMENT_POST_WINDOW_DAYS": value,
+            "CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": "0.25",
+            "CHANGE_MEASUREMENT_ACCELERATED": "true",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            if accepted:
+                assert Config(_env_file=None).CHANGE_MEASUREMENT_POST_WINDOW_DAYS == float(value)
+            else:
+                with pytest.raises(ValueError, match="CHANGE_MEASUREMENT_POST_WINDOW_DAYS"):
+                    Config(_env_file=None)
+
     def test_acceleration_is_off_by_default(self):
         with patch.dict(os.environ, {}, clear=True):
             cfg = Config(_env_file=None)
