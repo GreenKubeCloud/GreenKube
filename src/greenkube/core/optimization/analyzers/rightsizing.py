@@ -384,6 +384,21 @@ def skipped_increase(config: "Config", summary: "WorkloadUsageSummary", resource
     return reason if triggered else None
 
 
+def decrease_floor(config: "Config", p99: float, *, unit: int) -> int:
+    """Lowest request a decrease may propose so the next scan proposes nothing (REC-03).
+
+    The increase rule fires when p99 exceeds ``RIGHTSIZING_INCREASE_THRESHOLD`` of
+    the request and sizes to p99 x ``RIGHTSIZING_HEADROOM``. A decrease target at
+    or above both ``p99 / threshold`` (strictly) and that increase target can
+    neither fire the increase nor be undercut by a later decrease, so a decrease,
+    increase, decrease cycle is impossible. ``unit`` is the rounding step (1
+    millicore, or 1 MiB for memory).
+    """
+    trigger = math.floor(p99 / _threshold(config) / unit) + 1
+    increase_target = math.ceil(p99 * config.RIGHTSIZING_HEADROOM / unit - 1e-6)
+    return int(max(trigger, increase_target, 1)) * unit
+
+
 def _capped(target: int, request: int, factor: Optional[float]) -> int:
     if factor is None:
         return target
@@ -441,12 +456,21 @@ def cpu_proposal(
 
     if stats.avg / request >= config.RIGHTSIZING_CPU_THRESHOLD or not _coverage_ok(config, summary):
         return None
-    raw = balanced_rightsizing_target(config, stats.avg, stats.max, stats.p95)
+    balanced = balanced_rightsizing_target(config, stats.avg, stats.max, stats.p95)
+    floor = decrease_floor(config, stats.p99, unit=1)
+    raw = max(balanced, floor)
     proposed = max(raw, config.RECOMMENDATION_MIN_CPU_MILLICORES)
     if proposed >= request:
         return None
     proposal = RightsizingProposal(
-        "cpu", "decrease", request, proposed, raw, ["low_average_usage"], basis="balanced", stats=stats
+        "cpu",
+        "decrease",
+        request,
+        proposed,
+        raw,
+        ["low_average_usage"],
+        basis="balanced" if raw == balanced else "p99_floor",
+        stats=stats,
     )
     proposal.limit_advice = _cpu_limit_advice(policy, summary, proposed, throttling)
     return proposal
@@ -557,6 +581,14 @@ def memory_proposal(
             peak = increase_stats.max * MEMORY_MAX_FACTOR
             if peak > target:
                 target, basis = peak, "observed_max"
+        if policy == "memory_equals_request":
+            # The limit will equal the new request: it must cover the observed peak below its
+            # pressure line, or the increase itself would cause the OOM kills (REC-03).
+            peak = _round_up_mib(
+                max(increase_stats.max * MEMORY_MAX_FACTOR, increase_stats.max / MEMORY_LIMIT_PRESSURE)
+            )
+            if peak > target:
+                target, basis = peak, "observed_max"
         if "oom_kills" in triggers:
             # The kill proves usage passed the limit, even when the 30 s samples missed the spike:
             # one decisive step (oom_step_factor), never a 1.1x creep, within factor x the request.
@@ -597,15 +629,27 @@ def memory_proposal(
 
     if stats.avg / request >= config.RIGHTSIZING_MEMORY_THRESHOLD or not _coverage_ok(config, summary):
         return None
-    raw = _round_up_mib(balanced_rightsizing_target(config, stats.avg, stats.max, stats.p95))
+    balanced = _round_up_mib(balanced_rightsizing_target(config, stats.avg, stats.max, stats.p95))
+    # Memory is incompressible: never request less than the observed peak plus headroom,
+    # whatever the limits policy (REC-03).
+    peak = stats.max * MEMORY_MAX_FACTOR
     if policy == "memory_equals_request":
-        # The limit will equal the request: it must still cover the observed maximum.
-        raw = max(raw, _round_up_mib(stats.max * MEMORY_MAX_FACTOR))
+        # The limit will equal the request: the peak must stay below its pressure line too.
+        peak = max(peak, stats.max / MEMORY_LIMIT_PRESSURE)
+    floor = max(decrease_floor(config, stats.p99, unit=MIB), _round_up_mib(peak))
+    raw = max(balanced, floor)
     proposed = max(raw, config.RECOMMENDATION_MIN_MEMORY_BYTES)
     if proposed >= request:
         return None
     proposal = RightsizingProposal(
-        "memory", "decrease", request, proposed, raw, ["low_average_usage"], basis="balanced", stats=stats
+        "memory",
+        "decrease",
+        request,
+        proposed,
+        raw,
+        ["low_average_usage"],
+        basis="balanced" if raw == balanced else "peak_floor",
+        stats=stats,
     )
     proposal.limit_advice = _memory_limit_advice(policy, summary, proposed, config)
     return proposal
