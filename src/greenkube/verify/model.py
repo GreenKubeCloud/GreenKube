@@ -158,6 +158,10 @@ class HourBucket(_Frozen):
     #: frozen before it was measured.
     charged_core_hours: Optional[float] = None
     charged_gib_hours: Optional[float] = None
+    #: Grid intensity x PUE (gCO2e per kWh) of the hour's trusted-carbon rows, time-weighted (MEA-03).
+    #: Independent of energy, so an hour with zero energy keeps its factor. ``None`` in snapshots
+    #: frozen before it was recorded and when no row carried an intensity.
+    carbon_factor: Optional[float] = None
 
     @property
     def hour_of_week(self) -> int:
@@ -165,7 +169,13 @@ class HourBucket(_Frozen):
 
 
 #: HourBucket fields added after snapshots were first frozen (omitted from the digest while unset).
-_OPTIONAL_BUCKET_FIELDS = ("embodied_co2e_g", "embodied_coverage", "charged_core_hours", "charged_gib_hours")
+_OPTIONAL_BUCKET_FIELDS = (
+    "embodied_co2e_g",
+    "embodied_coverage",
+    "charged_core_hours",
+    "charged_gib_hours",
+    "carbon_factor",
+)
 
 
 def hour_of_week(moment: datetime) -> int:

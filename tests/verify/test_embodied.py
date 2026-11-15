@@ -22,7 +22,7 @@ PROJECTIONS = {"allocated_cost": 100.0, "co2e_g": 40_000.0, CO2E_WITH_EMBODIED: 
 
 
 def _without_embodied(buckets):
-    """Buckets of a snapshot frozen before embodied CO2e (and the charged quantities, MEA-02) were measured."""
+    """Buckets of a snapshot frozen before embodied CO2e, charged quantities and carbon factors were measured."""
     return [
         bucket.model_copy(
             update={
@@ -30,6 +30,7 @@ def _without_embodied(buckets):
                 "embodied_coverage": None,
                 "charged_core_hours": None,
                 "charged_gib_hours": None,
+                "carbon_factor": None,
             }
         )
         for bucket in buckets
@@ -110,6 +111,7 @@ def test_digest_of_a_snapshot_frozen_before_embodied_co2e_still_verifies():
         bucket.pop("embodied_coverage")
         bucket.pop("charged_core_hours")
         bucket.pop("charged_gib_hours")
+        bucket.pop("carbon_factor")
     assert snapshot.with_digest().content_sha256 == sha256_hex(legacy)
 
 

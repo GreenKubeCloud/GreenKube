@@ -71,6 +71,8 @@ class _Accumulator:
         "co2e_seconds",
         "embodied",
         "embodied_seconds",
+        "factor",
+        "factor_seconds",
         "instance_types",
     )
 
@@ -93,6 +95,8 @@ class _Accumulator:
         self.co2e_seconds = 0.0
         self.embodied = 0.0
         self.embodied_seconds = 0.0
+        self.factor = 0.0
+        self.factor_seconds = 0.0
         self.instance_types: Dict[str, float] = defaultdict(float)
 
 
@@ -164,6 +168,13 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
         if all(carbon_is_trusted(row) for row in members):
             acc.co2e += sum(float(getattr(row, "co2e_grams", 0.0) or 0.0) for row in members)
             acc.co2e_seconds += coverage
+            for row in members:
+                intensity = _number(getattr(row, "grid_intensity", None))
+                pue = _number(getattr(row, "pue", None))
+                if intensity is not None and intensity > 0 and pue is not None and pue > 0:
+                    seconds = _coverage_seconds(row, step_seconds)
+                    acc.factor += intensity * pue * seconds
+                    acc.factor_seconds += seconds
         embodied = [_number(getattr(row, "embodied_co2e_grams", None)) for row in members]
         if all(value is not None and value >= 0 for value in embodied):
             # Embodied emissions are allocated by the Impact Model by reservation; they do not
@@ -201,6 +212,7 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
                 co2e_coverage=min(acc.co2e_seconds / 3600.0, 1.0),
                 embodied_co2e_g=acc.embodied / acc.embodied_seconds * 3600.0 if acc.embodied_seconds > 0 else None,
                 embodied_coverage=min(acc.embodied_seconds / 3600.0, 1.0),
+                carbon_factor=acc.factor / acc.factor_seconds if acc.factor_seconds > 0 else None,
                 instance_types={key: value * per_hour for key, value in acc.instance_types.items()},
             )
         )
@@ -313,14 +325,23 @@ def carbon_factor(buckets: Sequence[HourBucket]) -> Optional[float]:
 
 
 def hourly_carbon_factors(buckets: Sequence[HourBucket]) -> Dict[datetime, float]:
-    """Carbon factor of each hour, ``co2e_g / energy_kwh``, over the hours :func:`carbon_factor` trusts."""
+    """Carbon factor of each hour over the hours :func:`carbon_factor` trusts.
+
+    The bucket's recorded ``carbon_factor`` (grid intensity x PUE, independent
+    of energy, so an hour with zero energy keeps it), else ``co2e_g /
+    energy_kwh`` when the hour has energy (snapshots frozen before the factor
+    was recorded).
+    """
     factors: Dict[datetime, float] = {}
     for bucket in buckets:
         if bucket.co2e_g is None or bucket.energy_kwh is None or bucket.co2e_coverage < MIN_HOUR_COVERAGE:
             continue
-        if bucket.co2e_coverage + 1e-9 < bucket.coverage or bucket.energy_kwh <= 0:
+        if bucket.co2e_coverage + 1e-9 < bucket.coverage:
             continue
-        factors[ensure_utc(bucket.hour)] = bucket.co2e_g / bucket.energy_kwh
+        if bucket.carbon_factor is not None and bucket.carbon_factor > 0:
+            factors[ensure_utc(bucket.hour)] = bucket.carbon_factor
+        elif bucket.energy_kwh > 0:
+            factors[ensure_utc(bucket.hour)] = bucket.co2e_g / bucket.energy_kwh
     return factors
 
 

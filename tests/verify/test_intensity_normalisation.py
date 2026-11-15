@@ -111,28 +111,20 @@ def _diurnal(hour_of_day: int) -> float:
     return math.sin(2 * math.pi * hour_of_day / 24)
 
 
-def _diurnal_window(start: datetime, kwh: float, amplitude: float) -> List[HourBucket]:
+def _diurnal_window(start: datetime, kwh: float, amplitude: float, *, record_factor: bool = True) -> List[HourBucket]:
+    """Energy ``kwh + amplitude x phase`` at intensity ``300 + 100 x phase`` (phase from the hour of day)."""
     out = []
     for bucket in _buckets(start, kwh, 300, 1.0):
         phase = _diurnal(bucket.hour.hour)
-        out.append(
-            bucket.model_copy(
-                update={
-                    "energy_kwh": kwh + amplitude * phase,
-                    "co2e_g": (kwh + amplitude * phase) * (300 + 100 * phase),
-                }
-            )
-        )
+        intensity = 300 + 100 * phase
+        update = {"energy_kwh": kwh + amplitude * phase, "co2e_g": (kwh + amplitude * phase) * intensity}
+        if record_factor:
+            update["carbon_factor"] = intensity
+        out.append(bucket.model_copy(update=update))
     return out
 
 
-@pytest.mark.parametrize("amplitude", [0.03, -0.03])
-def test_each_hour_is_valued_at_its_own_carbon_factor(amplitude):
-    """Review wp07-2 G-corr: a constant 0.01 kWh/h saving claims 3.0 g/h whether load follows intensity or not.
-
-    One window factor weighted by post-window energy claimed 3.5 g/h (load in
-    phase with intensity) or 2.5 g/h (out of phase).
-    """
+def _estimate_diurnal(pre: List[HourBucket], post: List[HourBucket]):
     change = ChangeEvent(
         change_id="c1",
         target=WorkloadRef(namespace="ns", kind="Deployment", name="web"),
@@ -143,15 +135,61 @@ def test_each_hour_is_valued_at_its_own_carbon_factor(amplitude):
     strategy = RequestRightsizingStrategy()
     settings = MeasurementSettings()
     plan = strategy.required_windows(change, settings)
-    pre = _diurnal_window(datetime(2026, 11, 2, 10, 0, tzinfo=UTC), 0.05, amplitude)
-    post = _diurnal_window(MERGE + timedelta(hours=1), 0.04, amplitude)
     result = strategy.estimate(
         change, plan, pre, post, load=None, confounders=[], projections={}, settings=settings, seed_parts=("c", 1)
     )
-    co2e = {item.quantity: item for item in result.estimates}["co2e_g"]
+    confounders = ConfounderDetector().detect(change, plan, pre=pre, post=post)
+    return result, {item.quantity: item for item in result.estimates}["co2e_g"], confounders
+
+
+@pytest.mark.parametrize("amplitude", [0.03, -0.03, 0.04, -0.04])
+def test_each_hour_is_valued_at_its_own_carbon_factor(amplitude):
+    """Review wp07-2 G-corr: a constant 0.01 kWh/h saving claims 3.0 g/h whether load follows intensity or not.
+
+    One window factor weighted by post-window energy claimed 3.5 g/h (load in
+    phase with intensity) or 2.5 g/h (out of phase). At amplitude 0.04 the post
+    energy is zero at 18:00 (review wp07-3 F1): the hour keeps its recorded
+    intensity x PUE instead of falling back to the window factor (3.0625).
+    """
+    pre = _diurnal_window(datetime(2026, 11, 2, 10, 0, tzinfo=UTC), 0.05, amplitude)
+    post = _diurnal_window(MERGE + timedelta(hours=1), 0.04, amplitude)
+    result, co2e, confounders = _estimate_diurnal(pre, post)
     truth = math.fsum(0.01 * (300 + 100 * _diurnal(bucket.hour.hour)) for bucket in post) / len(post)
     assert co2e.rate_per_hour == pytest.approx(truth, rel=1e-6)
     assert result.counterfactual_params["co2e_basis"] == "energy_delta_at_post_hourly_intensity"
+    assert result.counterfactual_params["co2e_factor_fallback_share"] == 0.0
+    assert not [item for item in confounders if item.kind == "co2e_factor_fallback"]
+
+
+def test_hours_without_a_post_factor_use_the_time_averaged_factor_and_are_reported():
+    """Scale-to-zero at night: no post rows 00:00-05:59, so those baseline hours have no post factor (wp07-3 F1)."""
+    pre = _diurnal_window(datetime(2026, 11, 2, 10, 0, tzinfo=UTC), 0.05, 0.03)
+    post = [bucket for bucket in _diurnal_window(MERGE + timedelta(hours=1), 0.04, 0.03) if bucket.hour.hour >= 6]
+    result, _, confounders = _estimate_diurnal(pre, post)
+    params = result.counterfactual_params
+    factors = [300 + 100 * _diurnal(bucket.hour.hour) for bucket in post]
+    # The plain time average of the post factors, not the energy-weighted window factor.
+    assert params["co2e_factor_fallback"] == pytest.approx(math.fsum(factors) / len(factors), rel=1e-6)
+    assert params["co2e_factor_fallback"] != pytest.approx(params["co2e_factor_post"], rel=1e-3)
+    night = math.fsum(bucket.energy_kwh or 0.0 for bucket in pre if bucket.hour.hour < 6)
+    total = math.fsum(bucket.energy_kwh or 0.0 for bucket in pre)
+    assert params["co2e_factor_fallback_share"] == pytest.approx(night / total, rel=1e-5)
+    (finding,) = [item for item in confounders if item.kind == "co2e_factor_fallback"]
+    assert finding.severity == "mild"
+    assert finding.evidence["share"] == pytest.approx(night / total, rel=1e-5)
+
+
+def test_hour_buckets_record_the_hours_carbon_factor():
+    """Grid intensity x PUE of the trusted-carbon rows, independent of energy (wp07-3 F1)."""
+    from greenkube.verify.model import TimeWindow
+    from greenkube.verify.series import hourly_buckets
+    from tests.verify.fixtures import workload_rows  # pyrefly: ignore[missing-import]
+
+    window = TimeWindow(start=MERGE, end=MERGE + timedelta(hours=2))
+    rows = [row.model_copy(update={"pue": 1.5, "joules": 0.0}) for row in workload_rows(window)]
+    buckets = hourly_buckets(rows, window, 3600)
+    assert [bucket.carbon_factor for bucket in buckets] == [pytest.approx(450.0), pytest.approx(450.0)]
+    assert all(bucket.energy_kwh == 0.0 for bucket in buckets)
 
 
 def test_an_intensity_shift_does_not_lower_the_cost_confidence():

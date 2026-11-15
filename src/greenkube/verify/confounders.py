@@ -64,6 +64,8 @@ INSTANCE_MIX_TOLERANCE = 0.25
 PRICE_CHANGE_SEVERE = 0.20
 #: The energy-weighted carbon factor (intensity x PUE) moved by more than this between the windows (MEA-03).
 INTENSITY_SHIFT_TOLERANCE = 0.10
+#: Share of the baseline energy valued at the fallback carbon factor above which it is reported (mild).
+CARBON_FACTOR_FALLBACK_TOLERANCE = 0.05
 #: The workload's instance-type mix moved by more than this share of its pod-hours (severe).
 INSTANCE_MIX_SEVERE = 0.5
 #: The node pool's capacity-weighted instance-type mix moved by more than this (severe: new hardware).
@@ -256,6 +258,7 @@ class ConfounderDetector:
         findings.extend(self._price_change(pre, post))
         findings.extend(self._constant_prices(pre, post, price_card))
         findings.extend(self._intensity_shift(pre, post))
+        findings.extend(self._carbon_factor_fallback(pre, post))
         findings.extend(self._instance_types(pre, post))
         if pool is not None:
             findings.extend(self._pool(change, pool))
@@ -468,6 +471,31 @@ class ConfounderDetector:
                 detail="no CPU/RAM cost components or baseline unit prices: the cost saving is measured at "
                 "observed prices, so a price move between the windows cannot be told apart from the change",
                 evidence={"constant_price_basis": CONSTANT_PRICE_OBSERVED},
+            )
+        ]
+
+    @staticmethod
+    def _carbon_factor_fallback(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:
+        """``co2e_factor_fallback`` (mild) when over 5% of the baseline energy has no post factor at its hour of week.
+
+        Such hours (the workload scaled to zero, post hours missing) are valued
+        at the time-averaged post factor, not at the intensity of their hour.
+        """
+        from greenkube.verify.strategy import PostCarbonFactors
+
+        factors = PostCarbonFactors.of(post)
+        if factors is None:
+            return []
+        share = factors.fallback_share(pre)
+        if share is None or share <= CARBON_FACTOR_FALLBACK_TOLERANCE:
+            return []
+        return [
+            Confounder(
+                kind="co2e_factor_fallback",
+                severity="mild",
+                detail=f"{share:.0%} of the baseline energy has no post-window carbon factor at its hour of week "
+                f"and is valued at the time-averaged post factor ({factors.fallback:.4g} gCO2e/kWh)",
+                evidence={"share": round(share, 6), "fallback": round(factors.fallback, 6)},
             )
         ]
 

@@ -206,7 +206,7 @@ class RequestRightsizingStrategy:
     CO2e of every hour of both windows is its energy times a post-window
     carbon factor (grid intensity x PUE, :class:`PostCarbonFactors`): each
     post hour at its own factor, each baseline hour at the post factor of the
-    same hour of week (window factor as fallback), so the claimed CO2e saving
+    same hour of week (time-averaged post factor as fallback), so the claimed CO2e saving
     is each hour's energy saving valued at what the grid emitted per kWh in
     that hour after the change, plus the embodied delta; a windier or calmer
     post week is reported by the ``intensity_shift`` confounder, not booked. Without a post
@@ -320,6 +320,10 @@ class RequestRightsizingStrategy:
             "co2e_basis": CO2E_BASIS_ENERGY if factor is not None else CO2E_BASIS_RAW,
             "co2e_factor_pre": _rounded(carbon_factor(pre)),
             "co2e_factor_post": _rounded(factor),
+            "co2e_factor_fallback": _rounded(post_factors.fallback) if post_factors is not None else None,
+            "co2e_factor_fallback_share": _rounded(post_factors.fallback_share(pre))
+            if post_factors is not None
+            else None,
             "co2e_raw_delta": _raw_co2e_delta(pre, post, embodied),
         }
         claimed_rate = next(item for item in estimates if item.quantity == self.primary).rate_per_hour
@@ -553,15 +557,20 @@ def _rounded(value: Optional[float]) -> Optional[float]:
 class PostCarbonFactors:
     """Post-window carbon factors the CO2e of both windows is valued at (MEA-03).
 
-    ``by_hour`` is each trusted post hour's own factor (``co2e / energy``),
-    ``by_hour_of_week`` the energy-weighted post factor of each hour of the
-    week, ``window`` the energy-weighted factor of the whole post-window (the
-    fallback for an hour of the week without a trusted post hour).
+    ``by_hour`` is each trusted post hour's own factor (the bucket's grid
+    intensity x PUE, else ``co2e / energy``), ``by_hour_of_week`` the time
+    average of the post factors of each hour of the week, ``fallback`` the time
+    average of all post hours' factors (for an hour of the week without a
+    trusted post hour; not energy-weighted, so it carries no load weighting)
+    and ``window`` the energy-weighted factor of the whole post-window (the
+    fallback only when no hour has its own factor, and the reported
+    ``co2e_factor_post``).
     """
 
     window: float
     by_hour: Dict[datetime, float]
     by_hour_of_week: Dict[int, float]
+    fallback: float
 
     @classmethod
     def of(cls, post: Sequence[HourBucket]) -> Optional["PostCarbonFactors"]:
@@ -570,22 +579,29 @@ class PostCarbonFactors:
         if window is None:
             return None
         by_hour = hourly_carbon_factors(post)
-        energy = quantity_series(post, "energy_kwh")
-        sums: Dict[int, List[float]] = {}
+        groups: Dict[int, List[float]] = {}
         for hour, factor in by_hour.items():
-            entry = sums.setdefault(hour_of_week(hour), [0.0, 0.0])
-            entry[0] += factor * energy.get(hour, 0.0)
-            entry[1] += energy.get(hour, 0.0)
-        by_week = {key: total / weight for key, (total, weight) in sums.items() if weight > 0}
-        return cls(window=window, by_hour=by_hour, by_hour_of_week=by_week)
+            groups.setdefault(hour_of_week(hour), []).append(factor)
+        by_week = {key: math.fsum(values) / len(values) for key, values in groups.items()}
+        fallback = math.fsum(by_hour.values()) / len(by_hour) if by_hour else window
+        return cls(window=window, by_hour=by_hour, by_hour_of_week=by_week, fallback=fallback)
 
     def baseline_factor(self, hour: datetime) -> float:
-        """The post factor of ``hour``'s hour of week, else the window factor."""
-        return self.by_hour_of_week.get(hour_of_week(hour), self.window)
+        """The post factor of ``hour``'s hour of week, else the time-averaged post factor."""
+        return self.by_hour_of_week.get(hour_of_week(hour), self.fallback)
 
     def post_factor(self, hour: datetime) -> float:
-        """The post hour's own factor, else that of its hour of week, else the window factor."""
+        """The post hour's own factor, else that of its hour of week, else the time-averaged post factor."""
         return self.by_hour.get(hour, self.baseline_factor(hour))
+
+    def fallback_share(self, pre: Sequence[HourBucket]) -> Optional[float]:
+        """Share of the baseline energy valued at the fallback factor (no post factor at its hour of week)."""
+        energy = quantity_series(pre, "energy_kwh")
+        total = math.fsum(energy.values())
+        if total <= 0:
+            return None
+        missing = math.fsum(value for hour, value in energy.items() if hour_of_week(hour) not in self.by_hour_of_week)
+        return missing / total
 
 
 def _co2e_at_factor(
@@ -594,7 +610,7 @@ def _co2e_at_factor(
     """CO2e per hour: energy x the post-window carbon factor of that hour (MEA-03), plus embodied CO2e.
 
     A post hour is valued at its own factor, a baseline hour at the post
-    factor of the same hour of week (window factor as fallback), so the
+    factor of the same hour of week (time-averaged post factor as fallback), so the
     claimed saving is ``sum((E_pre - E_post) x factor_post)`` hour by hour and a
     load that follows the grid intensity does not bias it. Only hours with
     trusted carbon count (as before), so an install without measured intensity
