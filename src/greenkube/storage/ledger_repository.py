@@ -459,6 +459,22 @@ class LedgerRepository:
                 entries[entry.entry_id] = entry
         return sorted(entries.values(), key=lambda item: item.seq)
 
+    async def live_v1_recommendations(self, recommendation_ids: Iterable[int]) -> set[int]:
+        """Those of ``recommendation_ids`` that still have v1 rows not flagged superseded."""
+        ids = sorted({int(item) for item in recommendation_ids})
+        live: set[int] = set()
+        for table in V1_TABLES:
+            for offset in range(0, len(ids), _CHUNK):
+                chunk = ids[offset : offset + _CHUNK]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = await self._select(
+                    f"SELECT DISTINCT recommendation_id FROM {table} "
+                    f"WHERE recommendation_id IN ({placeholders}) AND NOT ({self._true('superseded')})",
+                    chunk,
+                )
+                live.update(int(row["recommendation_id"]) for row in rows)
+        return live
+
     async def supersede_v1(self, recommendation_ids: Iterable[int]) -> int:
         """Flag every v1 row of ``recommendation_ids`` superseded (the only update the v1 triggers allow)."""
         ids = sorted({int(item) for item in recommendation_ids})

@@ -100,6 +100,11 @@ async def test_supersession_is_derived_from_the_recommendation_state(ledger: Led
     projector = _projector(ledger, records=[review])
     await projector.sync(full=True)
     assert await _net_of(ledger, 5, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+    from greenkube.verify.ledger.projector import LEDGER_UNRECONCILED_RECOMMENDATIONS
+
+    assert LEDGER_UNRECONCILED_RECOMMENDATIONS._value.get() == 1.0
+    await projector.sync(full=True)
+    assert LEDGER_UNRECONCILED_RECOMMENDATIONS._value.get() == 0.0
 
     late = SavingsLedgerRecord(
         recommendation_id=5,

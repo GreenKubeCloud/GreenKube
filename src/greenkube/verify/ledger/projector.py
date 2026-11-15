@@ -125,6 +125,12 @@ LEDGER_LATE_ROWS = Counter(
     ["source_table"],
     registry=OBSERVABILITY_REGISTRY,
 )
+LEDGER_UNRECONCILED_RECOMMENDATIONS = Gauge(
+    "greenkube_ledger_unreconciled_recommendations",
+    "Recommendations under review, reverted, failed or stale whose accruals were still live at the last ledger "
+    "pass (the pass supersedes them: a non-zero value means the one-shot supersession failed or raced).",
+    registry=OBSERVABILITY_REGISTRY,
+)
 LEDGER_UNPROJECTED_ROWS = Gauge(
     "greenkube_ledger_unprojected_rows",
     "v1 ledger rows with a non-zero saving that have no savings ledger v2 entry after the last full sweep.",
@@ -632,8 +638,12 @@ class LedgerProjector:
             int(record.id) for record in await self._records_of_pass() if _value(record.status) in SUPERSEDED_STATUSES
         ]
         if not ids:
+            LEDGER_UNRECONCILED_RECOMMENDATIONS.set(0)
             return
-        flagged = await self.repo.supersede_v1(ids)
+        live = await self.repo.live_v1_recommendations(ids)
+        # The one-shot supersession of the lifecycle loop failed, or an accrual landed after it (LED-08).
+        LEDGER_UNRECONCILED_RECOMMENDATIONS.set(len(live))
+        flagged = await self.repo.supersede_v1(live) if live else 0
         if flagged:
             logger.info("Savings ledger v2: superseded %d v1 row(s) of recommendations under review or ended.", flagged)
         corrections = await self.repo.unreversed_corrections(identity.cluster_uid, ids)
