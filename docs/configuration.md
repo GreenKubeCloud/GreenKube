@@ -173,6 +173,8 @@ config:
 | `config.prometheus.verifyCerts` | `PROMETHEUS_VERIFY_CERTS` | `true` | Verify the TLS certificate of Prometheus. |
 | `config.prometheus.nodeInstanceLabel` | `PROMETHEUS_NODE_INSTANCE_LABEL` | `label_node_kubernetes_io_instance_type` | kube-state-metrics node label that holds the instance type. |
 | `config.opencost.verifyCerts` | `OPENCOST_VERIFY_CERTS` | `true` | Verify the TLS certificate of OpenCost. |
+| Secret key | `OPENCOST_BEARER_TOKEN` | unset | Sent as `Authorization: Bearer <token>` with every OpenCost request (allocation, node prices, PersistentVolume and LoadBalancer costs, discovery probe). Takes precedence over basic auth. |
+| Secret keys | `OPENCOST_USERNAME`, `OPENCOST_PASSWORD` | unset | Basic auth sent with every OpenCost request when both are set and no bearer token is. An OpenCost that rejects the request (HTTP 401 or 403) leaves the window's cost `opencost_pending` until it answers. |
 
 ### Metric collection (`config.prometheus`, `config.collection`)
 

@@ -479,6 +479,23 @@ class OpenCostCollector(BaseCollector):
             self._client = get_async_http_client(verify=verify)
         return self._client
 
+    @staticmethod
+    def _auth_kwargs() -> Dict[str, Any]:
+        """Credentials of every OpenCost request (COST-06): bearer token first, else basic auth, else none.
+
+        Same precedence as the discovery probe. Read at each request, so a
+        changed setting applies at once; ``SafeAsyncClient`` drops them on a
+        cross-host redirect.
+        """
+        token = getattr(config, "OPENCOST_BEARER_TOKEN", None)
+        if token:
+            return {"headers": {"Authorization": f"Bearer {token}"}}
+        username = getattr(config, "OPENCOST_USERNAME", None)
+        password = getattr(config, "OPENCOST_PASSWORD", None)
+        if username and password:
+            return {"auth": httpx.BasicAuth(username, password)}
+        return {}
+
     async def close(self):
         """Close the reusable HTTP client to release connection pool resources."""
         if self._client is not None and not self._client.is_closed:
@@ -538,7 +555,7 @@ class OpenCostCollector(BaseCollector):
 
         async def _fetch(u: str):
             try:
-                resp = await client.get(u, params=params)
+                resp = await client.get(u, params=params, **self._auth_kwargs())
                 resp.raise_for_status()
             except httpx.HTTPError as exc:
                 logger.debug("Request to %s failed: %s", u, exc)
@@ -629,7 +646,7 @@ class OpenCostCollector(BaseCollector):
         }
         prices: Dict[str, NodeUnitPrices] = {}
         try:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, **self._auth_kwargs())
             resp.raise_for_status()
             data = resp.json().get("data")
         except Exception as exc:
@@ -667,7 +684,7 @@ class OpenCostCollector(BaseCollector):
             "includeIdle": "false",
         }
         try:
-            resp = await client.get(endpoint, params=params)
+            resp = await client.get(endpoint, params=params, **self._auth_kwargs())
             resp.raise_for_status()
             data = resp.json().get("data")
         except Exception as exc:
@@ -904,7 +921,7 @@ class OpenCostCollector(BaseCollector):
         """
         try:
             params = {"window": "1d", "aggregate": "pod"}
-            r = await client.get(url, params=params)
+            r = await client.get(url, params=params, **self._auth_kwargs())
             r.raise_for_status()
             return True
         except Exception:

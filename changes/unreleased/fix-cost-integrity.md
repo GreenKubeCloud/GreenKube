@@ -5,6 +5,7 @@
 - In windows of several steps (catch-up, backfill) each row receives its pod's OpenCost cost by the pod's running seconds inside the row's step, so the stored cost of a window equals OpenCost's allocation whatever the chunking; pods that covered steps only partly were over-costed (COL-10, RECON-08). `CALCULATION_VERSION` `+range.7`.
 - Container rows split the pod cost by reservation `max(request, usage)` (CPU cost by CPU reservation, RAM cost by memory reservation) instead of usage, in collection and in `greenkube recompute`; container costs and the unit prices of rightsizing projections of multi-container pods were wrong (COST-02, IMP-02). `CALCULATION_VERSION` `+range.8`.
 - Orphaned PersistentVolume and LoadBalancer costs are read from OpenCost's `pvs` and `lbAllocations` fields of `/allocation/compute` (the former query parameter and fields did not exist, so the flat defaults always applied), annualized over the hours the asset existed, observed zeros kept, LoadBalancers matched on their exact namespace; recommendation texts print the configured currency instead of `$` (COST-03).
+- Every OpenCost request (allocation, node prices, PersistentVolume and LoadBalancer costs, probe) carries the configured `OPENCOST_BEARER_TOKEN`, or `OPENCOST_USERNAME` and `OPENCOST_PASSWORD`; only the discovery probe sent them, so an authenticated OpenCost or Kubecost yielded no cost (COST-06).
 
 ### Added
 - Migration 0155 adds `collection_windows.cost_status`; gauge `greenkube_collection_cost_pending_steps`; counter `greenkube_opencost_unrebuilt_allocations_total`.
