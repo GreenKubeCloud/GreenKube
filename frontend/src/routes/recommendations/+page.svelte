@@ -43,6 +43,7 @@
 		planTargetFor
 	} from '$lib/utils/decision.js';
 	import DataState from '$lib/components/DataState.svelte';
+	import { capacitySummary } from '$lib/releasedCapacity.js';
 	import { etaFrom } from '$lib/overview.js';
 	import { SAVINGS_TERMS, realizationText, savingsFigures } from '$lib/savingsVocabulary.js';
 
@@ -378,7 +379,11 @@
 	}
 
 	$: totalSavingsCO2 = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
-	$: totalSavingsCost = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_cost ?? 0), 0);
+	// An unknown billable saving (cluster not observed yet) is the allocated value: never summed as projected.
+	$: totalSavingsCost = actionableActiveRecs.reduce(
+		(s, r) => s + (r.projected_billable_cost_annual === null ? 0 : (r.potential_savings_cost ?? 0)),
+		0
+	);
 	$: potentialSavingsPeriod = 'per year';
 	$: savingsTabFigures = savingsFigures(savings);
 
@@ -2339,10 +2344,24 @@
 													{#if rec.potential_savings_co2e_grams}
 														<p class="text-sm font-bold text-green-400">-{formatCO2(rec.potential_savings_co2e_grams)}</p>
 													{/if}
-													{#if rec.potential_savings_cost}
+													{#if rec.potential_savings_cost && rec.projected_billable_cost_annual === null}
+														<p class="text-xs text-blue-400" data-testid="row-allocated-unknown">allocated: -{formatCost(rec.potential_savings_cost)}</p>
+													{:else if rec.potential_savings_cost}
 														<p class="text-xs text-blue-400">-{formatCost(rec.potential_savings_cost)}</p>
 													{/if}
+													{#if rec.projection_note}<p class="text-[10px] text-dark-500" data-testid="row-projection-note">{rec.projection_note}</p>{/if}
 												</div>
+											{:else if rec.projected_allocated_cost_annual > 0}
+												<!-- IMP-03: on fixed nodes the billable projection is 0; show the allocated figure, never hide it. -->
+												<div class="text-right" data-testid="row-allocated-saving">
+													<p class="text-xs text-blue-400">allocated: -{formatCost(rec.projected_allocated_cost_annual)}</p>
+													{#if rec.projection_note}<p class="text-[10px] text-dark-500">{rec.projection_note}</p>{/if}
+												</div>
+											{/if}
+											{#if capacitySummary(rec.released_capacity)}
+												<p class="text-[11px] text-dark-400 text-right" data-testid="row-released-capacity" title="Reserved capacity, not money: never added to cost savings">
+													{capacitySummary(rec.released_capacity)}
+												</p>
 											{/if}
 											{#if activeTab === 'active'}
 												{#if canWrite && canPreviewRecommendation(rec)}

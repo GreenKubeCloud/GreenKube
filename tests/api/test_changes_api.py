@@ -90,6 +90,12 @@ async def test_list_and_read_a_measured_change(measured):
             record.id for record in applied
         )
         assert {row["outcome"] for row in measurement["recommendations"]} == {"realized"}
+        # WP-08.1: the measured released capacity is returned with its label and units; without recorded
+        # per-container requests the capacity verdict is unknown, never guessed.
+        capacity = measurement["capacity"]
+        assert capacity["method"] == "measured" and capacity["units"]["cpu_core_hours"] == "core-hours"
+        assert capacity["verdict"] == "unknown"
+        assert capacity["requests_source"]["before"] == "missing"
 
         assert client.get("/api/v2/changes/missing").status_code == 404
         assert client.get("/api/v2/changes/missing/measurements").status_code == 404

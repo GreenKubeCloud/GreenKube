@@ -107,6 +107,7 @@ class OrphanedLBAnalyzer(Analyzer):
                 component="lb",
                 cost_source=cost_source,
                 detail=cost_detail,
+                load_balancers=1,
             )
 
             since = ensure_utc(first_seen).strftime("%Y-%m-%d %H:%M UTC")

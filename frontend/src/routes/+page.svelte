@@ -175,8 +175,16 @@
 							{#if evText}
 								<p class="text-xs text-dark-200 whitespace-nowrap" data-testid="dashboard-expected-value">{evText}</p>
 							{/if}
-							{#if rec.potential_savings_cost}
+							{#if rec.potential_savings_cost && rec.projected_billable_cost_annual === null}
+								<p class="text-xs text-dark-400 whitespace-nowrap" data-testid="dashboard-allocated-unknown">Allocated {formatCost(rec.potential_savings_cost)}/yr</p>
+								{#if rec.projection_note}<p class="text-[10px] text-dark-500">{rec.projection_note}</p>{/if}
+							{:else if rec.potential_savings_cost}
 								<p class="text-xs text-dark-400 whitespace-nowrap">Projected {formatCost(rec.potential_savings_cost)}/yr</p>
+								{#if rec.projection_note}<p class="text-[10px] text-dark-500">{rec.projection_note}</p>{/if}
+							{:else if rec.projected_allocated_cost_annual > 0}
+								<!-- IMP-03: fixed nodes bill nothing back; show the allocated figure with its note. -->
+								<p class="text-xs text-dark-400 whitespace-nowrap" data-testid="dashboard-allocated-saving">Allocated {formatCost(rec.projected_allocated_cost_annual)}/yr</p>
+								{#if rec.projection_note}<p class="text-[10px] text-dark-500">{rec.projection_note}</p>{/if}
 							{/if}
 							{#if rec.potential_savings_co2e_grams}
 								<p class="text-xs text-green-400 whitespace-nowrap">−{formatCO2(rec.potential_savings_co2e_grams)} CO₂e/yr</p>

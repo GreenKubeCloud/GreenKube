@@ -98,6 +98,8 @@ class ValueParameters:
     engineer_hour_cost: float
     incident_cost: float
     currency: str
+    #: Weight of the released allocated value (allocated - expected billable) in ``value_annual`` (IMP-03).
+    capacity_value_weight: float = 1.0
 
 
 def profile_names() -> List[str]:
@@ -169,6 +171,7 @@ def resolve_parameters(
         effort_weight=preset.effort_weight,
         engineer_hour_cost=hour_cost,
         incident_cost=_config_float(config, "RECOMMENDATION_INCIDENT_COST", 100.0),
+        capacity_value_weight=_config_float(config, "RECOMMENDATION_CAPACITY_VALUE_WEIGHT", 1.0),
         currency=str(getattr(config, "IMPACT_PRICING_CURRENCY", "USD") or "USD") if config is not None else "USD",
     )
 
@@ -198,6 +201,29 @@ def _projected_quantities(rec: Any) -> tuple:
     cost = _finite(getattr(rec, "potential_savings_cost", None)) or 0.0
     co2e = _finite(getattr(rec, "potential_savings_co2e_grams", None)) or 0.0
     return cost, co2e, None
+
+
+def _allocated_cost(rec: Any) -> Optional[float]:
+    """Allocated annual cost of the Impact projection (what the workload stops being charged), or None."""
+    impact = getattr(rec, "impact", None)
+    if not isinstance(impact, Mapping):
+        return None
+    return _finite(impact.get("allocated_cost_annual"))
+
+
+def proposes_request_increase(rec: Any) -> bool:
+    """True when a CPU or memory recommendation raises the current request (a reliability change, H1)."""
+    rec_type = _text(getattr(rec, "type", None))
+    if rec_type == "RIGHTSIZING_CPU":
+        current = getattr(rec, "current_cpu_request_millicores", None)
+        proposed = getattr(rec, "recommended_cpu_request_millicores", None)
+    elif rec_type == "RIGHTSIZING_MEMORY":
+        current = getattr(rec, "current_memory_request_bytes", None)
+        proposed = getattr(rec, "recommended_memory_request_bytes", None)
+    else:
+        return False
+    before, after = _finite(current), _finite(proposed)
+    return before is not None and after is not None and after > before
 
 
 def success_probability(
@@ -275,7 +301,11 @@ def compute_value(
     """The ValueScore of one recommendation (a JSON-safe dict)."""
     cost, co2e_g, impact_currency = _projected_quantities(rec)
     carbon_value = params.carbon_price_per_tonne * co2e_g / 1e6
-    value_annual = cost + carbon_value
+    # IMP-03: on fixed nodes the billable projection is 0 for every request change, so the value
+    # also counts the allocated cost the change releases (or reserves), with a documented weight.
+    allocated = _allocated_cost(rec)
+    released_value = params.capacity_value_weight * (allocated - cost) if allocated is not None else 0.0
+    value_annual = cost + carbon_value + released_value
 
     risk_level = _text(getattr(rec, "risk_level", None), "medium") or "medium"
     risk_factors = [str(f) for f in getattr(rec, "risk_factors", None) or []]
@@ -286,7 +316,9 @@ def compute_value(
     severity = INCIDENT_SEVERITY.get(risk_level, INCIDENT_SEVERITY["medium"])
     incident_cost = params.risk_aversion * params.incident_cost * severity * radius
 
-    lane = "reliability" if value_annual < 0 else "savings"
+    # The lane follows the direction of the change, never the sign of a realization-scaled number.
+    increase = proposes_request_increase(rec) or (allocated is not None and allocated < 0)
+    lane = "reliability" if increase or value_annual < 0 else "savings"
     incident_cost_avoided = 0.0
     p_incident_now = None
     if lane == "reliability":
@@ -306,6 +338,8 @@ def compute_value(
         "incident_risk": round(-(1.0 - p) * incident_cost, 2),
         "effort": round(-effort_cost, 2),
     }
+    if released_value:
+        factors["allocated_value"] = round(p * released_value, 2)
     if incident_cost_avoided:
         factors["reliability"] = round(p * incident_cost_avoided, 2)
 
@@ -324,10 +358,18 @@ def compute_value(
         "factors": factors,
         "components": {
             "cost_annual": round(cost, 4),
+            "billable_cost_annual": round(cost, 4),
+            "allocated_cost_annual": round(allocated, 4) if allocated is not None else None,
+            "capacity_value_weight": params.capacity_value_weight,
+            "allocated_value_annual": round(released_value, 4),
             "co2e_annual_g": round(co2e_g, 4),
             "carbon_price_per_tonne": params.carbon_price_per_tonne,
             "carbon_value_annual": round(carbon_value, 4),
             "confidence": _finite(getattr(rec, "confidence", None)),
+            # IMP-03: the projection's own input confidence (price tier, short coverage), carried apart.
+            "projection_confidence": (
+                _finite(rec.impact.get("confidence")) if isinstance(getattr(rec, "impact", None), Mapping) else None
+            ),
             "risk_level": risk_level,
             "risk_success_factor": RISK_SUCCESS_FACTOR.get(risk_level, RISK_SUCCESS_FACTOR["medium"]),
             "track_record": (

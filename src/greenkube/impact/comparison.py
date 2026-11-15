@@ -80,6 +80,13 @@ def measurable_co2e_projection(
         return None
     if allocated:
         return sum(split.get(name, 0.0) for name in components)
+    expected = impact.get("co2e_expected_breakdown_annual_g")
+    if isinstance(expected, Mapping):
+        # A workload deletion keeps its usage-based power whole (IMP-05, model 3.0.0).
+        fields = ("idle_operational", "dynamic_operational", "memory_operational", "gpu_operational", "embodied")
+        values = {name: _number(expected.get(name)) or 0.0 for name in fields}
+        expected_split = co2e_components(Co2eBreakdown(**values))
+        return sum(expected_split.get(name, 0.0) for name in components)
     realization = _number(impact.get("realization_factor"))
     realization = 1.0 if realization is None else min(max(realization, 0.0), 1.0)
     return sum(split.get(name, 0.0) for name in components) * realization

@@ -330,6 +330,7 @@
             "targetMaxStalenessHours": {"type": "number", "exclusiveMinimum": 0},
             "rankingProfile": {"type": "string", "enum": ["balanced", "carbon_first", "cost_first", "quick_wins", "low_risk"]},
             "minSamples": {"type": "integer", "minimum": 1},
+            "capacityValueWeight": {"type": "number", "minimum": 0},
             "scanInterval": {"type": "string", "pattern": "^[0-9]+(s|m|h)$"},
             "changeMeasurement": {
               "type": "object",
@@ -397,7 +398,12 @@
         }
       }
     },
-    "impact": {"type": "object"},
+    "impact": {
+      "type": "object",
+      "properties": {
+        "autoscalerHint": {"type": "string", "enum": ["", "none", "cluster_autoscaler", "karpenter"]}
+      }
+    },
     "auth": {
       "type": "object",
       "properties": {

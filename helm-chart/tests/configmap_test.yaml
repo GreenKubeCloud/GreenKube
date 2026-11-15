@@ -832,6 +832,20 @@ tests:
           path: data.CARBON_PRICE_PER_TONNE
           value: "85"
 
+  - it: should render an empty autoscaler hint by default and a declared one (IMP-12)
+    asserts:
+      - equal:
+          path: data.IMPACT_AUTOSCALER_HINT
+          value: ""
+
+  - it: should render a declared autoscaler hint
+    set:
+      impact.autoscalerHint: cluster_autoscaler
+    asserts:
+      - equal:
+          path: data.IMPACT_AUTOSCALER_HINT
+          value: cluster_autoscaler
+
   - it: should omit unset impact settings so the application defaults apply
     set:
       impact.realizationFactor: null
@@ -874,6 +888,20 @@ tests:
       - equal:
           path: data.RECOMMENDATION_ENGINEER_HOUR_COST
           value: "85.5"
+
+  - it: should render the released-capacity value weight (IMP-03), zero included
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_CAPACITY_VALUE_WEIGHT
+          value: "1"
+
+  - it: should render a custom released-capacity value weight
+    set:
+      config.recommendations.capacityValueWeight: 0
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_CAPACITY_VALUE_WEIGHT
+          value: "0"
 
   # --------------------------------------------------------------------------
   # Pull-request experience (roadmap J1-J5)

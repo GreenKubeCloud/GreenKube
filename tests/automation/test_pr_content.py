@@ -540,3 +540,38 @@ def test_limit_edits_are_reverted_by_reverting_the_pull_request():
 def test_increase_labels_mark_reliability():
     metadata = derive_metadata(SCENARIOS["increase"]())
     assert "reliability" in metadata.labels
+
+
+def test_body_shows_projected_released_capacity_with_units_apart_from_the_saving():
+    impact = fx.impact(cost=300.0, co2e_g=12_000.0)
+    impact["capacity_released"] = {
+        "cpu_core_hours": 0.3 * 2 * 8760,
+        "mem_gib_hours": 0.0,
+        "replica_hours": 2 * 8760,
+        "node_hours": 0.0,
+    }
+    record = fx.recommendation(41, impact=impact)
+    body = render_body(_context(fx.rightsize_plan(), [record]), SETTINGS)
+    assert "| Released capacity (projected) | now | per year |" in body
+    assert "| CPU requests | 0.60 cores | 5256 core-hours |" in body
+    assert "never added to the cost saving" in body
+
+
+def test_increase_shows_released_capacity_as_a_negative_release():
+    impact = fx.impact(cost=-150.0, co2e_g=-4_000.0)
+    impact["capacity_released"] = {"cpu_core_hours": 0.0, "mem_gib_hours": -8760.0, "replica_hours": 8760.0}
+    record = fx.increase_recommendation(43).model_copy(update={"impact": impact})
+    body = render_body(_context(fx.increase_plan(), [record]), SETTINGS)
+    assert "| Memory requests | −1.00 GiB | −8760 GiB-hours |" in body
+    assert "Negative values are increases" in body
+
+
+def test_fixed_nodes_body_shows_the_allocated_saving_with_the_fixed_nodes_note():
+    # IMP-03: realization 0 on fixed nodes; the allocated saving is shown, never hidden behind a 0.
+    impact = fx.impact(cost=0.0, co2e_g=0.0, realization=1.0)
+    impact.update({"allocated_cost_annual": 236.52, "realization_factor": 0.0})
+    record = fx.recommendation(41, impact=impact, potential_savings_cost=0.0)
+    body = render_body(_context(fx.rightsize_plan(), [record]), SETTINGS)
+    assert "| Allocated cost (chargeback, not billed) (USD) | $19.71 | $236.52 |" in body
+    assert "Allocated: capacity released" not in body
+    assert "Fixed nodes: frees capacity, bill unchanged until nodes are removed." in body

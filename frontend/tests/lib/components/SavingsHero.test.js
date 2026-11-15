@@ -22,6 +22,21 @@ const recommendations = [
 ];
 
 describe('SavingsHero', () => {
+	it('keeps the allocated value of fixed-node changes out of the opportunity and says so', () => {
+		const fixed = [
+			{
+				id: 3,
+				potential_savings_cost: 0,
+				projected_billable_cost_annual: 0,
+				projected_allocated_cost_annual: 236.52,
+				value: { ev: 200, currency: 'USD', factors: { allocated_value: 210 } }
+			}
+		];
+		render(SavingsHero, { props: { overview: buildSavingsOverview(savings, fixed) } });
+		expect(screen.getByTestId('opportunity-ev')).toHaveTextContent('$0.00/yr (billable savings only)');
+		expect(screen.getByTestId('opportunity-allocated-only')).toHaveTextContent('chargeback, not billed');
+	});
+
 	it('shows realized, pending and opportunity as separate labeled figures', () => {
 		render(SavingsHero, { props: { overview: buildSavingsOverview(savings, recommendations) } });
 

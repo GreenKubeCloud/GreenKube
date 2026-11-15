@@ -467,6 +467,14 @@ class Recommendation(BaseModel):
         return self
 
 
+#: Shown next to a 0 billable projection on fixed nodes (IMP-03).
+FIXED_NODES_NOTE = "fixed nodes: frees capacity, bill unchanged until nodes are removed"
+#: Shown instead of a billable projection made before the cluster was observed (IMP-12).
+UNOBSERVED_NOTE = "billable saving unknown: cluster not observed yet"
+#: ``impact.assumptions.realization_factor_source`` of such a projection (greenkube.impact.realization).
+UNOBSERVED_REALIZATION_SOURCE = "realization_context:unobserved"
+
+
 class RecommendationRecord(BaseModel):
     """A persisted recommendation snapshot for historical tracking."""
 
@@ -617,6 +625,90 @@ class RecommendationRecord(BaseModel):
         description="When the recommendation was generated.",
     )
     updated_at: Optional[datetime] = Field(None, description="When the recommendation was last updated.")
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Projected released capacity (WP-08.1), derived from impact.capacity_released when read, never "
+            "persisted: annual core-hours, GiB-hours, replica-hours and node-hours (period 'year'), the "
+            "instantaneous (current - proposed request) x replicas in cores and GiB, storage GiB and LoadBalancer "
+            "count for deletions, with units. Never money and never added to cost savings; negative values are "
+            "increases."
+        )
+    )
+    @property
+    def released_capacity(self) -> Optional[dict]:
+        """Projected released capacity of this recommendation (``None`` without a projection)."""
+        from greenkube.impact.capacity import projected_capacity
+
+        return projected_capacity(self)
+
+    def _impact_number(self, key: str) -> Optional[float]:
+        impact = self.impact if isinstance(self.impact, dict) else None
+        value = impact.get(key) if impact is not None else None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value) if value == value and abs(value) != float("inf") else None
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Projected allocated annual cost saving (IMP-03): what the workload stops being charged under "
+            "chargeback/showback (label 'allocated: capacity released'). Shown whatever the realization factor."
+        )
+    )
+    @property
+    def projected_allocated_cost_annual(self) -> Optional[float]:
+        """``impact.allocated_cost_annual`` (``None`` without a projection)."""
+        return self._impact_number("allocated_cost_annual")
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Projected allocated annual CO2e saving in grams (IMP-03), before the realization factor."
+    )
+    @property
+    def projected_allocated_co2e_annual_g(self) -> Optional[float]:
+        """``impact.co2e_allocated_annual_g`` (``None`` without a projection)."""
+        return self._impact_number("co2e_allocated_annual_g")
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Projected billable annual cost saving (IMP-03): allocated x realization factor, the part expected to "
+            "leave the bill; read it with impact.realization_factor and its reasons."
+        )
+    )
+    @property
+    def projected_billable_cost_annual(self) -> Optional[float]:
+        """``impact.expected_billable_cost_annual``; ``None`` without a projection or before the cluster was observed.
+
+        ``-0.0`` reads as 0. A projection made with the unobserved factor 1.0
+        (IMP-12) has an unknown billable saving: ``None``, never the allocated value.
+        """
+        if self._unobserved_realization():
+            return None
+        value = self._impact_number("expected_billable_cost_annual")
+        return value + 0.0 if value is not None else None
+
+    def _unobserved_realization(self) -> bool:
+        impact = self.impact if isinstance(self.impact, dict) else {}
+        assumptions = impact.get("assumptions") if isinstance(impact.get("assumptions"), dict) else {}
+        return assumptions.get("realization_factor_source") == UNOBSERVED_REALIZATION_SOURCE
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Why the billable projection is lower than the allocated one, for the UI and the pull request "
+            "(IMP-03): 'fixed nodes: frees capacity, bill unchanged until nodes are removed' when the realization "
+            "factor is 0 and the allocated saving is not; 'billable saving unknown: cluster not observed yet' when "
+            "the projection was made before the cluster's autoscalers were observed (IMP-12)."
+        )
+    )
+    @property
+    def projection_note(self) -> Optional[str]:
+        """Fixed-nodes or not-observed note explaining the billable projection."""
+        if self._unobserved_realization():
+            return UNOBSERVED_NOTE
+        factor = self._impact_number("realization_factor")
+        allocated = self._impact_number("allocated_cost_annual")
+        if factor == 0.0 and allocated is not None and allocated > 0:
+            return FIXED_NODES_NOTE
+        return None
 
     @field_validator("source", mode="before")
     @classmethod

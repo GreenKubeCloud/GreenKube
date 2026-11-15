@@ -7,6 +7,7 @@ GreenKube proposes to **autoscale** `payments/Deployment/api` (2-6 replicas @70%
 | Projected saving (realization factor 0.80) | per month | per year |
 | --- | ---: | ---: |
 | Cost (USD) | $25.00 | $300.00 |
+| Allocated cost (chargeback, not billed) (USD) | $31.25 | $375.00 |
 | CO₂e | 1.0 kgCO₂e | 12.0 kgCO₂e |
 
 _Projected by the Impact Model; measured savings are reported on this pull request after the rollout._

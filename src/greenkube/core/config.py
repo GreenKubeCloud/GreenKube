@@ -465,6 +465,10 @@ class Config(BaseSettings):
     # derive it from the cluster's autoscalers, consolidation policies and
     # disruption blockers; a value pins it for every projection.
     IMPACT_REALIZATION_FACTOR: Optional[float] = None
+    # Autoscaler of the nodes outside Karpenter pools when detection cannot see it
+    # (IMP-12): none | cluster_autoscaler | karpenter. Empty: detected from the
+    # Cluster Autoscaler status ConfigMap and Karpenter NodePools.
+    IMPACT_AUTOSCALER_HINT: str = ""
     # Memory power per GiB of node memory (MemoryPowerModel, roadmap B5). The
     # default is the Cloud Carbon Footprint coefficient (0.392 W/GB).
     POWER_MEMORY_W_PER_GIB: float = 0.392
@@ -511,6 +515,11 @@ class Config(BaseSettings):
     # Cost (currency) of one engineer hour. 0 ignores implementation effort
     # except in the quick_wins profile (I1).
     RECOMMENDATION_ENGINEER_HOUR_COST: float = 0.0
+    # Weight of the allocated cost a change releases beyond its billable projection
+    # (allocated - expected billable) in the ranking value (IMP-03). On fixed nodes the
+    # billable projection is 0, so 1.0 ranks by the capacity freed for other workloads;
+    # 0 ranks by the billable projection only.
+    RECOMMENDATION_CAPACITY_VALUE_WEIGHT: float = 1.0
     # Minimum number of raw samples expected for a high-confidence recommendation.
     RECOMMENDATION_MIN_SAMPLES: int = 36
 
@@ -910,6 +919,14 @@ class Config(BaseSettings):
             raise ValueError("IMPACT_PRICING_CURRENCY must be a three-letter currency code (e.g. USD, EUR).")
         return currency
 
+    @field_validator("IMPACT_AUTOSCALER_HINT", mode="after")
+    @classmethod
+    def _validate_autoscaler_hint(cls, value: str) -> str:
+        hint = (value or "").strip().lower()
+        if hint and hint not in ("none", "cluster_autoscaler", "karpenter"):
+            raise ValueError("IMPACT_AUTOSCALER_HINT must be empty, none, cluster_autoscaler or karpenter.")
+        return hint
+
     @field_validator("IMPACT_REALIZATION_FACTOR", mode="after")
     @classmethod
     def _validate_realization_factor(cls, value: Optional[float]) -> Optional[float]:
@@ -931,7 +948,12 @@ class Config(BaseSettings):
             raise ValueError("CARBON_PRICE_PER_TONNE must not be negative.")
         return value
 
-    @field_validator("RECOMMENDATION_INCIDENT_COST", "RECOMMENDATION_ENGINEER_HOUR_COST", mode="after")
+    @field_validator(
+        "RECOMMENDATION_INCIDENT_COST",
+        "RECOMMENDATION_ENGINEER_HOUR_COST",
+        "RECOMMENDATION_CAPACITY_VALUE_WEIGHT",
+        mode="after",
+    )
     @classmethod
     def _validate_decision_costs(cls, value: float, info) -> float:
         if not math.isfinite(value) or value < 0:

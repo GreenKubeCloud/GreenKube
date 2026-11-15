@@ -1,6 +1,6 @@
 # Impact Model v1 — methodology
 
-**Model version:** `2.0.0` (`greenkube.impact.IMPACT_MODEL_VERSION`) · **Code:** `src/greenkube/impact/` · **Roadmap:** B1–B6, B8
+**Model version:** `3.0.0` (`greenkube.impact.IMPACT_MODEL_VERSION`) · **Code:** `src/greenkube/impact/` · **Roadmap:** B1–B6, B8
 
 The Impact Model is the single set of formulas GreenKube uses to say what a workload **is charged** (allocated cost and allocated CO₂e), what it **draws** (energy), and what a proposed change **releases**. Recommendation projections and the metric rows collection stores both come from it, so a projection and its later measurement are computed the same way.
 
@@ -11,6 +11,7 @@ This page is the reference for code review. When a formula below changes the num
 | `1.0.0` | Reservation-aware allocation and projections (CPU power, embodied, cost). |
 | `1.1.0` | Memory power (`MemoryPowerModel`) and GPU power (`GpuPowerModel`), allocated and projected. Stored rows carry the version that allocated them. |
 | `2.0.0` | Projections are annualized over the target's [observed coverage](#annualization-and-observed-coverage) instead of the whole lookback, with a minimum coverage and a short-coverage note. Projected CO₂e is reported by [component](#co2e-components-and-component-matched-comparison) (operational energy, idle share, embodied) with the value a measurement is compared with. Allocation is unchanged. |
+| `3.0.0` | Workload deletions take the pool's [realization factor](#realization-factor) for their reserved parts (IMP-05): per-asset costs (storage, LoadBalancer, network) and the usage-based CO₂e (dynamic CPU and GPU power) are saved whole, the rest at the factor; `co2e_expected_breakdown_annual_g` reports the expected CO₂e per component. `capacity_released` gains `storage_gib` and `load_balancers` (asset deletions). Allocation is unchanged: re-allocating stored rows (`greenkube recompute`) gives the same values. Recommendations are re-projected at the next scan; stored projections keep the version that made them. |
 
 ## Status of this version
 
@@ -277,7 +278,14 @@ share_s         = min(max(current, usage_s), A) − min(max(proposed, usage_s), 
 
 - Cost: each sample's observed allocated cost when it has one (OpenCost `totalCost`, split into components when available). Otherwise the modeled reservation cost.
 - CO₂e: the sample's whole allocated share, that is idle, memory and embodied by reservation, dynamic by usage and its attributed GPU power. The reservation shares are capped at the node's allocatable cores and memory and the usage at its capacity, so one workload never carries more than the whole node.
-- Realization factor: 1.
+- Realization factor (model 3.0.0, IMP-05): the pool factor of the nodes the samples ran on, as for a request cut. Deleting pods releases reserved capacity exactly like cutting their requests to zero: the bill only falls when a node goes away. Applied per part:
+
+```text
+expected_billable_cost_annual = factor × (cpu + ram + gpu + other) + (storage + lb + network)   # per-asset costs are billed whole
+co2e_expected_annual_g        = factor × (idle + memory + embodied) + (dynamic + gpu)           # usage-based power is no longer consumed
+```
+
+  On fixed nodes (factor 0) a deletion's expected billable saving is 0 (or its per-asset costs) and its expected CO₂e is the dynamic and GPU part only. A request cut to the usage level and a deletion of the same idle workload differ only by those usage-based terms.
 
 ### Asset deletion (orphaned PersistentVolumes and LoadBalancers)
 
@@ -299,6 +307,16 @@ A pool is recommended for consolidation when its average CPU request utilization
 ```
 
 The realization factor is 1, because the consolidation is the action itself.
+
+## Released capacity (WP-08.1)
+
+Next to cost and CO₂e every projection reports the reserved capacity the change releases, in its own units. It needs no price, no OpenCost and no autoscaler, and it is the honest result on a fixed-capacity cluster, where the bill does not move until a node is removed.
+
+- **Annual** (`impact.capacity_released`): `cpu_core_hours`, `mem_gib_hours`, `replica_hours` and `node_hours` per year, annualized like the cost over the target's observed coverage (so they inherit the coverage bias of the annualization above).
+- **Instantaneous** (`released_capacity.instantaneous` on every recommendation read through the API): `(current request − proposed request) × replicas` in cores and GiB, per replica and in total. The replica count is the mean over the observed coverage (`replica_hours / 8760`).
+- **Deletions**: `storage_gib` (orphaned PersistentVolume capacity) and `load_balancers` (count) for asset deletions only. A request change frees no storage. No network figure is reported.
+
+Rules: released capacity is never converted to money and never added to a cost saving; it is labelled *projected* (here) or *measured* (`docs/methodology/savings-measurement.md`, "Released capacity"). An increase is a negative release and is never shown as a saving. The API returns it as `released_capacity` on each recommendation (`method: projected`, `period: year`, `units`, `direction`); the pull-request summary has a "Released capacity (projected)" table; the recommendation list and detail pages show it in a separate block.
 
 ## Realization factor
 
@@ -331,9 +349,11 @@ Inputs and their sources:
 The controller reads them from its collection cycle, at most every 10 minutes, inside the cluster only (the chart's ClusterRole already grants these reads). A projection uses the hours-weighted factor of the pools its samples ran on; nodes the context does not know use the Cluster Autoscaler (or fixed-node) pool. The projection records the factor, `realization_factor_source: realization_context`, `realization_reasons` (rendered with the recommendation evidence) and the pools used (`realization_pools`).
 
 - `IMPACT_REALIZATION_FACTOR`, when set, overrides the context for every projection (`realization_factor_source: config:IMPACT_REALIZATION_FACTOR`).
-- Before the controller has observed the cluster (or outside a cluster), the factor is **1.0** with `realization_factor_source: realization_context:unobserved`, so expected savings equal allocated savings, as in model 1.0.0.
+- `IMPACT_AUTOSCALER_HINT` (`none`, `cluster_autoscaler`, `karpenter`; IMP-12) declares the autoscaler of the nodes outside Karpenter pools when detection does not see it (a Cluster Autoscaler run with another `--status-config-map-name` or namespace, a managed autoscaler that publishes neither signal). A detected Cluster Autoscaler wins; otherwise the hinted pool gets 0.6 (Cluster Autoscaler) or 0.8 (Karpenter), halved with blockers, and the reason names the hint.
+- Each resolved context is stored (table `realization_context`, migration 0141, IMP-12). A recommendation scan in a process that has not observed the cluster yet (after a restart, Prometheus down) restores the stored context when it is younger than 24 hours; its pools' reasons say it was restored. The next refresh still reads the cluster.
+- Before the controller has observed the cluster and without a stored context (or outside a cluster), the factor is **1.0** with `realization_factor_source: realization_context:unobserved`, so expected savings equal allocated savings, as in model 1.0.0.
 - When the Cluster Autoscaler status or the Karpenter NodePools cannot be read (RBAC, timeout; a missing ConfigMap or CRD is not an error), the affected pools are never treated as "no autoscaler": they keep their previous observation, or the unobserved factor 1.0 before any, and the reason says the input could not be read.
-- Deletions keep a factor of 1, and node-pool consolidation keeps 1 when the consolidation is the action itself.
+- Workload deletions take the pool factor for their reserved parts (model 3.0.0, see [Workload deletion](#workload-deletion-zombie-pods-idle-namespaces)); asset deletions (orphaned PersistentVolumes and LoadBalancers, billed per asset) keep a factor of 1, and node-pool consolidation keeps 1 when the consolidation is the action itself.
 
 ## Carbon price and value
 

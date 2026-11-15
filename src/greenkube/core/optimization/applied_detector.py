@@ -74,6 +74,10 @@ class WorkloadSnapshot:
     observed_generation: int | None = None
     container_request_values: Dict[str, Tuple[int | None, int | None]] = field(default_factory=dict)
     container_request_values_valid: bool = True
+    #: Per-container limits (CPU millicores, memory bytes), recorded with spec observations (WP-08.1).
+    container_limit_values: Dict[str, Tuple[int | None, int | None]] = field(default_factory=dict)
+    #: ``container``, ``sidecar`` (native sidecar) or ``init`` per container name (WP-08.1).
+    container_kinds: Dict[str, str] = field(default_factory=dict)
     # Rollout state; ``None`` means the reader does not report it (legacy/fake readers).
     desired_replicas: int | None = None
     current_replicas: int | None = None
@@ -208,9 +212,25 @@ def _resource_field(value, name: str, camel_case: str | None = None):
     return result if result is not None or camel_case is None else getattr(value, camel_case, None)
 
 
+def _container_kinds(containers, init_containers) -> Dict[str, str]:
+    """``container``, ``sidecar`` (init container with ``restartPolicy: Always``) or ``init`` per name."""
+    kinds: Dict[str, str] = {}
+    for container in containers or []:
+        name = _resource_field(container, "name")
+        if isinstance(name, str) and name:
+            kinds[name] = "container"
+    for container in init_containers or []:
+        name = _resource_field(container, "name")
+        if isinstance(name, str) and name and name not in kinds:
+            policy = _resource_field(container, "restart_policy", "restartPolicy")
+            kinds[name] = "sidecar" if policy == "Always" else "init"
+    return kinds
+
+
 def _read_container_request_values(
-    containers,
+    containers, field_name: str = "requests"
 ) -> tuple[Dict[str, Tuple[int | None, int | None]], bool]:
+    """Per-container ``(cpu millicores, memory bytes)`` of ``resources.<field_name>`` and whether all parsed."""
     values: Dict[str, Tuple[int | None, int | None]] = {}
     valid = True
     from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
@@ -221,7 +241,7 @@ def _read_container_request_values(
             valid = False
             continue
         resources = _resource_field(container, "resources")
-        requests = _resource_field(resources, "requests") if resources else None
+        requests = _resource_field(resources, field_name) if resources else None
         if requests is None:
             requests = {}
         elif not isinstance(requests, Mapping):
@@ -459,6 +479,9 @@ class K8sWorkloadReader:
                 request_values, request_values_valid = _read_container_request_values(
                     [*(containers or []), *init_containers]
                 )
+                limit_values, limit_values_valid = _read_container_request_values(
+                    [*(containers or []), *init_containers], "limits"
+                )
                 status = _resource_field(item, "status")
                 namespace = _resource_field(metadata, "namespace")
                 name = _resource_field(metadata, "name")
@@ -476,6 +499,8 @@ class K8sWorkloadReader:
                     observed_generation=_resource_field(status, "observed_generation", "observedGeneration"),
                     container_request_values=request_values,
                     container_request_values_valid=request_values_valid,
+                    container_limit_values=limit_values if limit_values_valid else {},
+                    container_kinds=_container_kinds(containers, init_containers),
                     spec_digest=pod_template_digest(template),
                     resources_digest=resources_digest(template),
                     image_digest=image_digest(template),

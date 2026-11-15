@@ -616,6 +616,10 @@ config:
     # Cost of one engineer hour, used to weigh implementation effort. 0 ignores
     # effort, except in the quick_wins profile (at least 100 per hour).
     engineerHourCost: 0
+    # Weight of the allocated cost a change releases beyond its billable projection
+    # (allocated - expected billable) in the ranking value. On fixed nodes the billable
+    # projection is 0, so 1 ranks by the capacity freed; 0 ranks by billable savings only.
+    capacityValueWeight: 1
     # Minimum raw samples of evidence, used everywhere a sample count gates a
     # decision: recommendation confidence, the plan policy gate and verification
     # (one knob since 0.4; replaces automation.policy.minSamples and
@@ -798,6 +802,11 @@ impact:
   # cluster (Cluster Autoscaler status, Karpenter consolidation policies,
   # do-not-disrupt annotations and blocking PDBs); set a value to pin it.
   realizationFactor: null
+  # Autoscaler of the nodes outside Karpenter pools when detection cannot see it
+  # (a Cluster Autoscaler with another status ConfigMap, a managed autoscaler
+  # that publishes nothing): none | cluster_autoscaler | karpenter. Empty:
+  # detected from kube-system/cluster-autoscaler-status and Karpenter NodePools.
+  autoscalerHint: ""
   # Memory power per GiB of node memory (W/GiB). Default: the Cloud Carbon
   # Footprint memory coefficient.
   memoryWattsPerGiB: 0.392

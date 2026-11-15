@@ -234,6 +234,9 @@ data:
   {{- if not (kindIs "invalid" .engineerHourCost) }}
   RECOMMENDATION_ENGINEER_HOUR_COST: {{ .engineerHourCost | toString | quote }}
   {{- end }}
+  {{- if not (kindIs "invalid" .capacityValueWeight) }}
+  RECOMMENDATION_CAPACITY_VALUE_WEIGHT: {{ .capacityValueWeight | toString | quote }}
+  {{- end }}
   RECOMMENDATION_MIN_SAMPLES: {{ $v.minSamples | int | quote }}
   RECOMMENDATION_SCAN_INTERVAL: {{ .scanInterval | default "1h" | quote }}
   {{- with .verification }}
@@ -284,6 +287,7 @@ data:
   {{- if not (kindIs "invalid" .realizationFactor) }}
   IMPACT_REALIZATION_FACTOR: {{ .realizationFactor | toString | quote }}
   {{- end }}
+  IMPACT_AUTOSCALER_HINT: {{ .autoscalerHint | default "" | quote }}
   {{- if not (kindIs "invalid" .carbonPricePerTonne) }}
   CARBON_PRICE_PER_TONNE: {{ .carbonPricePerTonne | toString | quote }}
   {{- end }}

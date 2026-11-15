@@ -106,6 +106,44 @@ describe('DashboardPage', () => {
 		expect(getByText('best').compareDocumentPosition(getByText('second')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
+	it('shows the allocated saving with the fixed-nodes note when nothing is billed back (IMP-03)', async () => {
+		api.getActiveRecommendations.mockResolvedValue([
+			{
+				id: 1,
+				type: 'RIGHTSIZING_CPU',
+				pod_name: 'api',
+				reason: 'r1',
+				potential_savings_cost: 0,
+				projected_allocated_cost_annual: 236.52,
+				projection_note: 'fixed nodes: frees capacity, bill unchanged until nodes are removed',
+				value: { ev: 120, p_success: 0.8, currency: 'USD' }
+			}
+		]);
+		const { findByTestId, getByText } = render(DashboardPage);
+		expect((await findByTestId('dashboard-allocated-saving')).textContent).toMatch(/Allocated/);
+		expect(getByText('fixed nodes: frees capacity, bill unchanged until nodes are removed')).toBeTruthy();
+	});
+
+	it('labels an unknown billable saving as allocated, never as projected (IMP-12 review)', async () => {
+		api.getActiveRecommendations.mockResolvedValue([
+			{
+				id: 1,
+				type: 'RIGHTSIZING_CPU',
+				pod_name: 'api',
+				reason: 'r1',
+				potential_savings_cost: 236.52,
+				projected_billable_cost_annual: null,
+				projected_allocated_cost_annual: 236.52,
+				projection_note: 'billable saving unknown: cluster not observed yet',
+				value: { ev: 120, p_success: 0.8, currency: 'USD' }
+			}
+		]);
+		const { findByTestId, getByText, queryByText } = render(DashboardPage);
+		expect((await findByTestId('dashboard-allocated-unknown')).textContent).toMatch(/^Allocated/);
+		expect(getByText('billable saving unknown: cluster not observed yet')).toBeTruthy();
+		expect(queryByText(/Projected \$237/)).toBeNull();
+	});
+
 	it('links each top recommendation to its detail page and shows its delivery state', async () => {
 		api.getActiveRecommendations.mockResolvedValue([
 			{ id: 7, pod_name: 'api', owner_kind: 'Deployment', owner_name: 'api', namespace: 'shop', eligibility: { can_open_pr: true } },

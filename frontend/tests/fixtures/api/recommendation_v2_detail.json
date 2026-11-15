@@ -263,7 +263,11 @@
   },
   "value": {
     "components": {
+      "allocated_cost_annual": null,
+      "allocated_value_annual": 0.0,
+      "billable_cost_annual": 0.0,
       "blast_radius": 1.0,
+      "capacity_value_weight": 1.0,
       "carbon_price_per_tonne": 100.0,
       "carbon_value_annual": 0.0,
       "co2e_annual_g": 0.0,
@@ -279,6 +283,7 @@
       "p_incident_now": null,
       "posterior_alpha": 2.0,
       "posterior_beta": 2.0,
+      "projection_confidence": null,
       "risk_aversion": 1.0,
       "risk_level": "medium",
       "risk_success_factor": 0.95,

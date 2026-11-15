@@ -7,6 +7,7 @@ GreenKube proposes to **rightsize** `payments/Deployment/api` (cpu 500m→200m, 
 | Projected saving (realization factor 0.80) | per month | per year |
 | --- | ---: | ---: |
 | Cost (USD) | $34.33 | $412.00 |
+| Allocated cost (chargeback, not billed) (USD) | $42.92 | $515.00 |
 | CO₂e | 1.5 kgCO₂e | 18.0 kgCO₂e |
 
 _Projected by the Impact Model; measured savings are reported on this pull request after the rollout._

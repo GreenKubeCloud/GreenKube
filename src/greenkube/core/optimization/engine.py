@@ -22,7 +22,7 @@ import logging
 import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
 
 from greenkube.core.optimization.actions import build_action_plans, may_build_action_plans
 from greenkube.core.optimization.context import OptimizationContext
@@ -277,6 +277,7 @@ class OptimizationEngine:
         from greenkube.core.observability import elapsed, record_run, start_timer
 
         timer = start_timer()
+        await _restore_realization(reco_repo)
         run = await self._start_run(run, namespace)
         outcomes: List[SourceRunOutcome] = []
         reports: List[SourceReport] = []
@@ -877,6 +878,24 @@ def _error_text(exc: BaseException) -> str:
     if isinstance(exc, RecommendationScanLimitError):
         return f"{type(exc).__name__}: {exc}"[:500]
     return type(exc).__name__
+
+
+async def _restore_realization(reco_repo: Any) -> None:
+    """Persist and restore the realization context through the scan's database (IMP-12).
+
+    A scan right after a restart projects with the last stored context
+    (younger than 24 h) instead of the unobserved factor 1.0. Repositories
+    without a database manager (tests, fakes) leave the process state alone.
+    """
+    db_manager = getattr(reco_repo, "db_manager", None)
+    if db_manager is None or getattr(db_manager, "db_type", None) not in ("sqlite", "postgres"):
+        return
+    from greenkube.impact.realization import register_realization_store, restore_realization_context
+    from greenkube.storage.realization_repository import RealizationContextRepository
+
+    store = RealizationContextRepository(db_manager)
+    register_realization_store(store)
+    await restore_realization_context(store)
 
 
 def _peak_resident_memory_bytes() -> int:

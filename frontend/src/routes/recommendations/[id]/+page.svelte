@@ -26,6 +26,7 @@
 		valueOf
 	} from '$lib/recommendationDetail.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
+	import ReleasedCapacity from '$lib/components/ReleasedCapacity.svelte';
 	import ManualApplyPanel from '$lib/components/ManualApplyPanel.svelte';
 
 	/** @type {{id: string}} */
@@ -288,6 +289,9 @@
 						<dd class="text-dark-100">{impact.co2eModeled ? `${formatCO2(impact.co2eExpectedAnnualG)}/yr` : 'Not modeled'}</dd>
 					</div>
 				</dl>
+				{#if rec?.projection_note}
+					<p class="text-xs text-dark-400" data-testid="projection-note">Allocated cost (chargeback, not billed): {formatMoney(impact.allocatedCostAnnual, impact.currency)}/yr. {rec.projection_note}.</p>
+				{/if}
 				<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
 					{#if impact.costComponents.length}
 						<div>
@@ -322,6 +326,9 @@
 				{/if}
 			</section>
 		{/if}
+
+		<!-- Released capacity (WP-08.1): its own units, never money -->
+		<ReleasedCapacity capacity={rec?.released_capacity} />
 
 		<!-- Consensus across sources (Recommendation v2 only) -->
 		{#if consensus}

@@ -57,6 +57,7 @@ export function opportunityOf(recommendations = []) {
 	let ev = 0;
 	let count = 0;
 	let reliabilityCount = 0;
+	let allocatedOnly = 0;
 	let hasEv = false;
 	for (const rec of Array.isArray(recommendations) ? recommendations : []) {
 		if (rec?.value?.lane === 'reliability') {
@@ -64,17 +65,24 @@ export function opportunityOf(recommendations = []) {
 			continue;
 		}
 		count += 1;
-		const recCost = finite(rec?.potential_savings_cost);
+		// An unknown billable saving (cluster not observed yet: null) is never summed as a projected saving.
+		const billableUnknown = rec?.projected_billable_cost_annual === null;
+		const recCost = billableUnknown ? null : finite(rec?.potential_savings_cost);
 		const recCo2e = finite(rec?.potential_savings_co2e_grams);
 		if (recCost !== null && recCost > 0) cost += recCost;
 		if (recCo2e !== null && recCo2e > 0) co2eGrams += recCo2e;
+		const allocated = finite(rec?.projected_allocated_cost_annual);
+		if (allocated !== null && allocated > 0 && (billableUnknown || !(recCost > 0))) allocatedOnly += 1;
 		const recEv = expectedValue(rec);
 		if (recEv !== null) {
 			hasEv = true;
-			if (recEv > 0) ev += recEv;
+			// The allocated (chargeback, not billed) value ranks fixed-node changes; it is not a saving.
+			const allocatedValue = finite(rec?.value?.factors?.allocated_value ?? rec?.ranking_factors?.allocated_value) ?? 0;
+			const savingEv = recEv - allocatedValue;
+			if (savingEv > 0) ev += savingEv;
 		}
 	}
-	return { cost, co2eGrams, ev: hasEv ? ev : null, count, reliabilityCount };
+	return { cost, co2eGrams, ev: hasEv ? ev : null, count, reliabilityCount, allocatedOnly };
 }
 
 /**
