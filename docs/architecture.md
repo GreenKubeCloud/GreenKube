@@ -268,8 +268,8 @@ All collectors are fully asynchronous and implement a common pattern.
   - Auto-discovery of Prometheus endpoints (multiple URL candidates)
   - Every PromQL expression comes from `PromQLCatalog` (`collectors/promql.py`); container-scoped series exclude the pod cgroup (`container=""`) and pause (`container="POD"`) series
   - CPU and memory usage are aggregated with `max` per container, so duplicate series of one container (kubelet `/metrics/resource` next to `/metrics/cadvisor`, two scrape jobs, two cgroup paths) are counted once
-  - Fallback to the pod cgroup series (counted once, CPU and memory) when container-level metrics are unavailable; that usage stays pod-level and is never attributed to a container
-  - Kubernetes Metrics API container samples that fill the latest step of a pod measured only at pod level are scaled down to the pod cgroup value when they add up to more than it (cri-dockerd counts page cache in a container's working set); the rows are flagged `container_usage_exceeds_pod`
+  - Container and pod cgroup series are read in one query; a pod without container series uses its pod cgroup (counted once, CPU and memory), per pod (COL-09); that usage stays pod-level and is never attributed to a container. Collected steps of a cluster without any container series are recorded with the reason `pod_level_usage_only`
+  - Kubernetes Metrics API container samples that fill the latest step of a pod measured only at pod level are stored with `usage_source = metrics_server` and the reason `metrics_api_point_sample` (COL-05), and scaled down to the pod cgroup value when they add up to more than it (cri-dockerd counts page cache in a container's working set); the rows are flagged `container_usage_exceeds_pod`
   - Range queries raise `PrometheusQueryError` when Prometheus is unreachable, so an outage is never stored as an empty window
   - TLS/authentication support (basic auth, bearer token)
   - Concurrent query execution (8 queries via `asyncio.gather`)

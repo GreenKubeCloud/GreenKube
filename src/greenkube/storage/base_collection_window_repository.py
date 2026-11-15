@@ -33,6 +33,8 @@ REASON_NO_SCRAPE_DATA = "no_scrape_data"
 REASON_BEYOND_BACKFILL = "beyond_backfill_horizon"
 #: Reason of a step recorded from the rows already stored when the table was introduced.
 REASON_SEEDED = "seeded_from_stored_rows"
+#: Reason of a collected step without container rows because cAdvisor exports pod cgroups only (COL-05).
+REASON_POD_LEVEL_ONLY = "pod_level_usage_only"
 #: Reason of an empty step whose range processor cannot probe Prometheus.
 REASON_NOT_PROBED = "not_probed"
 

@@ -95,6 +95,27 @@ def provenance_estimation_reasons(intensity_source: Optional[str], power_source:
     return reasons
 
 
+#: Estimation reason of a container row whose usage is a Metrics API point sample (about 15-30 s, read at
+#: collection time), not a step average (COL-05).
+METRICS_API_POINT_SAMPLE = "metrics_api_point_sample"
+
+
+def _container_usage_source(resource_maps: PodResourceMaps, container_key: tuple, aggregate: CombinedMetric) -> str:
+    """Usage source of a container row: its own when it differs from the pod row's (COL-05)."""
+    source = resource_maps.container_usage_source_map.get(container_key)
+    if source:
+        return source
+    if container_key in resource_maps.container_timestamp_map:
+        return UsageSource.METRICS_SERVER.value
+    return aggregate.usage_source or UsageSource.PROMETHEUS.value
+
+
+def _container_reasons(reasons: List[str], usage_source: str) -> List[str]:
+    if usage_source == UsageSource.METRICS_SERVER.value:
+        return list(dict.fromkeys([*reasons, METRICS_API_POINT_SAMPLE]))
+    return list(reasons)
+
+
 def _weights(values: Sequence[Optional[float]]) -> Optional[List[float]]:
     if any(value is None for value in values):
         return None
@@ -269,6 +290,7 @@ class MetricAssembler:
             ):
                 share = weight / total_weight
                 memory_share = memory_weight / total_memory_weight
+                usage_source = _container_usage_source(resource_maps, container_key, aggregate)
                 if has_components:
                     cost_cpu = (aggregate.cost_cpu or 0.0) * share
                     cost_ram = (aggregate.cost_ram or 0.0) * memory_share
@@ -287,11 +309,7 @@ class MetricAssembler:
                             "cost_storage": None if aggregate.cost_storage is None else aggregate.cost_storage * share,
                             "cost_network": None if aggregate.cost_network is None else aggregate.cost_network * share,
                             "cost_lb": None if aggregate.cost_lb is None else aggregate.cost_lb * share,
-                            "usage_source": (
-                                UsageSource.METRICS_SERVER.value
-                                if container_key in resource_maps.container_timestamp_map
-                                else (aggregate.usage_source or UsageSource.PROMETHEUS.value)
-                            ),
+                            "usage_source": usage_source,
                             **gpu_fields,
                             "cpu_limit": pod_metric.cpu_limit,
                             "memory_limit": pod_metric.memory_limit,
@@ -322,8 +340,10 @@ class MetricAssembler:
                             "sample_count": resource_maps.container_sample_count_map.get(
                                 container_key, aggregate.sample_count
                             ),
-                            "is_estimated": aggregate.is_estimated or incomplete,
-                            "estimation_reasons": list(estimation_reasons),
+                            "is_estimated": aggregate.is_estimated
+                            or incomplete
+                            or usage_source == UsageSource.METRICS_SERVER.value,
+                            "estimation_reasons": _container_reasons(estimation_reasons, usage_source),
                         }
                     )
                 )

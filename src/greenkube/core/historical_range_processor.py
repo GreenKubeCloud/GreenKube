@@ -176,6 +176,9 @@ class HistoricalRangeProcessor:
         #: Per step of the last ``run_range`` call: (OpenCost window total spread evenly over the steps,
         #: OpenCost cost stored in the step's rows), so allocations without a row are visible (COL-03 step 4).
         self.last_cost_reconciliation: dict[datetime, tuple[float, float]] = {}
+        #: Whether the last ``run_range`` call saw any container-level CPU series; False on runtimes whose
+        #: cAdvisor exports pod cgroups only (cri-dockerd), where past windows get no container rows (COL-05).
+        self.last_container_series_present = False
 
     # ------------------------------------------------------------------
     # Helpers
@@ -905,6 +908,7 @@ class HistoricalRangeProcessor:
             raise ValueError("Historical range end must be after start")
         self.last_idle_metrics = []
         self.last_cost_reconciliation = {}
+        self.last_container_series_present = False
 
         chosen_step_sec = self._promql.step_seconds
         window = CollectionWindow.covering(start_dt, end_dt, timedelta(seconds=chosen_step_sec))
@@ -1230,6 +1234,8 @@ class HistoricalRangeProcessor:
             pod_node_map_by_ts: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
             # Duplicate series of one container are merged with max (USER BUG 2).
             cpu_values, cpu_nodes = self._deduplicated_samples(results, chunk)
+            if any(container for by_key in cpu_values.values() for _ns, _pod, container in by_key):
+                self.last_container_series_present = True
             for sample_start, by_key in cpu_values.items():
                 named_pods = {(series_ns, pod) for series_ns, pod, container in by_key if container}
                 for (series_ns, pod, container), usage in by_key.items():
@@ -1540,6 +1546,8 @@ class HistoricalRangeProcessor:
                     key: int(round(value)) for key, value in container_memory_samples.get(sample_key, {}).items()
                 }
                 container_sample_count_map = {}
+                #: Containers filled from the Metrics API carry their own usage source (COL-05).
+                container_usage_source_map: dict[tuple[str, str, str], str] = {}
                 refitted_containers: set[tuple[str, str, str]] = set()
                 # Point-in-time metrics-server usage only fills gaps of the latest
                 # sample of a current window, and only when it was measured during
@@ -1570,6 +1578,7 @@ class HistoricalRangeProcessor:
                             usage_added = True
                         if usage_added:
                             container_sample_count_map[container_key] = 1
+                            container_usage_source_map[container_key] = UsageSource.METRICS_SERVER.value
                     # The pod cgroup bounds its containers (USER BUG 2): refit what contradicts it.
                     refitted_containers = self._fit_to_pod_cgroup(
                         container_cpu_usage, cpu_filled, range_cpu_usage_map, cpu_measured_pods
@@ -1581,6 +1590,7 @@ class HistoricalRangeProcessor:
                         container_cpu_usage_map=container_cpu_usage,
                         container_memory_usage_map=container_memory_usage,
                         container_sample_count_map=container_sample_count_map,
+                        container_usage_source_map=container_usage_source_map,
                     )
                     if container_cpu_usage or container_memory_usage
                     else None

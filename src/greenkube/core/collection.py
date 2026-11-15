@@ -28,6 +28,7 @@ from ..storage.base_collection_window_repository import (
     REASON_BEYOND_BACKFILL,
     REASON_NO_SCRAPE_DATA,
     REASON_NOT_PROBED,
+    REASON_POD_LEVEL_ONLY,
     REASON_SEEDED,
     STATUS_COLLECTED,
     STATUS_EMPTY,
@@ -429,10 +430,16 @@ class MetricsCollectionJob:
         if self.window_repository is None:
             return []
         pod_rows: dict[datetime, list[CombinedMetric]] = {}
+        container_steps: set[datetime] = set()
         for row in rows:
-            if row.timestamp is None or getattr(row, "container_name", None):
+            if row.timestamp is None:
+                continue
+            if getattr(row, "container_name", None):
+                container_steps.add(ensure_utc(row.timestamp))
                 continue
             pod_rows.setdefault(ensure_utc(row.timestamp), []).append(row)
+        # Pod-level cAdvisor only (cri-dockerd): steps without container rows say why (COL-05).
+        pod_level_only = getattr(self.processor, "last_container_series_present", None) is False
         reconciliation = getattr(self.processor, "last_cost_reconciliation", None)
         if not isinstance(reconciliation, dict):
             reconciliation = {}
@@ -448,7 +455,8 @@ class MetricsCollectionJob:
             step_rows = pod_rows.get(start, [])
             opencost_total, attributed = reconciliation.get(start, (None, None))
             if step_rows:
-                status, reason = STATUS_COLLECTED, None
+                status = STATUS_COLLECTED
+                reason = REASON_POD_LEVEL_ONLY if pod_level_only and start not in container_steps else None
             elif scraped is None:
                 status, reason = STATUS_EMPTY, REASON_NOT_PROBED
             elif start in scraped:

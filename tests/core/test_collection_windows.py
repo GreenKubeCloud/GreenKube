@@ -143,6 +143,19 @@ async def test_window_without_pods_while_cadvisor_is_scraped_is_empty(stack):
 
 
 @pytest.mark.asyncio
+async def test_steps_of_a_pod_level_only_cluster_say_why_they_have_no_container_rows(stack):
+    """COL-05 step 5: on cri-dockerd, catch-up windows have pod rows but no container rows."""
+    await stack["watermarks"].advance(CLUSTER, METRICS_WATERMARK_SOURCE, BASE)
+    stack["prom"].add("container_cpu_usage_seconds_total", {"namespace": "ns", "pod": "p", "node": "n1"}, 0.2)
+
+    report = await _run(stack, BASE + 2 * STEP + timedelta(minutes=1))
+
+    assert report.succeeded, report.error
+    records = await stack["windows"].list_overlapping(CLUSTER, METRICS_WATERMARK_SOURCE, BASE, BASE + 2 * STEP)
+    assert [(r.status, r.reason) for r in records] == [(STATUS_COLLECTED, "pod_level_usage_only")] * 2
+
+
+@pytest.mark.asyncio
 async def test_failed_step_is_retried_and_survives_a_restart(stack):
     """COL-04 acceptance e): the hole is in the table, and a later run fills it."""
     await stack["watermarks"].advance(CLUSTER, METRICS_WATERMARK_SOURCE, BASE)
