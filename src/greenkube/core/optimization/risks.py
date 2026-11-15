@@ -23,14 +23,15 @@ so they are never low risk and always carry ``irreversible_deletion``.
 
 Unknown profile facts (``None``) never change the risk level, with one
 exception: an unknown OOM history (``oom_events is None``) makes a memory
-decrease at least medium risk with the factor ``oom_history_unknown``, which
-blocks automation (REC-04: never treat unknown as healthy).
+decrease at least medium risk with the factor ``oom_history_unknown`` (REC-04:
+never treat unknown as healthy). A person may still open its pull request, with
+the warning of :func:`oom_history_unknown_warning`; automation never does.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, FrozenSet, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import EffortLevel, Recommendation, RecommendationSource, RecommendationType, RiskLevel
@@ -55,11 +56,65 @@ JVM_MEMORY_DECREASE_CONFIDENCE = 0.5
 #: Risk factor of every recommendation that deletes something (no revert brings it back).
 IRREVERSIBLE_DELETION = "irreversible_deletion"
 
-#: Risk factor of a memory decrease whose OOM history could not be read (blocks automation).
+#: Risk factor of a memory decrease whose OOM history could not be read (never automated, a person may open the PR).
 OOM_HISTORY_UNKNOWN = "oom_history_unknown"
 #: Prefix of the factor naming why the OOM history is unknown
 #: (``oom_unknown_no_usage_summary``, ``oom_unknown_signal_failed``, ``oom_unknown_signal_unavailable``).
 OOM_UNKNOWN_CAUSE_PREFIX = "oom_unknown_"
+
+#: What a reviewer checks before merging a memory decrease whose OOM history is unknown.
+OOM_UNKNOWN_CHECK = (
+    "Before merging, check the container over the observation window: no recent restarts "
+    "(kubectl get pod, RESTARTS column), no OOMKilled last state (kubectl describe pod), and memory peaks "
+    "below the proposed request (kubectl top pod or your monitoring)."
+)
+_OOM_UNKNOWN_DEFAULT = (
+    "The container's OOM-kill and restart history could not be read: a memory decrease could land below "
+    "peaks that killed it, so it is never applied automatically.",
+    "See the rightsizing source run's reliability_signals_unknown diagnostic for the missing input.",
+)
+#: Warning message and cause-specific remedy by cause (risk factor ``oom_unknown_<cause>``).
+OOM_UNKNOWN_CAUSES: Dict[str, Tuple[str, str]] = {
+    "no_usage_summary": (
+        "No usage summary covers this container, so its OOM-kill and restart history could not be read: a "
+        "memory decrease could land below peaks that killed it, so it is never applied automatically.",
+        "Or wait until the workload usage rollup covers the container (it runs with metric compression) and "
+        "the next scan.",
+    ),
+    "signal_failed": (
+        "The OOM-kill and restart queries to Prometheus failed (HTTP error, timeout or query limit) and the "
+        "rollup holds no restart history for this container, so its OOM history could not be read: a memory "
+        "decrease could land below peaks that killed it, so it is never applied automatically.",
+        "Or check that Prometheus answers (availability, timeouts, query sample limits) and wait for the next scan.",
+    ),
+    "signal_unavailable": (
+        "No OOM-kill and restart source is available (no Prometheus configured, or kube-state-metrics not "
+        "scraped) and the rollup holds no restart history for this container, so its OOM history could not be "
+        "read: a memory decrease could land below peaks that killed it, so it is never applied automatically.",
+        "Or configure Prometheus to scrape kube-state-metrics and wait for the next scan.",
+    ),
+}
+
+
+def oom_history_unknown_warning(risk_factors: Sequence[str]) -> Optional[Tuple[str, str]]:
+    """``(message, check)`` for a recommendation carrying ``oom_history_unknown``, else None.
+
+    The message names the cause from the factor ``oom_unknown_<cause>``; the
+    check says what a person verifies before merging the pull request. Shared
+    by the eligibility warning and the pull-request body.
+    """
+    factors = [str(factor) for factor in risk_factors or []]
+    if OOM_HISTORY_UNKNOWN not in factors:
+        return None
+    message, remedy = _OOM_UNKNOWN_DEFAULT
+    for factor in factors:
+        if factor.startswith(OOM_UNKNOWN_CAUSE_PREFIX):
+            texts = OOM_UNKNOWN_CAUSES.get(factor[len(OOM_UNKNOWN_CAUSE_PREFIX) :])
+            if texts is not None:
+                message, remedy = texts
+                break
+    return message, f"{OOM_UNKNOWN_CHECK} {remedy}"
+
 
 #: CPU throttling ratio above which a CPU decrease is at least medium (high above the second value).
 THROTTLING_MEDIUM = 0.05

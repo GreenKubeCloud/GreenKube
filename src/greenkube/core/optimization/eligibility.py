@@ -33,7 +33,11 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tupl
 
 from greenkube.automation.policy import AutomationPolicyConfig, AutomationPolicyEvaluator, AutomationPolicyResult
 from greenkube.core.deletion_safety import DELETION_TYPES
-from greenkube.core.optimization.risks import profile_from_binding_evidence
+from greenkube.core.optimization.risks import (
+    OOM_HISTORY_UNKNOWN,
+    oom_history_unknown_warning,
+    profile_from_binding_evidence,
+)
 from greenkube.gitops.contracts import BindingStatus
 from greenkube.storage.base_gitops_repository import WorkloadBinding, freshen_workload_binding
 
@@ -221,12 +225,6 @@ CODES: Dict[str, Tuple[str, str]] = {
         "The owning GitOps controller is suspended or unhealthy.",
         "Restore the controller to a healthy, syncing state.",
     ),
-    "oom_history_unknown": (
-        "The container's OOM-kill and restart history could not be read: a memory decrease could land below "
-        "peaks that killed it, so it is never automated.",
-        "See the rightsizing source run's reliability_signals_unknown diagnostic for the missing input, wait for "
-        "the next scan, or apply the change manually after checking the container's restarts.",
-    ),
     "policy_interaction_conflict": (
         "An HPA, VPA or PodDisruptionBudget conflicts with this change.",
         "Remove the conflicting writer (for example set the VPA to updateMode Off) or apply the change manually.",
@@ -248,6 +246,11 @@ CODES: Dict[str, Tuple[str, str]] = {
         "Sources disagree on this change: it is never approved automatically.",
         "Review the per-source spread in the evidence before opening the pull request.",
     ),
+    "oom_history_unknown": (
+        "The container's OOM-kill and restart history could not be read: a memory decrease could land below "
+        "peaks that killed it, so it is never applied automatically.",
+        "Before merging, check the container's restarts and OOMKilled last state over the observation window.",
+    ),
 }
 
 
@@ -260,39 +263,10 @@ def _configured_delivery_mode() -> str:
         return DELIVERY_DIRECT
 
 
-#: Message and fix of the ``oom_history_unknown`` blocker by cause (risk factor ``oom_unknown_<cause>``).
-OOM_UNKNOWN_CAUSES: Dict[str, Tuple[str, str]] = {
-    "no_usage_summary": (
-        "No usage summary covers this container, so its OOM-kill and restart history is unknown: a memory "
-        "decrease could land below peaks that killed it, so it is never automated.",
-        "Wait until the workload usage rollup covers the container (it runs with metric compression) and the "
-        "next scan, or apply the change manually after checking the container's restarts.",
-    ),
-    "signal_failed": (
-        "The OOM-kill and restart queries to Prometheus failed (HTTP error, timeout or query limit) and the "
-        "rollup holds no restart history for this container: a memory decrease could land below peaks that "
-        "killed it, so it is never automated.",
-        "Check that Prometheus answers (availability, timeouts, query sample limits), then wait for the next "
-        "scan, or apply the change manually after checking the container's restarts.",
-    ),
-    "signal_unavailable": (
-        "No OOM-kill and restart source is available (no Prometheus configured, or kube-state-metrics not "
-        "scraped) and the rollup holds no restart history for this container: a memory decrease could land "
-        "below peaks that killed it, so it is never automated.",
-        "Configure Prometheus and make sure it scrapes kube-state-metrics, then wait for the next scan, or apply "
-        "the change manually after checking the container's restarts.",
-    ),
-}
-
-
-def _oom_history_unknown_entry(risk_factors: Sequence[str]) -> Dict[str, str]:
-    """The ``oom_history_unknown`` blocker, worded after the cause recorded in the risk factors."""
-    for factor in risk_factors:
-        if factor.startswith("oom_unknown_"):
-            texts = OOM_UNKNOWN_CAUSES.get(factor[len("oom_unknown_") :])
-            if texts is not None:
-                return _entry("oom_history_unknown", *texts)
-    return _entry("oom_history_unknown")
+def _oom_history_unknown_entry(risk_factors: Sequence[str]) -> Optional[Dict[str, str]]:
+    """The ``oom_history_unknown`` warning, worded after the cause recorded in the risk factors."""
+    texts = oom_history_unknown_warning(risk_factors)
+    return _entry("oom_history_unknown", *texts) if texts is not None else None
 
 
 def _entry(code: str, message: Optional[str] = None, fix: Optional[str] = None) -> Dict[str, str]:
@@ -750,9 +724,11 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
                 warnings.extend(evaluator_warnings)
 
     risk_factors = [str(factor) for factor in getattr(record, "risk_factors", None) or []]
-    if "oom_history_unknown" in risk_factors:
-        # Fail closed (REC-04): an unknown OOM history never reaches a pull request automatically.
-        blockers.append(_oom_history_unknown_entry(risk_factors))
+    oom_warning = _oom_history_unknown_entry(risk_factors)
+    if oom_warning is not None:
+        # REC-04, maintainer decision 2026-11-15: a person may open the pull request after the
+        # checks the warning names; auto-approval never approves it (auto_approve_blockers).
+        warnings.append(oom_warning)
     for code in ("singleton_workload", "memory_decrease_best_effort"):
         if code in risk_factors:
             warnings.append(_entry(code))
@@ -917,6 +893,9 @@ AUTO_APPROVE_CODES: Dict[str, str] = {
     "risk_above_auto_approve": "A recommendation's risk is above automation.autoApprove.maxRisk.",
     "confidence_below_auto_approve": "A recommendation's confidence is below automation.autoApprove.minConfidence.",
     "consensus_contested": "Sources disagree on a recommendation: contested advice is never approved automatically.",
+    "oom_history_unknown": (
+        "The OOM-kill and restart history of a memory decrease could not be read: a person reviews it."
+    ),
     "deletion_requires_review": "A deletion is always approved by a person.",
     "decrease_without_native_evidence": (
         "A decrease needs GreenKube's own usage evidence or at least two independent agreeing sources."
@@ -972,6 +951,18 @@ def is_contested(record: Any) -> bool:
     if isinstance(eligibility, Mapping):
         for entry in [*(eligibility.get("warnings") or []), *(eligibility.get("blockers") or [])]:
             if isinstance(entry, Mapping) and entry.get("code") == "consensus_contested":
+                return True
+    return False
+
+
+def has_unknown_oom_history(record: Any) -> bool:
+    """The record carries ``oom_history_unknown``, as a risk factor or an eligibility entry."""
+    if OOM_HISTORY_UNKNOWN in [str(factor) for factor in getattr(record, "risk_factors", None) or []]:
+        return True
+    eligibility = getattr(record, "eligibility", None)
+    if isinstance(eligibility, Mapping):
+        for entry in [*(eligibility.get("warnings") or []), *(eligibility.get("blockers") or [])]:
+            if isinstance(entry, Mapping) and entry.get("code") == OOM_HISTORY_UNKNOWN:
                 return True
     return False
 
@@ -1108,6 +1099,9 @@ def auto_approve_blockers(records: Sequence[Any], policy: AutoApprovePolicy, *, 
             blockers.append("confidence_below_auto_approve")
         if is_contested(record):
             blockers.append("consensus_contested")
+        if has_unknown_oom_history(record):
+            # A decrease that could land below peaks that OOM-killed the container: a person decides.
+            blockers.append("oom_history_unknown")
         if proposes_decrease(record) and not has_native_evidence(record) and independent_votes(record) < 2:
             blockers.append("decrease_without_native_evidence")
         if proposes_increase(record):

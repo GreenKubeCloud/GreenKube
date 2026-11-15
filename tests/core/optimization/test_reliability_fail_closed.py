@@ -321,7 +321,8 @@ def test_risk_profile_reads_no_oom_from_a_clean_rollup_restart_history() -> None
     assert build_risk_profile(rec, context).oom_events is None
 
 
-def test_eligibility_blocks_automation_on_unknown_oom_history() -> None:
+def test_eligibility_warns_on_unknown_oom_history() -> None:
+    """Maintainer decision 2026-11-15: a warning a person may override; auto-approval stays blocked."""
     from greenkube.core.optimization.eligibility import EligibilityContext, assess_eligibility
 
     assert "oom_history_unknown" in CODES
@@ -334,8 +335,8 @@ def test_eligibility_blocks_automation_on_unknown_oom_history() -> None:
         consensus=None,
     )
     result = assess_eligibility(record, EligibilityContext(now=END))
-    assert "oom_history_unknown" in {entry["code"] for entry in result["blockers"]}
-    assert result["can_open_pr"] is False
+    assert "oom_history_unknown" in {entry["code"] for entry in result["warnings"]}
+    assert "oom_history_unknown" not in {entry["code"] for entry in result["blockers"]}
 
 
 @pytest.mark.parametrize(
@@ -346,7 +347,7 @@ def test_eligibility_blocks_automation_on_unknown_oom_history() -> None:
         ("signal_unavailable", "kube-state-metrics not scraped", None),
     ],
 )
-def test_the_unknown_oom_blocker_names_its_cause(cause, fragment, absent) -> None:
+def test_the_unknown_oom_warning_names_its_cause(cause, fragment, absent) -> None:
     """REC-04 review: "no usage summary" and "signal query failed" read differently, with a matching fix."""
     from greenkube.core.optimization.eligibility import EligibilityContext, assess_eligibility
 
@@ -360,7 +361,7 @@ def test_the_unknown_oom_blocker_names_its_cause(cause, fragment, absent) -> Non
     assert f"oom_unknown_{cause}" in factors
     record = NS(id=1, type="RIGHTSIZING_MEMORY", status="active", risk_factors=factors, value=None, consensus=None)
     result = assess_eligibility(record, EligibilityContext(now=END))
-    [entry] = [entry for entry in result["blockers"] if entry["code"] == "oom_history_unknown"]
+    [entry] = [entry for entry in result["warnings"] if entry["code"] == "oom_history_unknown"]
     assert fragment in entry["message"]
     if absent is not None:
         assert absent not in entry["message"] and absent not in entry["fix"]

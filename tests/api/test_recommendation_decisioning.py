@@ -246,6 +246,20 @@ class TestEligibilityWithAutomation:
         batch = {b["code"] for b in rows[3]["eligibility"]["blockers"]}
         assert {"policy_risk_exceeded", "policy_confidence_too_low"} <= batch
 
+    def test_unknown_oom_history_warns_but_a_person_can_open_the_pr(self, automation_client, mock_reco_repo):
+        """2026-11-15: oom_history_unknown moved from blocker to warning; the cause is named."""
+        flagged = RECORDS[0].model_copy(
+            update={"risk_factors": ["oom_history_unknown", "oom_unknown_no_usage_summary"]}
+        )
+        mock_reco_repo.get_active_recommendations = AsyncMock(return_value=[flagged])
+        [row] = automation_client.get("/api/v1/recommendations/active").json()
+        eligibility = row["eligibility"]
+        assert eligibility["can_open_pr"] is True, eligibility["blockers"]
+        assert eligibility["recommendation_ids"] == [1]
+        [warning] = [w for w in eligibility["warnings"] if w["code"] == "oom_history_unknown"]
+        assert "No usage summary covers this container" in warning["message"]
+        assert "Before merging" in warning["fix"]
+
     def test_unreadable_pull_requests_fail_closed(self, automation_client):
         prs = automation_client.app.dependency_overrides[get_pull_request_repository]()
         prs.get_open_pull_requests = AsyncMock(side_effect=RuntimeError("database down"))
