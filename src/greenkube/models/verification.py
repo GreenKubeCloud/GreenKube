@@ -61,6 +61,8 @@ class HealthGateResult(BaseModel):
     value: Optional[float] = None
     threshold: Optional[float] = None
     detail: str = ""
+    #: The same signal over the baseline window, when the gate was compared with it (MEA-07).
+    baseline_value: Optional[float] = None
 
 
 class MeasuredLedgerInput(BaseModel):

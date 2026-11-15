@@ -590,7 +590,7 @@ class ChangeRepository:
                 conn,
                 "INSERT INTO baseline_snapshots (snapshot_id, change_id, content_sha256, window_start, window_end, "
                 "hours, load_series, price_card, intensity_source, impact_model_version, collector_versions, "
-                f"created_at) VALUES (?, ?, ?, ?, ?, ?j, ?j, ?j, ?, ?, ?j, ?) {conflict}",
+                f"created_at, health) VALUES (?, ?, ?, ?, ?, ?j, ?j, ?j, ?, ?, ?j, ?, ?j) {conflict}",
                 [
                     snapshot.snapshot_id,
                     snapshot.change_id,
@@ -604,6 +604,7 @@ class ChangeRepository:
                     snapshot.impact_model_version,
                     _dumps(snapshot.collector_versions),
                     self._ts(snapshot.created_at),
+                    _dumps(snapshot.health),
                 ],
             )
         stored = await self.get_snapshot_for_change(snapshot.change_id)
@@ -624,6 +625,7 @@ class ChangeRepository:
                 "intensity_source": row.get("intensity_source"),
                 "impact_model_version": row.get("impact_model_version"),
                 "collector_versions": _loads(row.get("collector_versions")) or {},
+                "health": _loads(row.get("health")) or {},
                 "created_at": _parse_time(row["created_at"]),
             }
         )

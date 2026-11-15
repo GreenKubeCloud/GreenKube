@@ -237,6 +237,16 @@ They are evaluated twice:
 - once the interim health window has elapsed, so a harmful change is flagged within `VERIFICATION_WINDOW_HOURS` instead of at the end of the post-window. A failure sends every awaiting recommendation of the change to `rollback_review`. When the metrics cannot be read, the check is not recorded and is retried on the next pass;
 - at the decision, over the whole post-window. The gates are stored in the measurement.
 
+**Compared with the baseline (MEA-07).** The thresholds were designed for the 72-hour interim verifier; applied as absolute levels to a 7-day window, one unrelated restart of any replica, or CPU throttling that existed before the change, sent a realized change to `rollback_review`. The baseline snapshot therefore freezes the same signals over the baseline window, per container (`BaselineSnapshot.health`: restarts, OOM kills, readiness, throttling, and the window's replica-hours), and the restart, readiness and throttling gates fail only on a worsening:
+
+| Gate | Fails when |
+|---|---|
+| `restarts` | the post-window count is improbably high for the baseline rate per replica-hour — exact conditional binomial test: if the rate is unchanged, the post-window share of all restarts is binomial with the post-window share of the replica-hours, one-sided p ≤ 0.05 — **and** exceeds the expected count by at least `max(1, VERIFICATION_MAX_RESTART_DELTA)`. The tolerance scales with replica-hours. |
+| `cpu_throttling` | the ratio is above the baseline ratio + `VERIFICATION_MAX_THROTTLE_RATIO` (absolute). |
+| `readiness` | the ratio is below `min(VERIFICATION_MIN_READINESS, baseline − 0.01)`. |
+
+Each compared gate records `value` and `baseline_value`. Post-window replica-hours come from the post-window hours; the interim check, and baselines without replica counts, assume the baseline's replica count. A snapshot frozen before this check (or a signal not read in the baseline) keeps the absolute rule and the gate detail says `baseline_missing`. The usage and OOM-kill gates are unchanged (a request decrease must never hide an OOM kill).
+
 A health failure does not change the measurement outcome: the saving is still evidence about the change. It changes what happens to the recommendations.
 
 ### Reliability increases (H1)

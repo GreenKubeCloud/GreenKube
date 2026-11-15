@@ -185,6 +185,8 @@ class BaselineSnapshot(_Frozen):
     hours: List[HourBucket] = Field(default_factory=list)
     load_series: dict[str, dict[str, float]] = Field(default_factory=dict)
     price_card: dict[str, Any] = Field(default_factory=dict)
+    #: Health signals over the window, per container (MEA-07, :mod:`greenkube.verify.health_baseline`).
+    health: dict[str, Any] = Field(default_factory=dict)
     intensity_source: Optional[str] = None
     impact_model_version: Optional[str] = None
     collector_versions: dict[str, Any] = Field(default_factory=dict)
@@ -192,6 +194,9 @@ class BaselineSnapshot(_Frozen):
 
     def digest_payload(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"content_sha256", "created_at"})
+        if not payload.get("health"):
+            # Snapshots frozen before the baseline health (MEA-07) have none.
+            payload.pop("health", None)
         for bucket in payload.get("hours") or []:
             # Fields added after the first snapshots were frozen are left out while unset,
             # so the digest of an older snapshot still verifies.

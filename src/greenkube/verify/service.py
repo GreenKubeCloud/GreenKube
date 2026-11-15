@@ -52,6 +52,7 @@ from greenkube.verify.confounders import (
     confidence_score,
     pool_unit_prices,
 )
+from greenkube.verify.health_baseline import compare_with_baseline, freeze_health
 from greenkube.verify.load_driver import CollectedLoad, LoadDriverResolver, PrometheusRangeReader
 from greenkube.verify.model import (
     DECISION_GRACE,
@@ -646,6 +647,12 @@ class ChangeMeasurementService:
         collectors: Dict[str, Any] = {"greenkube": __version__, "query_step_seconds": self._step()}
         if collected.unavailable:
             collectors[UNAVAILABLE_DRIVERS_KEY] = sorted(collected.unavailable)
+        try:
+            members = await self._members(change)
+        except Exception as exc:
+            logger.warning("Members of change %s could not be read for its baseline health: %s", change.change_id, exc)
+            members = []
+        health = await self._baseline_health(members, plan.pre, buckets)
         sources: Dict[str, int] = {}
         for row in rows:
             source = getattr(row, "intensity_source", None)
@@ -661,11 +668,40 @@ class ChangeMeasurementService:
                 for key, series in load.items()
             },
             price_card=_price_card(buckets, getattr(self.config, "CURRENCY", None)),
+            health=health,
             intensity_source=max(sources, key=lambda key: sources[key]) if sources else None,
             impact_model_version=IMPACT_MODEL_VERSION,
             collector_versions=collectors,
             created_at=now,
         ).with_digest()
+
+    async def _baseline_health(
+        self, members: Sequence[RecommendationRecord], window: TimeWindow, buckets: Sequence[Any]
+    ) -> Dict[str, Any]:
+        """Health signals of each container over the baseline window, frozen with the snapshot (MEA-07).
+
+        A container whose gates cannot be read is left out (its decision gates
+        are then judged on absolute levels, labelled ``baseline_missing``); an
+        empty dict means no baseline health at all.
+        """
+        by_container: Dict[Optional[str], List[RecommendationRecord]] = {}
+        for member in members:
+            by_container.setdefault(member.container_name, []).append(member)
+        gates: Dict[Optional[str], List[HealthGateResult]] = {}
+        for container, group in sorted(by_container.items(), key=lambda item: item[0] or ""):
+            try:
+                read, _ = await self.verifier.health_check_for(
+                    group, ensure_utc(window.start), ensure_utc(window.end), strict=True
+                )
+            except Exception as exc:
+                logger.warning("Baseline health of %s could not be read: %s", container or "workload", exc)
+                continue
+            gates[container] = list(read)
+        if not gates:
+            return {}
+        replica_values = [bucket.replicas for bucket in buckets if getattr(bucket, "replicas", None) is not None]
+        hours = (ensure_utc(window.end) - ensure_utc(window.start)).total_seconds() / 3600.0
+        return freeze_health(gates, replica_hours=math.fsum(replica_values) if replica_values else None, hours=hours)
 
     # ------------------------------------------------------------------
     # C2: lifecycle
@@ -841,20 +877,36 @@ class ChangeMeasurementService:
         return updated
 
     async def _health(
-        self, members: Sequence[RecommendationRecord], start: datetime, end: datetime
+        self,
+        members: Sequence[RecommendationRecord],
+        start: datetime,
+        end: datetime,
+        *,
+        baseline: Optional[Mapping[str, Any]] = None,
     ) -> List[HealthGateResult]:
         """Health gates per container of the change (one failure flags the whole change).
 
         Raises :class:`MeasurementReadError` when the gates cannot be read, so
         no health check or decision is recorded from missing metrics.
         """
-        gates, _ = await self._health_and_reliability(members, start, end)
+        gates, _ = await self._health_and_reliability(members, start, end, baseline=baseline)
         return gates
 
     async def _health_and_reliability(
-        self, members: Sequence[RecommendationRecord], start: datetime, end: datetime
+        self,
+        members: Sequence[RecommendationRecord],
+        start: datetime,
+        end: datetime,
+        *,
+        baseline: Optional[Mapping[str, Any]] = None,
+        post_replica_hours: Optional[float] = None,
     ) -> Tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
-        """Health gates per container and the reliability outcome of memory increases (H1)."""
+        """Health gates per container and the reliability outcome of memory increases (H1).
+
+        With ``baseline`` (``BaselineSnapshot.health``; empty for snapshots frozen
+        before MEA-07) the restart, throttling and readiness gates are judged
+        against the baseline window (:func:`compare_with_baseline`).
+        """
         by_container: Dict[Optional[str], List[RecommendationRecord]] = {}
         for member in members:
             by_container.setdefault(member.container_name, []).append(member)
@@ -873,6 +925,21 @@ class ChangeMeasurementService:
         # rate (counted like its evidence), not on "any kill"; its OOM restarts leave the restart
         # gate. Every other container keeps the strict gates (H1).
         judged, reliability = increase_reliability(members, raw, start, end, oom_restarts)
+        if baseline is not None:
+            post_hours = (ensure_utc(end) - ensure_utc(start)).total_seconds() / 3600.0
+            judged = {
+                container: compare_with_baseline(
+                    container_gates,
+                    container,
+                    baseline,
+                    post_hours=post_hours,
+                    post_replica_hours=post_replica_hours,
+                    max_restart_delta=float(getattr(self.config, "VERIFICATION_MAX_RESTART_DELTA", 0)),
+                    max_throttle_ratio=float(getattr(self.config, "VERIFICATION_MAX_THROTTLE_RATIO", 0.05)),
+                    min_readiness=float(getattr(self.config, "VERIFICATION_MIN_READINESS", 0.99)),
+                )
+                for container, container_gates in judged.items()
+            }
         gates: List[HealthGateResult] = []
         for container in raw:
             for gate in judged[container]:
@@ -887,7 +954,17 @@ class ChangeMeasurementService:
         """Evaluate health gates once the interim window elapsed, so a harmful change is flagged early."""
         members = [member for member in await self._members(change) if _awaiting(member)]
         try:
-            gates = await self._health(members, ensure_utc(plan.post.start), health_end) if members else []
+            snapshot = await self.changes.get_snapshot_for_change(change.change_id) if members else None
+            gates = (
+                await self._health(
+                    members,
+                    ensure_utc(plan.post.start),
+                    health_end,
+                    baseline=snapshot.health if snapshot is not None else {},
+                )
+                if members
+                else []
+            )
         except MeasurementReadError as exc:
             logger.warning("Interim health check of change %s is retried next pass: %s", change.change_id, exc)
             return status, []
@@ -1021,7 +1098,13 @@ class ChangeMeasurementService:
         )
         awaiting = [member for member in in_effect if _awaiting(member)]
         gates, reliability = (
-            await self._health_and_reliability(awaiting, ensure_utc(plan.post.start), ensure_utc(plan.post.end))
+            await self._health_and_reliability(
+                awaiting,
+                ensure_utc(plan.post.start),
+                ensure_utc(plan.post.end),
+                baseline=snapshot.health,
+                post_replica_hours=_replica_hours(post_buckets),
+            )
             if awaiting
             else ([], None)
         )
@@ -1417,6 +1500,12 @@ def _rate_source(member: RecommendationRecord) -> str:
 def _sum(values: Iterable[Optional[float]]) -> Optional[float]:
     items = [float(value) for value in values if value is not None and math.isfinite(float(value))]
     return math.fsum(items) if items else None
+
+
+def _replica_hours(buckets: Sequence[Any]) -> Optional[float]:
+    """Sum of the hourly replica counts of ``buckets`` (``None`` without any)."""
+    values = [bucket.replicas for bucket in buckets if getattr(bucket, "replicas", None) is not None]
+    return math.fsum(values) if values else None
 
 
 def _price_card(buckets: Sequence[Any], currency: Optional[str]) -> dict:

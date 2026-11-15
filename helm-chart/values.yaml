@@ -622,11 +622,15 @@ config:
       minSavingsRatio: 0.5
       # Per-pod p95 usage must stay below the applied per-pod request x this factor.
       usageHeadroom: 1.1
-      # Maximum allowed restart-count increase during the observation window.
+      # Maximum allowed restart-count increase during the observation window. Change
+      # measurements compare with the baseline rate per replica-hour instead: a restart
+      # gate fails on a significant rise (p <= 0.05) of at least max(1, maxRestartDelta).
       maxRestartDelta: 0
-      # Minimum readiness ratio during the observation window.
+      # Minimum readiness ratio during the observation window. Change measurements
+      # fail below min(minReadiness, baseline readiness - 0.01).
       minReadiness: 0.99
-      # Maximum allowed CPU throttling ratio during the observation window.
+      # Maximum allowed CPU throttling ratio during the observation window. Change
+      # measurements fail above the baseline throttling ratio plus this value.
       maxThrottleRatio: 0.05
       # Interval between lifecycle jobs (apply detection, verification, expiry).
       lifecycleInterval: 5m
