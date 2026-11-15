@@ -111,6 +111,22 @@ MIN_POST_WINDOW_DAYS = 5.0
 ACCELERATED_MIN_POST_WINDOW_DAYS = 1 / 48
 
 
+#: Clamped window settings already reported (name, configured value): warn once per process.
+_CLAMP_WARNED: set[tuple[str, float]] = set()
+
+
+def _clamp_window(name: str, value: float, minimum: float, why: str) -> float:
+    """``value`` raised to ``minimum`` with a warning (once per value), never a startup failure."""
+    if value >= minimum - 1e-9:
+        return value
+    if (name, value) not in _CLAMP_WARNED:
+        _CLAMP_WARNED.add((name, value))
+        logging.getLogger(__name__).warning(
+            "%s=%g is below the minimum of %g days (%s): using %g days.", name, value, minimum, why, minimum
+        )
+    return minimum
+
+
 def _scan_interval_seconds(value: str) -> int:
     """Parse a scheduler interval such as ``30m`` or ``1h`` (units s, m, h)."""
     match = re.fullmatch(r"(\d+)([smh])", str(value).strip().lower())
@@ -1034,33 +1050,27 @@ class Config(BaseSettings):
                 self.DEFAULT_PUE,
             )
 
-        # Change measurement windows (C3): the 7-day baseline is the safe minimum; only an explicit
-        # accelerated (demo/quickstart) setting may shorten it, never below one hour.
-        minimum_pre_window = ACCELERATED_MIN_PRE_WINDOW_DAYS if self.CHANGE_MEASUREMENT_ACCELERATED else 7.0
-        if self.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS < minimum_pre_window:
-            raise ValueError(
-                f"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS must be at least {minimum_pre_window:g} "
-                + (
-                    "with CHANGE_MEASUREMENT_ACCELERATED."
-                    if self.CHANGE_MEASUREMENT_ACCELERATED
-                    else "(7 days so every hour of the week is matched; CHANGE_MEASUREMENT_ACCELERATED "
-                    "allows shorter demo windows)."
-                )
-            )
-        # MEA-10: a post-window shorter than the verdict's minimum is inconclusive by construction.
-        minimum_post_window = (
-            ACCELERATED_MIN_POST_WINDOW_DAYS if self.CHANGE_MEASUREMENT_ACCELERATED else MIN_POST_WINDOW_DAYS
+        # Change measurement windows (C3, MEA-10): the 7-day baseline and the 5-day post-window are the
+        # minimums a verdict needs; only an explicit accelerated (demo/quickstart) setting may shorten them
+        # (1 hour, 30 minutes). A shorter value is raised to the minimum with a warning, never a startup
+        # failure: a setting that was valid before must not stop GreenKube from starting.
+        accelerated = self.CHANGE_MEASUREMENT_ACCELERATED
+        self.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS = _clamp_window(
+            "CHANGE_MEASUREMENT_PRE_WINDOW_DAYS",
+            self.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS,
+            ACCELERATED_MIN_PRE_WINDOW_DAYS if accelerated else 7.0,
+            "1 hour with CHANGE_MEASUREMENT_ACCELERATED"
+            if accelerated
+            else "7 days so every hour of the week is matched",
         )
-        if self.CHANGE_MEASUREMENT_POST_WINDOW_DAYS < minimum_post_window - 1e-9:
-            raise ValueError(
-                f"CHANGE_MEASUREMENT_POST_WINDOW_DAYS must be at least {minimum_post_window:g} "
-                + (
-                    "(30 minutes) with CHANGE_MEASUREMENT_ACCELERATED."
-                    if self.CHANGE_MEASUREMENT_ACCELERATED
-                    else "(a verdict needs 5 complete days of aligned post-change hours; "
-                    "CHANGE_MEASUREMENT_ACCELERATED allows shorter demo windows)."
-                )
-            )
+        self.CHANGE_MEASUREMENT_POST_WINDOW_DAYS = _clamp_window(
+            "CHANGE_MEASUREMENT_POST_WINDOW_DAYS",
+            self.CHANGE_MEASUREMENT_POST_WINDOW_DAYS,
+            ACCELERATED_MIN_POST_WINDOW_DAYS if accelerated else MIN_POST_WINDOW_DAYS,
+            "30 minutes with CHANGE_MEASUREMENT_ACCELERATED"
+            if accelerated
+            else "a verdict needs 5 complete days of aligned post-change hours",
+        )
         if self.CHANGE_MEASUREMENT_ACCELERATED:
             logging.getLogger(__name__).warning(
                 "CHANGE_MEASUREMENT_ACCELERATED is on: change measurements use demo windows, 5-minute slots, "

@@ -197,3 +197,15 @@ tests:
     asserts:
       - matchRegexRaw:
           pattern: "Create Secret my-creds \\(key GREENKUBE_API_KEY\\) in namespace monitoring"
+
+  - it: warns that a post-window below five days is raised to five days (MEA-10)
+    set:
+      config.recommendations.changeMeasurement.postWindowDays: 3
+    asserts:
+      - matchRegexRaw:
+          pattern: postWindowDays=3 is below 5 days
+
+  - it: does not warn about the default post-window
+    asserts:
+      - notMatchRegexRaw:
+          pattern: is below 5 days

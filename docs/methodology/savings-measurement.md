@@ -61,7 +61,7 @@ Evidence is never frozen from a failed read. When the metrics of the baseline wi
 | Window | Definition |
 |---|---|
 | Baseline | `[baseline_window_end − CHANGE_MEASUREMENT_PRE_WINDOW_DAYS, baseline_window_end)`, 7 days by default. It ends at the merge or approval, so it never contains the change. |
-| Post | `[rollout_completed_at + CHANGE_MEASUREMENT_WARMUP_HOURS, + CHANGE_MEASUREMENT_POST_WINDOW_DAYS)`, 1 hour of warm-up and 7 days by default. At least 5 days (a verdict needs 5 complete days of aligned hours, MEA-10): a shorter post-window is rejected at startup and by the values schema, unless `CHANGE_MEASUREMENT_ACCELERATED` is on (then at least 30 minutes). |
+| Post | `[rollout_completed_at + CHANGE_MEASUREMENT_WARMUP_HOURS, + CHANGE_MEASUREMENT_POST_WINDOW_DAYS)`, 1 hour of warm-up and 7 days by default. At least 5 days (a verdict needs 5 complete days of aligned hours, MEA-10): a shorter post-window is raised to 5 days at startup with a warning (never a startup failure), unless `CHANGE_MEASUREMENT_ACCELERATED` is on (then at least 30 minutes). |
 | Interim health | `[post start, post start + VERIFICATION_WINDOW_HOURS)`, 72 hours by default. |
 
 Seven days give every hour of the week one baseline observation. A shorter baseline leaves hours of the week unmatched, which lowers coverage (section 4).

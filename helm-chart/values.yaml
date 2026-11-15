@@ -642,8 +642,9 @@ config:
       enabled: true
       # Baseline window in days, ending at the PR merge or plan approval (at least 7).
       preWindowDays: 7
-      # Post-change window in days, starting after the rollout and its warm-up (at least 5:
-      # a verdict needs 5 complete days of aligned hours; 30 minutes with accelerated).
+      # Post-change window in days, starting after the rollout and its warm-up. A verdict needs
+      # 5 complete days of aligned hours: a shorter value is raised to 5 days at startup, with a
+      # warning in the logs (30 minutes with accelerated).
       postWindowDays: 7
       # Hours after rollout completion excluded from the post-window.
       warmupHours: 1

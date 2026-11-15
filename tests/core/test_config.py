@@ -3,7 +3,9 @@
 Tests for the Config class, particularly the _get_secret method.
 """
 
+import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -137,10 +139,18 @@ class TestLeaderElectionConfig:
 
 
 class TestChangeMeasurementWindowConfig:
-    @pytest.mark.parametrize("value", ["0", "3", "6.9"])
-    def test_a_baseline_shorter_than_a_week_is_rejected(self, value):
+    """Windows below the minimum are clamped up with a warning, never a startup failure (MEA-10 review)."""
+
+    @pytest.mark.parametrize("value", ["3", "6.9"])
+    def test_a_baseline_shorter_than_a_week_is_clamped(self, value, caplog):
         with patch.dict(os.environ, {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value}, clear=True):
-            with pytest.raises(ValueError, match="CHANGE_MEASUREMENT_PRE_WINDOW_DAYS"):
+            with caplog.at_level(logging.WARNING):
+                assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == 7.0
+        assert "CHANGE_MEASUREMENT_PRE_WINDOW_DAYS" in caplog.text
+
+    def test_a_zero_baseline_is_still_invalid(self):
+        with patch.dict(os.environ, {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": "0"}, clear=True):
+            with pytest.raises(ValueError):
                 Config(_env_file=None)
 
     @pytest.mark.parametrize("value", ["7", "14"])
@@ -154,33 +164,43 @@ class TestChangeMeasurementWindowConfig:
         with patch.dict(os.environ, env, clear=True):
             assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == float(value)
 
-    @pytest.mark.parametrize("value", ["0", "0.01", "0.04"])
-    def test_accelerated_demo_windows_still_reject_less_than_an_hour(self, value):
+    @pytest.mark.parametrize("value", ["0.01", "0.04"])
+    def test_accelerated_demo_windows_clamp_less_than_an_hour(self, value):
         env = {"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": value, "CHANGE_MEASUREMENT_ACCELERATED": "true"}
         with patch.dict(os.environ, env, clear=True):
-            with pytest.raises(ValueError, match="CHANGE_MEASUREMENT_PRE_WINDOW_DAYS"):
-                Config(_env_file=None)
+            assert Config(_env_file=None).CHANGE_MEASUREMENT_PRE_WINDOW_DAYS == pytest.approx(1 / 24)
 
-    @pytest.mark.parametrize("value", ["0.025", "1", "4.9"])
-    def test_a_post_window_too_short_for_a_verdict_is_rejected(self, value):
-        """MEA-10: a verdict needs 5 days of aligned post-window hours; shorter windows need the demo flag."""
+    @pytest.mark.parametrize("value", ["0.025", "1", "3", "4.9"])
+    def test_a_post_window_too_short_for_a_verdict_is_clamped(self, value, caplog):
+        """MEA-10: a verdict needs 5 days of aligned post-window hours; a shorter window is raised to 5 days."""
         with patch.dict(os.environ, {"CHANGE_MEASUREMENT_POST_WINDOW_DAYS": value}, clear=True):
-            with pytest.raises(ValueError, match="CHANGE_MEASUREMENT_POST_WINDOW_DAYS"):
-                Config(_env_file=None)
+            with caplog.at_level(logging.WARNING):
+                assert Config(_env_file=None).CHANGE_MEASUREMENT_POST_WINDOW_DAYS == 5.0
+        assert "CHANGE_MEASUREMENT_POST_WINDOW_DAYS" in caplog.text
 
-    @pytest.mark.parametrize(("value", "accepted"), [("0.025", True), ("0.05", True), ("0.01", False)])
-    def test_accelerated_post_windows_need_thirty_minutes(self, value, accepted):
+    @pytest.mark.parametrize(("value", "expected"), [("0.025", 0.025), ("0.05", 0.05), ("0.01", 1 / 48)])
+    def test_accelerated_post_windows_need_thirty_minutes(self, value, expected):
         env = {
             "CHANGE_MEASUREMENT_POST_WINDOW_DAYS": value,
             "CHANGE_MEASUREMENT_PRE_WINDOW_DAYS": "0.25",
             "CHANGE_MEASUREMENT_ACCELERATED": "true",
         }
         with patch.dict(os.environ, env, clear=True):
-            if accepted:
-                assert Config(_env_file=None).CHANGE_MEASUREMENT_POST_WINDOW_DAYS == float(value)
-            else:
-                with pytest.raises(ValueError, match="CHANGE_MEASUREMENT_POST_WINDOW_DAYS"):
-                    Config(_env_file=None)
+            assert Config(_env_file=None).CHANGE_MEASUREMENT_POST_WINDOW_DAYS == pytest.approx(expected)
+
+    def test_importing_the_config_with_a_three_day_post_window_starts(self):
+        """The module-level ``config = Config()`` runs at import: a once-valid value must not stop GreenKube."""
+        import subprocess
+
+        env = {key: value for key, value in os.environ.items() if not key.startswith("CHANGE_MEASUREMENT_")}
+        env["CHANGE_MEASUREMENT_POST_WINDOW_DAYS"] = "3"
+        code = "from greenkube.core.config import config; print(config.CHANGE_MEASUREMENT_POST_WINDOW_DAYS)"
+        result = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120, check=False
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert result.stdout.strip().splitlines()[-1] == "5.0"
+        assert "CHANGE_MEASUREMENT_POST_WINDOW_DAYS" in result.stderr
 
     def test_acceleration_is_off_by_default(self):
         with patch.dict(os.environ, {}, clear=True):
