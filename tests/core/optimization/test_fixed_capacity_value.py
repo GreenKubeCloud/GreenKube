@@ -94,3 +94,18 @@ def test_the_api_exposes_allocated_and_billable_projections_and_the_fixed_nodes_
     assert payload["projected_allocated_co2e_annual_g"] == pytest.approx(5000.0)
     assert payload["projected_billable_cost_annual"] == 0.0
     assert payload["projection_note"] == "fixed nodes: frees capacity, bill unchanged until nodes are removed"
+
+
+def test_an_unobserved_cluster_reports_an_unknown_billable_saving():
+    # IMP-12: before the autoscalers are observed (and without a stored context) the billable saving is unknown.
+    impact = {
+        **_fixed_nodes_impact(236.52),
+        "expected_billable_cost_annual": 236.52,
+        "realization_factor": 1.0,
+        "assumptions": {"realization_factor_source": "realization_context:unobserved"},
+    }
+    record = RecommendationRecord(type=RecommendationType.RIGHTSIZING_CPU, description="cut", impact=impact)
+    payload = record.model_dump(mode="json")
+    assert payload["projected_allocated_cost_annual"] == pytest.approx(236.52)
+    assert payload["projected_billable_cost_annual"] is None
+    assert payload["projection_note"] == "billable saving unknown: cluster not observed yet"

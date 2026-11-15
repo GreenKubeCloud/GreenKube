@@ -469,6 +469,10 @@ class Recommendation(BaseModel):
 
 #: Shown next to a 0 billable projection on fixed nodes (IMP-03).
 FIXED_NODES_NOTE = "fixed nodes: frees capacity, bill unchanged until nodes are removed"
+#: Shown instead of a billable projection made before the cluster was observed (IMP-12).
+UNOBSERVED_NOTE = "billable saving unknown: cluster not observed yet"
+#: ``impact.assumptions.realization_factor_source`` of such a projection (greenkube.impact.realization).
+UNOBSERVED_REALIZATION_SOURCE = "realization_context:unobserved"
 
 
 class RecommendationRecord(BaseModel):
@@ -672,20 +676,34 @@ class RecommendationRecord(BaseModel):
     )
     @property
     def projected_billable_cost_annual(self) -> Optional[float]:
-        """``impact.expected_billable_cost_annual`` (``None`` without a projection); ``-0.0`` reads as 0."""
+        """``impact.expected_billable_cost_annual``; ``None`` without a projection or before the cluster was observed.
+
+        ``-0.0`` reads as 0. A projection made with the unobserved factor 1.0
+        (IMP-12) has an unknown billable saving: ``None``, never the allocated value.
+        """
+        if self._unobserved_realization():
+            return None
         value = self._impact_number("expected_billable_cost_annual")
         return value + 0.0 if value is not None else None
+
+    def _unobserved_realization(self) -> bool:
+        impact = self.impact if isinstance(self.impact, dict) else {}
+        assumptions = impact.get("assumptions") if isinstance(impact.get("assumptions"), dict) else {}
+        return assumptions.get("realization_factor_source") == UNOBSERVED_REALIZATION_SOURCE
 
     @computed_field(  # type: ignore[prop-decorator]
         description=(
             "Why the billable projection is lower than the allocated one, for the UI and the pull request "
             "(IMP-03): 'fixed nodes: frees capacity, bill unchanged until nodes are removed' when the realization "
-            "factor is 0 and the allocated saving is not."
+            "factor is 0 and the allocated saving is not; 'billable saving unknown: cluster not observed yet' when "
+            "the projection was made before the cluster's autoscalers were observed (IMP-12)."
         )
     )
     @property
     def projection_note(self) -> Optional[str]:
-        """Fixed-nodes note when the realization factor is 0 and the change releases allocated cost."""
+        """Fixed-nodes or not-observed note explaining the billable projection."""
+        if self._unobserved_realization():
+            return UNOBSERVED_NOTE
         factor = self._impact_number("realization_factor")
         allocated = self._impact_number("allocated_cost_annual")
         if factor == 0.0 and allocated is not None and allocated > 0:

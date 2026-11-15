@@ -2343,6 +2343,7 @@
 													{#if rec.potential_savings_cost}
 														<p class="text-xs text-blue-400">-{formatCost(rec.potential_savings_cost)}</p>
 													{/if}
+													{#if rec.projection_note}<p class="text-[10px] text-dark-500" data-testid="row-projection-note">{rec.projection_note}</p>{/if}
 												</div>
 											{:else if rec.projected_allocated_cost_annual > 0}
 												<!-- IMP-03: on fixed nodes the billable projection is 0; show the allocated figure, never hide it. -->
