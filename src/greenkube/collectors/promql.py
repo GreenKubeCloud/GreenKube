@@ -129,6 +129,19 @@ class PromQLCatalog:
         selector = _selector(POD_CGROUP_FILTER, *self.extra_matchers)
         return f"max(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) by (namespace,pod,node)"
 
+    def container_cpu_counter_max(self) -> str:
+        """Largest CPU counter value of each container within the step (COL-03 step 3).
+
+        ``rate()`` needs two scrapes of one series, so a container that lived
+        less than about two scrape intervals has no rate sample.  Its counter
+        starts at 0 with the container: when the series first appears inside a
+        step, its value over the step length is the container's core usage.
+        """
+        return (
+            f"max(max_over_time({self._container('container_cpu_usage_seconds_total')}[{self.step}])) "
+            "by (namespace,pod,container,node)"
+        )
+
     def container_memory_working_set(self) -> str:
         """Working-set bytes per container (duplicate series counted once)."""
         return f"max({self._container('container_memory_working_set_bytes')}) by (namespace,pod,container,node)"

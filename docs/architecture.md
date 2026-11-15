@@ -661,6 +661,9 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      │   ├─ NaN/Inf dropped, negative rates clamped to 0
      │   ├─ pod set = CPU ∪ memory ∪ Running pods; rows without CPU sample keep
      │   │  cpu_usage_millicores NULL with reason no_cpu_sample
+     │   ├─ containers too short-lived for rate(): when the CPU counter first appears
+     │   │  inside a step (absent at the previous evaluation), counter / step is the
+     │   │  usage (reason cpu_from_counter_start), only for pods without a rate sample
      │   └─ greenkube_collection_dropped_samples_total{reason}
      │
      ├─ Energy estimation per sample:

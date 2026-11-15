@@ -55,7 +55,10 @@ logger = logging.getLogger(__name__)
 #: history per observation interval and pod UID, unbounded history lookup for
 #: pods of the window, stored-row metadata on re-collection, degraded rows after
 #: repeated Kubernetes list failures.  ``+range.4`` rows are not rewritten.
-CALCULATION_VERSION = f"{__version__}+range.5"
+#: range.6 (COL-03 step 3): CPU of containers too short-lived for rate() comes from their counter
+#: (reason cpu_from_counter_start); such pods had no row or a NULL CPU before.  ``+range.5`` rows are
+#: not rewritten: re-collect a window inside Prometheus retention to apply it.
+CALCULATION_VERSION = f"{__version__}+range.6"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
@@ -83,6 +86,9 @@ KSM_UNAVAILABLE = "kube_state_metrics_unavailable"
 _MAX_TRACKED_LIST_FAILURES = 256
 #: Estimation reason of a pod row without CPU sample at its step (memory or Running phase only, COL-03).
 NO_CPU_SAMPLE = "no_cpu_sample"
+#: Estimation reason of CPU usage read from the counter of a container that started inside the step and had
+#: no rate() sample (counter value / step, COL-03 step 3).
+CPU_FROM_COUNTER_START = "cpu_from_counter_start"
 #: Pod history versions read around the range: a pod of the range was observed at most this far outside it.
 _POD_SNAPSHOT_MARGIN = timedelta(hours=1)
 
@@ -356,6 +362,53 @@ class HistoricalRangeProcessor:
             raise RangeCollectionError(
                 f"Prometheus CPU usage is unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
             ) from error
+
+    async def _recover_short_lived_cpu(
+        self, chunk: CollectionWindow
+    ) -> tuple[dict[int, dict[tuple[str, str, str], float]], dict[int, dict[tuple[str, str], str]]]:
+        """Core usage of containers whose CPU counter first appears inside a step (COL-03 step 3).
+
+        Evaluated from ``chunk.start`` so the step before the first one is
+        seen.  A container present at the previous evaluation is not a start
+        and is never recovered (a scrape gap of a long-running container must
+        not be read as its whole counter).  Returns per sample start the cores
+        per ``(namespace, pod, container)`` and the node of each pod.
+        """
+        step = chunk.step_seconds
+        try:
+            results = await self.prometheus_collector.collect_range(
+                start=chunk.start, end=chunk.end, step=self._promql.step, query=self._promql.container_cpu_counter_max()
+            )
+        except Exception as error:
+            raise RangeCollectionError(
+                f"Prometheus CPU counter query failed for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
+            ) from error
+        start = chunk.start.timestamp()
+        end = chunk.end.timestamp()
+        cores: dict[int, dict[tuple[str, str, str], float]] = defaultdict(dict)
+        nodes: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
+        for series in results or []:
+            namespace, pod, container, node = self._series_identity(series)
+            if not namespace or not pod or not container:
+                continue
+            present: dict[int, float] = {}
+            for raw_ts, raw_value in series.get("values", []) or []:
+                # Parsed without drop telemetry: the rate query of the same series already counts it.
+                try:
+                    evaluated_at = float(raw_ts)
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(value) or value < 0:
+                    continue
+                present[int(math.ceil((evaluated_at - _TIMESTAMP_TOLERANCE) / step) * step - step)] = value
+            for sample_start, value in present.items():
+                if not start <= sample_start < end or (sample_start - step) in present:
+                    continue
+                cores[sample_start][(namespace, pod, container)] = value / step
+                if node:
+                    nodes[sample_start].setdefault((namespace, pod), node)
+        return cores, nodes
 
     async def probe_scrape_data(self, start: datetime, end: datetime) -> set[datetime]:
         """Sample starts of ``[start, end)`` at which Prometheus holds cAdvisor scrape data (COL-04).
@@ -1197,6 +1250,26 @@ class HistoricalRangeProcessor:
                         pod_node_map_by_ts[sample_start][key] = resolved_node
             del cpu_values, cpu_nodes
 
+            # Containers too short-lived for rate(): counter / step, only for pods without any rate sample.
+            counter_cpu_pods: dict[int, set[tuple[str, str]]] = defaultdict(set)
+            recovered_cores, recovered_nodes = await self._recover_short_lived_cpu(chunk)
+            for sample_start, by_container in recovered_cores.items():
+                for (series_ns, pod, container), usage in by_container.items():
+                    key = (series_ns, pod)
+                    if key in samples.get(sample_start, {}) and key not in counter_cpu_pods[sample_start]:
+                        continue
+                    counter_cpu_pods[sample_start].add(key)
+                    samples[sample_start][key] += usage
+                    normalized_container_samples[sample_start][(series_ns, pod, container)] = usage
+                    resolved_node = (
+                        recovered_nodes.get(sample_start, {}).get(key)
+                        or pod_info_node_by_sample.get(sample_start, {}).get(key)
+                        or pod_info_node_latest.get(key)
+                    )
+                    if resolved_node:
+                        pod_node_map_by_ts[sample_start].setdefault(key, resolved_node)
+            del recovered_cores, recovered_nodes
+
             del results
 
             cpu_usage_by_sample = {
@@ -1356,6 +1429,9 @@ class HistoricalRangeProcessor:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, *fallback_reasons]))
                     has_cpu = pod_key in range_cpu_usage_map
+                    if pod_key in counter_cpu_pods.get(sample_key, ()):
+                        is_estimated = True
+                        estimation_reasons = list(dict.fromkeys([*estimation_reasons, CPU_FROM_COUNTER_START]))
                     if not has_cpu:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, NO_CPU_SAMPLE]))
@@ -1526,7 +1602,7 @@ class HistoricalRangeProcessor:
                             ]
                         combined.extend(container_rows)
 
-            del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group
+            del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group, counter_cpu_pods
             del net_rx_by_sample, net_tx_by_sample, disk_read_by_sample, disk_write_by_sample
             del restart_by_sample, ephemeral_usage_by_sample
             del container_memory_samples, normalized_container_samples
