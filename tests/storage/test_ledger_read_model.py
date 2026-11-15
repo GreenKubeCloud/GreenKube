@@ -143,3 +143,28 @@ async def test_savings_counters_switch_to_ledger_v2_only_once_it_reconciles(ledg
     # Once switched it stays on v2 while the projector catches up a new row.
     await attributor.accrue([pending], now=_hour(0) + timedelta(minutes=3))
     assert await metrics_endpoint.savings_counter_source(ledger.repo, CLUSTER) == CLUSTER_UID
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_every_column_of_the_legacy_hourly_ledger_is_append_only(ledger: LedgerDb):
+    # Review WP-09 point 4: only superseded may change, whatever column an update touches.
+    truthy = "TRUE" if ledger.backend == "postgres" else "1"
+    hour = "'2024-01-01T00:00:00Z'" if ledger.backend == "sqlite" else "'2024-01-01T00:00:00+00'"
+    await ledger.execute(
+        "INSERT INTO recommendation_savings_ledger_hourly (recommendation_id, cluster_name, namespace, "
+        "recommendation_type, co2e_saved_grams, cost_saved_dollars, sample_count, hour_bucket, measurement_method) "
+        f"VALUES (1, '{CLUSTER}', 'prod', 'RIGHTSIZING_CPU', 1.0, 0.01, 1, {hour}, 'projected')"
+    )
+    for assignment in (
+        "namespace = 'other'",
+        "recommendation_type = 'OTHER'",
+        "sample_count = 2",
+        "measurement_method = 'measured'",
+        "confidence = 0.5",
+        "baseline_value = 3.0",
+    ):
+        # Smuggled into the one update allowed (superseded 0 -> 1).
+        with pytest.raises(Exception, match="append-only"):
+            await ledger.execute(f"UPDATE recommendation_savings_ledger_hourly SET superseded = {truthy}, {assignment}")
+    await ledger.execute(f"UPDATE recommendation_savings_ledger_hourly SET superseded = {truthy}")
