@@ -66,8 +66,8 @@ def liveness_diagnostics(gone: int, not_running: int) -> List[Dict[str, Any]]:
             {
                 "level": "info",
                 "code": "target_gone",
-                "message": f"{gone} target(s) no longer exist in the cluster (or are Jobs): their recommendations "
-                "are retired (target_gone).",
+                "message": f"{gone} target(s) no longer exist in the cluster (or are finished Jobs): their "
+                "recommendations are retired (target_gone).",
                 "count": gone,
             }
         )

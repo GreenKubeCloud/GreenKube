@@ -6,8 +6,11 @@ its recommendations (refreshing their TTL) until its last hour left the
 lookback. Before the analyzers run, :func:`filter_live_targets` removes from
 the usage snapshot:
 
-* every ``Job`` target (a run's requests are not a workload's; a CronJob is
-  rightsized through its template, never through one run);
+* every ``Job`` target: one run's requests are not a workload's. CronJob runs
+  are attributed to their Job (the collectors do not resolve a Job to its
+  CronJob), so a CronJob gets no rightsizing at all for now. A running Job,
+  or a Job whose pods could not be listed, is ``not_running`` (records kept);
+  only a Job confirmed finished (pods listed, none running) is ``gone``;
 * containers no longer in the pod spec of a running target;
 * targets without a running pod whose last sample is older than
   :data:`TARGET_MAX_STALENESS` before the scan, and bare pods without a
@@ -16,8 +19,9 @@ the usage snapshot:
 A removed target is reported ``gone`` (its records are retired with the
 reason ``target_gone``) only when the cluster confirms it: the pod list was
 read and, for a controller, it is not present scaled to zero. A controller
-scaled to zero, or a target whose liveness could not be read (Kubernetes API
-unavailable), is reported ``not_running``: nothing is emitted for it and its
+scaled to zero, a DaemonSet with no scheduled pod (its node selector matches
+no node right now), or a target whose liveness could not be read (Kubernetes
+API unavailable), is reported ``not_running``: nothing is emitted for it and its
 existing records are kept (fail closed: never retire advice on a guess).
 """
 
@@ -39,6 +43,8 @@ TARGET_MAX_STALENESS = timedelta(hours=2)
 EPHEMERAL_KINDS = frozenset({"Job"})
 #: Controllers that may be scaled to zero while they still exist.
 SCALABLE_KINDS = ("Deployment", "StatefulSet")
+#: Controllers that may run no pod while they exist (no node matches their selector): never retired.
+PODLESS_KINDS = frozenset({"DaemonSet"})
 
 ContainerKey = Tuple[TargetKey, str]
 
@@ -84,7 +90,8 @@ def filter_live_targets(
         running = live_targets is not None and target in live_targets
         if target[1] in EPHEMERAL_KINDS:
             del snapshot.summaries[target]
-            report.gone.add(target)
+            # Retire only a Job confirmed finished; a running Job or an unreadable pod list keeps records.
+            (report.gone if live_targets is not None and not running else report.not_running).add(target)
             continue
         if running:
             for name in list(containers):
@@ -97,7 +104,11 @@ def filter_live_targets(
         if not stale and not (target[1] == "Pod" and live_targets is not None):
             continue  # fresh data: a pod list racing a rollout, or liveness unknown
         del snapshot.summaries[target]
-        if live_targets is None or (target[1] in SCALABLE_KINDS and scaled_to_zero is None):
+        if (
+            live_targets is None
+            or target[1] in PODLESS_KINDS
+            or (target[1] in SCALABLE_KINDS and scaled_to_zero is None)
+        ):
             report.not_running.add(target)
         elif scaled_to_zero is not None and target in scaled_to_zero:
             report.not_running.add(target)

@@ -60,8 +60,9 @@ def test_gone_scaled_to_zero_jobs_and_removed_containers_are_left_out() -> None:
 
     assert set(snapshot.summaries) == {LIVE}
     assert set(snapshot.summaries[LIVE]) == {"", "app"}
-    assert report.gone == {A, JOB}
-    assert report.not_running == {B}
+    # A running Job is never retired: it gets no advice, its records are kept.
+    assert report.gone == {A}
+    assert report.not_running == {B, JOB}
     assert report.removed_containers == {(LIVE, "removed")}
 
 
@@ -71,8 +72,8 @@ def test_unknown_liveness_never_retires_but_emits_nothing_for_stale_targets() ->
     report = filter_live_targets(snapshot, end=END, live_containers=None, scaled_to_zero=None)
 
     assert set(snapshot.summaries) == {LIVE}
-    assert report.gone == {JOB}
-    assert report.not_running == {A, B}
+    assert report.gone == set()
+    assert report.not_running == {A, B, JOB}
 
 
 def test_controllers_unreadable_keep_a_stale_deployment() -> None:
@@ -81,7 +82,18 @@ def test_controllers_unreadable_keep_a_stale_deployment() -> None:
     report = filter_live_targets(snapshot, end=END, live_containers={(LIVE, "app")}, scaled_to_zero=None)
 
     assert report.not_running == {A, B}
-    assert report.gone == {JOB}
+    assert report.gone == {JOB}  # the pods were listed: a Job without a running pod finished
+
+
+def test_a_daemonset_without_scheduled_pods_is_kept_like_a_scaled_to_zero_controller() -> None:
+    daemonset = ("kube-system", "DaemonSet", "gpu-agent")
+    snapshot = UsageSnapshot(source="test")
+    snapshot.summaries[daemonset] = {"": _summary(daemonset, "", 5), "agent": _summary(daemonset, "agent", 5)}
+
+    report = filter_live_targets(snapshot, end=END, live_containers=set(), scaled_to_zero=set())
+
+    assert report.not_running == {daemonset}
+    assert report.gone == set()
 
 
 @pytest.fixture
