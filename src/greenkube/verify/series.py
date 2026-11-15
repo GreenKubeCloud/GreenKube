@@ -219,6 +219,7 @@ QUANTITY_FIELDS: Dict[str, tuple[str, str]] = {
     "embodied_co2e_g": ("embodied_co2e_g", "embodied_coverage"),
     "replicas": ("replicas", "coverage"),
     "cpu_usage_cores": ("cpu_usage_cores", "coverage"),
+    "energy_kwh": ("energy_kwh", "coverage"),
 }
 
 #: Minimum share of an hour with qualifying data for the hour to count.
@@ -289,6 +290,26 @@ def price_card(buckets: Sequence[HourBucket], currency: Optional[str]) -> Dict[s
         card["cpu_charged_core_hour"] = charged["cpu"]
         card["memory_charged_gib_hour"] = charged["memory"]
     return card
+
+
+def carbon_factor(buckets: Sequence[HourBucket]) -> Optional[float]:
+    """Energy-weighted carbon factor of a window: grams CO2e per kWh of workload energy (MEA-03).
+
+    ``sum(co2e_g) / sum(energy_kwh)`` over the hours whose every covered sample
+    has trusted carbon (``co2e_coverage`` equal to ``coverage``), so energy and
+    CO2e come from the same rows. It is the grid intensity times the PUE that
+    the Impact Model applied, weighted by energy. ``None`` without such hours or
+    without energy.
+    """
+    co2e = energy = 0.0
+    for bucket in buckets:
+        if bucket.co2e_g is None or bucket.energy_kwh is None or bucket.co2e_coverage < MIN_HOUR_COVERAGE:
+            continue
+        if bucket.co2e_coverage + 1e-9 < bucket.coverage:
+            continue
+        co2e += bucket.co2e_g
+        energy += bucket.energy_kwh
+    return co2e / energy if energy > 0 else None
 
 
 def has_embodied(buckets: Sequence[HourBucket]) -> bool:

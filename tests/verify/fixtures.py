@@ -141,7 +141,9 @@ def workload_rows(
                     cost_ram=ram_cost if components else None,
                     co2e_grams=co2e * step.total_seconds() / 3600,
                     embodied_co2e_grams=embodied * step.total_seconds() / 3600,
-                    joules=3600.0,
+                    # Energy consistent with the CO2e at 300 gCO2e/kWh (PUE 1): CO2e = kWh x intensity (MEA-03).
+                    joules=co2e * step.total_seconds() / 3600 / 300.0 * 3_600_000.0,
+                    grid_intensity=300.0,
                     cpu_request=cpu_request,
                     memory_request=memory_request,
                     cpu_usage_millicores=cpu_usage,

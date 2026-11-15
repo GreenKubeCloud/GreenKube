@@ -62,6 +62,8 @@ PRICE_CHANGE_TOLERANCE = 0.05
 INSTANCE_MIX_TOLERANCE = 0.25
 #: Unit price changes beyond this share can explain a typical rightsizing effect on their own (severe).
 PRICE_CHANGE_SEVERE = 0.20
+#: The energy-weighted carbon factor (intensity x PUE) moved by more than this between the windows (MEA-03).
+INTENSITY_SHIFT_TOLERANCE = 0.10
 #: The workload's instance-type mix moved by more than this share of its pod-hours (severe).
 INSTANCE_MIX_SEVERE = 0.5
 #: The node pool's capacity-weighted instance-type mix moved by more than this (severe: new hardware).
@@ -247,6 +249,7 @@ class ConfounderDetector:
         findings.extend(self._spec_changes(change, plan, observations))
         findings.extend(self._replica_shift(pre, post, load))
         findings.extend(self._price_change(pre, post))
+        findings.extend(self._intensity_shift(pre, post))
         findings.extend(self._instance_types(pre, post))
         if pool is not None:
             findings.extend(self._pool(change, pool))
@@ -434,6 +437,45 @@ class ConfounderDetector:
             if finding is not None:
                 findings.append(finding)
         return findings
+
+    @staticmethod
+    def _intensity_shift(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:
+        """Carbon factor (grid intensity x PUE per kWh) of the two windows (MEA-03).
+
+        The CO2e saving is valued at the post-window factor, so a move does not
+        bias it; it is reported (moderate above 10%) because the baseline CO2e
+        the change is compared with was emitted at another factor. Without a
+        post-window factor the raw CO2e difference is measured: moderate.
+        """
+        from greenkube.verify.series import carbon_factor, quantity_series
+
+        before, after = carbon_factor(pre), carbon_factor(post)
+        if after is None:
+            if quantity_series(post, "co2e_g"):
+                return [
+                    Confounder(
+                        kind="co2e_raw_delta",
+                        severity="moderate",
+                        detail="no energy behind the post-window CO2e: the CO2e saving is the raw difference of "
+                        "the two windows' emissions, not normalised for grid intensity",
+                        evidence={},
+                    )
+                ]
+            return []
+        if before is None or before <= 0:
+            return []
+        deviation = after / before - 1.0
+        if abs(deviation) <= INTENSITY_SHIFT_TOLERANCE:
+            return []
+        return [
+            Confounder(
+                kind="intensity_shift",
+                severity="moderate",
+                detail=f"grid carbon intensity x PUE per kWh changed {deviation:+.0%} between the windows "
+                f"({before:.4g} -> {after:.4g} gCO2e/kWh); the CO2e saving is valued at the post-window factor",
+                evidence={"before": round(before, 6), "after": round(after, 6)},
+            )
+        ]
 
     @staticmethod
     def _instance_types(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:

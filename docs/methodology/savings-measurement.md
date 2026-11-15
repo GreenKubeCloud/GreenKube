@@ -89,6 +89,16 @@ Since 2.4, every hour of both windows is revalued before the counterfactual is f
 - Snapshots frozen before the charged quantities were measured use the requested quantity and the per-request prices of their price card (`cpu_core_hour`, `memory_gib_hour`), recorded as `constant_price_basis = requested`. Without any baseline price (no CPU/RAM cost components) the observed cost is measured, recorded as `constant_price_basis = observed`. An hour without cost components or quantities is not measured (lower coverage).
 - The cost at the observed prices is reported as a second quantity, `allocated_cost_observed` (not claimed), and `counterfactual_params.price_effect` = observed saving − constant-price saving. `counterfactual_params` also records `constant_price_basis`, `constant_prices` and `constant_price_source` (`snapshot_price_card`, or `baseline_hours` when no card was passed).
 
+### CO₂e at the post-window carbon factor (version 2.4, MEA-03)
+
+The stored CO₂e of an hour is its energy × PUE × the grid intensity of that hour. Before 2.4 the claimed CO₂e saving was the raw difference of the two windows' emissions, so a windier or calmer post week was booked as a carbon saving or loss of the change: a real cut from 0.050 to 0.040 kWh/h at 300 g/kWh (3.0 g/h) was measured as 7.0 g/h when the post week averaged 200 g/kWh and as −1.0 g/h at 400 g/kWh.
+
+Since 2.4 the operational CO₂e of every hour of both windows is its energy (`energy_kwh`) × the **post-window carbon factor**, the energy-weighted grams of CO₂e per kWh of the post-window (`Σ co2e_g / Σ energy_kwh` over the hours whose every sample has trusted carbon, i.e. intensity × PUE as the Impact Model applied them). The counterfactual is then fitted as before, so the claimed saving is the energy saving valued at what the grid emitted per kWh after the change, plus the embodied delta (embodied CO₂e does not depend on intensity). Only hours with trusted carbon count, as before, so an install without measured intensity still has no CO₂e verdict. `energy_kwh` is reported as its own quantity.
+
+`counterfactual_params` records `co2e_basis` (`energy_delta_at_post_intensity`), `co2e_factor_pre`, `co2e_factor_post` and `co2e_raw_delta` (the pre-2.4 raw mean difference, for comparison). An `intensity_shift` confounder (moderate) reports a carbon factor that moved more than 10% between the windows, with both values. Without energy behind the post-window CO₂e the raw difference is measured (`co2e_basis = raw_delta`) with a moderate `co2e_raw_delta` confounder.
+
+Deviation from the audit's fix text: the factor is one energy-weighted value for the whole post-window, not the intensity of each post hour, and it is derived from the stored CO₂e and energy instead of new per-hour intensity and PUE fields. The two coincide when hourly energy savings and hourly intensity are uncorrelated; a saving concentrated in low-carbon hours is valued at the window's mean factor. Snapshots frozen earlier carry energy and CO₂e, so they are measured the same way and need no fallback.
+
 Within-window price variation is removed with the window-level move: hourly cost noise of fixed requests is price noise and no longer widens the interval; variation of the charged quantity (usage above the request, replicas) still does. Measurements decided by 2.3 or earlier keep their observed-price values; they are not recomputed.
 
 ## 4. Counterfactual (C3)
@@ -160,6 +170,7 @@ The `request_rightsizing` strategy (version 2.4) measures, per hour:
 | `core_hours`, `gib_hours` | core-hours, GiB-hours | no | Requested capacity freed. |
 | `co2e_g` | gCO₂e | yes | CO₂e as the Impact Model allocates it: operational (idle and memory power follow the reservation) plus embodied (allocated by reservation) when both windows measured it. Claimed when the change is realized and its own interval shows a saving; compared with the projection of the same components only ([component matching](impact-model.md#co2e-components-and-component-matched-comparison)), listed in the estimate's `components` and in `counterfactual_params.co2e_components`. Split between the change's recommendations by their projections of those components. |
 | `embodied_co2e_g` | gCO₂e | no | The embodied part alone (reported). |
+| `energy_kwh` | kWh | no | Energy of the workload; since 2.4 the basis of the operational CO₂e saving ([CO₂e at the post-window carbon factor](#co2e-at-the-post-window-carbon-factor-version-24-mea-03)). |
 
 Stored rows are allocated by the Impact Model: idle CPU power follows the CPU reservation, memory power the memory reservation and embodied emissions the CPU reservation, so a request change moves the measured CO₂e. A baseline snapshot frozen before embodied emissions were measured carries none; its measurement compares operational CO₂e with the operational projection, as before (`components = [operational_energy, idle_share]`). A window whose embodied CO₂e is zero everywhere (no hardware profile for its nodes) is treated the same way. Before Impact Model 2.0.0, `co2e_g` was reported only and recommendations stored a measured CO₂e of 0.
 
@@ -231,6 +242,7 @@ Values are **signed and never floored**: a cost increase is reported as a negati
 | Another change on the same workload landed inside the baseline window | moderate |
 | The workload's HPA changed inside the baseline window | moderate |
 | Mean replicas deviate more than 25% from the replicas predicted by the same counterfactual | moderate |
+| The carbon factor (energy-weighted intensity × PUE) moved more than 10% between the windows (`intensity_shift`, MEA-03), or the post-window CO₂e has no energy behind it (`co2e_raw_delta`) | moderate |
 | The workload's own unit price of a resource (per charged unit, `price_card_change`) moved more than 5% | moderate |
 | The node pool's CPU or memory unit price moved more than 5% (`pool_price_card_change`) | moderate |
 | The node instance types running the workload changed (total-variation distance above 25% of pod-hours) | moderate |
