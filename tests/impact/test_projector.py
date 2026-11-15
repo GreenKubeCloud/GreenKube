@@ -33,7 +33,7 @@ def _row(**overrides) -> CombinedMetric:
         duration_seconds=300,
     )
     values.update(overrides)
-    return CombinedMetric(**values)
+    return CombinedMetric(restart_count=0, **values)
 
 
 class TestSamples:

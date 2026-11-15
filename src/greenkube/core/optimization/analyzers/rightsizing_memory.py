@@ -1,7 +1,7 @@
 """Memory rightsizing: requests far above usage (decrease) or too close to it (increase)."""
 
 import logging
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple
 
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.core.optimization.analyzers.rightsizing import (
@@ -10,12 +10,15 @@ from greenkube.core.optimization.analyzers.rightsizing import (
     MEMORY_MAX_FACTOR,
     MIB,
     OOM_SPIKE_LIMIT_FACTOR,
+    RELIABILITY_SIGNALS_UNKNOWN,
+    RELIABILITY_SIGNALS_UNKNOWN_TEXT,
     RightsizingProposal,
     max_increase_factor,
     memory_proposal,
     oom_proven_usage,
     oom_step_factor,
     skipped_increase,
+    withheld_decrease,
 )
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
 from greenkube.impact.projector import ImpactProjector, impact_fields
@@ -25,7 +28,7 @@ from greenkube.models.workload_usage import POD_LEVEL
 if TYPE_CHECKING:
     from greenkube.core.config import Config
     from greenkube.core.optimization.context import OptimizationContext
-    from greenkube.models.workload_usage import TargetKey, UsageStats, WorkloadUsageSummary
+    from greenkube.models.workload_usage import TargetKey, UsageSnapshot, UsageStats, WorkloadUsageSummary
 
 LOG = logging.getLogger(__name__)
 
@@ -37,6 +40,79 @@ _TRIGGER_TEXT = {
 
 #: A skipped target: (target, container or None, resource, reason code).
 Skip = Tuple["TargetKey", Optional[str], str, str]
+
+
+_SIGNAL_LABELS = {"oom_kills": "OOM kills", "restarts": "restarts", "throttling": "CPU throttling"}
+
+
+def reliability_diagnostics(
+    skipped: List[Skip], signal_status: Mapping[str, str], snapshot: Optional["UsageSnapshot"] = None
+) -> List[Dict[str, Any]]:
+    """Source-run diagnostics of the decreases withheld for unknown reliability signals (REC-04).
+
+    With ``snapshot``, the message also counts the containers whose rollup restart
+    history is unknown only because hours rolled before migration 0130 (upgrade)
+    could not be rebuilt from stored rows.
+    """
+    withheld = [skip for skip in skipped if skip[3] == RELIABILITY_SIGNALS_UNKNOWN]
+    if not withheld:
+        return []
+    legacy = 0
+    if snapshot is not None:
+        for target, container, _resource, _reason in withheld:
+            summaries = snapshot.summaries.get(target, {})
+            candidates = (summaries.get(container or POD_LEVEL), summaries.get(POD_LEVEL))
+            if any(item is not None and item.restart_increase_legacy for item in candidates):
+                legacy += 1
+    upgrade = (
+        f"; {legacy} of them because hours rolled before the upgrade (migration 0130) carry no per-pod restart "
+        "history and their metric rows are no longer stored (resolves as the lookback fills with new hours)"
+        if legacy
+        else ""
+    )
+    unread = [
+        f"{_SIGNAL_LABELS.get(name, name)} {status}"
+        for name, status in sorted(signal_status.items())
+        if name in ("oom_kills", "restarts") and status != "ok"
+    ]
+    detail = f" (signals: {', '.join(unread)})" if unread else ""
+    return [
+        {
+            "level": "warning",
+            "code": RELIABILITY_SIGNALS_UNKNOWN,
+            "message": f"{len(withheld)} {RELIABILITY_SIGNALS_UNKNOWN_TEXT}{detail}{upgrade}; "
+            "previous decreases of these containers are retired.",
+            "count": len(withheld),
+        }
+    ]
+
+
+def record_withheld_decrease(
+    skipped: List[Skip],
+    config: "Config",
+    summary: "WorkloadUsageSummary",
+    pod_summary: Optional["WorkloadUsageSummary"],
+    resource: str,
+    context: Optional["OptimizationContext"] = None,
+) -> None:
+    """Appends a ``reliability_signals_unknown`` skip when the target's decrease was withheld.
+
+    The withheld target is also registered on ``context.withheld_decreases`` so
+    the engine retires its previous decrease with that reason (REC-04).
+    """
+    reason = withheld_decrease(config, summary, pod_summary, "cpu" if resource == "cpu" else "memory")
+    if reason is None:
+        return
+    skipped.append((summary.target, summary.container_name, resource, reason))
+    if context is not None:
+        context.withheld_decreases.add((*summary.target, summary.container_name or "", resource))
+    LOG.info(
+        "%s decrease for %s/%s/%s container %r withheld (%s): restart/OOM history could not be read.",
+        "CPU" if resource == "cpu" else "Memory",
+        *summary.target,
+        summary.container_name,
+        reason,
+    )
 
 
 def increase_sizing_text(
@@ -104,6 +180,12 @@ class MemoryRightsizingAnalyzer(Analyzer):
         super().__init__(config)
         #: Targets whose usage calls for a change that was not proposed, with the reason.
         self.skipped: List[Skip] = []
+        self._signal_status: Dict[str, str] = {}
+        self._snapshot: Optional["UsageSnapshot"] = None
+
+    def scan_diagnostics(self) -> List[Dict[str, Any]]:
+        """Decreases withheld for unknown reliability signals in the last scan."""
+        return reliability_diagnostics(self.skipped, self._signal_status, self._snapshot)
 
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
@@ -112,6 +194,8 @@ class MemoryRightsizingAnalyzer(Analyzer):
         self.skipped = []
 
         snapshot = context.usage_snapshot()
+        self._signal_status = dict(snapshot.reliability_signal_status)
+        self._snapshot = snapshot
         for target, container_name, summary in context.iter_container_summaries():
             ns, target_kind, target_name = target
             skip = skipped_increase(cfg, summary, "memory")
@@ -127,6 +211,8 @@ class MemoryRightsizingAnalyzer(Analyzer):
                 continue
             pod_summary = snapshot.summaries.get(target, {}).get(POD_LEVEL)
             proposal = memory_proposal(cfg, summary, pod_summary)
+            if proposal is None:
+                record_withheld_decrease(self.skipped, cfg, summary, pod_summary, "memory", context)
             stats = proposal.stats if proposal is not None and proposal.stats is not None else summary.memory
             if proposal is None or stats is None:
                 continue

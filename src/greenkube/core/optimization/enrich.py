@@ -12,6 +12,7 @@ from greenkube.core.optimization.scoring import score_recommendations
 from greenkube.core.optimization.statistics import percentile
 from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationPatchV2
+from greenkube.models.workload_usage import POD_LEVEL
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -63,6 +64,16 @@ def _current_replicas(series: Sequence[CombinedMetric]) -> Optional[int]:
     return sum(1 for seen in last_seen.values() if latest - seen <= tolerance) or None
 
 
+def _oom_events(summary: Any, context: "OptimizationContext") -> Optional[int]:
+    """OOM kills of the target, or None when unknown (:func:`known_oom_events`)."""
+    from greenkube.core.optimization.analyzers.rightsizing import known_oom_events
+
+    if summary is None:
+        return None
+    pod_summary = context.usage_snapshot().summaries.get(summary.target, {}).get(POD_LEVEL)
+    return known_oom_events(summary, pod_summary)
+
+
 def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> WorkloadRiskProfile:
     """Workload facts available to a scan: replicas, per-replica headroom and HPA presence."""
     series = series_for(rec, context) if not rec.target_node else []
@@ -74,11 +85,18 @@ def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> W
         else:
             hpa_resources = frozenset()
     summary = usage_summary_for(rec, context)
+    oom_events = _oom_events(summary, context)
+    oom_unknown_cause = None
+    if oom_events is None:
+        from greenkube.core.optimization.analyzers.rightsizing import oom_unknown_cause as _cause
+
+        oom_unknown_cause = _cause(summary, context.usage_snapshot().reliability_signal_status)
     return WorkloadRiskProfile(
         replicas=_current_replicas(series) if rec.owner_kind else None,
         replica_cpu_p95_max=_replica_p95_max(series, "cpu_usage_millicores"),
         replica_memory_p95_max=_replica_p95_max(series, "memory_usage_bytes"),
-        oom_events=summary.oom_kill_count if summary is not None else None,
+        oom_events=oom_events,
+        oom_unknown_cause=oom_unknown_cause,
         cpu_throttling_ratio=summary.throttling_ratio if summary is not None else None,
         hpa_resources=hpa_resources,
         jvm=True if summary is not None and summary.jvm_hint else None,

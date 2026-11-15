@@ -105,6 +105,10 @@ class WorkloadUsageHour:
     #: Seconds from ``hour_bucket`` to the row's latest sample: among the node rows of
     #: one hour, the newest one holds the current request (None for rows before 0076).
     latest_sample_offset_seconds: Optional[float] = None
+    #: Restarts in the hour, summed over the pods of the row: each pod's count
+    #: compared with its own previous count (a reset or a new pod adds its count).
+    #: None when no row carries a restart count, and for rows before migration 0130.
+    restart_increase: Optional[int] = None
 
     @property
     def target(self) -> TargetKey:
@@ -168,6 +172,14 @@ class WorkloadUsageSummary:
     oom_kill_count: Optional[int] = None
     #: Container restarts over the lookback (kube-state-metrics), 0 when it reports none, None when unknown.
     restarts_in_window: Optional[int] = None
+    #: Container restarts over the lookback from the rollup: the sum of the hours' per-pod
+    #: restart increases (``WorkloadUsageHour.restart_increase``). None when no hour carries
+    #: a restart count or an hour was rolled before migration 0130. Fallback when the
+    #: signals above are unknown.
+    restart_increase: Optional[int] = None
+    #: An hour of the lookback was rolled before migration 0130 (restart count without
+    #: per-pod increase) and could not be re-rolled: ``restart_increase`` is None for that.
+    restart_increase_legacy: bool = False
     throttling_ratio: Optional[float] = None
     #: Why the container is believed to run a JVM (``JAVA_TOOL_OPTIONS``, ``-Xmx``, image name), None when not.
     jvm_hint: Optional[str] = None
@@ -224,6 +236,10 @@ class UsageSnapshot:
     source: str = "rows"
     #: First observed hour across all targets (None when unknown).
     first_hour: Optional[datetime] = None
+    #: Outcome of each reliability signal read by the scan (``oom_kills``, ``restarts``,
+    #: ``throttling``): ``ok``, ``failed`` (the query failed) or ``unavailable`` (no source).
+    #: Empty when the scan did not read them.
+    reliability_signal_status: Dict[str, str] = field(default_factory=dict)
 
 
 class BaselineMetric(CombinedMetric):

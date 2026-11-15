@@ -179,12 +179,15 @@ class ContextBuilder:
         )
 
     async def _attach_reliability_signals(self, snapshot, start: datetime, end: datetime) -> None:
-        from greenkube.core.reliability_signals import attach_reliability_signals
+        from greenkube.core.reliability_signals import SIGNAL_FAILED, SIGNAL_NAMES, attach_reliability_signals
 
         try:
             await attach_reliability_signals(snapshot, self.config, start=start, end=end)
-        except Exception as error:  # signals stay unknown; the scan goes on
+        except Exception as error:
+            # Signals stay unknown and rightsizing fails closed on them (REC-04): no decrease
+            # without a readable restart/OOM history, and the outcome is reported.
             logger.warning("Could not attach reliability signals to the usage summaries: %s", error)
+            snapshot.reliability_signal_status = {name: SIGNAL_FAILED for name in SIGNAL_NAMES}
 
     async def _build_from_rows(
         self,

@@ -43,7 +43,7 @@ from greenkube.core.optimization.providers.base import RecommendationSource
 from greenkube.core.optimization.registry import build_signal_sources, cluster_uid
 from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
 from greenkube.core.recommendation_reconciliation import RecommendationDiff, compute_diff, supporting_sources
-from greenkube.models.metrics import Recommendation, RecommendationPatchV2, RecommendationRecord
+from greenkube.models.metrics import Recommendation, RecommendationPatchV2, RecommendationRecord, RecommendationType
 from greenkube.models.optimization_run import (
     OptimizationRun,
     OptimizationRunCompletion,
@@ -53,6 +53,7 @@ from greenkube.models.optimization_run import (
     SourceRunStatus,
 )
 from greenkube.models.recommendation_v2 import with_v2_fields
+from greenkube.models.workload_usage import POD_LEVEL
 from greenkube.signals.adapters import adapt_recommendation_source, observed_window, workload_inventory
 from greenkube.signals.consensus import KIND_REQUEST_RESOURCES, ConsensusPolicy
 from greenkube.signals.runtime import SourceReport, SourceRunner, SourceRunRecord, legacy_outcomes
@@ -297,6 +298,7 @@ class OptimizationEngine:
                 reco_repo,
                 namespace=namespace,
                 incomplete_sources=generation.incomplete_sources,
+                reliability=ReliabilityGuard.from_context(context),
             )
         except BaseException as exc:
             error = _error_text(exc)
@@ -405,8 +407,17 @@ class OptimizationEngine:
         reco_repo: "RecommendationRepository",
         namespace: Optional[str] = None,
         incomplete_sources: FrozenSet[str] = frozenset(),
+        reliability: Optional["ReliabilityGuard"] = None,
     ) -> Tuple[RecommendationDiff, List[Recommendation]]:
         """Upserts generated recommendations, expires overdue actives and reconciles stale ones.
+
+        ``reliability`` names the containers whose restart/OOM history this scan
+        could not read (REC-04). Only their records are treated specially, never
+        the whole native source group: a missing rightsizing decrease of a
+        withheld target is retired with the reason ``reliability_signals_unknown``,
+        and a missing memory increase of a container whose OOM kills are unknown
+        is kept (it may have been sized from kills this scan cannot see). Every
+        other record reconciles normally.
 
         Returns the diff against the active set of the scanned scope and the
         recommendations actually written (a last known record is kept instead
@@ -437,15 +448,50 @@ class OptimizationEngine:
             ]
             if action_records:
                 await reco_repo.upsert_recommendations(action_records)
+        protected: List[RecommendationRecord] = []
+        if reliability is not None:
+            retire, protected = reliability.split(previous, records)
+            await self._retire_withheld_decreases(reco_repo, retire)
         await reco_repo.reconcile_active_recommendations(
-            records,
+            [*records, *protected],
             namespace=namespace,
             incomplete_sources=sorted(incomplete_sources),
         )
         # A namespaced scan snapshots and reconciles that namespace only; any
         # cluster-scoped record it emits is outside the baseline, not "new".
         in_scope = records if namespace is None else [record for record in records if record.namespace == namespace]
-        return compute_diff(previous, in_scope, incomplete_sources), kept
+        diff = compute_diff(previous, in_scope, incomplete_sources)
+        kept_fingerprints = {record.fingerprint for record in protected}
+        if kept_fingerprints:
+            diff.retained = sorted({*diff.retained, *(fp for fp in diff.resolved if fp in kept_fingerprints)})
+            diff.resolved = [fp for fp in diff.resolved if fp not in kept_fingerprints]
+        return diff, kept
+
+    @staticmethod
+    async def _retire_withheld_decreases(
+        reco_repo: "RecommendationRepository", records: Sequence[RecommendationRecord]
+    ) -> None:
+        """Marks stale, with the reason ``reliability_signals_unknown``, the decreases withheld this scan (REC-04)."""
+        from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+
+        lifecycle = RecommendationLifecycle(reco_repo)
+        for record in records:
+            if record.id is None:
+                continue
+            try:
+                await lifecycle.transition(
+                    record.id,
+                    "stale",
+                    event_type="stale",
+                    payload={"reason": "reliability_signals_unknown"},
+                    expected_statuses=("active",),
+                )
+                logger.info(
+                    "Retired decrease %s: restart/OOM history could not be read (reliability_signals_unknown).",
+                    record.id,
+                )
+            except Exception as exc:
+                logger.warning("Could not retire withheld decrease %s: %s", record.id, exc)
 
     def _record(self, recommendation: Recommendation) -> RecommendationRecord:
         """The persisted form of a recommendation, with its v2 identity, target and proposal (E4)."""
@@ -653,6 +699,93 @@ def _with_last_known_votes(
         last_known or "unknown",
     )
     return recommendation.model_copy(update=update)
+
+
+ContainerKey = Tuple[str, str, str, str]
+
+
+def _record_container(record: RecommendationRecord) -> ContainerKey:
+    """``(namespace, target_kind, target_name, container)`` of a rightsizing record."""
+    kind = record.owner_kind or "Pod"
+    name = record.owner_name or record.pod_name or ""
+    return (record.namespace or "", kind, name, record.container_name or "")
+
+
+def _native(record: RecommendationRecord) -> bool:
+    return any(
+        name == "greenkube" or name.startswith("greenkube.")
+        for name in supporting_sources(record.source, record.sources)
+    )
+
+
+@dataclass(frozen=True)
+class ReliabilityGuard:
+    """What a scan could not judge for lack of restart/OOM history (REC-04).
+
+    ``withheld`` holds the ``(container key, resource)`` pairs whose decrease the
+    usage called for but the analyzers withheld; ``oom_unknown`` the containers
+    whose OOM-kill count is unknown and not proven zero by the rollup.
+    """
+
+    withheld: FrozenSet[Tuple[ContainerKey, str]] = frozenset()
+    oom_unknown: FrozenSet[ContainerKey] = frozenset()
+
+    @classmethod
+    def from_context(cls, context: OptimizationContext) -> "ReliabilityGuard":
+        """Reads the withheld decreases and the unknown OOM histories of a scan's context."""
+        from greenkube.core.optimization.analyzers.rightsizing import known_oom_events
+
+        withheld = frozenset(
+            ((ns, kind, name, container), resource)
+            for ns, kind, name, container, resource in context.withheld_decreases
+        )
+        unknown = set()
+        try:
+            snapshot = context.usage_snapshot()
+        except Exception as exc:
+            # No snapshot: no memory increase is protected, records reconcile as usual.
+            logger.warning("Could not read the usage snapshot for the reliability guard: %s", exc)
+            snapshot = None
+        if snapshot is not None:
+            for target, containers in snapshot.summaries.items():
+                pod_summary = containers.get(POD_LEVEL)
+                for container, summary in containers.items():
+                    if known_oom_events(summary, pod_summary) is None:
+                        unknown.add((*target, container))
+        return cls(withheld=withheld, oom_unknown=frozenset(unknown))
+
+    def split(
+        self, previous: Sequence[RecommendationRecord], emitted: Sequence[RecommendationRecord]
+    ) -> Tuple[List[RecommendationRecord], List[RecommendationRecord]]:
+        """``(retire, protect)`` among the native rightsizing records this scan did not re-emit.
+
+        * retire: decreases of a withheld target (unsafe to keep, retired with
+          the reason ``reliability_signals_unknown``);
+        * protect: memory increases of a container whose OOM kills are unknown
+          (kept active instead of being marked stale).
+        """
+        fingerprints = {record.fingerprint for record in emitted if record.fingerprint}
+        retire: List[RecommendationRecord] = []
+        protect: List[RecommendationRecord] = []
+        for record in previous:
+            if not record.fingerprint or record.fingerprint in fingerprints or not _native(record):
+                continue
+            if record.type == RecommendationType.RIGHTSIZING_CPU:
+                resource = "cpu"
+                current, proposed = record.current_cpu_request_millicores, record.recommended_cpu_request_millicores
+            elif record.type == RecommendationType.RIGHTSIZING_MEMORY:
+                resource = "memory"
+                current, proposed = record.current_memory_request_bytes, record.recommended_memory_request_bytes
+            else:
+                continue
+            if current is None or proposed is None:
+                continue
+            key = _record_container(record)
+            if proposed < current and (key, resource) in self.withheld:
+                retire.append(record)
+            elif proposed > current and resource == "memory" and key in self.oom_unknown:
+                protect.append(record)
+        return retire, protect
 
 
 def _run_status(outcomes: List[SourceRunOutcome]) -> OptimizationRunStatus:

@@ -55,6 +55,8 @@ def _usage_context() -> OptimizationContext:
             memory=_stats(100 * MIB, 120 * MIB, 130 * MIB, 140 * MIB),
             cpu_request=1000,
             memory_request=1024 * MIB,
+            oom_kill_count=0,
+            restarts_in_window=0,
         )
 
     return OptimizationContext(
@@ -109,6 +111,7 @@ class _FakeVpaCollector:
 def _vpa_context() -> OptimizationContext:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     metric = CombinedMetric(
+        restart_count=0,
         pod_name="api-7d9f8b6c5-x2k4p",
         namespace="prod",
         owner_kind="Deployment",
@@ -162,7 +165,13 @@ def _nodepool_context() -> OptimizationContext:
     now = datetime.now(timezone.utc)
     metrics = [
         CombinedMetric(
-            pod_name=f"pod-{node}", namespace="default", node=node, cpu_request=200, total_cost=1.0, timestamp=now
+            restart_count=0,
+            pod_name=f"pod-{node}",
+            namespace="default",
+            node=node,
+            cpu_request=200,
+            total_cost=1.0,
+            timestamp=now,
         )
         for node in ("n1", "n2")
     ]

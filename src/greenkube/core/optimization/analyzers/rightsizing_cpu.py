@@ -1,11 +1,17 @@
 """CPU rightsizing: requests far above usage (decrease) or too close to it (increase)."""
 
 import logging
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from greenkube.core.optimization.analyzers.base import Analyzer
 from greenkube.core.optimization.analyzers.rightsizing import cpu_proposal, skipped_increase
-from greenkube.core.optimization.analyzers.rightsizing_memory import Skip, _pod_level_note, increase_sizing_text
+from greenkube.core.optimization.analyzers.rightsizing_memory import (
+    Skip,
+    _pod_level_note,
+    increase_sizing_text,
+    record_withheld_decrease,
+    reliability_diagnostics,
+)
 from greenkube.core.optimization.targeting import owner_fields, scope_for_target_kind, target_label
 from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
@@ -14,6 +20,7 @@ from greenkube.models.workload_usage import POD_LEVEL
 if TYPE_CHECKING:
     from greenkube.core.config import Config
     from greenkube.core.optimization.context import OptimizationContext
+    from greenkube.models.workload_usage import UsageSnapshot
 
 LOG = logging.getLogger(__name__)
 
@@ -27,6 +34,12 @@ class CpuRightsizingAnalyzer(Analyzer):
         super().__init__(config)
         #: Targets whose usage calls for a change that was not proposed, with the reason.
         self.skipped: List[Skip] = []
+        self._signal_status: Dict[str, str] = {}
+        self._snapshot: Optional["UsageSnapshot"] = None
+
+    def scan_diagnostics(self) -> List[Dict[str, Any]]:
+        """Decreases withheld for unknown reliability signals in the last scan."""
+        return reliability_diagnostics(self.skipped, self._signal_status, self._snapshot)
 
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
@@ -35,6 +48,8 @@ class CpuRightsizingAnalyzer(Analyzer):
         self.skipped = []
 
         snapshot = context.usage_snapshot()
+        self._signal_status = dict(snapshot.reliability_signal_status)
+        self._snapshot = snapshot
         for target, container_name, summary in context.iter_container_summaries():
             ns, target_kind, target_name = target
             skip = skipped_increase(cfg, summary, "cpu")
@@ -50,6 +65,8 @@ class CpuRightsizingAnalyzer(Analyzer):
                 continue
             pod_summary = snapshot.summaries.get(target, {}).get(POD_LEVEL)
             proposal = cpu_proposal(cfg, summary, pod_summary)
+            if proposal is None:
+                record_withheld_decrease(self.skipped, cfg, summary, pod_summary, "cpu", context)
             stats = proposal.stats if proposal is not None and proposal.stats is not None else summary.cpu
             if proposal is None or stats is None:
                 continue

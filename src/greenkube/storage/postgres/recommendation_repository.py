@@ -16,6 +16,7 @@ from ...core.recommendation_realization import (
     RECORDED_CHANGE_STATUSES,
     absorbs_regenerated_recommendation,
     estimate_realized_savings,
+    is_rightsizing_type,
     refresh_applied_recommendation,
 )
 from ...core.recommendation_reconciliation import may_mark_stale
@@ -304,6 +305,21 @@ class PostgresRecommendationRepository(RecommendationRepository):
                         await self._settle_revision(conn, stored, False, now)
                     count += 1
                     continue
+                if (
+                    applied_row
+                    and applied_row["status"] == RecommendationStatus.APPLIED.value
+                    and is_rightsizing_type(applied_row["type"])
+                    and not absorbs_regenerated_recommendation(row_to_record(applied_row), r, now)
+                ):
+                    # REC-01: an applied rightsizing only absorbs a restatement of its change.
+                    logger.info(
+                        "New %s advice for %s/%s after applied recommendation %s: inserted.",
+                        applied_row["type"],
+                        r.namespace,
+                        r.pod_name,
+                        applied_row["id"],
+                    )
+                    applied_row = None
                 if applied_row and applied_row["status"] != RecommendationStatus.APPLIED.value:
                     if absorbs_regenerated_recommendation(row_to_record(applied_row), r, now):
                         # The scan restates a change already recorded (lagging rollup):

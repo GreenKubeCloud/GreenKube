@@ -83,6 +83,7 @@ Eligibility depends on live state (GitOps bindings, freeze windows, open pull re
 | `workload_cooldown_active` | The workload changed less than `cooldownMinutes` ago. | Wait for the cooldown. |
 | `rollout_in_progress` | The workload is rolling out. | Wait for the rollout to complete. |
 | `controller_unhealthy` | The owning Argo CD or Flux object is suspended or unhealthy. | Restore it to a healthy, syncing state. |
+| `oom_history_unknown` | A memory decrease whose OOM-kill and restart history could not be read (risk factor `oom_history_unknown`). The message names the cause from the factor `oom_unknown_<cause>`: no usage summary covers the container, the Prometheus queries failed, or no source is available (no Prometheus, kube-state-metrics not scraped). | No usage summary: wait for the workload usage rollup and the next scan. Failed queries: check Prometheus availability, timeouts and query limits. No source: configure Prometheus and scrape kube-state-metrics. In every case you can apply the change manually after checking the container's restarts. |
 | `policy_interaction_conflict` | An HPA scales on a utilization target of the changed resource, a VPA writes requests (`Auto`, `Recreate`, `InPlace`, `InPlaceOrRecreate`) or a PodDisruptionBudget blocks the rollout. | Remove the conflicting writer or apply manually. |
 
 ## Warnings

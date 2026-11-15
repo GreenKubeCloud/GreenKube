@@ -66,6 +66,7 @@ ROLLUP_COLUMNS: Tuple[str, ...] = (
     "node_instance_type",
     "source",
     "latest_sample_offset_seconds",
+    "restart_increase",
 )
 
 
@@ -128,6 +129,21 @@ class WorkloadUsageRepository(ABC):
         """
         return []
 
+    async def read_last_restart_counts(self, hour: datetime, pods: Sequence[Tuple[str, str]]) -> List[UsageInputRow]:
+        """The last stored restart count before ``hour`` of each pod, however old (REC-04).
+
+        One row per ``(namespace, pod_name)`` of ``pods`` that has a non-null
+        restart count before ``hour`` in the raw or the compressed hourly pod
+        table (the newest of both). Only ``namespace``, ``pod_name``,
+        ``timestamp`` and ``restart_count`` are filled. Backends without stored
+        rows return none.
+        """
+        return []
+
+    async def legacy_restart_hours(self, start: datetime, end: datetime) -> List[datetime]:
+        """Rolled hours of ``[start, end)`` with a restart count but no per-pod increase (before 0130)."""
+        return []
+
     async def read_hourly_restart_context(self, hour: datetime) -> List[UsageInputRow]:
         """Compressed pod rows of the hour before ``hour`` with their restart counts.
 
@@ -146,6 +162,13 @@ class WorkloadUsageRepository(ABC):
         Each table is read from its raw rows when it still holds the hour,
         otherwise from its compressed hourly table. ``source`` is ``raw``,
         ``hourly`` or ``mixed``.
+        """
+
+    async def set_restart_increase(self, hour: datetime, rows: Sequence[WorkloadUsageHour]) -> None:
+        """Write only ``restart_increase`` of the stored rollup rows of ``hour`` matching ``rows``.
+
+        Used for hours rolled before migration 0130 that can only be rebuilt from
+        the compressed hourly tables: their stored usage (raw precision) is kept.
         """
 
     @abstractmethod

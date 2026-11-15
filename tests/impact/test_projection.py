@@ -381,6 +381,7 @@ def _container_rows(count=12, **overrides) -> List[CombinedMetric]:
             pue=1.2,
             timestamp=START + timedelta(minutes=5 * index),
             duration_seconds=300,
+            restart_count=0,
         )
         values.update(overrides)
         rows.append(CostedMetric(**values))
@@ -466,6 +467,7 @@ def _opencost_rows(per_row_cost: float, count: int = 12) -> List[CombinedMetric]
     """Rows as written on dev with OpenCost: a per-container ``total_cost`` and no component split."""
     return [
         CombinedMetric(
+            restart_count=0,
             pod_name="api-7f9c5d9f6d-a1b2c",
             namespace="prod",
             owner_kind="Deployment",
@@ -572,7 +574,9 @@ class TestKarpenterProjection:
             for i in range(3)
         ]
         rows = [
-            CombinedMetric(pod_name=f"p{i}", namespace="default", node=f"n{i}", cpu_request=200, timestamp=START)
+            CombinedMetric(
+                restart_count=0, pod_name=f"p{i}", namespace="default", node=f"n{i}", cpu_request=200, timestamp=START
+            )
             for i in range(3)
         ]
         context = OptimizationContext(config=Config(), metrics=rows, node_infos=nodes, analysis_window_seconds=86400)
@@ -600,6 +604,7 @@ class TestKarpenterProjection:
         ]
         rows = [
             CombinedMetric(
+                restart_count=0,
                 pod_name=f"p{i}",
                 namespace="default",
                 node=f"n{i}",
@@ -632,6 +637,7 @@ class TestScheduleAndDeletionAnalyzers:
 
         rows = [
             CombinedMetric(
+                restart_count=0,
                 pod_name="batch-7f9c5d9f6d-a1b2c",
                 namespace="jobs",
                 owner_kind="Deployment",
@@ -659,6 +665,7 @@ class TestScheduleAndDeletionAnalyzers:
 
         rows = [
             CombinedMetric(
+                restart_count=0,
                 pod_name="a",
                 namespace="sandbox",
                 node="n1",
@@ -668,6 +675,7 @@ class TestScheduleAndDeletionAnalyzers:
                 timestamp=START,
             ),
             CombinedMetric(
+                restart_count=0,
                 pod_name="b",
                 namespace="sandbox",
                 node="n1",

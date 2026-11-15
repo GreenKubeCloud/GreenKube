@@ -221,6 +221,12 @@ CODES: Dict[str, Tuple[str, str]] = {
         "The owning GitOps controller is suspended or unhealthy.",
         "Restore the controller to a healthy, syncing state.",
     ),
+    "oom_history_unknown": (
+        "The container's OOM-kill and restart history could not be read: a memory decrease could land below "
+        "peaks that killed it, so it is never automated.",
+        "See the rightsizing source run's reliability_signals_unknown diagnostic for the missing input, wait for "
+        "the next scan, or apply the change manually after checking the container's restarts.",
+    ),
     "policy_interaction_conflict": (
         "An HPA, VPA or PodDisruptionBudget conflicts with this change.",
         "Remove the conflicting writer (for example set the VPA to updateMode Off) or apply the change manually.",
@@ -252,6 +258,41 @@ def _configured_delivery_mode() -> str:
         return configured_delivery_mode()
     except Exception:  # configuration errors surface elsewhere; eligibility stays readable
         return DELIVERY_DIRECT
+
+
+#: Message and fix of the ``oom_history_unknown`` blocker by cause (risk factor ``oom_unknown_<cause>``).
+OOM_UNKNOWN_CAUSES: Dict[str, Tuple[str, str]] = {
+    "no_usage_summary": (
+        "No usage summary covers this container, so its OOM-kill and restart history is unknown: a memory "
+        "decrease could land below peaks that killed it, so it is never automated.",
+        "Wait until the workload usage rollup covers the container (it runs with metric compression) and the "
+        "next scan, or apply the change manually after checking the container's restarts.",
+    ),
+    "signal_failed": (
+        "The OOM-kill and restart queries to Prometheus failed (HTTP error, timeout or query limit) and the "
+        "rollup holds no restart history for this container: a memory decrease could land below peaks that "
+        "killed it, so it is never automated.",
+        "Check that Prometheus answers (availability, timeouts, query sample limits), then wait for the next "
+        "scan, or apply the change manually after checking the container's restarts.",
+    ),
+    "signal_unavailable": (
+        "No OOM-kill and restart source is available (no Prometheus configured, or kube-state-metrics not "
+        "scraped) and the rollup holds no restart history for this container: a memory decrease could land "
+        "below peaks that killed it, so it is never automated.",
+        "Configure Prometheus and make sure it scrapes kube-state-metrics, then wait for the next scan, or apply "
+        "the change manually after checking the container's restarts.",
+    ),
+}
+
+
+def _oom_history_unknown_entry(risk_factors: Sequence[str]) -> Dict[str, str]:
+    """The ``oom_history_unknown`` blocker, worded after the cause recorded in the risk factors."""
+    for factor in risk_factors:
+        if factor.startswith("oom_unknown_"):
+            texts = OOM_UNKNOWN_CAUSES.get(factor[len("oom_unknown_") :])
+            if texts is not None:
+                return _entry("oom_history_unknown", *texts)
+    return _entry("oom_history_unknown")
 
 
 def _entry(code: str, message: Optional[str] = None, fix: Optional[str] = None) -> Dict[str, str]:
@@ -709,6 +750,9 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
                 warnings.extend(evaluator_warnings)
 
     risk_factors = [str(factor) for factor in getattr(record, "risk_factors", None) or []]
+    if "oom_history_unknown" in risk_factors:
+        # Fail closed (REC-04): an unknown OOM history never reaches a pull request automatically.
+        blockers.append(_oom_history_unknown_entry(risk_factors))
     for code in ("singleton_workload", "memory_decrease_best_effort"):
         if code in risk_factors:
             warnings.append(_entry(code))

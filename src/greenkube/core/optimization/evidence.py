@@ -15,7 +15,7 @@ from greenkube.models.evidence import (
     UtilizationStats,
 )
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
-from greenkube.models.workload_usage import BaselineMetric
+from greenkube.models.workload_usage import POD_LEVEL, BaselineMetric
 from greenkube.utils.time import ensure_utc
 
 if TYPE_CHECKING:
@@ -275,6 +275,15 @@ def usage_summary_for(rec: Recommendation, context: "OptimizationContext") -> Op
     return context.usage.summaries.get(target, {}).get(rec.container_name or "")
 
 
+def _known_oom_events(summary: Any, context: "OptimizationContext") -> Optional[int]:
+    from greenkube.core.optimization.analyzers.rightsizing import known_oom_events
+
+    if summary is None or not hasattr(summary, "target"):
+        return getattr(summary, "oom_kill_count", None)
+    pod_summary = context.usage_snapshot().summaries.get(summary.target, {}).get(POD_LEVEL)
+    return known_oom_events(summary, pod_summary)
+
+
 def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optional[RecommendationEvidence]:
     """Builds the evidence block for a recommendation, or None when no metrics exist."""
     series = series_for(rec, context)
@@ -304,9 +313,10 @@ def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optio
     co2e_per_hour = (total_co2e / window * 3600) if window else None
 
     # OOM kills and CPU throttling over the lookback, from the scan's usage summary
-    # (kube-state-metrics / cAdvisor); None when no source reported them.
+    # (kube-state-metrics / cAdvisor). OOM kills are 0 when the signal is unknown but
+    # the rollup restart history shows no restart; None when neither is known (REC-04).
     summary = usage_summary_for(rec, context)
-    oom_events = getattr(summary, "oom_kill_count", None)
+    oom_events = _known_oom_events(summary, context)
     throttling = getattr(summary, "throttling_ratio", None)
     # Container limits and the limit changes delivered with the request change (H1).
     current = current.model_copy(

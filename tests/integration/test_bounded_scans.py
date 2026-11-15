@@ -115,6 +115,7 @@ def _rows(start: datetime, hours: int) -> list[CombinedMetric]:
             }
             rows.append(
                 CombinedMetric(
+                    restart_count=0,
                     **common,
                     node=node,
                     cpu_request=1000,
@@ -128,6 +129,7 @@ def _rows(start: datetime, hours: int) -> list[CombinedMetric]:
             )
             rows.append(
                 CombinedMetric(
+                    restart_count=0,
                     **common,
                     container_name="web",
                     cpu_request=1000,
@@ -157,11 +159,12 @@ def _rows(start: datetime, hours: int) -> list[CombinedMetric]:
             "cost_source": "opencost",
             "joules": 2000.0,
         }
-        rows.append(CombinedMetric(**hot, node="node-a"))
+        rows.append(CombinedMetric(restart_count=0, **hot, node="node-a"))
         # Increases need container-level usage (pod-level usage never sizes a container).
-        rows.append(CombinedMetric(**hot, container_name="db"))
+        rows.append(CombinedMetric(restart_count=0, **hot, container_name="db"))
         rows.append(
             CombinedMetric(
+                restart_count=0,
                 pod_name="forgotten",
                 namespace="idle-ns",
                 timestamp=ts,
@@ -287,6 +290,7 @@ async def test_deleted_namespaces_leave_node_averages_and_observed_window(db, no
     await repo.write_combined_metrics(
         [
             CombinedMetric(
+                restart_count=0,
                 pod_name="old-0",
                 namespace="gone",
                 timestamp=gone_start + timedelta(minutes=5 * step),

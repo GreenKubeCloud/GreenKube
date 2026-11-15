@@ -1,0 +1,15 @@
+### Added
+- Usage summaries carry `restart_increase`, the restarts over the lookback from the rollup, as the fallback when the scan's reliability signals are unknown (SQLite and PostgreSQL). The rollup stores each hour's per-pod restart increase in the new column `workload_usage_hourly.restart_increase` (migration 0130): each pod's count is compared with its own last stored count, however old (a collection gap or a missing hour never hides restarts), never with the highest count across replicas.
+- Risk factor and eligibility blocker `oom_history_unknown`: a memory decrease whose OOM history could not be read is at least medium risk and never becomes a pull request. A second factor (`oom_unknown_no_usage_summary`, `oom_unknown_signal_failed`, `oom_unknown_signal_unavailable`) names the cause, and the blocker's message and fix are worded after it.
+- Rightsizing source runs report a `reliability_signals_unknown` warning diagnostic naming the reliability signals that failed.
+
+### Fixed
+- Rightsizing no longer fails open when OOM kills or restarts are unknown (REC-04): a CPU or memory decrease needs explicit zero signals or a rollup restart history without restart. Restarts in that history block the decrease like known restarts; without any stored restart count the decrease is withheld with the reason `reliability_signals_unknown`. Only the withheld containers' records are affected: their previous decrease is retired, their previous memory increase is kept while their OOM kills are unknown, and the native source run stays complete so every other record (zombie pods, idle namespaces, advice for deleted workloads) is still reconciled.
+- A failed OOM or restart query is no longer reported as zero kills or restarts, and one failing reliability query no longer drops the other signals.
+- The evidence of a recommendation records 0 OOM kills when the signal is unknown but the rollup restart history proves none, instead of an unknown value.
+
+- An applied CPU or memory rightsizing no longer swallows every later recommendation of the same type for its container (REC-01): only a restatement of the applied change within 6 hours of `applied_at` is absorbed; other advice, such as an OOM-driven increase after a decrease, is inserted as a new active recommendation (SQLite and PostgreSQL).
+
+### Changed
+- Upgrade: on the first scan after the upgrade, an active native CPU or memory decrease whose container has no readable restart/OOM history is retired (marked stale) with the reason `reliability_signals_unknown`.
+- Upgrade: hours rolled before migration 0130 carry no per-pod restart increase. The rollup re-rolls those whose raw rows are still stored on its first run after the upgrade, and for older hours writes only the restart increase computed from the compressed hourly rows (stored usage percentiles are kept); an hour whose rows are gone keeps an unknown restart history, so a decrease whose scan signals are also unknown is withheld, and the `reliability_signals_unknown` diagnostic says how many are due to the upgrade.

@@ -82,6 +82,7 @@ def _make_zombie_metrics() -> list[CombinedMetric]:
     now = datetime.now(timezone.utc)
     return [
         CombinedMetric(
+            restart_count=0,
             pod_name="zombie-pod",
             namespace="staging",
             total_cost=0.50,
@@ -102,6 +103,7 @@ def _make_oversized_cpu_metrics() -> list[CombinedMetric]:
 
     return [
         CombinedMetric(
+            restart_count=0,
             pod_name="oversized-cpu",
             namespace="production",
             total_cost=1.0,

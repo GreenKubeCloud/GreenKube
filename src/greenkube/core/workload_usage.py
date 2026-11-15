@@ -230,6 +230,8 @@ class _HourAccumulator:
     latest: Any = None
     latest_rows: List[Any] = field(default_factory=list)
     restart_count: Optional[int] = None
+    #: Sum of the per-pod restart increases of the hour's rows (:func:`restart_deltas`).
+    restart_increase: Optional[int] = None
     total_cost: float = 0.0
     cost_cpu: Optional[float] = None
     cost_ram: Optional[float] = None
@@ -248,7 +250,7 @@ class _HourAccumulator:
     zones: List[Optional[str]] = field(default_factory=list)
     instance_types: List[Optional[str]] = field(default_factory=list)
 
-    def add(self, row: Any, step_seconds: float, warm: bool = False) -> None:
+    def add(self, row: Any, step_seconds: float, warm: bool = False, restart_delta: Optional[int] = None) -> None:
         weight = _weight(row)
         timestamp = getattr(row, "timestamp", None)
         self.pods.add(getattr(row, "pod_name", None))
@@ -296,6 +298,8 @@ class _HourAccumulator:
         restarts = getattr(row, "restart_count", None)
         if isinstance(restarts, int) and not isinstance(restarts, bool):
             self.restart_count = restarts if self.restart_count is None else max(self.restart_count, restarts)
+        if restart_delta is not None:
+            self.restart_increase = (self.restart_increase or 0) + restart_delta
         self.total_cost += _number(getattr(row, "total_cost", 0)) or 0.0
         for name in ("cost_cpu", "cost_ram", "cost_storage", "cost_network", "cost_lb"):
             setattr(self, name, _sum_optional(getattr(self, name), getattr(row, name, None)))
@@ -366,6 +370,7 @@ class _HourAccumulator:
             cpu_limit=self._latest("cpu_limit", optional=True),
             memory_limit=self._latest("memory_limit", optional=True),
             restart_count=self.restart_count,
+            restart_increase=self.restart_increase,
             total_cost=self.total_cost,
             cost_cpu=self.cost_cpu,
             cost_ram=self.cost_ram,
@@ -435,6 +440,76 @@ def warmup_windows(rows: Iterable[Any], warmup_seconds: float) -> WarmupWindows:
     return windows
 
 
+def _restart_value(row: Any) -> Optional[int]:
+    restarts = getattr(row, "restart_count", None)
+    return restarts if isinstance(restarts, int) and not isinstance(restarts, bool) else None
+
+
+def restart_deltas(
+    rows: Iterable[Any],
+    context_rows: Iterable[Any] = (),
+    *,
+    per_container: bool = False,
+    collection_started: bool = False,
+) -> Dict[int, int]:
+    """Restart increase of each row since the previous known count of the same pod (REC-04).
+
+    Returns ``{id(row): increase}`` for the ``rows`` that carry a restart count.
+    Counts are compared per pod (``namespace``, ``pod_name``, and the container
+    with ``per_container``), never across replicas: the highest count of
+    several replicas is not a counter. For each row, oldest first:
+
+    * a rise since the pod's previous known count adds the difference;
+    * a drop is a counter reset (the pod was recreated under the same name):
+      it adds the new count;
+    * a pod without any previous known count adds its whole count when
+      collection had already started (``collection_started``: older stored
+      rows exist, or an earlier sample of any pod is among the rows): a new pod
+      starts at zero, and a pod whose previous count is unknown is not known to
+      be clean. At the very first sample, the count is the baseline (0 added).
+
+    ``context_rows`` give previous counts and are not returned: the rows just
+    before ``rows`` and, for pods without a count there, each pod's last stored
+    count however old (a collection gap or a missing hour never hides the
+    restarts that happened in it). Overcounting never allows a
+    decrease, so every unknown counts as restarts (fail closed).
+    """
+    rows = list(rows)
+
+    def key(row: Any) -> Tuple[Any, ...]:
+        base = (getattr(row, "namespace", None), getattr(row, "pod_name", None))
+        return (*base, getattr(row, "container_name", None)) if per_container else base
+
+    def order(row: Any) -> float:
+        # Rows without a timestamp (in-memory rows) sort first, in input order.
+        timestamp = getattr(row, "timestamp", None)
+        return timestamp.timestamp() if isinstance(timestamp, datetime) else float("-inf")
+
+    stamped = [(row, False) for row in context_rows] + [(row, True) for row in rows]
+    if not stamped:
+        return {}
+    first = min(order(item[0]) for item in stamped)
+    stamped.sort(key=lambda item: (order(item[0]), item[1]))
+    last: Dict[Tuple[Any, ...], int] = {}
+    deltas: Dict[int, int] = {}
+    for row, own in stamped:
+        count = _restart_value(row)
+        if count is None:
+            continue
+        pod = key(row)
+        previous = last.get(pod)
+        if previous is not None:
+            delta = count - previous if count >= previous else count
+        elif collection_started or order(row) > first:
+            delta = count
+        else:
+            delta = 0
+        last[pod] = count
+        if own:
+            deltas[id(row)] = delta
+    return deltas
+
+
 def _in_warmup(windows: WarmupWindows, row: Any) -> bool:
     spans = windows.get((row.namespace, row.pod_name))
     timestamp = getattr(row, "timestamp", None)
@@ -451,6 +526,8 @@ def rollup_rows(
     source: str = "raw",
     warmup_seconds: float = 0.0,
     context_rows: Iterable[Any] = (),
+    restart_context_rows: Optional[Iterable[Any]] = None,
+    collection_started: bool = False,
 ) -> List[WorkloadUsageHour]:
     """Aggregates metric rows into hourly rows per target, container and node.
 
@@ -472,7 +549,13 @@ def rollup_rows(
     """
     pod_rows = list(pod_rows)
     container_rows = list(container_rows)
+    context_rows = list(context_rows)
     warm = warmup_windows([*context_rows, *pod_rows], warmup_seconds)
+    # Restart increases compare each pod with its last known count (``restart_context_rows``,
+    # by default the warm-up context); ``collection_started``: older stored rows exist.
+    restart_context = context_rows if restart_context_rows is None else list(restart_context_rows)
+    deltas = restart_deltas(pod_rows, restart_context, collection_started=collection_started)
+    deltas.update(restart_deltas(container_rows, per_container=True))
     pods_at: Dict[Tuple[str, str, Any], Any] = {}
     pods_in_hour: Dict[Tuple[str, str, Optional[datetime]], Any] = {}
     for row in pod_rows:
@@ -522,7 +605,9 @@ def rollup_rows(
     for row in [*pod_rows, *synthetic.values()]:
         namespace, kind, name = _target(row)
         node = getattr(row, "node", None) or ""
-        _group(_bucket(row), (namespace, kind, name, POD_LEVEL, node)).add(row, step_seconds, _in_warmup(warm, row))
+        _group(_bucket(row), (namespace, kind, name, POD_LEVEL, node)).add(
+            row, step_seconds, _in_warmup(warm, row), deltas.get(id(row))
+        )
 
     for row in container_rows:
         container = getattr(row, "container_name", None)
@@ -535,7 +620,9 @@ def rollup_rows(
         )
         namespace, kind, name = _target(row)
         node = (getattr(pod, "node", None) if pod is not None else None) or getattr(row, "node", None) or ""
-        _group(bucket, (namespace, kind, name, container, node)).add(row, step_seconds, _in_warmup(warm, row))
+        _group(bucket, (namespace, kind, name, container, node)).add(
+            row, step_seconds, _in_warmup(warm, row), deltas.get(id(row))
+        )
 
     return [accumulator.build(bucket, key, source) for (bucket, key), accumulator in groups.items()]
 
@@ -568,6 +655,10 @@ class _HourTotals:
     #: Latest-sample offset of the node rows whose requests and limits are kept.
     latest_offset: Optional[float] = None
     restart_count: Optional[int] = None
+    #: Sum of the node rows' per-pod restart increases (None when no row carries one).
+    restart_increase: Optional[int] = None
+    #: A node row carries a restart count but no increase (rolled before migration 0130).
+    restart_increase_unknown: bool = False
     total_cost: float = 0.0
     co2e_grams: float = 0.0
     embodied_co2e_grams: float = 0.0
@@ -616,6 +707,10 @@ def _merge_hour(totals: _HourTotals, hour: WorkloadUsageHour) -> None:
         totals.cpu_limit = _max_int(totals.cpu_limit, hour.cpu_limit)
         totals.memory_limit = _max_int(totals.memory_limit, hour.memory_limit)
     totals.restart_count = _max_int(totals.restart_count, hour.restart_count)
+    if hour.restart_increase is not None:
+        totals.restart_increase = (totals.restart_increase or 0) + hour.restart_increase
+    elif hour.restart_count is not None:
+        totals.restart_increase_unknown = True
     totals.total_cost += hour.total_cost or 0.0
     totals.co2e_grams += hour.co2e_grams or 0.0
     totals.embodied_co2e_grams += hour.embodied_co2e_grams or 0.0
@@ -736,6 +831,8 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             cpu_limit=last.cpu_limit,
             memory_limit=last.memory_limit,
             restart_count=_restart_max(ordered),
+            restart_increase=_restart_increase(ordered),
+            restart_increase_legacy=any(item.restart_increase_unknown for item in ordered),
             total_cost=sum(item.total_cost for item in ordered),
             co2e_grams=sum(item.co2e_grams for item in ordered),
             embodied_co2e_grams=sum(item.embodied_co2e_grams for item in ordered),
@@ -770,6 +867,19 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
     return snapshot
 
 
+def _restart_increase(ordered: List[_HourTotals]) -> Optional[int]:
+    """Restarts over the lookback: the sum of the hours' per-pod restart increases.
+
+    None when no hour carries a restart count, or when an hour carries a count
+    without an increase (rolled before migration 0130): unknown, never zero.
+    Hours without a count are skipped, as in the SQL summary.
+    """
+    counted = [item for item in ordered if item.restart_count is not None or item.restart_increase is not None]
+    if not counted or any(item.restart_increase_unknown for item in counted):
+        return None
+    return sum(item.restart_increase or 0 for item in counted)
+
+
 def _restart_max(ordered: List[_HourTotals]) -> Optional[int]:
     values = [item.restart_count for item in ordered if item.restart_count is not None]
     return max(values) if values else None
@@ -800,6 +910,8 @@ class RollupResult:
     end: Optional[datetime] = None
     #: Hours older than the refresh window re-rolled because they received rows.
     late_hours: int = 0
+    #: Hours rolled before migration 0130 re-rolled to store their per-pod restart increase.
+    legacy_hours: int = 0
 
 
 class WorkloadUsageRollup:
@@ -829,6 +941,18 @@ class WorkloadUsageRollup:
         self.step_seconds = step_seconds
         self.backfill_hours = max(int(backfill_hours), 1)
         self.warmup_seconds = max(float(warmup_seconds or 0.0), 0.0)
+
+    async def _restart_context(self, hour: datetime, pod_rows: Sequence[Any], context: Sequence[Any]) -> List[Any]:
+        """Previous restart counts of the hour's pods: the context rows, plus each pod's last
+        stored count however old when the context has none for it (collection gap, missing hour)."""
+        known = {(row.namespace, row.pod_name) for row in context if _restart_value(row) is not None}
+        # Only pods that carry a count need a previous one: a pod without restart counts
+        # (kube-state-metrics not scraped) never triggers the unbounded lookup.
+        counted = {(row.namespace, row.pod_name) for row in pod_rows if _restart_value(row) is not None}
+        missing = sorted(counted - known)
+        if not missing:
+            return list(context)
+        return [*context, *await self.repository.read_last_restart_counts(hour, missing)]
 
     async def refresh(
         self, now: Optional[datetime] = None, *, refresh_hours: int = DEFAULT_REFRESH_HOURS
@@ -860,21 +984,34 @@ class WorkloadUsageRollup:
         hours = {start + timedelta(hours=offset) for offset in range(int((end - start) / timedelta(hours=1)))}
         late = {floor_hour(hour) for hour in written if max(earliest, floor_input) <= floor_hour(hour) < start}
         hours |= late
+        # Hours rolled before migration 0130 carry no per-pod restart increase: re-roll
+        # those the stored rows can still rebuild (REC-04), once.
+        legacy = {
+            floor_hour(hour) for hour in await self.repository.legacy_restart_hours(max(earliest, floor_input), start)
+        } - hours
+        hours |= legacy
         result = RollupResult(start=min(hours) if hours else start, end=end, late_hours=len(late))
+        result.legacy_hours = len(legacy)
+        if legacy:
+            logger.info("Workload usage rollup: re-rolling %d hours rolled before migration 0130.", len(legacy))
         if late:
             logger.info("Workload usage rollup: re-rolling %d hours that received late rows.", len(late))
         for hour in sorted(hours):
             pod_rows, container_rows, source = await self.repository.read_hour_inputs(hour)
+            if hour in legacy and not pod_rows:
+                # Pod rows (which carry the restart counts) no longer stored: keep the rolled hour.
+                continue
             context: List[Any] = []
-            if self.warmup_seconds > 0 and pod_rows:
+            if pod_rows:
+                # The previous restart count of each pod: per-pod restart increases
+                # (REC-04), and a restart shortly before the hour still excludes the
+                # hour's first points (warm-up).
                 if source == "hourly":
-                    # Re-rolled from the compressed tables: the previous hour's restart counts.
                     context = await self.repository.read_hourly_restart_context(hour)
                 else:
-                    # A restart shortly before the hour still excludes the hour's first points.
-                    context = await self.repository.read_restart_context(
-                        hour, self.warmup_seconds + max(self.step_seconds, 1.0)
-                    )
+                    step = max(self.step_seconds, 1.0)
+                    context = await self.repository.read_restart_context(hour, max(self.warmup_seconds, step) + step)
+            restart_context = await self._restart_context(hour, pod_rows, context)
             rows = (
                 rollup_rows(
                     pod_rows,
@@ -883,11 +1020,18 @@ class WorkloadUsageRollup:
                     source=source,
                     warmup_seconds=self.warmup_seconds,
                     context_rows=context,
+                    restart_context_rows=restart_context,
+                    collection_started=oldest_input < hour,
                 )
                 if pod_rows or container_rows
                 else []
             )
-            await self.repository.replace_hour(hour, rows)
+            if hour in legacy and source != "raw":
+                # A pre-0130 hour whose raw rows are gone: the compressed hourly rows would
+                # lower the stored percentiles, so only its restart increase is written.
+                await self.repository.set_restart_increase(hour, rows)
+            else:
+                await self.repository.replace_hour(hour, rows)
             result.hours += 1
             result.rows += len(rows)
         await self.repository.save_rollup_marks(marks)
