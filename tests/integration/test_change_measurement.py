@@ -714,6 +714,13 @@ async def test_accelerated_demo_windows_decide_through_the_service(database):
     assert snapshot is not None and snapshot.verify_digest()
     # Replica-hours of 5-minute slots: 2 replicas over the 6-hour baseline.
     assert snapshot.health["replica_hours"] == pytest.approx(12.0, rel=0.02)
+    # Demo verdicts never accrue measured savings in the ledger (review wp07-4 point 2).
+    from greenkube.core.savings_attributor import accrual_components, is_non_representative
+
+    records = await scenario.records()
+    assert {record_status(record) for record in records} == {"verified"}
+    assert all(is_non_representative(record) for record in records)
+    assert all(accrual_components(record) == [] for record in records)
 
 
 class _OomHealth:

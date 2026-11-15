@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.automation.actions.delete_resource import deletion_target_for
+from greenkube.core.savings_attributor import REPRESENTATIVE_KEY
 from greenkube.impact.comparison import measurable_co2e_projection
 from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
 from greenkube.models.measurement import (
@@ -1369,6 +1370,9 @@ class ChangeMeasurementService:
             measured_co2e = co2e.claimed_annualized
         else:
             measured_co2e = co2e.annualized
+        if measurement.counterfactual_params.get("representative") is False:
+            # Accelerated demo verdict (MEA-10): marked so its saving never accrues in the ledger.
+            baseline = {**baseline, REPRESENTATIVE_KEY: False}
         try:
             return await self.verifier.apply_stored_measurement(
                 member, stored, baseline, previous_ids, measured_cost=measured_cost, measured_co2e=measured_co2e

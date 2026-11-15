@@ -172,7 +172,8 @@ class TestAuditVerifyE2E:
         assert record.status is RecommendationStatus.VERIFIED
 
     async def test_not_realized_is_terminal_for_the_measurement(self, database, monkeypatch):
-        reco, verifier, _, record = await _scenario(database, replicas=1, after_cost=BEFORE_COST)
+        # A clear cost increase: equal costs can straddle the noise floor once compression jitters the rate.
+        reco, verifier, _, record = await _scenario(database, replicas=1, after_cost=BEFORE_COST * 1.2)
         assert record.status is RecommendationStatus.APPLIED
         assert record.verification_status == "failed"
         assert record.id is not None

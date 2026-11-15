@@ -3,7 +3,7 @@
 
 ### Changed
 - `request_rightsizing` strategy version 2.5: a pod-template change during a measurement with the change's requests and limits is a `template_change` confounder (mild, moderate when the image changed or is unknown) instead of a severe `spec_change`, so an image deployment, an env change or a rollout restart no longer contaminates the measurement (MEA-08). Measurements stored with earlier versions are kept as they were; a contaminated change can be re-measured.
-- Accelerated demo windows (`CHANGE_MEASUREMENT_ACCELERATED`, quickstart only) bucket rows into 5-minute slots, use the baseline mean as counterfactual (`flat_mean_accelerated`) and demo thresholds (6 post slots), so the quickstart windows reach a decided verdict; such measurements record `representative: false` (MEA-10).
+- Accelerated demo windows (`CHANGE_MEASUREMENT_ACCELERATED`, quickstart only) bucket rows into 5-minute slots, use the baseline mean as counterfactual (`flat_mean_accelerated`) and demo thresholds (6 post slots), so the quickstart windows reach a decided verdict; such measurements record `representative: false` and their measured saving never accrues in the savings ledger (MEA-10).
 - `CHANGE_MEASUREMENT_POST_WINDOW_DAYS` below 5 days (30 minutes with `CHANGE_MEASUREMENT_ACCELERATED`) is raised to that minimum at startup with a warning, since a verdict needs 5 complete days of aligned hours (MEA-10). `CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` below its minimum is now raised the same way instead of stopping GreenKube from starting.
 
 ### Fixed
