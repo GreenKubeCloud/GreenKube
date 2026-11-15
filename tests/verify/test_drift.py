@@ -6,7 +6,7 @@ import pytest
 
 from greenkube.verify.drift import MIN_DAY_HOURS, DriftSettings, assess_drift, detect_spec_drift
 from greenkube.verify.model import TimeWindow, WorkloadSpecObservation
-from greenkube.verify.series import hourly_buckets
+from greenkube.verify.series import hourly_buckets, price_card
 from tests.verify.fixtures import change_event, hour_now, workload_rows  # pyrefly: ignore[missing-import]
 
 STEP = 300
@@ -88,6 +88,21 @@ def test_a_gap_breaks_the_sustained_run():
     last = _buckets(today - timedelta(days=2), today, cpu_request=1000, memory_request=1024**3)
     assessment = assess_drift(baseline, post, first + sparse + last, SETTINGS)
     assert not assessment.regressed
+
+
+def test_a_later_price_rise_does_not_reverse_a_saving_claimed_at_constant_prices():
+    """Review wp07-2: the saving was measured at the baseline prices, so the monitor prices at them too."""
+    today, baseline, post = _windows()
+    card = price_card(baseline, "EUR")
+    # The CPU unit price triples after the post-window: observed per-replica cost loses 73% of the saving.
+    pricier = _buckets(today - timedelta(days=7), today, cpu_request=300, memory_request=1024**3, cpu_price=0.24)
+    assessment = assess_drift(baseline, post, pricier, SETTINGS, price_card=card)
+    assert not assessment.regressed
+    assert all(abs(day.lost_share) < 1e-9 for day in assessment.days)
+    assert assessment.payload(SETTINGS)["constant_price_basis"] == "charged"
+    # Requests creeping back are still a drift at constant prices.
+    drifted = _buckets(today - timedelta(days=4), today, cpu_request=1000, memory_request=1024**3, cpu_price=0.24)
+    assert assess_drift(baseline, post, pricier[: 3 * 24] + drifted, SETTINGS, price_card=card).regressed
 
 
 def test_a_post_window_without_per_replica_saving_is_not_monitored():

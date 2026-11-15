@@ -7,10 +7,12 @@ watches it after the measurement and acts when the saving is lost:
 * **Drift.** For a request rightsizing the saving is the allocated cost freed
   per replica (requests x unit price), so the monitor compares the daily
   allocated cost *per replica* with the baseline snapshot (``B``) and with the
-  measured post-window (``A``). The share of the saving lost on day ``d`` is
+  measured post-window (``A``), all three valued at the constant baseline
+  prices the saving was measured at (MEA-02). The share of the saving lost on day ``d`` is
   ``(rate_d - A) / (B - A)``. Per-replica rates are not moved by load-driven
   replica counts; they move when requests creep back (a VPA in auto mode, an
-  admission webhook, a LimitRange) or prices change. When the lost share is at
+  admission webhook, a LimitRange) or usage grows above the request, not when
+  prices change. When the lost share is at
   least ``CHANGE_DRIFT_THRESHOLD`` on each of the last
   ``CHANGE_DRIFT_SUSTAINED_DAYS`` complete UTC days, the change becomes
   ``regressed`` (``realized → regressed``, event ``regressed`` with the daily
@@ -67,9 +69,9 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Sequence, Set
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set
 
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.model import (
@@ -160,10 +162,14 @@ class DriftAssessment:
     regressed: bool = False
     onset: Optional[datetime] = None
     reason: str = ""
+    #: Basis of the constant-price revaluation (:class:`~greenkube.verify.strategy.ConstantPriceWindows`).
+    constant_price_basis: Optional[str] = None
 
     def payload(self, settings: DriftSettings) -> dict:
+        """Evidence recorded on the ``regressed`` event."""
         return {
             "quantity": "allocated_cost_per_replica",
+            "constant_price_basis": self.constant_price_basis,
             "baseline_per_replica_hour": _round(self.baseline_per_replica),
             "realized_per_replica_hour": _round(self.realized_per_replica),
             "threshold": settings.threshold,
@@ -202,8 +208,30 @@ def assess_drift(
     post: Sequence[HourBucket],
     monitored: Sequence[HourBucket],
     settings: DriftSettings,
+    price_card: Optional[Mapping[str, Any]] = None,
 ) -> DriftAssessment:
-    """Lost share of the per-replica saving on each complete day of ``monitored``."""
+    """Lost share of the per-replica saving on each complete day of ``monitored``.
+
+    The saving was measured at the baseline unit prices (MEA-02), so all three
+    windows are revalued at the same constant prices (``price_card``: the
+    frozen snapshot's card, else the baseline hours' prices) before the
+    per-replica cost is compared: a later price rise does not reverse a saving
+    claimed at constant prices, requests creeping back still do.
+    """
+    from greenkube.verify.strategy import constant_price_windows
+
+    constant = constant_price_windows(baseline, [*post, *monitored], price_card)
+    baseline = constant.pre
+    post, monitored = constant.post[: len(post)], constant.post[len(post) :]
+    return replace(_assess_drift(baseline, post, monitored, settings), constant_price_basis=constant.basis)
+
+
+def _assess_drift(
+    baseline: Sequence[HourBucket],
+    post: Sequence[HourBucket],
+    monitored: Sequence[HourBucket],
+    settings: DriftSettings,
+) -> DriftAssessment:
     before = _mean(list(per_replica_cost(baseline).values()))
     after = _mean(list(per_replica_cost(post).values()))
     if before is None or after is None:
@@ -401,7 +429,7 @@ class DriftMonitor:
         post = hourly_buckets(await self.service._read_workload(change.target, post_window), post_window, step)
         window = TimeWindow(start=start, end=today)
         monitored = hourly_buckets(await self.service._read_workload(change.target, window), window, step)
-        assessment = assess_drift(snapshot.hours, post, monitored, self.settings)
+        assessment = assess_drift(snapshot.hours, post, monitored, self.settings, price_card=snapshot.price_card)
         self._assessed[memo] = today
         if not assessment.regressed or assessment.onset is None:
             return False
