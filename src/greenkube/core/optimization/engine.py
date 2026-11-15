@@ -446,7 +446,7 @@ class OptimizationEngine:
         previous = await self._active_snapshot(reco_repo, namespace)
         kept = self._preserve_last_known(recommendations, previous, incomplete_sources)
         # Usage jitter below the hysteresis keeps the stored advice (no new revision, one shared action).
-        kept = apply_revision_hysteresis(kept, previous)
+        kept = apply_revision_hysteresis(kept, previous, config=self.config)
         records = [self._record(r) for r in kept]
         if records:
             outcomes: List["UpsertOutcome"] = []

@@ -424,6 +424,13 @@ class Recommendation(BaseModel):
             "effort_cost, ev and currency, with their components. A projection, never a measured value."
         ),
     )
+    pending_revision: Optional[dict] = Field(
+        None,
+        description=(
+            "A lower request proposal waiting for confirmation before it becomes a new revision (IMP-13): "
+            "{value, scans}, the latest proposed request and the number of consecutive scans that proposed it."
+        ),
+    )
     eligibility: Optional[dict] = Field(
         None,
         description=(
@@ -537,6 +544,13 @@ class RecommendationRecord(BaseModel):
         description=(
             "Risk-adjusted expected value (ValueScore, roadmap I1): value_annual, p_success, incident_cost, "
             "effort_cost, ev and currency, with their components. A projection, never a measured value."
+        ),
+    )
+    pending_revision: Optional[dict] = Field(
+        None,
+        description=(
+            "A lower request proposal waiting for confirmation before it becomes a new revision (IMP-13): "
+            "{value, scans}, the latest proposed request and the number of consecutive scans that proposed it."
         ),
     )
     eligibility: Optional[dict] = Field(
@@ -687,6 +701,7 @@ class RecommendationRecord(BaseModel):
             requires_restart=rec.requires_restart,
             impact=dict(rec.impact) if rec.impact is not None else None,
             value=dict(rec.value) if rec.value is not None else None,
+            pending_revision=dict(rec.pending_revision) if rec.pending_revision is not None else None,
             created_at=created_at or datetime.now(timezone.utc),
         )
 

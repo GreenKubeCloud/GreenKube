@@ -213,7 +213,7 @@ class TestRunOutcome:
         engine = _engine(
             [
                 FakeSource("vpa", available=False),
-                FakeSource("greenkube", [_rec("same", cpu=100), _rec("moved", cpu=50), _rec("fresh")]),
+                FakeSource("greenkube", [_rec("same", cpu=100), _rec("moved", cpu=150), _rec("fresh")]),
             ],
             run_repository=runs,
         )

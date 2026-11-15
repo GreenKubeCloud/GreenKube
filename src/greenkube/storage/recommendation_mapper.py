@@ -203,6 +203,7 @@ RECORD_COLUMNS: tuple = (
     "fingerprint_v4",
     "previous_recommendation_id",
     "previous_change_id",
+    "pending_revision",
 )
 
 #: Recommendation v2 columns refreshed with the proposal (E4, E6). ``revision``
@@ -246,6 +247,7 @@ ACTIVE_UPSERT_COLUMNS: tuple = (
     "requires_restart",
     "impact",
     "value_score",
+    "pending_revision",
 ) + V2_UPSERT_COLUMNS
 
 
@@ -341,6 +343,7 @@ def record_values(record: RecommendationRecord, encode_datetime=lambda value: va
         "fingerprint_v4": record.fingerprint_v4,
         "previous_recommendation_id": record.previous_recommendation_id,
         "previous_change_id": record.previous_change_id,
+        "pending_revision": to_json(record.pending_revision),
     }
 
 
@@ -416,6 +419,7 @@ def row_to_record(row: Any) -> RecommendationRecord:
         fingerprint_v4=_get(row, "fingerprint_v4"),
         previous_recommendation_id=_get(row, "previous_recommendation_id"),
         previous_change_id=_get(row, "previous_change_id"),
+        pending_revision=_as_dict(_get(row, "pending_revision")),
         changed_since_ignored=_changed_since_ignored(_get(row, "changed_while_ignored_payload")),
     )
 
