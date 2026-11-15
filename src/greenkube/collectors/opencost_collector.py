@@ -15,6 +15,7 @@ from greenkube.collectors.discovery.opencost import OpenCostDiscovery
 from ..core.config import config
 from ..core.observability import (
     OPENCOST_AMBIGUOUS_CLUSTER,
+    OPENCOST_AUTH_FAILED,
     OPENCOST_UNREBUILT_ALLOCATIONS,
     elapsed,
     record_collection_request,
@@ -572,10 +573,24 @@ class OpenCostCollector(BaseCollector):
             try:
                 resp = await client.get(u, params=params, **self._auth_kwargs())
                 resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (401, 403):
+                    # A configuration error, not an outage: say so loudly (COST-06).
+                    OPENCOST_AUTH_FAILED.set(1)
+                    logger.error(
+                        "OpenCost rejected the allocation request with HTTP %d: check OPENCOST_BEARER_TOKEN or "
+                        "OPENCOST_USERNAME and OPENCOST_PASSWORD; the window's cost stays opencost_pending.",
+                        exc.response.status_code,
+                    )
+                else:
+                    logger.debug("Request to %s failed: %s", u, exc)
+                errors.append(f"{u}: {exc}")
+                return None
             except httpx.HTTPError as exc:
                 logger.debug("Request to %s failed: %s", u, exc)
                 errors.append(f"{u}: {exc}")
                 return None
+            OPENCOST_AUTH_FAILED.set(0)
 
             try:
                 data = resp.json().get("data")

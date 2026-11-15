@@ -74,3 +74,22 @@ async def test_no_credentials_no_authorization_header(monkeypatch):
     collector, seen = _collector(monkeypatch)
     await _exercise(collector)
     assert seen and all("Authorization" not in request.headers for request in seen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_rejected_credentials_raise_and_set_the_auth_failure_gauge(monkeypatch, status):
+    """(b) A 401 or 403 is never read as a cluster without OpenCost, and the gauge says why."""
+    from greenkube.collectors.opencost_collector import OpenCostUnavailableError
+    from greenkube.core.observability import OPENCOST_AUTH_FAILED
+
+    monkeypatch.setattr("greenkube.collectors.opencost_collector.config.OPENCOST_BEARER_TOKEN", "wrong")
+    collector = OpenCostCollector()
+    collector._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(status)))
+    collector._resolved_url = "http://opencost:9003/allocation/compute"
+    try:
+        with pytest.raises(OpenCostUnavailableError):
+            await collector.collect_range(START, START + timedelta(minutes=5))
+    finally:
+        await collector.close()
+    assert OPENCOST_AUTH_FAILED._value.get() == 1

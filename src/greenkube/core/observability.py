@@ -241,6 +241,11 @@ COLLECTION_SOURCE_REQUESTS = Counter(
     ["source", "outcome"],
     registry=REGISTRY,
 )
+OPENCOST_AUTH_FAILED = Gauge(
+    "greenkube_opencost_auth_failed",
+    "1 when OpenCost rejected the last allocation request with HTTP 401 or 403 (credentials), COST-06.",
+    registry=REGISTRY,
+)
 OPENCOST_AMBIGUOUS_CLUSTER = Gauge(
     "greenkube_opencost_ambiguous_cluster",
     "1 when the last OpenCost answer covered several clusters and OPENCOST_CLUSTER_ID is not set: no OpenCost "
