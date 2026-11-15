@@ -961,6 +961,24 @@ def increase_reliability(
     Restart counters are read per pod, so the OOM restarts judged by a rate gate are
     left out of the ``restarts`` gate of every container of the change.
     """
+    judged, outcome, _ = increase_reliability_detail(
+        members, gates_by_container, post_start, post_end, oom_restarts_by_container
+    )
+    return judged, outcome
+
+
+def increase_reliability_detail(
+    members: Sequence[Any],
+    gates_by_container: Mapping[Optional[str], Sequence[HealthGateResult]],
+    post_start: datetime,
+    post_end: datetime,
+    oom_restarts_by_container: Optional[Mapping[Optional[str], Optional[int]]] = None,
+) -> tuple[Dict[Optional[str], List[HealthGateResult]], Optional[ReliabilityOutcome], frozenset]:
+    """:func:`increase_reliability` plus the containers whose OOM restarts left the restart gates.
+
+    The third value lets the baseline comparison leave the same containers'
+    baseline OOM restarts out of the baseline restart count (MEA-07 review).
+    """
     oom_restarts = dict(oom_restarts_by_container or {})
     by_container: Dict[Optional[str], List[Any]] = {}
     for member in members:
@@ -968,6 +986,7 @@ def increase_reliability(
     result: Dict[Optional[str], List[HealthGateResult]] = {}
     outcomes: Dict[Optional[str], ReliabilityOutcome] = {}
     excused = 0
+    relaxed_containers: set = set()
     for container, gates in gates_by_container.items():
         result[container], outcome, relaxed = _judge_container(
             by_container.get(container, []), gates, post_start, post_end, oom_restarts.get(container)
@@ -975,6 +994,7 @@ def increase_reliability(
         if outcome is not None:
             outcomes[container] = outcome
             if relaxed:
+                relaxed_containers.add(container)
                 excused += outcome.post_events or 0
     for container, group in by_container.items():
         if container not in gates_by_container:
@@ -983,10 +1003,11 @@ def increase_reliability(
                 outcomes[container] = outcome
     if excused:
         result = {container: _excuse_oom_restarts(gates, excused) for container, gates in result.items()}
+    relaxed_set = frozenset(relaxed_containers)
     if not outcomes:
-        return result, None
+        return result, None, relaxed_set
     if len(outcomes) == 1:
-        return result, next(iter(outcomes.values()))
+        return result, next(iter(outcomes.values())), relaxed_set
     baselines = [outcome.baseline_events for outcome in outcomes.values()]
     posts = [outcome.post_events for outcome in outcomes.values()]
     longest = max(
@@ -994,10 +1015,11 @@ def increase_reliability(
         key=lambda outcome: outcome.baseline_hours or 0.0,
         default=None,
     )
-    return result, oom_rate_outcome(
+    combined = oom_rate_outcome(
         sum(value for value in baselines if value is not None) if any(v is not None for v in baselines) else None,
         longest.baseline_hours * 3600.0 if longest is not None and longest.baseline_hours else None,
         None if any(value is None for value in posts) else sum(value for value in posts if value is not None),
         (ensure_utc(post_end) - ensure_utc(post_start)).total_seconds(),
         baseline_exposure_source=longest.baseline_exposure_source if longest is not None else None,
     )
+    return result, combined, relaxed_set

@@ -249,7 +249,10 @@ async def test_a_change_is_measured_once_and_split_across_its_recommendations(da
     assert snapshot.verify_digest() and snapshot.health["containers"]
     assert snapshot.health["replica_hours"] and snapshot.health["hours"] == pytest.approx(7 * 24)
     restarts = next(gate for gate in measurement.health if gate.gate == "restarts")
-    assert restarts.status.value == "not_available" or restarts.baseline_value is not None
+    # The scenario reads restarts in both windows (none): the gate is compared, not left not_available.
+    assert restarts.status.value == "passed"
+    assert restarts.baseline_value == 0 and restarts.value == 0
+    assert "336 replica-hours" in (restarts.detail or "")
 
     cost = measurement.estimate("allocated_cost")
     assert cost is not None and cost.ci_low is not None and cost.ci_low > 0

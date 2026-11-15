@@ -161,3 +161,100 @@ async def test_the_measurement_service_compares_the_final_gates_with_the_frozen_
     legacy, _ = await service._health_and_reliability(members, START, START + timedelta(days=7), baseline={})
     restarts = next(gate for gate in legacy if gate.gate == "restarts")
     assert restarts.status is HealthGateStatus.FAILED and BASELINE_MISSING in restarts.detail
+
+
+def _compare(baseline_gates, post_gates, *, baseline_hours: float):
+    health = freeze_health({"api": baseline_gates}, replica_hours=baseline_hours, hours=baseline_hours)
+    return {
+        gate.gate: gate
+        for gate in compare_with_baseline(
+            post_gates,
+            "api",
+            health,
+            post_hours=WEEK_HOURS,
+            post_replica_hours=WEEK_HOURS,
+            max_restart_delta=0,
+            max_throttle_ratio=0.05,
+            min_readiness=0.99,
+        )
+    }
+
+
+def test_a_one_hour_baseline_keeps_the_absolute_restart_rule():
+    # Review: with 1 baseline hour the post-window share is 168/169 and 100 restarts passed the test.
+    judged = _compare(_gates(0, 0.0), _gates(100, 0.0), baseline_hours=1.0)
+    assert judged["restarts"].status is HealthGateStatus.FAILED
+    assert "baseline_too_short" in (judged["restarts"].detail or "")
+
+
+def test_a_baseline_a_quarter_of_the_post_window_is_still_compared():
+    judged = _compare(_gates(0, 0.0), _gates(1, 0.0), baseline_hours=WEEK_HOURS / 4)
+    assert judged["restarts"].status is HealthGateStatus.PASSED
+    assert judged["restarts"].baseline_value == 0
+
+
+def _oom_gates(oom: int, restarts: int):
+    return [
+        HealthGateResult(
+            gate="restarts",
+            status=HealthGateStatus.FAILED if restarts > 0 else HealthGateStatus.PASSED,
+            value=restarts,
+            threshold=0,
+        ),
+        HealthGateResult(
+            gate="oom_kills",
+            status=HealthGateStatus.FAILED if oom > 0 else HealthGateStatus.PASSED,
+            value=oom,
+            threshold=0,
+        ),
+    ]
+
+
+class _OomVerifier:
+    """Baseline: 10 restarts, all OOM kills. Post: 1 OOM restart and 5 other restarts."""
+
+    async def health_check_for(self, group, start, end, *, strict=False):
+        if end <= START:
+            observation = WorkloadHealthObservation(oom_kill_count=4, oom_restart_count=10, readiness_ratio=1.0)
+            return _oom_gates(4, 10), observation
+        observation = WorkloadHealthObservation(oom_kill_count=1, oom_restart_count=1, readiness_ratio=1.0)
+        return _oom_gates(1, 6), observation
+
+
+def _memory_member():
+    mib = 1024**2
+    return SimpleNamespace(
+        type="RIGHTSIZING_MEMORY",
+        container_name="api",
+        current_cpu_request_millicores=None,
+        recommended_cpu_request_millicores=None,
+        current_memory_request_bytes=512 * mib,
+        recommended_memory_request_bytes=768 * mib,
+        evidence=SimpleNamespace(oom_events=10, observation_window_seconds=7 * 86400.0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_oom_restarts_are_excused_on_both_sides_of_the_restart_comparison():
+    # Review: a memory increase drops OOM restarts from the post count while the baseline count kept
+    # them, so 10 OOM restarts before hid a rise of other restarts. Both sides must count the same.
+    service = _service(_OomVerifier())
+    members = cast(Any, [_memory_member()])
+    window = TimeWindow(start=START - timedelta(days=7), end=START)
+    health = await service._baseline_health(members, window, [])
+    assert health["containers"]["api"]["oom_restarts"] == 10
+    gates, _ = await service._health_and_reliability(
+        members, START, START + timedelta(days=7), baseline=health, post_replica_hours=None
+    )
+    restarts = next(gate for gate in gates if gate.gate == "restarts")
+    # 5 other restarts after against 0 other restarts before: a significant rise.
+    assert restarts.baseline_value == 0 and restarts.value == 5
+    assert restarts.status is HealthGateStatus.FAILED
+
+    # A snapshot without baseline OOM restarts cannot be compared on equal terms: absolute rule, labelled.
+    del health["containers"]["api"]["oom_restarts"]
+    gates, _ = await service._health_and_reliability(
+        members, START, START + timedelta(days=7), baseline=health, post_replica_hours=None
+    )
+    restarts = next(gate for gate in gates if gate.gate == "restarts")
+    assert "baseline_oom_restarts_missing" in (restarts.detail or "")

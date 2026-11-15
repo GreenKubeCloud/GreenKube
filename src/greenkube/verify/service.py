@@ -52,7 +52,13 @@ from greenkube.verify.confounders import (
     confidence_score,
     pool_unit_prices,
 )
-from greenkube.verify.health_baseline import compare_with_baseline, freeze_health
+from greenkube.verify.health_baseline import (
+    CONTAINERS_KEY,
+    OOM_RESTARTS_KEY,
+    compare_with_baseline,
+    container_key,
+    freeze_health,
+)
 from greenkube.verify.load_driver import CollectedLoad, LoadDriverResolver, PrometheusRangeReader
 from greenkube.verify.model import (
     DECISION_GRACE,
@@ -76,7 +82,7 @@ from greenkube.verify.strategy import (
     MeasurementSettings,
     ReliabilityOutcome,
     SavingsMeasurementStrategy,
-    increase_reliability,
+    increase_reliability_detail,
     strategy_for,
 )
 
@@ -688,20 +694,27 @@ class ChangeMeasurementService:
         for member in members:
             by_container.setdefault(member.container_name, []).append(member)
         gates: Dict[Optional[str], List[HealthGateResult]] = {}
+        oom_restarts: Dict[Optional[str], Optional[int]] = {}
         for container, group in sorted(by_container.items(), key=lambda item: item[0] or ""):
             try:
-                read, _ = await self.verifier.health_check_for(
+                read, observation = await self.verifier.health_check_for(
                     group, ensure_utc(window.start), ensure_utc(window.end), strict=True
                 )
             except Exception as exc:
                 logger.warning("Baseline health of %s could not be read: %s", container or "workload", exc)
                 continue
             gates[container] = list(read)
+            oom_restarts[container] = observation.oom_restart_count if observation is not None else None
         if not gates:
             return {}
         replica_values = [bucket.replicas for bucket in buckets if getattr(bucket, "replicas", None) is not None]
         hours = (ensure_utc(window.end) - ensure_utc(window.start)).total_seconds() / 3600.0
-        return freeze_health(gates, replica_hours=math.fsum(replica_values) if replica_values else None, hours=hours)
+        return freeze_health(
+            gates,
+            replica_hours=math.fsum(replica_values) if replica_values else None,
+            hours=hours,
+            oom_restarts=oom_restarts,
+        )
 
     # ------------------------------------------------------------------
     # C2: lifecycle
@@ -924,9 +937,10 @@ class ChangeMeasurementService:
         # A memory-request increase made because of OOM kills is judged on that container's kill
         # rate (counted like its evidence), not on "any kill"; its OOM restarts leave the restart
         # gate. Every other container keeps the strict gates (H1).
-        judged, reliability = increase_reliability(members, raw, start, end, oom_restarts)
+        judged, reliability, relaxed = increase_reliability_detail(members, raw, start, end, oom_restarts)
         if baseline is not None:
             post_hours = (ensure_utc(end) - ensure_utc(start)).total_seconds() / 3600.0
+            excused_baseline = _excused_baseline_restarts(baseline, relaxed)
             judged = {
                 container: compare_with_baseline(
                     container_gates,
@@ -937,6 +951,7 @@ class ChangeMeasurementService:
                     max_restart_delta=float(getattr(self.config, "VERIFICATION_MAX_RESTART_DELTA", 0)),
                     max_throttle_ratio=float(getattr(self.config, "VERIFICATION_MAX_THROTTLE_RATIO", 0.05)),
                     min_readiness=float(getattr(self.config, "VERIFICATION_MIN_READINESS", 0.99)),
+                    excused_baseline_restarts=excused_baseline,
                 )
                 for container, container_gates in judged.items()
             }
@@ -1500,6 +1515,24 @@ def _rate_source(member: RecommendationRecord) -> str:
 def _sum(values: Iterable[Optional[float]]) -> Optional[float]:
     items = [float(value) for value in values if value is not None and math.isfinite(float(value))]
     return math.fsum(items) if items else None
+
+
+def _excused_baseline_restarts(baseline: Mapping[str, Any], relaxed: Iterable[Optional[str]]) -> Optional[float]:
+    """Baseline OOM restarts of the containers whose post-window OOM restarts left the restart gates.
+
+    The post-window restart gates of a memory increase judged on its OOM-kill
+    rate leave out the OOM restarts of the relaxed containers; the baseline count
+    must leave out the same restarts (MEA-07 review). ``None`` when one of them
+    was not frozen (the comparison then keeps the absolute rule, labelled).
+    """
+    containers = baseline.get(CONTAINERS_KEY) or {}
+    total = 0.0
+    for container in relaxed:
+        value = (containers.get(container_key(container)) or {}).get(OOM_RESTARTS_KEY)
+        if value is None:
+            return None
+        total += float(value)
+    return total
 
 
 def _replica_hours(buckets: Sequence[Any]) -> Optional[float]:
