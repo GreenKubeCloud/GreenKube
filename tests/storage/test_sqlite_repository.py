@@ -44,7 +44,13 @@ async def mock_db_manager(db_connection):
     async def scope():
         yield db_connection
 
+    @asynccontextmanager
+    async def transaction(immediate=False):
+        yield db_connection
+        await db_connection.commit()
+
     db_manager.connection_scope = scope
+    db_manager.transaction = transaction
     return db_manager
 
 
@@ -269,6 +275,7 @@ async def test_save_history_db_error():
         yield mock_conn
 
     db_manager.connection_scope = scope
+    db_manager.transaction = lambda immediate=False: scope()
     repo = SQLiteCarbonIntensityRepository(db_manager)
 
     with pytest.raises(QueryError):

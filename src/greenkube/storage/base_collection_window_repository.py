@@ -37,6 +37,8 @@ REASON_SEEDED = "seeded_from_stored_rows"
 REASON_POD_LEVEL_ONLY = "pod_level_usage_only"
 #: Reason of an empty step whose range processor cannot probe Prometheus.
 REASON_NOT_PROBED = "not_probed"
+#: Reason of a collected step of a window that left invalid rows out (partial window, STO-03).
+REASON_ROWS_REJECTED = "rows_rejected"
 
 
 @dataclass(frozen=True)
@@ -171,8 +173,12 @@ class CollectionWindowRepository(ABC):
     """Stores the outcome of every collection step per ``(cluster_uid, source)``."""
 
     @abstractmethod
-    async def record(self, records: list[CollectionWindowRecord]) -> int:
-        """Upsert records keyed by ``(cluster_uid, source, window_start)``; returns the number written."""
+    async def record(self, records: list[CollectionWindowRecord], *, connection: Any = None) -> int:
+        """Upsert records keyed by ``(cluster_uid, source, window_start)``; returns the number written.
+
+        On ``connection`` (inside the caller's transaction, not committed) when
+        given, so a window's rows and its records commit together (STO-03).
+        """
 
     @abstractmethod
     async def list_overlapping(

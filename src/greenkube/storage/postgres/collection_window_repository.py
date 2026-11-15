@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any
 
 from greenkube.storage.base_collection_window_repository import (
     STATUS_FAILED,
@@ -43,7 +46,7 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
     def __init__(self, db_manager) -> None:
         self.db_manager = db_manager
 
-    async def record(self, records: list[CollectionWindowRecord]) -> int:
+    async def record(self, records: list[CollectionWindowRecord], *, connection: Any = None) -> int:
         """Upsert records keyed by ``(cluster_uid, source, window_start)``."""
         if not records:
             return 0
@@ -66,7 +69,7 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
             )
             for r in records
         ]
-        async with self.db_manager.connection_scope() as conn:
+        async with self._connection(connection) as conn:
             await conn.executemany(
                 f"""INSERT INTO collection_windows ({_COLUMNS})
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14, NOW()))
@@ -87,6 +90,15 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
                 params,
             )
         return len(params)
+
+    @asynccontextmanager
+    async def _connection(self, connection: Any = None) -> AsyncIterator[Any]:
+        """``connection`` when given (the caller's transaction), else a pooled connection."""
+        if connection is not None:
+            yield connection
+            return
+        async with self.db_manager.connection_scope() as conn:
+            yield conn
 
     async def list_overlapping(
         self, cluster_uid: str, source: str, start: datetime, end: datetime

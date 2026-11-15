@@ -247,6 +247,8 @@ class DatabaseManager:
         await self.connection.execute("PRAGMA cache_size=-65536")
         await self.connection.execute("PRAGMA mmap_size=268435456")
         await self.connection.execute("PRAGMA synchronous=NORMAL")
+        # A writer waits up to 30 s for another process's lock instead of failing at once (STO-04).
+        await self.connection.execute("PRAGMA busy_timeout=30000")
         await MigrationRunner("sqlite").run(self.connection)
         self._schema_current = True
 

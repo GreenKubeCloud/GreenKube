@@ -13,9 +13,12 @@ import pytest
 
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
+from greenkube.core.exceptions import QueryError
 from greenkube.impact.rows import NodeIdleMetric
 from greenkube.models.metrics import CombinedMetric
+from greenkube.storage.postgres.collection_watermark_repository import PostgresCollectionWatermarkRepository
 from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
+from greenkube.storage.sqlite.collection_watermark_repository import SQLiteCollectionWatermarkRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 
 BASE = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
@@ -198,3 +201,52 @@ async def test_window_write_removes_rows_the_new_pass_no_longer_produces(databas
                 async with conn.execute(query.format(table)) as cursor:
                     runs = [row[0] for row in await cursor.fetchall()]
             assert runs == ["r2"]
+
+
+def _watermarks(backend: str, manager: DatabaseManager):
+    if backend == "sqlite":
+        return SQLiteCollectionWatermarkRepository(manager)
+    return PostgresCollectionWatermarkRepository(manager)
+
+
+async def test_a_window_is_written_atomically_with_its_watermark(database):
+    """STO-03: pod, container and idle rows and the watermark commit together or not at all."""
+    backend, manager = database
+    repo = _repo(backend, manager)
+    watermarks = _watermarks(backend, manager)
+    window = (BASE, BASE + timedelta(minutes=5))
+    rows = [_row("p"), _row("p", container_name="app")]
+
+    async def failing_commit(_conn):
+        raise RuntimeError("watermark store unavailable")
+
+    with pytest.raises(RuntimeError):
+        await repo.write_window(rows, [_idle(1.0, "opencost")], window=window, run_id="r1", on_commit=failing_commit)
+    bad_idle = replace(_idle(1.0, "opencost"), duration_seconds=2**64)
+    with pytest.raises(QueryError):
+        await repo.write_window(rows, [bad_idle], window=window, run_id="r1")
+    assert await repo.read_combined_metrics(*window) == []
+    assert await repo.read_container_metrics(*window) == []
+    assert await repo.read_idle_metrics(*window) == []
+    assert await watermarks.get("c", "combined_metrics") is None
+
+    async def advance(conn):
+        await watermarks.advance("c", "combined_metrics", window[1], connection=conn)
+
+    written = await repo.write_window(rows, [_idle(1.0, "opencost")], window=window, run_id="r2", on_commit=advance)
+    assert written == 2
+    assert len(await repo.read_combined_metrics(*window)) == 1
+    assert len(await repo.read_container_metrics(*window)) == 1
+    assert len(await repo.read_idle_metrics(*window)) == 1
+    stored = await watermarks.get("c", "combined_metrics")
+    assert stored is not None and stored.last_complete_end == window[1]
+
+
+async def test_sqlite_and_postgres_writers_reject_the_whole_batch_on_a_bad_row(database):
+    """STO-04 (SIM A1): no row of the batch is stored and QueryError is raised."""
+    backend, manager = database
+    repo = _repo(backend, manager)
+    with pytest.raises(QueryError):
+        await repo.write_combined_metrics([_row("a"), _row("b", restart_count=2**64), _row("c")])
+    assert await repo.read_combined_metrics(BASE, BASE + timedelta(minutes=5)) == []
+    assert await repo.write_combined_metrics([_row("a"), _row("b"), _row("c")]) == 3

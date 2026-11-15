@@ -21,6 +21,7 @@ from greenkube.core.config import Config
 from greenkube.core.db import DatabaseManager
 from greenkube.core.leader_election import LeaderFence
 from greenkube.storage.sqlite.collection_watermark_repository import SQLiteCollectionWatermarkRepository
+from greenkube.storage.sqlite.collection_window_repository import SQLiteCollectionWindowRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 from tests.core.fake_prometheus import FakePrometheus  # pyrefly: ignore[missing-import]
 from tests.core.range_harness import FakeOpenCost, build_range_processor  # pyrefly: ignore[missing-import]
@@ -393,7 +394,7 @@ async def test_failed_idle_write_does_not_advance_the_watermark(stack):
     metrics_repo = stack["metrics_repo"]
     original = metrics_repo.write_idle_metrics
 
-    async def failing_write(_rows):
+    async def failing_write(_rows, **_kwargs):
         raise RuntimeError("disk full")
 
     metrics_repo.write_idle_metrics = failing_write
@@ -404,6 +405,72 @@ async def test_failed_idle_write_does_not_advance_the_watermark(stack):
 
     assert not report.succeeded and "idle" in (report.error or "")
     assert report.watermark == BASE
+    # STO-03: the window is atomic, so the failed idle write leaves no pod or container row behind.
+    assert await metrics_repo.read_combined_metrics(BASE, BASE + STEP) == []
+    assert await metrics_repo.read_container_metrics(BASE, BASE + STEP) == []
+
+    recovered = await _run_scheduled(stack, BASE + STEP + timedelta(minutes=1))
+    assert recovered.succeeded and recovered.watermark == BASE + STEP
+    assert len(await _pod_rows(metrics_repo, BASE, BASE + STEP)) == len(PODS)
+    assert len(await metrics_repo.read_idle_metrics(BASE, BASE + STEP)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_row_the_database_rejects_fails_the_window_without_storing_any_row(stack):
+    """STO-04 (SIM A1): one out-of-range value rolls back the whole window instead of being logged away."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    processor = stack["processor"]
+    collect = processor.run_range
+
+    async def with_bad_row(*args, **kwargs):
+        rows = await collect(*args, **kwargs)
+        pod_rows = [row for row in rows if not row.container_name]
+        pod_rows[0].restart_count = 2**64
+        return rows
+
+    processor.run_range = with_bad_row
+    try:
+        failed = await _run_scheduled(stack, BASE + STEP + timedelta(minutes=1))
+    finally:
+        processor.run_range = collect
+
+    assert not failed.succeeded and failed.watermark == BASE
+    assert await stack["metrics_repo"].read_combined_metrics(BASE, BASE + STEP) == []
+    recovered = await _run_scheduled(stack, BASE + STEP + timedelta(minutes=1))
+    assert recovered.succeeded and len(await _pod_rows(stack["metrics_repo"], BASE, BASE + STEP)) == len(PODS)
+
+
+@pytest.mark.asyncio
+async def test_a_row_without_timestamp_is_rejected_and_counted_and_the_window_logged_partial(stack):
+    """STO-03 step 3: invalid rows are quarantined; the other rows of the window are stored."""
+    window_repository = SQLiteCollectionWindowRepository(stack["metrics_repo"].db_manager)
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    processor = stack["processor"]
+    collect = processor.run_range
+
+    async def with_unplaced_container_row(*args, **kwargs):
+        rows = await collect(*args, **kwargs)
+        container = next(row for row in rows if row.container_name)
+        return [*rows, container.model_copy(update={"timestamp": None, "container_name": "ghost"})]
+
+    rejected = collection_telemetry.ROWS_REJECTED.labels(source=METRICS_WATERMARK_SOURCE, reason="no_timestamp")
+    before = rejected._value.get()
+    processor.run_range = with_unplaced_container_row
+    try:
+        stack["clock"].current = BASE + STEP + timedelta(minutes=1)
+        report = await stack["job"](window_repository=window_repository).run()
+    finally:
+        processor.run_range = collect
+
+    assert report.succeeded, report.error
+    assert report.watermark == BASE + STEP
+    assert rejected._value.get() == before + 1
+    assert len(await _pod_rows(stack["metrics_repo"], BASE, BASE + STEP)) == len(PODS)
+    assert "ghost" not in {
+        c.container_name for c in await stack["metrics_repo"].read_container_metrics(BASE, BASE + STEP)
+    }
+    records = await window_repository.list_overlapping("test-cluster", METRICS_WATERMARK_SOURCE, BASE, BASE + STEP)
+    assert [(r.status, r.reason) for r in records] == [("collected", "rows_rejected")]
 
 
 @pytest.mark.asyncio

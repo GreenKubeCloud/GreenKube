@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Collection, Dict, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, Collection, Dict, List, Mapping, Optional
 
 from ..models.metrics import (
     ApplyRecommendationRequest,
@@ -303,6 +303,26 @@ class CombinedMetricsRepository(ABC):
             The number of records saved.
         """
         pass
+
+    async def write_window(
+        self,
+        rows: List[CombinedMetric],
+        idle_rows: List[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ) -> int:
+        """Write one collected window atomically (STO-03).
+
+        Pod and container ``rows`` (as :meth:`write_combined_metrics` with
+        ``replace_containers``, ``window`` and ``run_id``) and ``idle_rows`` are
+        written in one transaction; ``on_commit(connection)`` runs last inside
+        it (the collection job records the window and advances the watermark
+        there). Any failure rolls everything back. Returns the pod and container
+        rows written.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot write a collection window atomically")
 
     async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, tuple[int, int]]:
         """Per step of ``[start, end)``: stored pod rows and pod rows with an allocated cost (STO-01).

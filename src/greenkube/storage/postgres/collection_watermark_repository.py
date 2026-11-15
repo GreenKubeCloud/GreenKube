@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from greenkube.storage.base_collection_watermark_repository import CollectionWatermark, CollectionWatermarkRepository
 from greenkube.utils.time import ensure_utc
@@ -31,19 +32,28 @@ class PostgresCollectionWatermarkRepository(CollectionWatermarkRepository):
             )
         return _row(row) if row else None
 
-    async def advance(self, cluster_uid: str, source: str, last_complete_end: datetime) -> CollectionWatermark:
+    async def advance(
+        self, cluster_uid: str, source: str, last_complete_end: datetime, *, connection: Any = None
+    ) -> CollectionWatermark:
+        """See :meth:`CollectionWatermarkRepository.advance`."""
+        if connection is not None:
+            return await self._advance(connection, cluster_uid, source, last_complete_end)
         async with self.db_manager.connection_scope() as conn:
-            row = await conn.fetchrow(
-                """INSERT INTO collection_watermarks (cluster_uid, source, last_complete_end, updated_at)
-                VALUES ($1, $2, $3, NOW())
-                ON CONFLICT (cluster_uid, source) DO UPDATE SET
-                    last_complete_end = GREATEST(collection_watermarks.last_complete_end, EXCLUDED.last_complete_end),
-                    updated_at = NOW()
-                RETURNING cluster_uid, source, last_complete_end, updated_at""",
-                cluster_uid,
-                source,
-                ensure_utc(last_complete_end),
-            )
+            return await self._advance(conn, cluster_uid, source, last_complete_end)
+
+    @staticmethod
+    async def _advance(conn: Any, cluster_uid: str, source: str, last_complete_end: datetime) -> CollectionWatermark:
+        row = await conn.fetchrow(
+            """INSERT INTO collection_watermarks (cluster_uid, source, last_complete_end, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (cluster_uid, source) DO UPDATE SET
+                last_complete_end = GREATEST(collection_watermarks.last_complete_end, EXCLUDED.last_complete_end),
+                updated_at = NOW()
+            RETURNING cluster_uid, source, last_complete_end, updated_at""",
+            cluster_uid,
+            source,
+            ensure_utc(last_complete_end),
+        )
         return _row(row)
 
     async def list_all(self, cluster_uid: str | None = None) -> list[CollectionWatermark]:

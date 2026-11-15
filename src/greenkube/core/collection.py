@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, Protocol
@@ -31,6 +31,7 @@ from ..storage.base_collection_window_repository import (
     REASON_NO_SCRAPE_DATA,
     REASON_NOT_PROBED,
     REASON_POD_LEVEL_ONLY,
+    REASON_ROWS_REJECTED,
     REASON_SEEDED,
     STATUS_COLLECTED,
     STATUS_EMPTY,
@@ -223,6 +224,18 @@ class MetricsWriter(Protocol):
         """Upsert combined and container rows; ``replace_containers`` rewrites the container rows of each pod."""
         ...
 
+    async def write_window(
+        self,
+        rows: list[CombinedMetric],
+        idle_rows: list[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Callable[[Any], Awaitable[Any]] | None = None,
+    ) -> int:
+        """Write pod, container and idle rows of a window and run ``on_commit`` in one transaction (STO-03)."""
+        ...
+
 
 @dataclass
 class CollectionReport:
@@ -360,15 +373,59 @@ class MetricsCollectionJob:
         )
         return CollectionWatermark(self.cluster_uid, self.source, resume_at, now)
 
-    async def _write_rows(self, rows: list[CombinedMetric], window: CollectionWindow, run_id: str) -> int:
-        """Write a collected window as one generation (STO-01).
+    async def _write_window(
+        self,
+        window: CollectionWindow,
+        rows: list[CombinedMetric],
+        records: list[CollectionWindowRecord],
+        fence: LeaderFence,
+        *,
+        advance: bool,
+    ) -> tuple[int, CollectionWatermark | None]:
+        """Commit a collected window in one transaction (STO-01, STO-03).
 
-        Its container rows replace the stored ones of its pods (review 4), and
-        stored pod rows of its steps that this pass did not produce are deleted.
+        Pod, container and ``__idle__`` rows of the pass (one generation:
+        stored rows of its steps it no longer produces are deleted), the step
+        records and, when ``advance``, the watermark are written together: a
+        failure anywhere leaves the database as it was. The leader fence is
+        checked inside the transaction, just before the watermark moves.
         """
-        return await self.metrics_repository.write_combined_metrics(
-            rows, replace_containers=True, window=(window.start, window.end), run_id=run_id
+        idle = getattr(self.processor, "last_idle_metrics", None)
+        idle_rows = list(idle) if isinstance(idle, (list, tuple)) else []
+        watermark: CollectionWatermark | None = None
+
+        async def on_commit(connection: Any) -> None:
+            nonlocal watermark
+            if self.window_repository is not None and records:
+                await self.window_repository.record(records, connection=connection)
+            if advance:
+                fence.check("advance watermark")
+                watermark = await self.watermark_repository.advance(
+                    self.cluster_uid, self.source, window.end, connection=connection
+                )
+
+        fence.check("write metrics")
+        written = await self.metrics_repository.write_window(
+            rows, idle_rows, window=(window.start, window.end), run_id=uuid4().hex, on_commit=on_commit
         )
+        return written or 0, watermark
+
+    def _quarantine(self, rows: list[CombinedMetric]) -> tuple[list[CombinedMetric], int]:
+        """Drop rows that cannot be stored (no timestamp) and count them (STO-03 step 3).
+
+        A row the database would reject must not fail the whole window again on
+        every run: it is left out, counted in
+        ``greenkube_collection_rows_rejected_total`` and the window's step
+        records name the rejection.
+        """
+        kept = [row for row in rows if row.timestamp is not None]
+        rejected = len(rows) - len(kept)
+        if rejected:
+            logger.warning("Left %d collected row(s) without a timestamp out of the window.", rejected)
+            collection_telemetry.record_rows_rejected(
+                self.source, collection_telemetry.REJECT_REASON_NO_TIMESTAMP, rejected
+            )
+        return kept, rejected
 
     async def _recollection_degradation(self, window: CollectionWindow, rows: list[CombinedMetric]) -> str | None:
         """Why a re-collection of ``window`` must not replace its stored rows, or ``None`` (STO-01).
@@ -399,22 +456,6 @@ class MetricsCollectionJob:
                 return collection_telemetry.RECOLLECT_REASON_COST_UNAVAILABLE
         return None
 
-    async def _write_idle_metrics(self, window: CollectionWindow, run_id: str) -> None:
-        """Commits the ``__idle__`` rows of the window just collected (roadmap B2).
-
-        Called after the fence check, like the pod rows. A failed write raises,
-        so the watermark never advances over a window without its idle rows.
-        """
-        idle_rows = getattr(self.processor, "last_idle_metrics", None)
-        write = getattr(self.metrics_repository, "write_idle_metrics", None)
-        # Processors without idle rows (other range processors, test doubles) commit none.
-        if not isinstance(idle_rows, (list, tuple)) or not idle_rows or write is None:
-            return
-        try:
-            await write(list(idle_rows), window=(window.start, window.end), run_id=run_id)
-        except Exception as error:
-            raise RuntimeError(f"Could not store {len(idle_rows)} node idle row(s): {error}") from error
-
     def _plan(self, now: datetime, watermark: CollectionWatermark | None, last: timedelta | None) -> CollectionPlan:
         if last is None:
             return plan_collection(
@@ -441,7 +482,11 @@ class MetricsCollectionJob:
     ) -> CollectionWatermark | None:
         started = monotonic()
         fence.check("collect metrics")
-        rows = await self.processor.run_range(start=window.start, end=window.end)
+        rows, rejected = self._quarantine(await self.processor.run_range(start=window.start, end=window.end))
+        contiguous = watermark is None or watermark.last_complete_end >= window.start
+        # An explicit --last range that does not touch the watermark must not
+        # hide the windows between the watermark and this range.
+        advance = not (forced and not contiguous)
         degraded = await self._recollection_degradation(window, rows) if rows else None
         if degraded is not None:
             # The stored rows of this window come from a better pass: keep them as they are.
@@ -453,13 +498,13 @@ class MetricsCollectionJob:
             )
             collection_telemetry.record_recollect_skipped(self.source, degraded)
         else:
-            records = await self._window_records(window, rows)
-            run_id = uuid4().hex
-            fence.check("write metrics")
-            written = await self._write_rows(rows, window, run_id) if rows else 0
-            await self._write_idle_metrics(window, run_id)
-            await self._store_records(records, report)
-            report.rows_written += written or 0
+            records = self._flag_rejected(await self._window_records(window, rows), rejected)
+            written, advanced = await self._write_window(window, rows, records, fence, advance=advance)
+            self._account_records(records, report)
+            report.rows_written += written
+            if advanced is not None:
+                watermark = advanced
+                advance = False
         report.windows_collected += 1
         if rows:
             # Dashboard gauges describe "now": keep only the most recent sample.
@@ -467,11 +512,9 @@ class MetricsCollectionJob:
             report.latest_rows = [row for row in rows if row.timestamp == latest]
         collection_telemetry.record_window(self.source, monotonic() - started)
 
-        contiguous = watermark is None or watermark.last_complete_end >= window.start
-        if forced and not contiguous:
-            # An explicit --last range that does not touch the watermark must not
-            # hide the windows between the watermark and this range.
+        if not advance:
             return watermark
+        # A window left as stored (degraded re-collection) still moves the watermark over its stored rows.
         fence.check("advance watermark")
         return await self.watermark_repository.advance(self.cluster_uid, self.source, window.end)
 
@@ -545,11 +588,22 @@ class MetricsCollectionJob:
             )
         return records
 
-    async def _store_records(self, records: list[CollectionWindowRecord], report: CollectionReport) -> None:
-        """Write step records after the rows, before the watermark moves (a failure fails the window)."""
+    @staticmethod
+    def _flag_rejected(records: list[CollectionWindowRecord], rejected: int) -> list[CollectionWindowRecord]:
+        """Name the rejection on the collected steps of a window that lost rows (STO-03 step 3)."""
+        if not rejected:
+            return records
+        return [
+            replace(record, reason=REASON_ROWS_REJECTED)
+            if record.status == STATUS_COLLECTED and record.reason is None
+            else record
+            for record in records
+        ]
+
+    def _account_records(self, records: list[CollectionWindowRecord], report: CollectionReport) -> None:
+        """Telemetry and report counters of step records committed with their window."""
         if self.window_repository is None or not records:
             return
-        await self.window_repository.record(records)
         by_status: dict[str, int] = {}
         for record in records:
             by_status[record.status] = by_status.get(record.status, 0) + 1
@@ -635,15 +689,13 @@ class MetricsCollectionJob:
         for window in _contiguous_windows(starts, self.step):
             try:
                 fence.check("retry failed window")
-                rows = await self.processor.run_range(start=window.start, end=window.end)
-                records = await self._window_records(window, rows)
+                rows, rejected = self._quarantine(await self.processor.run_range(start=window.start, end=window.end))
+                records = self._flag_rejected(await self._window_records(window, rows), rejected)
                 fence.check("write retried window")
-                if rows:
-                    run_id = uuid4().hex
-                    report.rows_written += await self._write_rows(rows, window, run_id) or 0
-                    await self._write_idle_metrics(window, run_id)
+                written, _ = await self._write_window(window, rows, records, fence, advance=False)
+                report.rows_written += written
                 failed_before = report.failed_steps
-                await self._store_records(records, report)
+                self._account_records(records, report)
                 still_failed = report.failed_steps - failed_before
                 report.failed_steps = failed_before
                 report.recovered_steps += len(records) - still_failed

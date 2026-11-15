@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from greenkube.storage.base_collection_watermark_repository import CollectionWatermark, CollectionWatermarkRepository
 from greenkube.utils.time import ensure_utc
@@ -42,18 +43,22 @@ class SQLiteCollectionWatermarkRepository(CollectionWatermarkRepository):
                 row = await cursor.fetchone()
         return _row(row) if row else None
 
-    async def advance(self, cluster_uid: str, source: str, last_complete_end: datetime) -> CollectionWatermark:
+    async def advance(
+        self, cluster_uid: str, source: str, last_complete_end: datetime, *, connection: Any = None
+    ) -> CollectionWatermark:
+        """See :meth:`CollectionWatermarkRepository.advance`."""
         now = _encode(datetime.now(timezone.utc))
-        async with self.db_manager.connection_scope() as conn:
-            await conn.execute(
-                """INSERT INTO collection_watermarks (cluster_uid, source, last_complete_end, updated_at)
+        query = """INSERT INTO collection_watermarks (cluster_uid, source, last_complete_end, updated_at)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(cluster_uid, source) DO UPDATE SET
                     last_complete_end = MAX(collection_watermarks.last_complete_end, excluded.last_complete_end),
-                    updated_at = excluded.updated_at""",
-                (cluster_uid, source, _encode(last_complete_end), now),
-            )
-            await conn.commit()
+                    updated_at = excluded.updated_at"""
+        params = (cluster_uid, source, _encode(last_complete_end), now)
+        if connection is not None:
+            await connection.execute(query, params)
+        else:
+            async with self.db_manager.transaction() as conn:
+                await conn.execute(query, params)
         watermark = await self.get(cluster_uid, source)
         if watermark is None:  # pragma: no cover - the upsert above guarantees a row
             raise RuntimeError("Collection watermark was not persisted.")

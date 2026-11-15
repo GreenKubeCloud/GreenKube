@@ -1,8 +1,10 @@
 import json
 import logging
 from collections import defaultdict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, List, Mapping, Optional
 
 from ...core.exceptions import QueryError
 from ...core.observability import record_metric_provenance
@@ -21,6 +23,9 @@ from ..container_rows import complete_container_rows, container_rows_of
 from ..write_guards import IDLE_COST_COLUMNS, cost_guard_assignments, produced_idle_keys, produced_pod_keys
 
 logger = logging.getLogger(__name__)
+
+#: Rows per executemany call; a window is still written in one transaction (STO-03).
+_EXECUTEMANY_CHUNK = 5000
 
 #: Provenance and cost-component columns shared by every metrics table (A4, A11).
 PROVENANCE_COLUMNS: tuple[str, ...] = (
@@ -256,6 +261,48 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
+    @asynccontextmanager
+    async def _connection(self, conn: Any = None) -> AsyncIterator[Any]:
+        """``conn`` when given (the caller's transaction), else a pooled connection."""
+        if conn is not None:
+            yield conn
+            return
+        async with self.db_manager.connection_scope() as scoped:
+            yield scoped
+
+    async def _write_window_idle_rows(
+        self, conn: Any, idle_rows: List[Any], window: tuple[datetime, datetime], run_id: str
+    ) -> None:
+        """Idle rows of a window inside its transaction; a failure names them and rolls the window back."""
+        try:
+            await self.write_idle_metrics(idle_rows, window=window, run_id=run_id, conn=conn)
+        except Exception as error:
+            raise QueryError(f"Could not store {len(idle_rows)} node idle row(s): {error}") from error
+
+    async def write_window(
+        self,
+        rows: List[CombinedMetric],
+        idle_rows: List[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ) -> int:
+        """See :meth:`CombinedMetricsRepository.write_window`."""
+        async with self.db_manager.connection_scope() as conn:
+            async with conn.transaction():
+                written = (
+                    await self.write_combined_metrics(
+                        rows, replace_containers=True, window=window, run_id=run_id, conn=conn
+                    )
+                    if rows
+                    else 0
+                )
+                await self._write_window_idle_rows(conn, list(idle_rows), window, run_id)
+                if on_commit is not None:
+                    await on_commit(conn)
+        return written
+
     async def write_combined_metrics(
         self,
         metrics: List[CombinedMetric],
@@ -263,20 +310,21 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         replace_containers: bool = False,
         window: Optional[tuple[datetime, datetime]] = None,
         run_id: Optional[str] = None,
+        conn: Any = None,
     ) -> int:
-        """See :meth:`CombinedMetricsRepository.write_combined_metrics`."""
+        """See :meth:`CombinedMetricsRepository.write_combined_metrics`; on ``conn`` (a savepoint) when given."""
         container_metrics = [metric for metric in metrics if metric.container_name]
         metrics = [metric for metric in metrics if not metric.container_name]
         collected_at = datetime.now(timezone.utc) if run_id else None
         if not metrics:
             if not container_metrics:
                 return 0
-            return await self.write_container_metrics(container_metrics, run_id=run_id, collected_at=collected_at)
+            return await self.write_container_metrics(container_metrics, conn, run_id=run_id, collected_at=collected_at)
         produced = produced_pod_keys(metrics)
 
         saved_count = 0
         try:
-            async with self.db_manager.connection_scope() as conn:
+            async with self._connection(conn) as conn:
                 query = """
                     INSERT INTO combined_metrics (
                         pod_name, namespace, total_cost, co2e_grams,
@@ -412,7 +460,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 # Container rows are rewritten with their pod rows, in the same
                 # transaction, so pod and container rows of a step agree (review 4).
                 async with conn.transaction():
-                    await conn.executemany(query, metrics_data)
+                    for offset in range(0, len(metrics_data), _EXECUTEMANY_CHUNK):
+                        await conn.executemany(query, metrics_data[offset : offset + _EXECUTEMANY_CHUNK])
                     if replace_containers:
                         await self._delete_stale_container_rows(conn, metrics, container_metrics)
                     saved_count = len(metrics)
@@ -726,11 +775,14 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 )
             )
         if conn is not None:
-            await conn.executemany(query, rows)
+            for offset in range(0, len(rows), _EXECUTEMANY_CHUNK):
+                await conn.executemany(query, rows[offset : offset + _EXECUTEMANY_CHUNK])
             return len(rows)
         try:
             async with self.db_manager.connection_scope() as scoped:
-                await scoped.executemany(query, rows)
+                async with scoped.transaction():
+                    for offset in range(0, len(rows), _EXECUTEMANY_CHUNK):
+                        await scoped.executemany(query, rows[offset : offset + _EXECUTEMANY_CHUNK])
             record_metric_provenance(metrics)
             return len(rows)
         except Exception as e:
@@ -774,17 +826,17 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             if window is not None:
                 await self._delete_idle_not_produced(connection, window, produced_idle_keys(metrics))
 
-        if conn is not None:
-            await write(conn)
-            return len(rows)
         try:
-            async with self.db_manager.connection_scope() as scoped:
-                async with scoped.transaction():
-                    await write(scoped)
-            return len(rows)
+            if conn is not None:
+                await write(conn)
+            else:
+                async with self.db_manager.connection_scope() as scoped:
+                    async with scoped.transaction():
+                        await write(scoped)
         except Exception as e:
             logger.error("Error writing node idle metrics to Postgres: %s", e)
             raise QueryError(f"Error writing node idle metrics: {e}") from e
+        return len(rows)
 
     @staticmethod
     async def _delete_idle_not_produced(conn: Any, window: tuple[datetime, datetime], produced: set[tuple]) -> int:
