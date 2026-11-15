@@ -174,6 +174,22 @@ async def test_async_write_combined_metrics_to_database_delegates_last_value():
     writer.assert_awaited_once_with(last="1h")
 
 
+@pytest.mark.asyncio
+async def test_async_write_combined_metrics_to_database_forwards_force():
+    """Review 2: ``start --last 1h --force`` reaches the collection job."""
+    with patch("greenkube.cli.start.write_combined_metrics_to_database", new_callable=AsyncMock) as writer:
+        await start_module.async_write_combined_metrics_to_database(last="1h", force=True)
+
+    writer.assert_awaited_once_with(last="1h", force=True)
+
+
+@pytest.mark.asyncio
+async def test_force_without_last_is_refused_by_the_collection_entry_point():
+    from greenkube.cli import utils
+
+    assert await utils.write_combined_metrics_to_database(last=None, force=True) is None
+
+
 def test_data_processor_is_resolved_from_factory():
     with patch("greenkube.cli.start.get_data_processor") as get_processor:
         get_processor.return_value = MagicMock()

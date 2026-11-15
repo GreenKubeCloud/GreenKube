@@ -197,7 +197,10 @@ async def async_write_combined_metrics_to_database(last: Optional[str] = None, f
 
     timer = start_timer()
     try:
-        await write_combined_metrics_to_database(last=last, force=force)
+        if force:
+            await write_combined_metrics_to_database(last=last, force=True)
+        else:
+            await write_combined_metrics_to_database(last=last)
     finally:
         record_collection_run(elapsed(timer))
 
@@ -1016,7 +1019,7 @@ async def _async_start(last: Optional[str], force: bool = False):
         initial_tasks = (
             (collect_carbon_intensity_for_all_zones, (), {}),
             (analyze_nodes, (), {}),
-            (async_write_combined_metrics_to_database, (), {"last": last, "force": force}),
+            (async_write_combined_metrics_to_database, (), {"last": last, **({"force": True} if force else {})}),
             (attribute_recommendation_savings, (), {}),
             (run_recommendation_lifecycle, (), {}),
             (compress_metrics, (), {}),
