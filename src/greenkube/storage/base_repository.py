@@ -270,19 +270,23 @@ class WindowStepProfile:
 
     pods: frozenset[tuple[str, str]]
     allocated_cost_rows: int
+    #: Rows whose cost waits for OpenCost (``cost_source = opencost_pending``, COST-01).
+    pending_cost_rows: int = 0
 
 
 def window_step_profiles(rows: Any) -> dict[datetime, WindowStepProfile]:
     """Build :class:`WindowStepProfile` per step from ``(namespace, pod_name, timestamp, cost_source)`` rows."""
-    from ..models.provenance import ALLOCATED_COST_SOURCES
+    from ..models.provenance import ALLOCATED_COST_SOURCES, CostSource
 
     pods: dict[datetime, set[tuple[str, str]]] = {}
     allocated: dict[datetime, int] = {}
+    pending: dict[datetime, int] = {}
     for namespace, pod_name, timestamp, cost_source in rows:
         step = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
         pods.setdefault(step, set()).add((namespace, pod_name))
         allocated[step] = allocated.get(step, 0) + (1 if cost_source in ALLOCATED_COST_SOURCES else 0)
-    return {step: WindowStepProfile(frozenset(names), allocated[step]) for step, names in pods.items()}
+        pending[step] = pending.get(step, 0) + (1 if cost_source == CostSource.OPENCOST_PENDING.value else 0)
+    return {step: WindowStepProfile(frozenset(names), allocated[step], pending[step]) for step, names in pods.items()}
 
 
 class CombinedMetricsRepository(ABC):

@@ -349,6 +349,7 @@ _PROVENANCE_VALUES = frozenset(
         "kubecost",
         "pricing_catalog",
         "custom_rate",
+        "opencost_pending",
         "none",
         "prometheus",
         "metrics_server",

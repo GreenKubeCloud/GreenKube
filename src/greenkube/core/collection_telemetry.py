@@ -153,6 +153,20 @@ def set_rate_window_scrapes(source: str, scrapes: float) -> None:
     RATE_WINDOW_SCRAPES.labels(source=source).set(max(scrapes, 0.0))
 
 
+COST_PENDING_STEPS = Gauge(
+    "greenkube_collection_cost_pending_steps",
+    "Collection steps inside the backfill horizon whose cost waits for OpenCost (outage, lag or rejected "
+    "request): their rows carry a modeled cost labelled opencost_pending, COST-01.",
+    ["source"],
+    registry=REGISTRY,
+)
+
+
+def set_cost_pending_steps(source: str, steps: int) -> None:
+    """Publish the number of steps whose cost waits for OpenCost (COST-01)."""
+    COST_PENDING_STEPS.labels(source=source).set(max(int(steps), 0))
+
+
 def set_cost_unattributed_ratio(source: str, ratio: float) -> None:
     """Publish the unattributed share of the OpenCost window total (COL-03 step 4)."""
     COST_UNATTRIBUTED_RATIO.labels(source=source).set(min(max(ratio, 0.0), 1.0))

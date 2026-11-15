@@ -11,7 +11,7 @@ import pytest
 import respx
 from httpx import Response
 
-from greenkube.collectors.opencost_collector import OpenCostCollector
+from greenkube.collectors.opencost_collector import OpenCostCollector, OpenCostUnavailableError
 
 # Source de vérité pour les données de test.
 MOCK_API_RESPONSE = {
@@ -136,7 +136,7 @@ async def test_collect_skips_items_with_missing_namespace():
 @respx.mock
 async def test_collect_handles_api_error_gracefully():
     """
-    Tests that the collector returns an empty list when the API call fails.
+    Tests that the collector raises OpenCostUnavailableError when the API call fails (COST-01).
     """
     # 1. Arrange
     fixed_url = "http://opencost:9003"
@@ -149,13 +149,9 @@ async def test_collect_handles_api_error_gracefully():
     with patch.object(OpenCostCollector, "_resolve_url", side_effect=mock_resolve_url):
         collector = OpenCostCollector()
 
-        # 2. Act
-        results = await collector.collect()
-
-    # 3. Assert
-    # Le collecteur doit retourner une liste vide en cas d'erreur
-    assert isinstance(results, list)
-    assert len(results) == 0
+        # 2. Act / 3. Assert: an outage is never an empty allocation set.
+        with pytest.raises(OpenCostUnavailableError):
+            await collector.collect()
 
 
 @pytest.mark.asyncio
@@ -215,7 +211,8 @@ async def test_collect_handles_non_json_response():
     client.get = AsyncMock(return_value=response)
     collector._get_client = AsyncMock(return_value=client)
 
-    assert await collector.collect() == []
+    with pytest.raises(OpenCostUnavailableError):
+        await collector.collect()
 
 
 @pytest.mark.asyncio

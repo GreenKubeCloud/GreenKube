@@ -87,10 +87,14 @@ async def test_unallocated_and_idle_entries_are_not_attributed_to_pods():
 
 
 @respx.mock
-async def test_opencost_errors_return_no_cost_rows():
+async def test_opencost_errors_raise_instead_of_returning_no_cost_rows():
+    """COST-01: an OpenCost error is never reported as a window without allocations."""
+    from greenkube.collectors.opencost_collector import OpenCostUnavailableError
+
     respx.get(URL).mock(return_value=Response(500, text="boom"))
 
-    assert await _collect_range() == []
+    with pytest.raises(OpenCostUnavailableError):
+        await _collect_range()
 
 
 @respx.mock

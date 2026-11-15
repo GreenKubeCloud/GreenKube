@@ -42,6 +42,10 @@ REASON_ROWS_REJECTED = "rows_rejected"
 #: Reason of a stored step a re-collection left as it was because the new pass was worse (STO-01).
 REASON_RECOLLECT_SKIPPED = "recollect_skipped"
 
+#: ``cost_status`` of a step whose rows carry modeled cost because OpenCost could not price it
+#: (outage, lag, rejected request); the collection job re-prices it once OpenCost answers (COST-01).
+COST_STATUS_PENDING = "opencost_pending"
+
 
 @dataclass(frozen=True)
 class CollectionWindowRecord:
@@ -61,6 +65,8 @@ class CollectionWindowRecord:
     opencost_total_cost: float | None = None
     attributed_cost: float | None = None
     collected_at: datetime | None = None
+    #: ``COST_STATUS_PENDING`` while the step's cost waits for OpenCost, else ``None``.
+    cost_status: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in WINDOW_STATUSES:
@@ -193,6 +199,18 @@ class CollectionWindowRepository(ABC):
         self, cluster_uid: str, source: str, since: datetime, limit: int
     ) -> list[CollectionWindowRecord]:
         """Failed steps starting at or after ``since``, least recently attempted first."""
+
+    async def list_cost_pending(
+        self, cluster_uid: str, source: str, since: datetime, until: datetime, limit: int
+    ) -> list[CollectionWindowRecord]:
+        """Steps of ``[since, until)`` whose cost waits for OpenCost, least recently attempted first (COST-01)."""
+        records = [
+            record
+            for record in await self.list_overlapping(cluster_uid, source, since, until)
+            if record.cost_status == COST_STATUS_PENDING and record.expected_steps == 1
+        ]
+        records.sort(key=lambda record: (record.collected_at or record.window_start, record.window_start))
+        return records[: max(int(limit), 0)]
 
     @abstractmethod
     async def expire_failed(self, cluster_uid: str, source: str, before: datetime) -> int:

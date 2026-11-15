@@ -21,6 +21,21 @@ from .base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
 
+#: OpenCost answered with allocations for the window.
+OPENCOST_STATUS_OK = "ok"
+#: OpenCost answered, but with no allocation for the window (lag, or a gap in its own data).
+OPENCOST_STATUS_EMPTY = "empty"
+#: No OpenCost URL is configured and none was discovered: the cluster has no OpenCost.
+OPENCOST_STATUS_NOT_CONFIGURED = "not_configured"
+
+
+class OpenCostUnavailableError(RuntimeError):
+    """A configured or discovered OpenCost could not answer an allocation request (COST-01).
+
+    Raised for transport errors, non-2xx answers (401, 503, ...) and invalid
+    JSON, so callers never mistake an outage for a cluster without OpenCost.
+    """
+
 
 def _optional_number(value: Any) -> Optional[float]:
     """A finite float from an OpenCost JSON value; ``None`` when missing, NaN, infinite or not a number."""
@@ -350,6 +365,8 @@ class OpenCostCollector(BaseCollector):
         self._client: Optional[httpx.AsyncClient] = None
         # OpenCost node unit prices with the hour of collection time they were read for.
         self._node_prices: Optional[tuple[int, Dict[str, NodeUnitPrices]]] = None
+        #: Outcome of the last allocation request (``OPENCOST_STATUS_*``; ``None`` after an error).
+        self.last_status: Optional[str] = None
 
     async def _get_client(self, verify: bool = True) -> httpx.AsyncClient:
         """Return the reusable HTTP client, creating it lazily if needed."""
@@ -383,8 +400,15 @@ class OpenCostCollector(BaseCollector):
             accumulate: Sum the whole window into one allocation set.
 
         Returns:
-            A list of CostMetric objects, or an empty list if an error occurs.
+            The pod CostMetric objects. An empty list means OpenCost answered
+            without allocations (``last_status = empty``) or no OpenCost is
+            configured or discoverable (``last_status = not_configured``).
+
+        Raises:
+            OpenCostUnavailableError: the resolved OpenCost failed (transport
+                error, non-2xx answer, invalid JSON); never reported as ``[]``.
         """
+        self.last_status = None
         logger.info("Collecting data from OpenCostCollector (using Ingress)...")
 
         params = {"window": window, "aggregate": "namespace,pod"}
@@ -400,10 +424,12 @@ class OpenCostCollector(BaseCollector):
         if not url:
             logger.error("OpenCost API URL is not configured and discovery failed; skipping OpenCost collection")
             record_collection_request("opencost", "skipped")
+            self.last_status = OPENCOST_STATUS_NOT_CONFIGURED
             return []
 
         timer = start_timer()
         errors: list[str] = []
+        answered: list[str] = []
 
         async def _fetch(u: str):
             try:
@@ -411,17 +437,22 @@ class OpenCostCollector(BaseCollector):
                 resp.raise_for_status()
             except httpx.HTTPError as exc:
                 logger.debug("Request to %s failed: %s", u, exc)
-                errors.append(u)
+                errors.append(f"{u}: {exc}")
                 return None
 
             try:
-                return resp.json().get("data")
+                data = resp.json().get("data")
             except Exception:
                 # httpx doesn't separate json decode easily, usually ValueError? No, json.JSONDecodeError
                 logger.error("Failed to decode JSON from %s. Server sent non-JSON response.", u)
                 logger.debug("Raw response content from %s: %s", u, resp.text[:500])
-                errors.append(u)
+                errors.append(f"{u}: invalid JSON")
                 return None
+            if isinstance(data, list):
+                answered.append(u)
+            else:
+                errors.append(f"{u}: no allocation data in the answer")
+            return data
 
         response_data = await _fetch(url)
 
@@ -435,11 +466,15 @@ class OpenCostCollector(BaseCollector):
                 # Prefer the alt path for future calls (stored in instance, not global config)
                 self._resolved_url = alt_path
 
+        if not answered:
+            record_collection_request("opencost", "error", elapsed(timer))
+            raise OpenCostUnavailableError("OpenCost allocation request failed: " + "; ".join(errors))
         if not response_data or not isinstance(response_data, list) or len(response_data) == 0:
             logger.warning(
                 "OpenCost API returned no data. This can happen if the cluster is new or the endpoint is different."
             )
-            record_collection_request("opencost", "error" if errors else "empty", elapsed(timer))
+            record_collection_request("opencost", "empty", elapsed(timer))
+            self.last_status = OPENCOST_STATUS_EMPTY
             return []
 
         now = timestamp if timestamp else datetime.now(timezone.utc)
@@ -461,6 +496,7 @@ class OpenCostCollector(BaseCollector):
                     collected_metrics.append(metric)
 
         record_collection_request("opencost", "success" if collected_metrics else "empty", elapsed(timer))
+        self.last_status = OPENCOST_STATUS_OK if collected_metrics else OPENCOST_STATUS_EMPTY
         logger.info("Successfully collected %d metrics from OpenCost.", len(collected_metrics))
         return collected_metrics
 

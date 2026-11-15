@@ -19,7 +19,7 @@ from greenkube.utils.time import ensure_utc
 _FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _COLUMNS = (
     "cluster_uid, source, window_start, window_end, status, expected_steps, steps_with_data, pod_rows, "
-    "cpu_series, pods_without_cpu, reason, opencost_total_cost, attributed_cost, collected_at"
+    "cpu_series, pods_without_cpu, reason, opencost_total_cost, attributed_cost, collected_at, cost_status"
 )
 
 
@@ -43,6 +43,7 @@ def _row(row) -> CollectionWindowRecord:
         opencost_total_cost=row[11],
         attributed_cost=row[12],
         collected_at=ensure_utc(row[13]),
+        cost_status=row[14],
     )
 
 
@@ -73,13 +74,14 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
                 r.opencost_total_cost,
                 r.attributed_cost,
                 _encode(r.collected_at) if r.collected_at else now,
+                r.cost_status,
             )
             for r in records
         ]
         async with self._transaction(connection) as conn:
             await conn.executemany(
                 f"""INSERT INTO collection_windows ({_COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cluster_uid, source, window_start) DO UPDATE SET
                     window_end = excluded.window_end,
                     status = excluded.status,
@@ -91,7 +93,8 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
                     reason = excluded.reason,
                     opencost_total_cost = excluded.opencost_total_cost,
                     attributed_cost = excluded.attributed_cost,
-                    collected_at = excluded.collected_at
+                    collected_at = excluded.collected_at,
+                    cost_status = excluded.cost_status
                 -- A re-collection without data (beyond retention) never downgrades stored rows.
                 WHERE NOT (collection_windows.status = 'collected' AND excluded.status = 'failed')""",
                 params,

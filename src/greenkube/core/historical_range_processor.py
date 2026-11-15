@@ -14,7 +14,12 @@ from .. import __version__
 from ..collectors import dcgm_collector
 from ..collectors.metrics_server_collector import MetricsServerCollector
 from ..collectors.node_collector import NodeCollector
-from ..collectors.opencost_collector import OpenCostCollector, opencost_step_share
+from ..collectors.opencost_collector import (
+    OPENCOST_STATUS_EMPTY,
+    OPENCOST_STATUS_OK,
+    OpenCostCollector,
+    opencost_step_share,
+)
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..collectors.promql import PromQLCatalog
@@ -33,7 +38,7 @@ from ..energy.estimator import BasicEstimator
 from ..energy.node_power import NodePowerProfile, resolve_node_power_profile
 from ..impact.power import GpuDevice, GpuPowerModel, NodeGpuPower, node_gpu_power
 from ..impact.realization import refresh_realization_context
-from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour
+from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour, mark_cost_pending
 from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
 from ..models.provenance import CostSource, MetadataSource, NodeSource, UsageSource
@@ -179,10 +184,59 @@ class HistoricalRangeProcessor:
         #: Whether the last ``run_range`` call saw any container-level CPU series; False on runtimes whose
         #: cAdvisor exports pod cgroups only (cri-dockerd), where past windows get no container rows (COL-05).
         self.last_container_series_present = False
+        #: OpenCost outcome of the last ``run_range`` call (``OPENCOST_STATUS_*`` or ``unavailable``).
+        self.last_cost_status: str | None = None
+        #: True when the last ``run_range`` window waits for OpenCost: its modeled rows carry
+        #: ``cost_source = opencost_pending`` and the collection job re-prices it later (COST-01).
+        self.last_cost_pending = False
+        #: OpenCost priced a window before (in this process, or per the stored step records): an empty
+        #: OpenCost answer is then a lag or a gap of OpenCost's own data, not a cluster without OpenCost.
+        self.opencost_known = False
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _collect_costs(self, start: datetime, end: datetime) -> tuple[dict, bool]:
+        """OpenCost allocations of ``[start, end)`` keyed by ``(namespace, pod)``, and whether cost is pending.
+
+        The cost of the window is pending (COST-01) when OpenCost failed (any
+        error of the call: transport, non-2xx, invalid JSON) or answered without
+        allocations after it priced a window before (``opencost_known``). A
+        cluster without OpenCost (``not_configured``) is not pending: its rows
+        get the modeled cost as before. Sets ``last_cost_status`` and
+        ``last_cost_pending``.
+        """
+        try:
+            # Exact-window allocation keyed by (namespace, pod) (A4, BUG-04, BUG-41).
+            cost_metrics = await self.opencost_collector.collect_range(start=start, end=end)
+        except Exception as error:
+            logger.error(
+                "OpenCost allocation is unavailable for %s -> %s; the window keeps a modeled cost marked "
+                "opencost_pending and is re-priced when OpenCost answers again: %s",
+                start.isoformat(),
+                end.isoformat(),
+                error,
+            )
+            self.last_cost_status = "unavailable"
+            self.last_cost_pending = True
+            return {}, True
+        status = getattr(self.opencost_collector, "last_status", None)
+        status = status if isinstance(status, str) else None
+        if cost_metrics:
+            status = OPENCOST_STATUS_OK
+            self.opencost_known = True
+        self.last_cost_status = status
+        if not cost_metrics and status == OPENCOST_STATUS_EMPTY and self.opencost_known:
+            logger.error(
+                "OpenCost returned no allocation for %s -> %s although it priced earlier windows; the window "
+                "keeps a modeled cost marked opencost_pending and is re-priced later.",
+                start.isoformat(),
+                end.isoformat(),
+            )
+            self.last_cost_pending = True
+            return {}, True
+        return {(c.namespace, c.pod_name): c for c in cost_metrics}, False
 
     @staticmethod
     def _parse_duration_to_seconds(s: str) -> int:
@@ -954,6 +1008,8 @@ class HistoricalRangeProcessor:
         self.last_idle_metrics = []
         self.last_cost_reconciliation = {}
         self.last_container_series_present = False
+        self.last_cost_status = None
+        self.last_cost_pending = False
 
         chosen_step_sec = self._promql.step_seconds
         window = CollectionWindow.covering(start_dt, end_dt, timedelta(seconds=chosen_step_sec))
@@ -1171,13 +1227,7 @@ class HistoricalRangeProcessor:
 
         # Cost data
         range_seconds = (end_dt - start_dt).total_seconds()
-        try:
-            # Exact-window allocation keyed by (namespace, pod) (A4, BUG-04, BUG-41).
-            cost_metrics = await self.opencost_collector.collect_range(start=start_dt, end=end_dt)
-            cost_map = {(c.namespace, c.pod_name): c for c in cost_metrics}
-        except Exception as error:
-            logger.warning("OpenCost allocation is unavailable for %s -> %s: %s", start_dt, end_dt, error)
-            cost_map = {}
+        cost_map, cost_pending = await self._collect_costs(start_dt, end_dt)
         # Reconciliation against the OpenCost total of the window (COL-03 step 4): an allocation
         # of a pod that gets no row (no sample of any kind) is not stored, so it must be counted.
         opencost_window_total = sum(
@@ -1600,6 +1650,9 @@ class HistoricalRangeProcessor:
                 )
                 if allocated.idle is not None:
                     idle_rows.append(allocated.idle)
+                if cost_pending:
+                    # Modeled cost while OpenCost could not price the window: never trusted, re-priced later.
+                    allocated.rows = [mark_cost_pending(row) for row in allocated.rows]
 
                 container_cpu_usage = {
                     key: int(round(value * 1000))

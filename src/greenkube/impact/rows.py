@@ -55,6 +55,31 @@ UNRESOLVED_NODE = "__unresolved__"
 
 #: ``estimation_reasons`` prefix written when a row's cost is modeled, not observed.
 MODELED_COST_REASON_PREFIX = "No observed cost for pod"
+#: Estimation reason of a row whose window OpenCost could not price (COST-01).
+OPENCOST_PENDING_REASON = (
+    "OpenCost could not price this window (outage, lag or rejected request); modeled cost kept as "
+    "opencost_pending until the window is re-priced from OpenCost"
+)
+
+
+def mark_cost_pending(row: CombinedMetric) -> CombinedMetric:
+    """Label a modeled row of a window OpenCost could not price as ``opencost_pending`` (COST-01).
+
+    The modeled figure is kept (dashboards stay continuous) but the row is
+    never trusted, and the collection job replaces it with OpenCost's cost
+    once OpenCost answers for the window. Rows with an allocated cost are
+    returned unchanged.
+    """
+    if _is_observed_cost(row):
+        return row
+    reasons = list(dict.fromkeys([*row.estimation_reasons, OPENCOST_PENDING_REASON]))
+    return row.model_copy(
+        update={
+            "cost_source": CostSource.OPENCOST_PENDING.value,
+            "is_estimated": True,
+            "estimation_reasons": reasons,
+        }
+    )
 
 
 @dataclass
@@ -316,6 +341,9 @@ class MetricRowAllocator:
             reasons = [r for r in reasons if not r.startswith(MODELED_COST_REASON_PREFIX)]
             update["estimation_reasons"] = [*reasons, reason]
             update["is_estimated"] = True
+            if (row.cost_source or "").strip().lower() == CostSource.OPENCOST_PENDING.value:
+                # A recompute re-prices the model but the window still waits for OpenCost.
+                update["cost_source"] = CostSource.OPENCOST_PENDING.value
         return row.model_copy(update=update)
 
     def _idle_row(
@@ -384,8 +412,12 @@ def group_rows_by_node_interval(
 
 
 def is_modeled_cost(source: Optional[str]) -> bool:
-    """True for cost tiers the model computes itself (catalog or custom rates)."""
-    return (source or "") in {CostSource.PRICING_CATALOG.value, CostSource.CUSTOM_RATE.value}
+    """True for cost tiers the model computes itself (catalog or custom rates, or pending OpenCost re-pricing)."""
+    return (source or "") in {
+        CostSource.PRICING_CATALOG.value,
+        CostSource.CUSTOM_RATE.value,
+        CostSource.OPENCOST_PENDING.value,
+    }
 
 
 def container_gpu_fields(pod: CombinedMetric, container_count: int) -> Dict[str, Any]:

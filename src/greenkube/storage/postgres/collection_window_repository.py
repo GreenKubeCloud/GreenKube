@@ -17,7 +17,7 @@ from greenkube.utils.time import ensure_utc
 
 _COLUMNS = (
     "cluster_uid, source, window_start, window_end, status, expected_steps, steps_with_data, pod_rows, "
-    "cpu_series, pods_without_cpu, reason, opencost_total_cost, attributed_cost, collected_at"
+    "cpu_series, pods_without_cpu, reason, opencost_total_cost, attributed_cost, collected_at, cost_status"
 )
 
 
@@ -37,6 +37,7 @@ def _row(row) -> CollectionWindowRecord:
         opencost_total_cost=row["opencost_total_cost"],
         attributed_cost=row["attributed_cost"],
         collected_at=ensure_utc(row["collected_at"]),
+        cost_status=row["cost_status"],
     )
 
 
@@ -66,13 +67,14 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
                 r.opencost_total_cost,
                 r.attributed_cost,
                 ensure_utc(r.collected_at) if r.collected_at else None,
+                r.cost_status,
             )
             for r in records
         ]
         async with self._connection(connection) as conn:
             await conn.executemany(
                 f"""INSERT INTO collection_windows ({_COLUMNS})
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14, NOW()))
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14, NOW()), $15)
                 ON CONFLICT (cluster_uid, source, window_start) DO UPDATE SET
                     window_end = EXCLUDED.window_end,
                     status = EXCLUDED.status,
@@ -84,7 +86,8 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
                     reason = EXCLUDED.reason,
                     opencost_total_cost = EXCLUDED.opencost_total_cost,
                     attributed_cost = EXCLUDED.attributed_cost,
-                    collected_at = EXCLUDED.collected_at
+                    collected_at = EXCLUDED.collected_at,
+                    cost_status = EXCLUDED.cost_status
                 -- A re-collection without data (beyond retention) never downgrades stored rows.
                 WHERE NOT (collection_windows.status = 'collected' AND EXCLUDED.status = 'failed')""",
                 params,

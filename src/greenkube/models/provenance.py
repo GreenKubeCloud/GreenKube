@@ -33,6 +33,9 @@ class CostSource(StrEnum):
     KUBECOST = "kubecost"
     PRICING_CATALOG = "pricing_catalog"
     CUSTOM_RATE = "custom_rate"
+    OPENCOST_PENDING = "opencost_pending"
+    """Modeled cost of a window OpenCost could not price (outage, lag, rejected request): never
+    trusted, re-priced from OpenCost by the collection job once it answers again (COST-01)."""
     NONE = "none"
     MIXED = MIXED
 
@@ -256,6 +259,7 @@ COST_SOURCE_RANK: dict[str, int] = {
     CostSource.OPENCOST_DERIVED.value: 4,
     CostSource.PRICING_CATALOG.value: 3,
     CostSource.CUSTOM_RATE.value: 2,
+    CostSource.OPENCOST_PENDING.value: 2,
     CostSource.MIXED.value: 2,
     CostSource.NONE.value: 1,
 }
