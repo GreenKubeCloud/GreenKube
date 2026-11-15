@@ -348,9 +348,11 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             else:
                 await self._settle_revision(conn, stored, False, now)
             # A record never changes under an open plan (E7), not even its shared action, but the
-            # scan still saw its target: keep it alive so it does not expire while the plan is open.
+            # scan still saw its target: keep it alive so it does not expire while the plan is open. A
+            # lower request waiting for confirmation starts again after the plan (IMP-13).
             await conn.execute(
-                "UPDATE recommendation_history SET expires_at = COALESCE(?, expires_at), updated_at = ? WHERE id = ?",
+                "UPDATE recommendation_history SET expires_at = COALESCE(?, expires_at), updated_at = ?, "
+                "pending_revision = NULL WHERE id = ?",
                 (values["expires_at"], now, existing["id"]),
             )
             return UpsertOutcome(r.fingerprint, "queued" if decision.action == "queue" else "kept", existing["id"])
