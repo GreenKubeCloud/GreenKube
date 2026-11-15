@@ -124,6 +124,7 @@ class TestPopulateDatabase:
             patch("greenkube.core.db.db_manager", mock_db_manager),
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
+            patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
         ):
             counts = await _populate_database(days=2)
 
@@ -194,6 +195,7 @@ class TestPopulateDatabase:
             patch("greenkube.core.db.db_manager", mock_db_manager),
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
+            patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
         ):
             counts = await _populate_database(days=2)
 
@@ -259,6 +261,7 @@ class TestPopulateDatabase:
             patch("greenkube.core.db.db_manager", mock_db_manager),
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
+            patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
         ):
             counts = await _populate_database(days=2)
 
@@ -327,6 +330,7 @@ class TestPopulateDatabase:
             patch("greenkube.core.db.db_manager", mock_db_manager),
             patch("greenkube.core.metrics_compressor.MetricsCompressor", return_value=mock_compressor),
             patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=mock_refresher),
+            patch("greenkube.demo.changes.populate_demo_changes", AsyncMock(return_value=3)),
         ):
             counts = await _populate_database(days=2)
 

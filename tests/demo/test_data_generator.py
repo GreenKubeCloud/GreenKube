@@ -6,6 +6,8 @@ Validates that generated data is realistic, consistent, and correctly shaped.
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from greenkube.demo.data_generator import (
     DEMO_NODES,
     DEMO_WORKLOADS,
@@ -17,6 +19,9 @@ from greenkube.demo.data_generator import (
 )
 from greenkube.models.metrics import CombinedMetric, RecommendationRecord, RecommendationStatus, RecommendationType
 from greenkube.models.node import NodeInfo
+
+#: Statuses of a recommendation whose change landed (verified ones were measured afterwards).
+_LANDED = {RecommendationStatus.APPLIED, RecommendationStatus.VERIFIED}
 
 
 class TestGenerateNodeSnapshots:
@@ -296,7 +301,7 @@ class TestGenerateRecommendations:
     def test_all_types_have_been_applied(self):
         """The demo should already show one applied recommendation of each type."""
         recs = generate_recommendations()
-        applied_types = {rec.type for rec in recs if rec.status == RecommendationStatus.APPLIED}
+        applied_types = {rec.type for rec in recs if rec.status in _LANDED}
         assert applied_types == set(RecommendationType)
 
     def test_has_zombie_pod_recommendation(self):
@@ -342,7 +347,7 @@ class TestGenerateRecommendations:
 
     def test_applied_recommendations_have_realized_savings(self):
         """Applied recommendations must carry realized cost and CO2 savings."""
-        applied = [rec for rec in generate_recommendations() if rec.status == RecommendationStatus.APPLIED]
+        applied = [rec for rec in generate_recommendations() if rec.status in _LANDED]
         assert applied
         for rec in applied:
             assert rec.cost_saved is not None
@@ -362,3 +367,44 @@ class TestGenerateRecommendations:
                 assert rec.cost_saved > 0
             if rec.carbon_saved_co2e_grams is not None:
                 assert rec.carbon_saved_co2e_grams > 0
+
+
+class TestDemoMeasurementsAndProjections:
+    """Measured outcomes and Impact Model projections of the demo recommendations (WP-08.1)."""
+
+    def test_measured_recommendations_carry_measured_rates(self):
+        verified = [rec for rec in generate_recommendations() if rec.status == RecommendationStatus.VERIFIED]
+        assert len(verified) >= 10
+        for rec in verified:
+            assert rec.measured_cost_saved == rec.cost_saved
+            assert rec.verified_at is not None and rec.applied_at is not None
+            assert rec.verified_at > rec.applied_at
+
+    def test_an_inconclusive_change_stays_applied(self):
+        gateway = next(rec for rec in generate_recommendations() if rec.pod_name == "api-gateway-0")
+        assert gateway.status == RecommendationStatus.APPLIED
+        assert gateway.verification_status == "inconclusive"
+        assert gateway.measured_cost_saved is None
+
+    def test_active_rightsizings_project_released_capacity(self):
+        active = [
+            rec
+            for rec in generate_recommendations()
+            if rec.status == RecommendationStatus.ACTIVE
+            and rec.type in (RecommendationType.RIGHTSIZING_CPU, RecommendationType.RIGHTSIZING_MEMORY)
+        ]
+        assert len(active) >= 3
+        for rec in active:
+            capacity = rec.released_capacity
+            assert capacity is not None and capacity["direction"] == "release"
+            assert rec.evidence is not None and rec.risk_level is not None and rec.confidence is not None
+
+    def test_fixed_pool_recommendation_frees_capacity_without_billed_saving(self):
+        rec = next(rec for rec in generate_recommendations() if rec.pod_name == "qa-traceability-0")
+        assert rec.projected_billable_cost_annual == 0.0
+        allocated = rec.projected_allocated_cost_annual
+        assert allocated is not None and allocated > 0
+        capacity = rec.released_capacity
+        assert capacity is not None
+        assert capacity["instantaneous"]["cpu_cores"] == pytest.approx(0.5)
+        assert rec.projection_note is not None
