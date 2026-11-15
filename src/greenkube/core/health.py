@@ -12,7 +12,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from greenkube.core.config import Config, get_config
 from greenkube.models.health import (
@@ -135,6 +135,32 @@ async def check_opencost(cfg: Config) -> ServiceHealth:
     return await _probe_opencost(url, configured=True, discovered=False)
 
 
+async def _opencost_allocation_error(client: Any, url: str) -> Optional[str]:
+    """Why the OpenCost allocation call fails, or ``None`` (COST-01 step 6, COST-06 step 2).
+
+    ``/healthz`` answers even when the allocation call is rejected (401, 403)
+    or broken, so the call collection makes is tested too: a 10-minute window
+    aggregated by cluster, with the configured credentials.
+    """
+    from greenkube.collectors.opencost_collector import OpenCostCollector
+
+    base = url.rstrip("/")
+    endpoint = base if base.endswith("/allocation/compute") else base + "/allocation/compute"
+    end = int(time.time()) // 60 * 60
+    params = {"window": f"{end - 600},{end}", "aggregate": "cluster", "accumulate": "true"}
+    try:
+        resp = await client.get(endpoint, params=params, timeout=5.0, **OpenCostCollector._auth_kwargs())
+    except Exception as exc:
+        return f"OpenCost /healthz answers but the allocation request failed: {exc}"
+    status = getattr(resp, "status_code", 200)
+    if isinstance(status, int) and not 200 <= status < 300:
+        hint = (
+            " Check OPENCOST_BEARER_TOKEN or OPENCOST_USERNAME and OPENCOST_PASSWORD." if status in (401, 403) else ""
+        )
+        return f"OpenCost /healthz answers but the allocation request returned status {status}.{hint}"
+    return None
+
+
 async def _probe_opencost(url: str, configured: bool, discovered: bool) -> ServiceHealth:
     """Probe an OpenCost endpoint and return health status."""
     name = "opencost"
@@ -146,6 +172,18 @@ async def _probe_opencost(url: str, configured: bool, discovered: bool) -> Servi
             latency = (time.monotonic() - start) * 1000
 
             if 200 <= resp.status_code < 300:
+                allocation_error = await _opencost_allocation_error(client, url)
+                if allocation_error is not None:
+                    return ServiceHealth(
+                        name=name,
+                        status=ServiceStatus.DEGRADED,
+                        url=url,
+                        message=allocation_error,
+                        latency_ms=round((time.monotonic() - start) * 1000, 1),
+                        last_check=datetime.now(timezone.utc),
+                        configured=configured,
+                        discovered=discovered,
+                    )
                 return ServiceHealth(
                     name=name,
                     status=ServiceStatus.HEALTHY,
