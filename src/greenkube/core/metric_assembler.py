@@ -23,8 +23,12 @@ from ..models.provenance import (
     cost_source_for,
 )
 from ..storage.base_repository import CarbonIntensityRepository
+from ..storage.container_rows import CONTAINER_SAMPLE_INCOMPLETE as _CONTAINER_SAMPLE_INCOMPLETE
 
 logger = logging.getLogger(__name__)
+
+#: Re-exported: estimation reason of container rows of a pod where some containers had no sample (COL-17).
+CONTAINER_SAMPLE_INCOMPLETE = _CONTAINER_SAMPLE_INCOMPLETE
 
 
 #: Intensity provenance values that mean the figure is not a fresh provider value.
@@ -211,14 +215,25 @@ class MetricAssembler:
             if not containers:
                 continue
 
-            container_keys = [(aggregate.namespace, aggregate.pod_name, item.container_name) for item in containers]
-            has_container_usage = all(
-                container_key in resource_maps.container_cpu_usage_map
-                or container_key in resource_maps.container_memory_usage_map
-                for container_key in container_keys
-            )
-            if not has_container_usage:
+            # A container without a sample at the step (waiting, finished, just restarted) gets no
+            # row, and no longer drops the rows of its siblings (COL-17): the sampled containers carry
+            # the whole pod so container rows still sum to the pod row, flagged as incomplete.
+            sampled = [
+                item
+                for item in containers
+                if (aggregate.namespace, aggregate.pod_name, item.container_name)
+                in resource_maps.container_cpu_usage_map
+                or (aggregate.namespace, aggregate.pod_name, item.container_name)
+                in resource_maps.container_memory_usage_map
+            ]
+            if not sampled:
                 continue
+            incomplete = len(sampled) < len(containers)
+            containers = sampled
+            container_keys = [(aggregate.namespace, aggregate.pod_name, item.container_name) for item in containers]
+            estimation_reasons = list(aggregate.estimation_reasons)
+            if incomplete:
+                estimation_reasons = list(dict.fromkeys([*estimation_reasons, CONTAINER_SAMPLE_INCOMPLETE]))
 
             cpu_weights = (
                 [max(resource_maps.container_cpu_usage_map[key], 0) for key in container_keys]
@@ -307,8 +322,8 @@ class MetricAssembler:
                             "sample_count": resource_maps.container_sample_count_map.get(
                                 container_key, aggregate.sample_count
                             ),
-                            "is_estimated": aggregate.is_estimated,
-                            "estimation_reasons": list(aggregate.estimation_reasons),
+                            "is_estimated": aggregate.is_estimated or incomplete,
+                            "estimation_reasons": list(estimation_reasons),
                         }
                     )
                 )

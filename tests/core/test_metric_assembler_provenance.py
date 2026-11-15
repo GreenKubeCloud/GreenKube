@@ -147,3 +147,20 @@ def test_default_cost_placeholder_is_not_tagged_as_a_cost_rate():
     assert fields["total_cost"] == pytest.approx(0.05)
     assert fields["cost_source"] == "none"
     assert not is_cost_trusted(fields)
+
+
+def test_a_container_without_sample_does_not_drop_its_siblings_rows():
+    """COL-17 (S8): app has 250 m, proxy is waiting (no series): app still gets its row and the pod total."""
+    maps = PodResourceMaps(
+        container_cpu_usage_map={("shop", "web-0", "app"): 250},
+        container_memory_usage_map={("shop", "web-0", "app"): 100},
+    )
+
+    rows = MetricAssembler.assemble_container_metrics([_aggregate()], _containers(), maps)
+
+    assert [(row.container_name, row.cpu_usage_millicores) for row in rows] == [("app", 250)]
+    (row,) = rows
+    assert row.total_cost == pytest.approx(1.0)
+    assert row.joules == pytest.approx(1000.0)
+    assert row.co2e_grams == pytest.approx(10.0)
+    assert row.is_estimated and "container_sample_incomplete" in row.estimation_reasons

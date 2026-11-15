@@ -16,6 +16,7 @@ from ..base_repository import (
     is_persistable_intensity_record,
     measured_intensity_sql,
 )
+from ..container_rows import complete_container_rows, container_rows_of
 
 logger = logging.getLogger(__name__)
 
@@ -345,7 +346,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 query += _metadata_upsert("combined_metrics") + ";"
 
                 if replace_containers:
-                    metrics = await self._without_rows_over_stored_containers(conn, metrics, container_metrics)
+                    complete = complete_container_rows(container_metrics)
+                    metrics = await self._without_rows_over_stored_containers(conn, metrics, complete)
+                    container_metrics = container_rows_of(metrics, container_metrics)
                 metrics_data = []
                 for metric in metrics:
                     reasons = metric.estimation_reasons

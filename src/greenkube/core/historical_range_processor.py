@@ -56,7 +56,8 @@ logger = logging.getLogger(__name__)
 #: pods of the window, stored-row metadata on re-collection, degraded rows after
 #: repeated Kubernetes list failures.  ``+range.4`` rows are not rewritten.
 #: range.6 (COL-03 step 3): CPU of containers too short-lived for rate() comes from their counter
-#: (reason cpu_from_counter_start); such pods had no row or a NULL CPU before.  ``+range.5`` rows are
+#: (reason cpu_from_counter_start); such pods had no row or a NULL CPU before.  COL-17: a container
+#: without sample no longer drops the container rows of its siblings.  ``+range.5`` rows are
 #: not rewritten: re-collect a window inside Prometheus retention to apply it.
 CALCULATION_VERSION = f"{__version__}+range.6"
 # Day-sized chunks bound the memory of long backfills.

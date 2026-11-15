@@ -230,6 +230,17 @@ async def test_recollection_without_container_usage_keeps_the_stored_container_r
 
 
 @pytest.mark.asyncio
+async def test_first_collection_with_a_container_without_sample_stores_its_siblings(storage):
+    """COL-17: the sampled container gets its row; an incomplete batch only replaces nothing stored."""
+    cfg, repo, snapshots = storage
+    live = [_pod(300), _pod(200, container="side"), _pod(100).model_copy(update={"pod_name": "q"})]
+    rows = await _build(cfg, repo, snapshots, pod_list=live, containers=("app",)).run_range(*RANGE)
+    await repo.write_combined_metrics(rows, replace_containers=True)
+
+    assert await _stored_containers(repo) == ["app"]
+
+
+@pytest.mark.asyncio
 async def test_rows_without_provenance_are_not_reused_as_stored_metadata(storage):
     """Second review 2: rows written before range.4 (metadata_source NULL) carry the collection-time state."""
     cfg, repo, snapshots = storage
