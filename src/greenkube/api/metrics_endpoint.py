@@ -495,7 +495,8 @@ REGISTRY.register(SAVINGS_LEDGER_COUNTERS)
 
 SAVINGS_MEASURED_RATIO = Gauge(
     "greenkube_savings_measured_vs_projected_ratio",
-    "Share of net accrued CO2e savings that is measured rather than projected (0–1).",
+    "Share of net accrued CO2e savings that is measured rather than projected (0–1), "
+    "both accrued on the allocated basis since ledger/2.",
     ["cluster"],
     registry=REGISTRY,
 )

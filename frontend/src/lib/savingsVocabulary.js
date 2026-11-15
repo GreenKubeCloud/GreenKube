@@ -2,8 +2,10 @@
  * One savings vocabulary for every page (roadmap principle 3:
  * projected ≠ allocated ≠ realized).
  *
- * - **Projected**: GreenKube's estimate before a change is measured; the
- *   Impact Model scales it by the realization factor.
+ * - **Projected**: GreenKube's estimate before a change is measured, on the
+ *   allocated basis like a measurement (ledger `basis: allocated`). The
+ *   billable expectation (allocated x realization factor) is a derived figure
+ *   (`realization.projected_billable_cost_annual_expected`), never accrued.
  * - **Measured allocated**: what the changed workloads stop being charged,
  *   measured after the change (ledger method `measured_allocated`). The
  *   cluster bill drops only when capacity is actually removed.

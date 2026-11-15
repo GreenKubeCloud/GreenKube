@@ -51,6 +51,7 @@ from greenkube.storage.ledger_repository import V1_RAW_TABLE, V1_TABLES, LedgerR
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.ledger.identity import ClusterIdentity, ClusterIdentityResolver, ClusterIdentityUnavailable
 from greenkube.verify.ledger.model import (
+    BASIS_ALLOCATED,
     BOOK_ACCRUED,
     BOOK_RESTATEMENT,
     CO2E_UNIT,
@@ -67,13 +68,17 @@ from greenkube.verify.ledger.model import (
     REASON_SUPERSESSION,
     LedgerEntry,
     LedgerEntryDraft,
+    basis_of,
     entry_id_for,
+    format_time,
     v2_method,
 )
 
 logger = logging.getLogger(__name__)
 
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
+#: The accrual grid (one-hour slots, as the attribution job).
+SLOT_SECONDS = 3600
 #: v1 rows read per batch, and at most this many batches per pass (the rest catches up next pass).
 BATCH_SIZE = 2000
 MAX_BATCHES_PER_SYNC = 50
@@ -125,6 +130,34 @@ class SyncResult:
 
 def _value(raw: Any) -> str:
     return str(getattr(raw, "value", raw) or "")
+
+
+def _uncovered(
+    begin: datetime, finish: datetime, periods: Sequence[tuple[datetime, datetime]]
+) -> Optional[tuple[datetime, datetime, float]]:
+    """The hull and length (seconds) of ``[begin, finish)`` minus ``periods``; None when fully covered."""
+    pieces = [(begin, finish)]
+    for start, end in periods:
+        start, end = ensure_utc(start), ensure_utc(end)
+        next_pieces = []
+        for low, high in pieces:
+            if end <= low or start >= high:
+                next_pieces.append((low, high))
+                continue
+            if low < start:
+                next_pieces.append((low, start))
+            if end < high:
+                next_pieces.append((end, high))
+        pieces = next_pieces
+    seconds = sum((high - low).total_seconds() for low, high in pieces)
+    if seconds <= 0:
+        return None
+    return pieces[0][0], pieces[-1][1], seconds
+
+
+def _floor_slot(moment: datetime) -> datetime:
+    moment = ensure_utc(moment)
+    return moment - timedelta(seconds=moment.timestamp() % SLOT_SECONDS)
 
 
 def _is_drift_reversal(table: str, row: dict, method: str) -> bool:
@@ -310,6 +343,7 @@ class LedgerProjector:
                     reverses_entry_id=reverses,
                     source_table=table,
                     source_id=int(row["id"]),
+                    basis=basis_of(method, row.get("basis")),
                 )
             )
         return drafts
@@ -365,9 +399,7 @@ class LedgerProjector:
         if not records:
             return
         projections = await self.repo.unrestated_projections(identity.cluster_uid, records)
-        if not projections:
-            return
-        superseded = await self.repo.superseded_sources(projections)
+        superseded = await self.repo.superseded_sources(projections) if projections else set()
         provenance = await self.repo.provenance(records)
         drafts: List[LedgerEntryDraft] = []
         for projection in projections:
@@ -388,9 +420,79 @@ class LedgerProjector:
                     provenance=provenance.get(projection.recommendation_id, Provenance()),
                 )
             )
+        drafts.extend(await self._slot_restatements(identity, records, provenance))
         if drafts:
             inserted = await self.repo.append(identity.cluster_uid, identity.cluster_name, drafts, now=self._now())
             result.restated += len(inserted)
+
+    async def _slot_restatements(
+        self, identity: ClusterIdentity, records: Dict[int, Any], provenance: Dict[int, Provenance]
+    ) -> List[LedgerEntryDraft]:
+        """Measured amounts for the slots of ``[applied_at, verified_at)`` that no entry covers (LED-01 c).
+
+        A projection of exactly 0 (or one never accrued: catch-up limits,
+        downtime) writes no projected entry, so there is nothing to restate,
+        yet the measurement proved the saving of that period. Each such slot
+        gets a ``restatement`` entry at the measured rate (key
+        ``restatement:slot:{rec}:{slot}:{quantity}``). A slot is covered by a
+        projected or measured accrual of the same quantity, or by an earlier
+        slot restatement.
+        """
+        covered = await self.repo.covered_slots(identity.cluster_uid, records)
+        drafts: List[LedgerEntryDraft] = []
+        step = timedelta(seconds=SLOT_SECONDS)
+        for rec_id, record in records.items():
+            if record.applied_at is None:
+                continue
+            start = ensure_utc(record.applied_at)
+            end = ensure_utc(record.verified_at)
+            if end <= start:
+                continue
+            source = provenance.get(rec_id, Provenance())
+            currency = source.currency or self.currency
+            cursor = _floor_slot(start)
+            while cursor < end:
+                begin, finish = max(cursor, start), min(cursor + step, end)
+                for quantity, annual, unit, unit_currency in (
+                    (QUANTITY_COST, record.measured_cost_saved, currency, currency),
+                    (QUANTITY_CO2E, record.measured_co2e_saved_grams, CO2E_UNIT, None),
+                ):
+                    if annual is None or float(annual) == 0.0:
+                        continue
+                    gap = _uncovered(begin, finish, covered.get((rec_id, quantity, cursor), ()))
+                    if gap is None:
+                        continue
+                    gap_start, gap_end, seconds = gap
+                    key = f"restatement:slot:{rec_id}:{format_time(cursor)}:{quantity}"
+                    drafts.append(
+                        LedgerEntryDraft(
+                            entry_key=key,
+                            group_key=f"restatement:slot:{rec_id}:{format_time(cursor)}",
+                            entry_kind=ENTRY_RESTATEMENT,
+                            book=BOOK_RESTATEMENT,
+                            reason=REASON_RESTATEMENT,
+                            method=METHOD_MEASURED_ALLOCATED,
+                            quantity=quantity,
+                            value=float(annual) * seconds / SECONDS_PER_YEAR,
+                            unit=unit,
+                            currency=unit_currency,
+                            method_version=source.method_version or LEDGER_WRITER_VERSION,
+                            period_start=gap_start,
+                            period_end=gap_end,
+                            slot_start=cursor,
+                            created_by="ledger-restatement",
+                            recommendation_id=rec_id,
+                            recommendation_ids=list(source.recommendation_ids or (rec_id,)),
+                            namespace=getattr(record, "namespace", None) or "",
+                            recommendation_type=_value(getattr(record, "type", "")),
+                            change_id=source.change_id,
+                            measurement_id=source.measurement_id,
+                            pr_url=source.pr_url,
+                            basis=BASIS_ALLOCATED,
+                        )
+                    )
+                cursor += step
+        return drafts
 
 
 def reversal_of(entry: LedgerEntry, reason: str, *, created_by: str) -> LedgerEntryDraft:
@@ -419,6 +521,7 @@ def reversal_of(entry: LedgerEntry, reason: str, *, created_by: str) -> LedgerEn
         measurement_id=entry.measurement_id,
         pr_url=entry.pr_url,
         reverses_entry_id=entry.entry_id,
+        basis=entry.effective_basis,
     )
 
 
@@ -456,6 +559,7 @@ def restatement_of(projection: LedgerEntry, *, annual_rate: float, provenance: P
         measurement_id=provenance.measurement_id,
         pr_url=provenance.pr_url or projection.pr_url,
         restates_entry_id=projection.entry_id,
+        basis=BASIS_ALLOCATED,
     )
     return [reversal, measured]
 

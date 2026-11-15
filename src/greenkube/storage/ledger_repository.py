@@ -25,7 +25,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.utils.time import ensure_utc
@@ -87,6 +87,7 @@ _COLUMNS = (
     "created_by",
     "prev_hash",
     "hash",
+    "basis",
 )
 _TIME_COLUMNS = ("period_start", "period_end", "slot_start", "created_at")
 _SELECT = ", ".join(_COLUMNS)
@@ -130,6 +131,15 @@ class SummaryRow:
     entry_kind: str
     value: float
     entries: int
+    #: Accounting basis (stored, or inferred from the method for entries stored before ledger/2).
+    basis: str = ""
+
+
+#: SQL of an entry's accounting basis (``model.basis_of``): entries stored before migration 0160 have none.
+_BASIS_SQL = (
+    "COALESCE(basis, CASE method WHEN 'projected' THEN 'billable_expected' WHEN 'realized_billed' THEN 'billed' "
+    "WHEN 'user_declared' THEN 'declared' ELSE 'allocated' END)"
+)
 
 
 def _impact_currency(raw: Any) -> Optional[str]:
@@ -384,6 +394,7 @@ class LedgerRepository:
         found, however late it becomes visible.
         """
         slot = "l.slot_start" if table == V1_RAW_TABLE else "NULL AS slot_start"
+        basis = "l.basis" if table == V1_RAW_TABLE else "NULL AS basis"
         where = self._v1_scope(table, unprojected_for)
         params: List[Any] = [cluster_name, int(after_id)]
         if unprojected_for is not None:
@@ -391,7 +402,7 @@ class LedgerRepository:
         rows = await self._select(
             "SELECT l.id, l.recommendation_id, l.cluster_name, l.namespace, l.recommendation_type, "
             "l.measurement_method, l.co2e_saved_grams, l.cost_saved_dollars, l.period_start, l.period_end, "
-            f"{slot}, l.confidence, l.superseded FROM {table} l WHERE {where} ORDER BY l.id LIMIT ?",
+            f"{slot}, {basis}, l.confidence, l.superseded FROM {table} l WHERE {where} ORDER BY l.id LIMIT ?",
             [*params, int(limit)],
         )
         for row in rows:
@@ -460,6 +471,38 @@ class LedgerRepository:
             )
             result.extend(self._entry(row) for row in rows)
         return result
+
+    async def covered_slots(
+        self, cluster_uid: str, recommendation_ids: Iterable[int]
+    ) -> Dict[Tuple[int, str, datetime], List[Tuple[datetime, datetime]]]:
+        """Periods covered per ``(recommendation_id, quantity, slot_start)``.
+
+        Covered: a projected or measured accrual of that quantity (reversed or
+        not: a reversed projection is restated by its own pair), or a slot
+        restatement written earlier (which covers its whole slot).
+        """
+        ids = sorted({int(item) for item in recommendation_ids})
+        covered: Dict[Tuple[int, str, datetime], List[Tuple[datetime, datetime]]] = {}
+        for offset in range(0, len(ids), _CHUNK):
+            chunk = ids[offset : offset + _CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = await self._select(
+                "SELECT recommendation_id, quantity, entry_key, period_start, period_end FROM savings_ledger_entries "
+                f"WHERE cluster_uid = ? AND recommendation_id IN ({placeholders}) AND ("
+                "(entry_kind = 'accrual' AND method IN ('projected', 'measured_allocated')) "
+                "OR entry_key LIKE 'restatement:slot:%')",
+                [cluster_uid, *chunk],
+            )
+            for row in rows:
+                start, end = parse_time(row.get("period_start")), parse_time(row.get("period_end"))
+                if start is None or end is None:
+                    continue
+                slot = start - timedelta(seconds=start.timestamp() % 3600)
+                if str(row["entry_key"]).startswith("restatement:slot:"):
+                    start, end = slot, slot + timedelta(hours=1)
+                key = (int(row["recommendation_id"]), str(row["quantity"]), slot)
+                covered.setdefault(key, []).append((start, end))
+        return covered
 
     async def superseded_sources(self, entries: Sequence[LedgerEntry]) -> set[str]:
         """Entry ids among ``entries`` whose v1 source row is superseded."""
@@ -627,7 +670,7 @@ class LedgerRepository:
         end: Optional[datetime] = None,
         namespace: Optional[str] = None,
     ) -> List[SummaryRow]:
-        """Signed totals per method, quantity, book and kind.
+        """Signed totals per method, quantity, book, kind and accounting basis.
 
         With a window, an entry contributes the share of its period inside
         ``[start, end)``, as ``GET /recommendations/savings`` does.
@@ -650,10 +693,11 @@ class LedgerRepository:
                 )
             share_params = [self._ts(start), self._ts(end), self._ts(end), self._ts(start)]
         rows = await self._select(
-            f"SELECT method, quantity, unit, book, entry_kind, SUM(value * share) AS value, COUNT(*) AS entries "
-            f"FROM (SELECT method, quantity, unit, book, entry_kind, value, {share} AS share "
+            "SELECT method, quantity, unit, book, entry_kind, basis, SUM(value * share) AS value, COUNT(*) AS entries "
+            f"FROM (SELECT method, quantity, unit, book, entry_kind, {_BASIS_SQL} AS basis, value, {share} AS share "
             f"FROM savings_ledger_entries WHERE {where}) AS windowed "
-            "GROUP BY method, quantity, unit, book, entry_kind ORDER BY method, quantity, book, entry_kind",
+            "GROUP BY method, quantity, unit, book, entry_kind, basis "
+            "ORDER BY method, quantity, book, entry_kind, basis",
             [*share_params, *params],
         )
         return [
@@ -665,6 +709,7 @@ class LedgerRepository:
                 entry_kind=row["entry_kind"],
                 value=float(row["value"] or 0.0),
                 entries=int(row["entries"] or 0),
+                basis=str(row["basis"]),
             )
             for row in rows
         ]

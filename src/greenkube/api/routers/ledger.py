@@ -57,7 +57,10 @@ logger = logging.getLogger(__name__)
 
 #: What each ledger method measures (projected != allocated != realized), for labels.
 METHOD_BASIS: Dict[str, str] = {
-    "projected": "projection of an applied change that is not measured yet",
+    "projected": (
+        "projection of an applied change that is not measured yet, on the allocated basis like measurements "
+        "(entries before ledger/2: expected billable, see accounting_bases)"
+    ),
     "measured_allocated": "measured allocated saving (what the workload stops being charged); not the bill",
     "realized_billed": "measured billed saving (removed node-hours on the bill)",
     "user_declared": "value declared by a user, never measured",
@@ -96,6 +99,7 @@ FOCUS_COLUMNS = (
     "x-greenkube-reason",
     "x-greenkube-method",
     "x-greenkube-method-version",
+    "x-greenkube-basis",
     "x-greenkube-saving",
     "x-greenkube-co2e-g",
     "x-greenkube-window-share",
@@ -145,6 +149,7 @@ CSV_COLUMNS = (
     "created_by",
     "prev_hash",
     "hash",
+    "basis",
 )
 
 
@@ -365,6 +370,12 @@ async def get_ledger_summary(
             },
         )
         bucket["accrued" if row.book == BOOK_ACCRUED else "restatement"] += row.value
+        # LED-01: never mix bases silently; each total says how much of it is on which basis.
+        basis = bucket.setdefault("accounting_bases", {}).setdefault(
+            row.basis, {"accrued": 0.0, "restatement": 0.0, "restated": 0.0}
+        )
+        basis["accrued" if row.book == BOOK_ACCRUED else "restatement"] += row.value
+        basis["restated"] += row.value
         by_kind[row.entry_kind] = by_kind.get(row.entry_kind, 0) + row.entries
     for bucket in totals.values():
         bucket["restated"] = bucket["accrued"] + bucket["restatement"]
@@ -495,6 +506,7 @@ def _focus_row(cost: Optional[LedgerEntry], co2e: Optional[LedgerEntry], share: 
         "x-greenkube-reason": entry.reason,
         "x-greenkube-method": entry.method,
         "x-greenkube-method-version": entry.method_version,
+        "x-greenkube-basis": entry.effective_basis,
         "x-greenkube-saving": repr(saving),
         "x-greenkube-co2e-g": repr((co2e.value if co2e is not None else 0.0) * share),
         "x-greenkube-window-share": repr(share),

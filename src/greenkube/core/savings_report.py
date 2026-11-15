@@ -59,7 +59,13 @@ def _realization_factor(record: RecommendationRecord) -> Optional[float]:
 
 
 def realization_summary(records: Iterable[RecommendationRecord]) -> RealizationSummary:
-    """Measured allocated rates of ``records`` and the billed saving their realization factors imply."""
+    """Measured allocated rates of ``records`` and the billed saving their realization factors imply.
+
+    Also the projected allocated rate of the changes still accruing as
+    projected and its billable expectation (allocated x realization factor):
+    a derived figure, never accrued (LED-01).
+    """
+    records = list(records)
     cost = co2e = billed_cost = billed_co2e = weighted = 0.0
     count = without = 0
     for record in records:
@@ -82,7 +88,23 @@ def realization_summary(records: Iterable[RecommendationRecord]) -> RealizationS
         billed_co2e += measured_co2e * factor
         weighted += measured_cost
     known = count - without
+    projected_cost = 0.0
+    projected_billable: Optional[float] = None
+    for record in records:
+        try:
+            components = [item for item in accrual_components(record) if item.method == METHOD_PROJECTED]
+        except (InvalidSavingsRecord, ValueError):
+            continue
+        rate = math.fsum(item.cost_per_year for item in components)
+        if not components:
+            continue
+        projected_cost += rate
+        factor = _realization_factor(record)
+        if factor is not None:
+            projected_billable = (projected_billable or 0.0) + rate * factor
     return RealizationSummary(
+        projected_allocated_cost_annual=projected_cost,
+        projected_billable_cost_annual_expected=projected_billable,
         measured_allocated_cost_annual=cost,
         measured_allocated_co2e_grams_annual=co2e,
         realization_factor=(billed_cost / weighted) if weighted else None,

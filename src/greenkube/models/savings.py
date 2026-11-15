@@ -85,6 +85,13 @@ class SavingsLedgerRecord(BaseModel):
     actual_value: Optional[float] = Field(None, description="Annual CO2e rate used for this accrual.")
     confidence: Optional[float] = Field(None, description="Confidence attached to the source rate, 0.0–1.0.")
     superseded: bool = Field(False, description="True when a later outcome invalidated this attribution.")
+    basis: Optional[str] = Field(
+        None,
+        description=(
+            "Accounting basis of the amounts (LED-01): allocated, billable_expected, billed or declared. "
+            "None only for rows written without one (drift reversals and demo rows: inferred from the method)."
+        ),
+    )
 
     @field_validator("co2e_saved_grams", "cost_saved_dollars")
     @classmethod
@@ -201,6 +208,20 @@ class RealizationSummary(BaseModel):
         0, description="Measured recommendations whose projection has no realization factor (left out of the factor)."
     )
     realized_billed_measured: bool = Field(False, description="Whether billed savings are measured (not yet).")
+    projected_allocated_cost_annual: float = Field(
+        0.0,
+        description=(
+            "Projected annual cost saving of the changes still accruing as projected, on the allocated basis "
+            "(the basis of the projected accruals since ledger/2, same as projected_annual.cost)."
+        ),
+    )
+    projected_billable_cost_annual_expected: Optional[float] = Field(
+        None,
+        description=(
+            "Projected allocated cost x realization factor: the share expected on the bill. A derived "
+            "expectation, never accrued in the ledger (None when no projection has a realization factor)."
+        ),
+    )
 
 
 def _deprecated(description: str) -> Any:
