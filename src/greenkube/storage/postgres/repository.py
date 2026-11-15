@@ -44,6 +44,41 @@ def _allocation_values(metric: CombinedMetric) -> tuple[Any, ...]:
     return tuple(getattr(metric, column) for column in ALLOCATION_COLUMNS)
 
 
+#: Where the node and pod metadata of a raw row came from (WP-01.1, migration 0120).
+ROW_SOURCE_COLUMNS: tuple[str, ...] = ("node_source", "metadata_source")
+
+
+def _row_source_values(metric: CombinedMetric) -> tuple[Any, ...]:
+    return tuple(getattr(metric, column) for column in ROW_SOURCE_COLUMNS)
+
+
+def _keep_known_metadata(table: str, column: str, known: str) -> str:
+    """Upsert expression that never lets a row without pod metadata erase stored metadata (COL-01).
+
+    A re-collected row whose ``metadata_source`` is ``missing`` keeps the stored
+    value of ``column`` when the stored row had it (``known`` is the SQL test).
+    """
+    return (
+        f"{column} = CASE WHEN EXCLUDED.metadata_source = 'missing' AND ({known}) "
+        f"THEN {table}.{column} ELSE EXCLUDED.{column} END"
+    )
+
+
+def _metadata_upsert(table: str) -> str:
+    """SET clauses of owner, requests and metadata_source for raw metric upserts."""
+    has_metadata = f"{table}.owner_kind IS NOT NULL OR {table}.cpu_request > 0 OR {table}.memory_request > 0"
+    return ",\n".join(
+        [
+            _keep_known_metadata(table, "owner_kind", f"{table}.owner_kind IS NOT NULL"),
+            _keep_known_metadata(table, "owner_name", f"{table}.owner_name IS NOT NULL"),
+            _keep_known_metadata(table, "cpu_request", f"{table}.cpu_request > 0"),
+            _keep_known_metadata(table, "memory_request", f"{table}.memory_request > 0"),
+            _keep_known_metadata(table, "metadata_source", has_metadata),
+            "node_source = EXCLUDED.node_source",
+        ]
+    )
+
+
 #: Columns of ``node_idle_metrics`` (``greenkube.impact.rows.NodeIdleMetric`` fields, migration 0050).
 IDLE_METRIC_COLUMNS: tuple[str, ...] = (
     "node",
@@ -251,7 +286,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         calculation_version,
                         cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                         cost_source, usage_source, power_source, intensity_source,
-                        model_version, gpu_power_watts
+                        model_version, gpu_power_watts, node_source, metadata_source
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8,
@@ -269,7 +304,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         $35,
                         $36, $37, $38, $39, $40,
                         $41, $42, $43, $44,
-                        $45, $46
+                        $45, $46, $47, $48
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         total_cost = EXCLUDED.total_cost,
@@ -277,8 +312,6 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         pue = EXCLUDED.pue,
                         grid_intensity = EXCLUDED.grid_intensity,
                         joules = EXCLUDED.joules,
-                        cpu_request = EXCLUDED.cpu_request,
-                        memory_request = EXCLUDED.memory_request,
                         cpu_usage_millicores = EXCLUDED.cpu_usage_millicores,
                         memory_usage_bytes = EXCLUDED.memory_usage_bytes,
                         network_receive_bytes = EXCLUDED.network_receive_bytes,
@@ -291,8 +324,6 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         ephemeral_storage_usage_bytes = EXCLUDED.ephemeral_storage_usage_bytes,
                         gpu_usage_millicores = EXCLUDED.gpu_usage_millicores,
                         restart_count = EXCLUDED.restart_count,
-                        owner_kind = EXCLUDED.owner_kind,
-                        owner_name = EXCLUDED.owner_name,
                         period = EXCLUDED.period,
                         duration_seconds = EXCLUDED.duration_seconds,
                         grid_intensity_timestamp = EXCLUDED.grid_intensity_timestamp,
@@ -314,8 +345,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         power_source = EXCLUDED.power_source,
                         intensity_source = EXCLUDED.intensity_source,
                         model_version = EXCLUDED.model_version,
-                        gpu_power_watts = EXCLUDED.gpu_power_watts;
+                        gpu_power_watts = EXCLUDED.gpu_power_watts,
                 """
+                query += _metadata_upsert("combined_metrics") + ";"
 
                 metrics_data = []
                 for metric in metrics:
@@ -361,6 +393,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             metric.calculation_version,
                             *_provenance_values(metric),
                             *_allocation_values(metric),
+                            *_row_source_values(metric),
                         )
                     )
 
@@ -469,13 +502,14 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version,
                 cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                 cost_source, usage_source, power_source, intensity_source,
-                emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts
+                emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
+                node_source, metadata_source
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
                 $10, $11, $12, $13, $14, $15, $16, $17,
                 $18, $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31,
-                $32, $33, $34, $35, $36
+                $32, $33, $34, $35, $36, $37, $38
             )
             ON CONFLICT (namespace, pod_name, container_name, timestamp) DO UPDATE SET
                 total_cost = EXCLUDED.total_cost,
@@ -509,7 +543,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 cpu_limit = EXCLUDED.cpu_limit,
                 memory_limit = EXCLUDED.memory_limit,
                 model_version = EXCLUDED.model_version,
-                gpu_power_watts = EXCLUDED.gpu_power_watts
+                gpu_power_watts = EXCLUDED.gpu_power_watts,
+                node_source = EXCLUDED.node_source,
+                metadata_source = EXCLUDED.metadata_source
         """
         rows = []
         for metric in metrics:
@@ -546,6 +582,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     metric.cpu_limit,
                     metric.memory_limit,
                     *_allocation_values(metric),
+                    *_row_source_values(metric),
                 )
             )
         try:

@@ -1,0 +1,11 @@
+### Added
+- Pod metadata history (`pod_snapshots`, migration 0120): every collection records the owner, requests, limits and containers of the live pods, one version per spec.
+- Raw pod and container rows record `node_source` (`snapshot`, `current_api`, `unknown`) and `metadata_source` (`k8s_snapshot`, `missing`).
+
+### Fixed
+- Historical rows take node zone, Electricity Maps zone, provider and PUE, instance type and embodied profile from the node snapshot valid at the sample time, so rows of a node that left the cluster no longer fall back to the default zone and PUE with zero embodied carbon (RECON-05, COL-01).
+- Historical rows take owner, requests and container list from the pod history at the sample time, so a pod deleted before its window was collected keeps its owner, requests and container rows (COL-01).
+- A re-collected row without pod metadata no longer overwrites the stored owner and requests (COL-01).
+
+### Changed
+- Calculation version `+range.4`. Rows stored before keep the node and pod state of their collection time and are not rewritten.

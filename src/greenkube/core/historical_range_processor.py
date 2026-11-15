@@ -33,9 +33,10 @@ from ..energy.node_power import NodePowerProfile, resolve_node_power_profile
 from ..impact.power import GpuDevice, GpuPowerModel, NodeGpuPower, node_gpu_power
 from ..impact.realization import refresh_realization_context
 from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour
-from ..models.metrics import CombinedMetric, EnergyMetric
-from ..models.node import NodeInfo
-from ..models.provenance import UsageSource
+from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
+from ..models.node import NodeInfo, NodeZoneContext
+from ..models.provenance import MetadataSource, NodeSource, UsageSource
+from ..storage.base_pod_snapshot_repository import PodSnapshotRepository, snapshot_at
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
 
@@ -44,9 +45,12 @@ logger = logging.getLogger(__name__)
 #: Bumped when the range pipeline changes how stored values are computed
 #: (A1: pod cgroup no longer double counted; A2: half-open per-step samples;
 #: A10: capacity-derived power profiles; B2: energy, CO2e and modeled cost
-#: allocated by the Impact Model, see ``model_version``).  Rows written before
-#: carry the bare package version and over-state CPU, memory and energy.
-CALCULATION_VERSION = f"{__version__}+range.3"
+#: allocated by the Impact Model, see ``model_version``; range.4, WP-01.1: node
+#: attributes and pod metadata as of the sample time, from node and pod
+#: snapshots).  Rows written before carry the bare package version and
+#: over-state CPU, memory and energy; ``+range.3`` rows keep the node and pod
+#: state of their collection time (``node_source``/``metadata_source`` NULL).
+CALCULATION_VERSION = f"{__version__}+range.4"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
@@ -57,6 +61,10 @@ _MEMORY_PAGE_BYTES = 4096
 POD_CGROUP_TOLERANCE = 0.05
 #: Estimation reason of container usage refitted to its pod cgroup (USER BUG 2).
 CONTAINER_USAGE_EXCEEDS_POD = "container_usage_exceeds_pod"
+#: Estimation reason of a pod row without any pod metadata (no history, not in the live pod list).
+POD_METADATA_MISSING = "pod_metadata_missing"
+#: Pod history versions read around the range: a pod of the range was observed at most this far outside it.
+_POD_SNAPSHOT_MARGIN = timedelta(hours=1)
 
 
 class RangeCollectionError(RuntimeError):
@@ -84,6 +92,7 @@ class HistoricalRangeProcessor:
         zone_mapper: NodeZoneMapper,
         config: Config | None = None,
         metrics_server_collector: MetricsServerCollector | None = None,
+        pod_snapshot_repository: PodSnapshotRepository | None = None,
     ):
         self.prometheus_collector = prometheus_collector
         self.opencost_collector = opencost_collector
@@ -98,6 +107,8 @@ class HistoricalRangeProcessor:
         self.zone_mapper = zone_mapper
         self._config = config if config is not None else get_config()
         self._metrics_server_collector = metrics_server_collector or MetricsServerCollector()
+        #: Pod metadata history (WP-01.1); without it pod metadata comes from the live pod list only.
+        self.pod_snapshot_repository = pod_snapshot_repository
         self._promql = PromQLCatalog.from_config(self._config)
         self._allocator = MetricRowAllocator(self._config)
         self._gpu_model = GpuPowerModel()
@@ -410,6 +421,39 @@ class HistoricalRangeProcessor:
             is_fallback=power.is_fallback,
         )
 
+    async def _pod_history(
+        self,
+        live_pods: List[PodMetric],
+        now: datetime,
+        start: datetime,
+        end: datetime,
+        step_seconds: int,
+    ) -> dict:
+        """Record the live pod list and read the pod history around ``[start, end)`` (WP-01.1).
+
+        Returns ``{(namespace, pod): [PodSnapshot, ...]}``.  Without a history
+        repository, or when it fails, the result is empty and pod metadata
+        comes from the live pod list; rows of other pods get
+        ``metadata_source = missing``, so the degradation is visible per row.
+        """
+        repository = self.pod_snapshot_repository
+        if repository is None:
+            return {}
+        margin = max(_POD_SNAPSHOT_MARGIN, timedelta(seconds=step_seconds))
+        try:
+            if live_pods:
+                await repository.save_pods(live_pods, now)
+            return await repository.get_snapshots(start - margin, end + margin)
+        except Exception as error:
+            logger.warning(
+                "Pod metadata history unavailable (%s); pods missing from the live pod list get "
+                "metadata_source=missing for %s -> %s.",
+                error,
+                start.isoformat(),
+                end.isoformat(),
+            )
+            return {}
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -505,30 +549,32 @@ class HistoricalRangeProcessor:
         except Exception:
             current_node_map = {}
 
-        # Pod request maps
+        # Pod metadata (owner, requests, containers) as of each sample (WP-01.1, COL-01).
         try:
             pod_metrics_list = await pod_collector.collect()
-            pod_request_map_agg = defaultdict(int)
-            pod_mem_map_agg = defaultdict(int)
-            pod_ephemeral_storage_map_agg = defaultdict(int)
-            pod_owner_map: dict[tuple[str, str], tuple[str, str]] = {}
-            for p in pod_metrics_list:
-                key = (p.namespace, p.pod_name)
-                if p.owner_kind and p.owner_name:
-                    # Pod rows carry their workload owner so replicas share one usage target.
-                    pod_owner_map.setdefault(key, (p.owner_kind, p.owner_name))
-                pod_request_map_agg[key] += p.cpu_request
-                pod_mem_map_agg[key] += p.memory_request
-                pod_ephemeral_storage_map_agg[key] += p.ephemeral_storage_request
-            pod_request_map = pod_request_map_agg
-            pod_mem_map = pod_mem_map_agg
-            pod_ephemeral_storage_map = pod_ephemeral_storage_map_agg
         except Exception:
             pod_metrics_list = []
-            pod_owner_map = {}
-            pod_request_map = {}
-            pod_mem_map = {}
-            pod_ephemeral_storage_map = {}
+        live_pods: dict[tuple[str, str], list[PodMetric]] = defaultdict(list)
+        for pod_metric in pod_metrics_list:
+            live_pods[(pod_metric.namespace, pod_metric.pod_name)].append(pod_metric)
+        pod_history = await self._pod_history(pod_metrics_list, now, start_dt, end_dt, chosen_step_sec)
+
+        def pod_metadata_at(pod_key: tuple[str, str], timestamp: datetime) -> tuple[list[PodMetric], MetadataSource]:
+            """Containers (with owner and requests) of a pod as of ``timestamp``.
+
+            The history version valid at ``timestamp`` (or the nearest one),
+            else the live pod list, else nothing (``missing``): a pod deleted
+            before its window was collected keeps the metadata it had.
+            """
+            versions = pod_history.get(pod_key)
+            if versions:
+                version = snapshot_at(versions, timestamp)
+                if version is not None:
+                    return version.pod_metrics(), MetadataSource.K8S_SNAPSHOT
+            live = live_pods.get(pod_key)
+            if live:
+                return live, MetadataSource.K8S_SNAPSHOT
+            return [], MetadataSource.MISSING
 
         # Current node metadata — collected once here for zone mapping and
         # assembly.  Historical snapshots (node_timeline) cover the past;
@@ -538,14 +584,32 @@ class HistoricalRangeProcessor:
         except Exception:
             nodes_info = {}
 
-        def profile_for_node(node_name: str, timestamp: datetime) -> NodePowerProfile:
-            """Resolve the node power profile with provenance (A10)."""
-            node_info = get_node_info_at(node_name, timestamp) if node_name else None
+        def node_at(node_name: str, timestamp: datetime) -> tuple[NodeInfo | None, NodeSource]:
+            """Node attributes as of ``timestamp`` (WP-01.1, RECON-05).
+
+            The snapshot valid at ``timestamp``, else the earliest snapshot after
+            it (a node first saved after the sample), else the node as the API
+            lists it now.  A node that left the cluster before the window was
+            collected therefore keeps its real zone, provider and instance type.
+            """
+            if not node_name:
+                return None, NodeSource.UNKNOWN
+            info = get_node_info_at(node_name, timestamp)
+            if info is None:
+                info = next((later for ts, later in node_timeline.get(node_name, ()) if ts > timestamp), None)
+            if info is not None:
+                return info, NodeSource.SNAPSHOT
+            current = nodes_info.get(node_name)
+            if current is not None:
+                return current, NodeSource.CURRENT_API
+            return None, NodeSource.UNKNOWN
+
+        def profile_for_node(node_name: str, info: NodeInfo | None) -> NodePowerProfile:
+            """Resolve the node power profile with provenance (A10) from the node as of the sample."""
             current_info = nodes_info.get(node_name) if node_name else None
-            info = node_info or current_info
             instance_type = (info.instance_type if info else None) or current_node_map.get(node_name)
             cpu_capacity = None
-            for candidate in (node_info, current_info):
+            for candidate in (info, current_info):
                 if candidate is not None and candidate.cpu_capacity_cores:
                     cpu_capacity = candidate.cpu_capacity_cores
                     break
@@ -558,13 +622,27 @@ class HistoricalRangeProcessor:
                 default_profile=estimator.DEFAULT_INSTANCE_PROFILE,
             )
 
-        # Node contexts for zone mapping — pass already-collected nodes_info
-        # so the zone mapper never triggers an extra K8s API call.
-        node_contexts = await self.zone_mapper.map_nodes(nodes_info)
+        # Zone contexts are mapped from the node as of each sample (snapshot or
+        # current), never by a Kubernetes API call; one mapping per node version.
+        zone_context_cache: dict[tuple, NodeZoneContext | None] = {}
 
-        # Fetch / cache Boavizta embodied-emissions profiles once for the whole range.
+        async def zone_context_for(node_name: str, info: NodeInfo | None) -> NodeZoneContext | None:
+            if not node_name or info is None:
+                return None
+            cache_key = (node_name, info.zone, info.region, info.cloud_provider)
+            if cache_key not in zone_context_cache:
+                contexts = await self.zone_mapper.map_nodes({node_name: info})
+                zone_context_cache[cache_key] = (contexts or {}).get(node_name)
+            return zone_context_cache[cache_key]
+
+        # Boavizta embodied profiles for every node version the window can use:
+        # the current nodes and every snapshot of the timeline (RECON-05).
+        embodied_nodes: dict[str, NodeInfo] = dict(nodes_info)
+        for node_name, timeline in node_timeline.items():
+            for index, (_ts, snapshot_info) in enumerate(timeline):
+                embodied_nodes[f"{node_name}#snapshot{index}"] = snapshot_info
         try:
-            boavizta_cache = await self.assembler.embodied_service.prepare_embodied_data(nodes_info)
+            boavizta_cache = await self.assembler.embodied_service.prepare_embodied_data(embodied_nodes)
         except Exception as e:
             logger.warning("Failed to prepare embodied data: %s. Embodied emissions will be 0.", e)
             boavizta_cache = {}
@@ -707,9 +785,19 @@ class HistoricalRangeProcessor:
 
             del samples, pod_node_map_by_ts
 
+            # Node attributes and zone context of every (sample, node), as of the sample.
+            node_state: dict[tuple[int, str], tuple[NodeInfo | None, NodeSource, NodeZoneContext | None]] = {}
+            for sample_start, node_name in groups:
+                info, node_source = node_at(node_name, datetime.fromtimestamp(sample_start, tz=timezone.utc))
+                node_state[(sample_start, node_name)] = (
+                    info,
+                    node_source,
+                    await zone_context_for(node_name, info),
+                )
+
             # Prefetch carbon intensities, once per zone and sample.
             for sample_start, node_name in groups:
-                context = node_contexts.get(node_name) if node_name else None
+                context = node_state[(sample_start, node_name)][2]
                 zone = context.emaps_zone if context else self._config.DEFAULT_ZONE
                 ts = datetime.fromtimestamp(sample_start, tz=timezone.utc)
                 try:
@@ -723,7 +811,8 @@ class HistoricalRangeProcessor:
             for (sample_start, node_name), pod_keys in sorted(groups.items()):
                 ts = datetime.fromtimestamp(sample_start, tz=timezone.utc)
                 sample_key = sample_start
-                power = profile_for_node(node_name, ts)
+                _ni, node_source, node_context = node_state[(sample_start, node_name)]
+                power = profile_for_node(node_name, _ni)
                 node_power_sources[(node_name, sample_start)] = power.source
                 if power.is_fallback:
                     unknown_power_nodes.add(node_name)
@@ -735,9 +824,7 @@ class HistoricalRangeProcessor:
                 range_disk_write_map = disk_write_by_sample.get(sample_key, {})
                 range_restart_map = restart_by_sample.get(sample_key, {})
                 range_ephemeral_usage_map = ephemeral_usage_by_sample.get(sample_key, {})
-                node_context = node_contexts.get(node_name) if node_name else None
                 zone = node_context.emaps_zone if node_context else self._config.DEFAULT_ZONE
-                _ni = nodes_info.get(node_name)
                 provider = _ni.cloud_provider if _ni else None
                 pue = self._config.get_pue_for_provider(provider)
                 try:
@@ -756,8 +843,15 @@ class HistoricalRangeProcessor:
                 gpu_power = gpu_power_by_group.get((sample_start, node_name))
 
                 node_rows: List[CombinedMetric] = []
+                group_pod_metrics: List[PodMetric] = []
                 for em_namespace, pod_name in pod_keys:
                     pod_key = (em_namespace, pod_name)
+                    pod_containers, metadata_source = pod_metadata_at(pod_key, ts)
+                    group_pod_metrics.extend(pod_containers)
+                    owner = next(
+                        ((c.owner_kind, c.owner_name) for c in pod_containers if c.owner_kind and c.owner_name),
+                        None,
+                    )
                     energy_metric = EnergyMetric(
                         pod_name=pod_name,
                         namespace=em_namespace,
@@ -786,7 +880,9 @@ class HistoricalRangeProcessor:
                     if fallback_reasons:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, *fallback_reasons]))
-                    owner = pod_owner_map.get(pod_key)
+                    if metadata_source is MetadataSource.MISSING:
+                        is_estimated = True
+                        estimation_reasons = list(dict.fromkeys([*estimation_reasons, POD_METADATA_MISSING]))
                     node_rows.append(
                         CombinedMetric(
                             pod_name=pod_name,
@@ -805,11 +901,15 @@ class HistoricalRangeProcessor:
                             pue=pue,
                             grid_intensity=carbon_result.grid_intensity,
                             joules=0.0,
-                            cpu_request=pod_request_map.get(pod_key, 0),
-                            memory_request=pod_mem_map.get(pod_key, 0),
+                            cpu_request=sum(c.cpu_request for c in pod_containers),
+                            memory_request=sum(c.memory_request for c in pod_containers),
                             node=node_name or None,
-                            node_instance_type=(_ni.instance_type if _ni else current_node_map.get(node_name)),
+                            node_instance_type=(
+                                (_ni.instance_type if _ni else None) or current_node_map.get(node_name)
+                            ),
                             node_zone=(_ni.zone if _ni else None),
+                            node_source=node_source.value,
+                            metadata_source=metadata_source.value,
                             emaps_zone=zone,
                             is_estimated=is_estimated,
                             estimation_reasons=estimation_reasons,
@@ -828,7 +928,9 @@ class HistoricalRangeProcessor:
                             storage_usage_bytes=(
                                 int(pod_storage_map[pod_key]["usage"]) or None if pod_key in pod_storage_map else None
                             ),
-                            ephemeral_storage_request_bytes=(pod_ephemeral_storage_map.get(pod_key) or None),
+                            ephemeral_storage_request_bytes=(
+                                sum(c.ephemeral_storage_request for c in pod_containers) or None
+                            ),
                             ephemeral_storage_usage_bytes=(
                                 int(range_ephemeral_usage_map[pod_key])
                                 if pod_key in range_ephemeral_usage_map
@@ -841,14 +943,12 @@ class HistoricalRangeProcessor:
                         )
                     )
 
-                node_info_at_ts = get_node_info_at(node_name, ts) if node_name else None
-                info = node_info_at_ts or _ni
                 spec = self._node_spec(
                     node_name,
-                    info,
+                    _ni,
                     power,
                     boavizta_cache,
-                    instance_type=(info.instance_type if info else None) or current_node_map.get(node_name),
+                    instance_type=(_ni.instance_type if _ni else None) or current_node_map.get(node_name),
                     gpu_unattributed_watts=gpu_power.unattributed_watts if gpu_power else 0.0,
                 )
                 node_profile = allocator.node_profile(
@@ -922,7 +1022,7 @@ class HistoricalRangeProcessor:
                     if container_maps is not None:
                         container_rows = self.assembler.assemble_container_metrics(
                             [aggregate_metric],
-                            pod_metrics_list,
+                            group_pod_metrics,
                             container_maps,
                         )
                         if refitted_containers:

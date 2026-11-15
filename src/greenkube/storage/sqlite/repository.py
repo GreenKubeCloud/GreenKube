@@ -97,9 +97,49 @@ def _allocation_values(metric: CombinedMetric) -> tuple[Any, ...]:
     return tuple(getattr(metric, column) for column in ALLOCATION_COLUMNS)
 
 
+#: Where the node and pod metadata of a raw row came from (WP-01.1, migration 0120).
+ROW_SOURCE_COLUMNS: tuple[str, ...] = ("node_source", "metadata_source")
+
+
+def _row_source_values(metric: CombinedMetric) -> tuple[Any, ...]:
+    return tuple(getattr(metric, column) for column in ROW_SOURCE_COLUMNS)
+
+
+def _keep_known_metadata(table: str, column: str, known: str) -> str:
+    """Upsert expression that never lets a row without pod metadata erase stored metadata (COL-01).
+
+    A re-collected row whose ``metadata_source`` is ``missing`` keeps the stored
+    value of ``column`` when the stored row had it (``known`` is the SQL test).
+    """
+    return (
+        f"{column} = CASE WHEN excluded.metadata_source = 'missing' AND ({known}) "
+        f"THEN {table}.{column} ELSE excluded.{column} END"
+    )
+
+
+def _metadata_upsert(table: str) -> str:
+    """SET clauses of owner, requests and metadata_source for raw metric upserts."""
+    has_metadata = f"{table}.owner_kind IS NOT NULL OR {table}.cpu_request > 0 OR {table}.memory_request > 0"
+    return ",\n".join(
+        [
+            _keep_known_metadata(table, "owner_kind", f"{table}.owner_kind IS NOT NULL"),
+            _keep_known_metadata(table, "owner_name", f"{table}.owner_name IS NOT NULL"),
+            _keep_known_metadata(table, "cpu_request", f"{table}.cpu_request > 0"),
+            _keep_known_metadata(table, "memory_request", f"{table}.memory_request > 0"),
+            _keep_known_metadata(table, "metadata_source", has_metadata),
+            "node_source = excluded.node_source",
+        ]
+    )
+
+
 def _allocation_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
     keys = set(row.keys())
     return {column: row[column] for column in ALLOCATION_COLUMNS if column in keys}
+
+
+def _row_source_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    keys = set(row.keys())
+    return {column: row[column] for column in ROW_SOURCE_COLUMNS if column in keys}
 
 
 def _container_metric_from_row(row: Mapping[str, Any], *, hourly: bool = False) -> CombinedMetric:
@@ -323,14 +363,14 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                   calculation_version,
                                   cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                                   cost_source, usage_source, power_source, intensity_source,
-                                  model_version, gpu_power_watts)
+                                  model_version, gpu_power_watts, node_source, metadata_source)
                             VALUES (
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?
+                                ?, ?, ?, ?
                             )
                             ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
                                 total_cost = excluded.total_cost,
@@ -338,8 +378,6 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 pue = excluded.pue,
                                 grid_intensity = excluded.grid_intensity,
                                 joules = excluded.joules,
-                                cpu_request = excluded.cpu_request,
-                                memory_request = excluded.memory_request,
                                 cpu_usage_millicores = excluded.cpu_usage_millicores,
                                 memory_usage_bytes = excluded.memory_usage_bytes,
                                 network_receive_bytes = excluded.network_receive_bytes,
@@ -352,8 +390,6 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 ephemeral_storage_usage_bytes = excluded.ephemeral_storage_usage_bytes,
                                 gpu_usage_millicores = excluded.gpu_usage_millicores,
                                 restart_count = excluded.restart_count,
-                                owner_kind = excluded.owner_kind,
-                                owner_name = excluded.owner_name,
                                 period = excluded.period,
                                 duration_seconds = excluded.duration_seconds,
                                 grid_intensity_timestamp = excluded.grid_intensity_timestamp,
@@ -375,8 +411,10 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 power_source = excluded.power_source,
                                 intensity_source = excluded.intensity_source,
                                 model_version = excluded.model_version,
-                                gpu_power_watts = excluded.gpu_power_watts;
-                        """,
+                                gpu_power_watts = excluded.gpu_power_watts,
+                        """
+                            + _metadata_upsert("combined_metrics")
+                            + ";",
                             (
                                 metric.pod_name,
                                 metric.namespace,
@@ -415,6 +453,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 metric.calculation_version,
                                 *_provenance_values(metric),
                                 *_allocation_values(metric),
+                                *_row_source_values(metric),
                             ),
                         )
                         saved_count += cursor.rowcount
@@ -455,7 +494,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                            calculation_version,
                            cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                            cost_source, usage_source, power_source, intensity_source,
-                           model_version, gpu_power_watts
+                           model_version, gpu_power_watts, node_source, metadata_source
                     FROM combined_metrics
                     WHERE "timestamp" >= ? AND "timestamp" < ?
                 """,
@@ -512,6 +551,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 calculation_version=row["calculation_version"],
                                 **_provenance_from_row(row),
                                 **_allocation_from_row(row),
+                                **_row_source_from_row(row),
                             )
                         )
                     return metrics
@@ -655,7 +695,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                            is_estimated, estimation_reasons, embodied_co2e_grams, calculation_version,
                            cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                            cost_source, usage_source, power_source, intensity_source,
-                           model_version, gpu_power_watts
+                           model_version, gpu_power_watts, node_source, metadata_source
                     FROM combined_metrics WHERE {where}
                     ORDER BY "timestamp", namespace, pod_name
                     LIMIT ?
@@ -1080,10 +1120,11 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version,
                             cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                             cost_source, usage_source, power_source, intensity_source,
-                            emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts
+                            emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
+                            node_source, metadata_source
                         ) VALUES (
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         ON CONFLICT(namespace, pod_name, container_name, timestamp) DO UPDATE SET
                             total_cost = excluded.total_cost,
@@ -1117,7 +1158,9 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             cpu_limit = excluded.cpu_limit,
                             memory_limit = excluded.memory_limit,
                             model_version = excluded.model_version,
-                            gpu_power_watts = excluded.gpu_power_watts
+                            gpu_power_watts = excluded.gpu_power_watts,
+                            node_source = excluded.node_source,
+                            metadata_source = excluded.metadata_source
                         """,
                         (
                             metric.pod_name,
@@ -1147,6 +1190,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             metric.cpu_limit,
                             metric.memory_limit,
                             *_allocation_values(metric),
+                            *_row_source_values(metric),
                         ),
                     )
                     saved_count += cursor.rowcount

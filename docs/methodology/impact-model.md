@@ -56,6 +56,16 @@ A **node profile** holds what the model knows about a node:
 - unit prices `p_cpu` (per core-hour) and `p_ram` (per GiB-hour);
 - PUE and grid intensity.
 
+### State at sample time (WP-01.1)
+
+A window is collected after it ended, when some of its pods and nodes may already be gone from the Kubernetes API. The collector therefore reads the Kubernetes facts of each sample as they were at the sample time:
+
+- **Node attributes** (zone and Electricity Maps zone, provider and PUE, instance type, capacity, power and embodied profiles) come from the `node_snapshots_scd` version valid at the sample time, else the earliest later version, else the node as the API lists it now. Each row stores where they came from in `node_source`: `snapshot`, `current_api` or `unknown` (configured defaults, also flagged by the existing zone and power reasons).
+- **Pod metadata** (owner, requests, limits and container list) comes from the `pod_snapshots` history, which every collection extends with the live pod list (one version per distinct spec, with the interval it was observed in). The version valid at the sample time is used, else the nearest one, else the live pod list. Rows store `metadata_source = k8s_snapshot`. A pod known from none of them gets `metadata_source = missing`, the estimation reason `pod_metadata_missing`, no owner and requests 0.
+- **Re-collection.** A row with `metadata_source = missing` never overwrites a stored owner or non-zero request of the same pod and timestamp.
+
+Rows written before calculation version `+range.4` have `node_source` and `metadata_source` NULL: they were built from the state at collection time and are not rewritten.
+
 The **allocatable** capacity `A` is the denominator of reservation shares. Until kubelet allocatable is collected, `A` equals the node capacity, which matches how OpenCost computes idle cost.
 
 ### Power profile
