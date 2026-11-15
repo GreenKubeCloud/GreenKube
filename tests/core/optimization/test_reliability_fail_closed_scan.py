@@ -1,16 +1,23 @@
 """Scan-level regression of REC-04: a failed OOM query never turns into a decrease.
 
-The OOM query fails (``WorkloadHealthCollector._query`` returns None on an
-HTTP 503); the rollup shows the container's pod restarting. The scan must emit
-no decrease, report the withheld decrease on the source run, and keep the
-previously active memory increase (incomplete source, no stale).
+The OOM and restart queries fail (``WorkloadHealthCollector._query`` returns
+None on an HTTP 503). The usage snapshot is read the way production reads it:
+metric rows are written to SQLite, rolled into ``workload_usage_hourly`` and
+summarized in SQL (``read_usage_snapshot``).
+
+* Without any stored restart count, the decreases are withheld: the source run
+  reports it, the previous decrease is retired with the reason
+  ``reliability_signals_unknown`` and the previous OOM-driven increase is
+  kept, while every other record of the native source group still goes stale
+  in the same scan (the group is not marked incomplete).
+* With restarts stored in the rollup, the decreases are simply not
+  recommended (no withheld diagnostic).
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace as NS
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,15 +29,18 @@ from greenkube.core.optimization.analyzers.rightsizing import RELIABILITY_SIGNAL
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.core.reliability_signals import attach_reliability_signals
-from greenkube.core.workload_usage import rollup_rows, summarize
-from greenkube.models.metrics import Recommendation, RecommendationRecord, RecommendationType
+from greenkube.core.workload_usage import WorkloadUsageRollup
+from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationRecord, RecommendationType
 from greenkube.models.optimization_run import SourceRunStatus
 from greenkube.signals.adapters import analyzer_source_class
 from greenkube.signals.sdk import SourceDeps, SourceSettings
+from greenkube.storage.base_workload_usage_repository import create_workload_usage_repository
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
+from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 
 MIB = 1024 * 1024
 END = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+DAYS = 8
 TARGET = ("shop", "Deployment", "api")
 
 
@@ -47,38 +57,72 @@ async def sqlite_db(tmp_path, monkeypatch):
         await manager.close()
 
 
-def _snapshot():
-    """14 days of a low-usage container whose pod restart count grows (pod rows only carry it)."""
-    t0 = END - timedelta(days=14)
-    pods, containers = [], []
-    for i in range(14 * 288):
+async def _sql_snapshot(db: DatabaseManager, restarts: Callable[[int], Optional[int]]):
+    """Eight days of a low-usage container, written, rolled up and summarized in SQL.
+
+    ``restarts(step)`` is the pod's restart count at each 5-minute step (pod rows
+    only carry it; None: kube-state-metrics never scraped).
+    """
+    t0 = END - timedelta(days=DAYS)
+    rows: List[CombinedMetric] = []
+    for i in range(DAYS * 288):
         base: Dict[str, Any] = dict(
             namespace="shop",
             pod_name="api-7c9d8f6b5d-abcde",
             timestamp=t0 + timedelta(minutes=5 * i),
             owner_kind="Deployment",
             owner_name="api",
-            node="n1",
-            sample_count=1,
             duration_seconds=300,
             cpu_usage_millicores=20,
-            cpu_usage_max_millicores=None,
             memory_usage_bytes=100 * MIB,
-            memory_usage_max_bytes=None,
             cpu_request=1000,
             memory_request=1024 * MIB,
-            cpu_limit=None,
-            memory_limit=1024 * MIB,
-            total_cost=0.0,
-            co2e_grams=0.0,
-            embodied_co2e_grams=0.0,
-            joules=0.0,
+            total_cost=0.001,
         )
-        pods.append(NS(restart_count=i // 110, **base))
-        containers.append(NS(container_name="app", restart_count=None, **base))
-    snapshot = summarize(rollup_rows(pods, containers, step_seconds=300, warmup_seconds=600))
-    snapshot.source = "rollup"
+        rows.append(CombinedMetric(node="n1", restart_count=restarts(i), **base))
+        rows.append(CombinedMetric(container_name="app", memory_limit=1024 * MIB, **base))
+    await SQLiteCombinedMetricsRepository(db).write_combined_metrics(rows)
+    repository = create_workload_usage_repository(db, db.db_type)
+    await WorkloadUsageRollup(repository, warmup_seconds=600).refresh(now=END + timedelta(minutes=30))
+    snapshot = await repository.read_usage_snapshot(t0, END + timedelta(hours=1))
+    assert snapshot.source == "rollup"
+    await attach_reliability_signals(
+        snapshot, get_config(), start=t0, end=END, query=_Prometheus503(), list_pods=_no_pods
+    )
     return snapshot
+
+
+def _rightsizing(resource: str, current: int, proposed: int, description: str) -> Recommendation:
+    fields: Dict[str, Any] = (
+        {"current_cpu_request_millicores": current, "recommended_cpu_request_millicores": proposed}
+        if resource == "cpu"
+        else {"current_memory_request_bytes": current, "recommended_memory_request_bytes": proposed}
+    )
+    return Recommendation(
+        pod_name="api",
+        namespace="shop",
+        container_name="app",
+        type=RecommendationType.RIGHTSIZING_CPU if resource == "cpu" else RecommendationType.RIGHTSIZING_MEMORY,
+        scope="workload",
+        owner_kind="Deployment",
+        owner_name="api",
+        description=description,
+        **fields,
+    )
+
+
+def _engine(snapshot) -> OptimizationEngine:
+    sources = [analyzer_source_class(MemoryRightsizingAnalyzer), analyzer_source_class(CpuRightsizingAnalyzer)]
+    deps = SourceDeps(config=get_config(), cluster_uid="c")
+    engine = OptimizationEngine(sources=[cls(SourceSettings(), deps) for cls in sources])
+    engine.build_context = AsyncMock(
+        return_value=OptimizationContext(config=get_config(), usage=snapshot, analysis_window_seconds=DAYS * 86400)
+    )
+    return engine
+
+
+async def _active(repo: SQLiteRecommendationRepository) -> List[RecommendationRecord]:
+    return await repo.get_active_recommendations()
 
 
 class _Prometheus503:
@@ -100,84 +144,87 @@ async def _no_pods() -> List[Any]:
     return []
 
 
-async def test_failed_oom_query_keeps_the_increase_and_reports_the_withheld_decrease(sqlite_db):
+async def test_unknown_history_withholds_decreases_without_freezing_the_native_group(sqlite_db):
     repo = SQLiteRecommendationRepository(sqlite_db)
-    increase = Recommendation(
-        pod_name="api",
-        namespace="shop",
-        container_name="app",
-        type=RecommendationType.RIGHTSIZING_MEMORY,
-        scope="workload",
-        owner_kind="Deployment",
-        owner_name="api",
-        description="OOM-driven increase",
-        current_memory_request_bytes=512 * MIB,
-        recommended_memory_request_bytes=1024 * MIB,
-    )
-    await repo.upsert_recommendations([RecommendationRecord.from_recommendation(increase)])
-
-    snapshot = _snapshot()
-    await attach_reliability_signals(
-        snapshot, get_config(), start=END - timedelta(days=14), end=END, query=_Prometheus503(), list_pods=_no_pods
-    )
-    summary = snapshot.summaries[TARGET]["app"]
-    assert summary.oom_kill_count is None and summary.restarts_in_window is None
-    assert snapshot.summaries[TARGET][""].restart_increase
-
-    sources = [analyzer_source_class(MemoryRightsizingAnalyzer), analyzer_source_class(CpuRightsizingAnalyzer)]
-    deps = SourceDeps(config=get_config(), cluster_uid="c")
-    engine = OptimizationEngine(sources=[cls(SourceSettings(), deps) for cls in sources])
-    engine.build_context = AsyncMock(
-        return_value=OptimizationContext(config=get_config(), usage=snapshot, analysis_window_seconds=14 * 86400)
-    )
-
-    result = await engine.run_scan(AsyncMock(), AsyncMock(), repo)
-
-    assert not [rec for rec in result.recommendations if rec.type == RecommendationType.RIGHTSIZING_CPU]
-    memory = [rec for rec in result.recommendations if rec.type == RecommendationType.RIGHTSIZING_MEMORY]
-    assert all((rec.recommended_memory_request_bytes or 0) >= 1024 * MIB for rec in memory)
-
-    statuses = {outcome.source: outcome.status for outcome in result.source_outcomes}
-    assert SourceRunStatus.INCOMPLETE in statuses.values()
-    reports = {report.source_id: report for report in result.source_reports}
-    memory_run = reports["greenkube.rightsizing_memory"].run
-    [diagnostic] = [d for d in memory_run.diagnostics if d.code == RELIABILITY_SIGNALS_UNKNOWN]
-    assert "OOM kills failed" in diagnostic.message and "restarts failed" in diagnostic.message
-
-    active = await repo.get_active_recommendations()
-    kept = [rec for rec in active if rec.type == RecommendationType.RIGHTSIZING_MEMORY and rec.container_name == "app"]
-    assert len(kept) == 1
-    assert kept[0].recommended_memory_request_bytes == 1024 * MIB
-
-
-async def test_an_incomplete_rightsizing_source_never_keeps_a_previous_decrease_alive(sqlite_db):
-    """The withheld decrease must not survive as last-known advice: only increases are kept."""
-    repo = SQLiteRecommendationRepository(sqlite_db)
-    decrease = Recommendation(
-        pod_name="api",
+    increase = _rightsizing("memory", 512 * MIB, 1024 * MIB, "OOM-driven increase")
+    decrease = _rightsizing("cpu", 1000, 100, "decrease emitted while the signals failed open")
+    # Another recommendation of the native group, no longer emitted: it must go stale in this scan.
+    gone = Recommendation(
+        pod_name="worker",
         namespace="shop",
         container_name="app",
         type=RecommendationType.RIGHTSIZING_CPU,
         scope="workload",
         owner_kind="Deployment",
-        owner_name="api",
-        description="decrease emitted while the signals failed open",
-        current_cpu_request_millicores=1000,
-        recommended_cpu_request_millicores=100,
+        owner_name="worker",
+        description="increase of a deleted workload",
+        current_cpu_request_millicores=100,
+        recommended_cpu_request_millicores=200,
     )
-    await repo.upsert_recommendations([RecommendationRecord.from_recommendation(decrease)])
-
-    snapshot = _snapshot()
-    await attach_reliability_signals(
-        snapshot, get_config(), start=END - timedelta(days=14), end=END, query=_Prometheus503(), list_pods=_no_pods
+    zombie = Recommendation(
+        pod_name="old-job",
+        namespace="shop",
+        type=RecommendationType.ZOMBIE_POD,
+        scope="workload",
+        owner_kind="Deployment",
+        owner_name="old-job",
+        description="appears idle",
     )
-    deps = SourceDeps(config=get_config(), cluster_uid="c")
-    engine = OptimizationEngine(sources=[analyzer_source_class(CpuRightsizingAnalyzer)(SourceSettings(), deps)])
-    engine.build_context = AsyncMock(
-        return_value=OptimizationContext(config=get_config(), usage=snapshot, analysis_window_seconds=14 * 86400)
+    await repo.upsert_recommendations(
+        [RecommendationRecord.from_recommendation(rec) for rec in (increase, decrease, gone, zombie)]
     )
+    before = {(rec.pod_name, rec.type): rec.id for rec in await _active(repo)}
 
-    await engine.run_scan(AsyncMock(), AsyncMock(), repo)
+    snapshot = await _sql_snapshot(sqlite_db, lambda step: None)
+    summary = snapshot.summaries[TARGET]["app"]
+    assert summary.oom_kill_count is None and summary.restarts_in_window is None
+    assert snapshot.summaries[TARGET][""].restart_increase is None
 
-    active = await repo.get_active_recommendations()
-    assert not [rec for rec in active if rec.type == RecommendationType.RIGHTSIZING_CPU]
+    result = await _engine(snapshot).run_scan(AsyncMock(), AsyncMock(), repo)
+
+    assert not [rec for rec in result.recommendations if rec.type == RecommendationType.RIGHTSIZING_CPU]
+    memory = [rec for rec in result.recommendations if rec.type == RecommendationType.RIGHTSIZING_MEMORY]
+    assert all((rec.recommended_memory_request_bytes or 0) >= 1024 * MIB for rec in memory)
+
+    # The source runs are complete: one withheld target never freezes the group.
+    assert {outcome.status for outcome in result.source_outcomes} == {SourceRunStatus.SUCCEEDED}
+    reports = {report.source_id: report for report in result.source_reports}
+    memory_run = reports["greenkube.rightsizing_memory"].run
+    [diagnostic] = [d for d in memory_run.diagnostics if d.code == RELIABILITY_SIGNALS_UNKNOWN]
+    assert "OOM kills failed" in diagnostic.message and "restarts failed" in diagnostic.message
+
+    active = {(rec.pod_name, rec.type): rec for rec in await _active(repo)}
+    kept = active.get(("api", RecommendationType.RIGHTSIZING_MEMORY))
+    assert kept is not None and kept.recommended_memory_request_bytes == 1024 * MIB
+    assert ("api", RecommendationType.RIGHTSIZING_CPU) not in active
+    assert ("worker", RecommendationType.RIGHTSIZING_CPU) not in active
+    assert ("old-job", RecommendationType.ZOMBIE_POD) not in active
+
+    retired_id = before[("api", RecommendationType.RIGHTSIZING_CPU)]
+    assert retired_id is not None
+    events = await repo.get_events(retired_id)
+    assert any(RELIABILITY_SIGNALS_UNKNOWN in str(event.payload) for event in events)
+
+
+async def test_restarts_in_the_rollup_block_decreases_without_a_withheld_diagnostic(sqlite_db):
+    repo = SQLiteRecommendationRepository(sqlite_db)
+    increase = _rightsizing("memory", 512 * MIB, 1024 * MIB, "OOM-driven increase")
+    await repo.upsert_recommendations([RecommendationRecord.from_recommendation(increase)])
+
+    snapshot = await _sql_snapshot(sqlite_db, lambda step: step // 110)
+    assert snapshot.summaries[TARGET][""].restart_increase
+
+    result = await _engine(snapshot).run_scan(AsyncMock(), AsyncMock(), repo)
+
+    decreases = [
+        rec
+        for rec in result.recommendations
+        if (rec.recommended_cpu_request_millicores or 10**9) < (rec.current_cpu_request_millicores or 0)
+        or (rec.recommended_memory_request_bytes or 10**12) < (rec.current_memory_request_bytes or 0)
+    ]
+    assert decreases == []
+    for report in result.source_reports:
+        assert not [d for d in report.run.diagnostics if d.code == RELIABILITY_SIGNALS_UNKNOWN]
+    # The OOM kills are unknown (the restarts may be OOM kills): the increase is kept.
+    active = await _active(repo)
+    assert [rec for rec in active if rec.type == RecommendationType.RIGHTSIZING_MEMORY]

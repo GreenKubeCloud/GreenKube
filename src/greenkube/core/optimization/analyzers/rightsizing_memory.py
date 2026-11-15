@@ -61,7 +61,7 @@ def reliability_diagnostics(skipped: List[Skip], signal_status: Mapping[str, str
             "level": "warning",
             "code": RELIABILITY_SIGNALS_UNKNOWN,
             "message": f"{len(withheld)} {RELIABILITY_SIGNALS_UNKNOWN_TEXT}{detail}; "
-            "previous advice for these containers is kept.",
+            "previous decreases of these containers are retired.",
             "count": len(withheld),
         }
     ]
@@ -73,12 +73,19 @@ def record_withheld_decrease(
     summary: "WorkloadUsageSummary",
     pod_summary: Optional["WorkloadUsageSummary"],
     resource: str,
+    context: Optional["OptimizationContext"] = None,
 ) -> None:
-    """Appends a ``reliability_signals_unknown`` skip when the target's decrease was withheld."""
+    """Appends a ``reliability_signals_unknown`` skip when the target's decrease was withheld.
+
+    The withheld target is also registered on ``context.withheld_decreases`` so
+    the engine retires its previous decrease with that reason (REC-04).
+    """
     reason = withheld_decrease(config, summary, pod_summary, "cpu" if resource == "cpu" else "memory")
     if reason is None:
         return
     skipped.append((summary.target, summary.container_name, resource, reason))
+    if context is not None:
+        context.withheld_decreases.add((*summary.target, summary.container_name or "", resource))
     LOG.info(
         "%s decrease for %s/%s/%s container %r withheld (%s): restart/OOM history could not be read.",
         "CPU" if resource == "cpu" else "Memory",
@@ -159,10 +166,6 @@ class MemoryRightsizingAnalyzer(Analyzer):
         """Decreases withheld for unknown reliability signals in the last scan."""
         return reliability_diagnostics(self.skipped, self._signal_status)
 
-    def scan_complete(self) -> bool:
-        """Incomplete when a decrease was withheld: previous advice is kept (REC-04)."""
-        return not any(skip[3] == RELIABILITY_SIGNALS_UNKNOWN for skip in self.skipped)
-
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
         cfg = self.config
@@ -187,7 +190,7 @@ class MemoryRightsizingAnalyzer(Analyzer):
             pod_summary = snapshot.summaries.get(target, {}).get(POD_LEVEL)
             proposal = memory_proposal(cfg, summary, pod_summary)
             if proposal is None:
-                record_withheld_decrease(self.skipped, cfg, summary, pod_summary, "memory")
+                record_withheld_decrease(self.skipped, cfg, summary, pod_summary, "memory", context)
             stats = proposal.stats if proposal is not None and proposal.stats is not None else summary.memory
             if proposal is None or stats is None:
                 continue

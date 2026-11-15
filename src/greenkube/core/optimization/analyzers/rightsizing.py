@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, List, Literal, Mapping, Optional, Tuple
 
 from greenkube.core.optimization.statistics import balanced_rightsizing_target, coverage_days
 
@@ -216,6 +216,44 @@ def rollup_restarts(
     return None
 
 
+def known_oom_events(
+    summary: Optional["WorkloadUsageSummary"], pod_summary: Optional["WorkloadUsageSummary"] = None
+) -> Optional[int]:
+    """OOM kills of a container over the lookback, or None when unknown.
+
+    The scan signal when known; otherwise 0 when the rollup restart history
+    shows no restart (an OOM kill restarts the container, so none happened);
+    otherwise None. Shared by the risk profile and the evidence.
+    """
+    if summary is None:
+        return None
+    if summary.oom_kill_count is not None:
+        return summary.oom_kill_count
+    return 0 if rollup_restarts(summary, pod_summary) == 0 else None
+
+
+#: Why an OOM history is unknown: no usage summary covers the container.
+OOM_UNKNOWN_NO_USAGE_SUMMARY = "no_usage_summary"
+#: The OOM signal query failed (HTTP error, timeout, Prometheus limit).
+OOM_UNKNOWN_SIGNAL_FAILED = "signal_failed"
+#: No source for the OOM signal (no Prometheus, kube-state-metrics not scraped).
+OOM_UNKNOWN_SIGNAL_UNAVAILABLE = "signal_unavailable"
+
+
+def oom_unknown_cause(
+    summary: Optional["WorkloadUsageSummary"], signal_status: Optional[Mapping[str, str]] = None
+) -> str:
+    """Why :func:`known_oom_events` is None: one of the ``OOM_UNKNOWN_*`` values.
+
+    ``signal_status`` is ``UsageSnapshot.reliability_signal_status``; a signal
+    that was not read at all counts as unavailable.
+    """
+    if summary is None:
+        return OOM_UNKNOWN_NO_USAGE_SUMMARY
+    status = (signal_status or {}).get("oom_kills")
+    return OOM_UNKNOWN_SIGNAL_FAILED if status == "failed" else OOM_UNKNOWN_SIGNAL_UNAVAILABLE
+
+
 def decrease_reliability_block(
     summary: "WorkloadUsageSummary", pod_summary: Optional["WorkloadUsageSummary"] = None
 ) -> Optional[str]:
@@ -251,13 +289,12 @@ def withheld_decrease(
     because the reliability signals are unknown, else None.
 
     The decrease is re-evaluated as if the signals were explicit zeros; when that
-    yields a decrease and the real signals are not known to be clean (unknown,
-    or the rollup fallback shows restarts), the decrease was withheld for lack of
-    a readable restart/OOM history.
+    yields a decrease and the restart/OOM history could not be read at all
+    (signals unknown and no rollup restart count), the decrease was withheld.
+    A decrease blocked because restarts were observed (scan signals or rollup
+    history) is not withheld: it is a normal "not recommended" outcome.
     """
-    if summary.oom_kill_count or summary.restarts_in_window:
-        return None
-    if decrease_reliability_block(summary, pod_summary) is None:
+    if decrease_reliability_block(summary, pod_summary) != RELIABILITY_SIGNALS_UNKNOWN:
         return None
     clean = replace(summary, oom_kill_count=0, restarts_in_window=0)
     proposal = (cpu_proposal if resource == "cpu" else memory_proposal)(config, clean, pod_summary)

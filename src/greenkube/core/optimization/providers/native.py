@@ -43,7 +43,6 @@ class NativeSource(RecommendationSource):
             try:
                 recs.extend(analyzer.analyze(context))
                 if not analyzer.scan_complete():
-                    # The analyzer withheld advice it could not judge (REC-04): keep the previous one.
                     self.last_collect_complete = False
             except Exception:
                 self.last_collect_complete = False

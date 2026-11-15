@@ -57,6 +57,9 @@ IRREVERSIBLE_DELETION = "irreversible_deletion"
 
 #: Risk factor of a memory decrease whose OOM history could not be read (blocks automation).
 OOM_HISTORY_UNKNOWN = "oom_history_unknown"
+#: Prefix of the factor naming why the OOM history is unknown
+#: (``oom_unknown_no_usage_summary``, ``oom_unknown_signal_failed``, ``oom_unknown_signal_unavailable``).
+OOM_UNKNOWN_CAUSE_PREFIX = "oom_unknown_"
 
 #: CPU throttling ratio above which a CPU decrease is at least medium (high above the second value).
 THROTTLING_MEDIUM = 0.05
@@ -79,6 +82,8 @@ class WorkloadRiskProfile:
     replica_cpu_p95_max: Optional[float] = None
     replica_memory_p95_max: Optional[float] = None
     oom_events: Optional[int] = None
+    #: Why ``oom_events`` is None (``no_usage_summary``, ``signal_failed``, ``signal_unavailable``).
+    oom_unknown_cause: Optional[str] = None
     cpu_throttling_ratio: Optional[float] = None
     #: Resources an HPA scales on (``cpu``, ``memory``); ``{"*"}`` when an HPA exists but its metrics are unknown.
     hpa_resources: Optional[FrozenSet[str]] = None
@@ -285,6 +290,9 @@ def apply_profile(
             # Unknown is never healthy: the decrease may land below peaks that OOM-killed it.
             level = _at_least(level, RiskLevel.MEDIUM)
             add(OOM_HISTORY_UNKNOWN)
+            if profile.oom_unknown_cause:
+                # Which input was missing, for the eligibility message (REC-04).
+                add(f"{OOM_UNKNOWN_CAUSE_PREFIX}{profile.oom_unknown_cause}")
         if resource == "cpu" and profile.cpu_throttling_ratio is not None:
             if profile.cpu_throttling_ratio > THROTTLING_HIGH:
                 if not increase:

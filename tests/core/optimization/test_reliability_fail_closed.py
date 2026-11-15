@@ -79,13 +79,21 @@ def test_unknown_signals_with_a_clean_rollup_restart_history_allow_a_decrease() 
     assert withheld_decrease(Config(), summary, None, "memory") is None
 
 
-@pytest.mark.parametrize("restart_increase", [3, None])
-def test_unknown_signals_without_a_clean_rollup_history_withhold_the_decrease(restart_increase) -> None:
-    summary = _summary(oom_kill_count=None, restarts_in_window=None, restart_increase=restart_increase)
+def test_unknown_signals_without_any_rollup_history_withhold_the_decrease() -> None:
+    summary = _summary(oom_kill_count=None, restarts_in_window=None, restart_increase=None)
     assert cpu_proposal(Config(), summary) is None
     assert memory_proposal(Config(), summary) is None
     assert withheld_decrease(Config(), summary, None, "cpu") == RELIABILITY_SIGNALS_UNKNOWN
     assert withheld_decrease(Config(), summary, None, "memory") == RELIABILITY_SIGNALS_UNKNOWN
+
+
+def test_restarts_seen_in_the_rollup_block_the_decrease_without_withholding_it() -> None:
+    """REC-04 review: restarts observed in the rollup are a normal "not recommended" outcome."""
+    summary = _summary(oom_kill_count=None, restarts_in_window=None, restart_increase=3)
+    assert cpu_proposal(Config(), summary) is None
+    assert memory_proposal(Config(), summary) is None
+    assert withheld_decrease(Config(), summary, None, "cpu") is None
+    assert withheld_decrease(Config(), summary, None, "memory") is None
 
 
 def test_one_unknown_signal_is_enough_to_need_the_rollup_fallback() -> None:
@@ -147,7 +155,8 @@ def test_sim_gates_case_1_crash_looping_container_with_unknown_signals_gets_no_d
 
     assert cpu_proposal(Config(), summary) is None
     assert memory_proposal(Config(), summary) is None
-    assert withheld_decrease(Config(), summary, None, "memory") == RELIABILITY_SIGNALS_UNKNOWN
+    # Restarts were observed: blocked, not withheld for unknown history.
+    assert withheld_decrease(Config(), summary, None, "memory") is None
 
 
 def test_summarize_counts_restart_count_resets_as_restarts() -> None:
@@ -174,8 +183,9 @@ def test_analyzers_record_the_skip_and_the_source_reports_it() -> None:
 
     batch = asyncio.run(source.collect(ctx))
     assert batch.recommendations == []
-    # Previous advice is kept: the scan's rightsizing result is not authoritative.
-    assert batch.complete is False
+    # REC-04 review: one withheld target never makes the whole source incomplete.
+    assert batch.complete is True
+    assert (*TARGET, "app", "memory") in context.withheld_decreases
     [diagnostic] = [d for d in batch.diagnostics if d.code == RELIABILITY_SIGNALS_UNKNOWN]
     assert diagnostic.level == "warning" and diagnostic.count == 1
     assert "restart/OOM history could not be read" in diagnostic.message
@@ -294,7 +304,8 @@ def test_container_summaries_fall_back_on_the_pod_level_restart_history() -> Non
     assert memory_proposal(Config(), container, clean_pod) is not None
     assert cpu_proposal(Config(), container, clean_pod) is not None
     assert memory_proposal(Config(), container, restarted_pod) is None
-    assert withheld_decrease(Config(), container, restarted_pod, "memory") == RELIABILITY_SIGNALS_UNKNOWN
+    assert withheld_decrease(Config(), container, restarted_pod, "memory") is None
+    assert withheld_decrease(Config(), container, None, "memory") == RELIABILITY_SIGNALS_UNKNOWN
 
 
 def test_risk_profile_reads_no_oom_from_a_clean_rollup_restart_history() -> None:
@@ -325,3 +336,60 @@ def test_eligibility_blocks_automation_on_unknown_oom_history() -> None:
     result = assess_eligibility(record, EligibilityContext(now=END))
     assert "oom_history_unknown" in {entry["code"] for entry in result["blockers"]}
     assert result["can_open_pr"] is False
+
+
+@pytest.mark.parametrize(
+    ("cause", "fragment", "absent"),
+    [
+        ("no_usage_summary", "No usage summary covers this container", "kube-state-metrics"),
+        ("signal_failed", "queries to Prometheus failed", "kube-state-metrics"),
+        ("signal_unavailable", "kube-state-metrics not scraped", None),
+    ],
+)
+def test_the_unknown_oom_blocker_names_its_cause(cause, fragment, absent) -> None:
+    """REC-04 review: "no usage summary" and "signal query failed" read differently, with a matching fix."""
+    from greenkube.core.optimization.eligibility import EligibilityContext, assess_eligibility
+
+    level, factors = apply_profile(
+        _memory_decrease(),
+        RiskLevel.LOW,
+        [],
+        WorkloadRiskProfile(oom_events=None, oom_unknown_cause=cause),
+        requires_restart=False,
+    )
+    assert f"oom_unknown_{cause}" in factors
+    record = NS(id=1, type="RIGHTSIZING_MEMORY", status="active", risk_factors=factors, value=None, consensus=None)
+    result = assess_eligibility(record, EligibilityContext(now=END))
+    [entry] = [entry for entry in result["blockers"] if entry["code"] == "oom_history_unknown"]
+    assert fragment in entry["message"]
+    if absent is not None:
+        assert absent not in entry["message"] and absent not in entry["fix"]
+
+
+def test_risk_profile_names_why_the_oom_history_is_unknown() -> None:
+    from greenkube.core.optimization.enrich import build_risk_profile
+
+    rec = _memory_decrease().model_copy(update={"owner_kind": "Deployment", "owner_name": "api"})
+    empty = OptimizationContext(config=Config(), usage=UsageSnapshot(source="rollup"))
+    assert build_risk_profile(rec, empty).oom_unknown_cause == "no_usage_summary"
+
+    snapshot = _snapshot(_summary(oom_kill_count=None, restarts_in_window=None, restart_increase=None))
+    snapshot.reliability_signal_status = {"oom_kills": "failed", "restarts": "failed"}
+    profile = build_risk_profile(rec, OptimizationContext(config=Config(), usage=snapshot))
+    assert profile.oom_events is None and profile.oom_unknown_cause == "signal_failed"
+    snapshot.reliability_signal_status = {"oom_kills": "unavailable"}
+    profile = build_risk_profile(rec, OptimizationContext(config=Config(), usage=snapshot))
+    assert profile.oom_unknown_cause == "signal_unavailable"
+
+
+def test_evidence_records_zero_oom_kills_when_the_rollup_proves_none() -> None:
+    """REC-04 review: the evidence stores the 0 the rollup restart history proves, not None."""
+    from greenkube.core.optimization.evidence import _known_oom_events
+
+    container = _summary(oom_kill_count=None, restarts_in_window=None, restart_increase=None)
+    snapshot = _snapshot(container)
+    snapshot.summaries[TARGET][""] = _summary(container_name="", restart_increase=0)
+    context = OptimizationContext(config=Config(), usage=snapshot)
+    assert _known_oom_events(container, context) == 0
+    snapshot.summaries[TARGET][""] = _summary(container_name="", restart_increase=None)
+    assert _known_oom_events(container, context) is None

@@ -4,11 +4,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from greenkube.core.optimization.analyzers.base import Analyzer
-from greenkube.core.optimization.analyzers.rightsizing import (
-    RELIABILITY_SIGNALS_UNKNOWN,
-    cpu_proposal,
-    skipped_increase,
-)
+from greenkube.core.optimization.analyzers.rightsizing import cpu_proposal, skipped_increase
 from greenkube.core.optimization.analyzers.rightsizing_memory import (
     Skip,
     _pod_level_note,
@@ -43,10 +39,6 @@ class CpuRightsizingAnalyzer(Analyzer):
         """Decreases withheld for unknown reliability signals in the last scan."""
         return reliability_diagnostics(self.skipped, self._signal_status)
 
-    def scan_complete(self) -> bool:
-        """Incomplete when a decrease was withheld: previous advice is kept (REC-04)."""
-        return not any(skip[3] == RELIABILITY_SIGNALS_UNKNOWN for skip in self.skipped)
-
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
         recs: List[Recommendation] = []
         cfg = self.config
@@ -71,7 +63,7 @@ class CpuRightsizingAnalyzer(Analyzer):
             pod_summary = snapshot.summaries.get(target, {}).get(POD_LEVEL)
             proposal = cpu_proposal(cfg, summary, pod_summary)
             if proposal is None:
-                record_withheld_decrease(self.skipped, cfg, summary, pod_summary, "cpu")
+                record_withheld_decrease(self.skipped, cfg, summary, pod_summary, "cpu", context)
             stats = proposal.stats if proposal is not None and proposal.stats is not None else summary.cpu
             if proposal is None or stats is None:
                 continue

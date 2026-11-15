@@ -45,6 +45,10 @@ class OptimizationContext:
     #: Namespace metadata by name for the deletion safety rules; None when unreadable.
     namespace_info: Optional[Dict[str, Any]] = None
     usage: Optional[UsageSnapshot] = None
+    #: Rightsizing decreases withheld by this scan because the restart/OOM history
+    #: could not be read (REC-04), as ``(namespace, target_kind, target_name,
+    #: container, resource)``; filled by the analyzers, read by the engine.
+    withheld_decreases: Set[Tuple[str, str, str, str, str]] = field(default_factory=set)
     _target_series_cache: Optional[Dict[Tuple[str, str, str], List[CombinedMetric]]] = field(
         default=None, init=False, repr=False, compare=False
     )

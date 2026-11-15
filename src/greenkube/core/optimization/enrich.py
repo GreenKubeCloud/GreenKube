@@ -65,20 +65,13 @@ def _current_replicas(series: Sequence[CombinedMetric]) -> Optional[int]:
 
 
 def _oom_events(summary: Any, context: "OptimizationContext") -> Optional[int]:
-    """OOM kills of the target, or None when unknown.
-
-    When the scan signal is unknown, a rollup restart history without any
-    restart (the container's or its pod's ``restart_increase == 0``) proves
-    there was no OOM kill either: a kill restarts the container.
-    """
-    from greenkube.core.optimization.analyzers.rightsizing import rollup_restarts
+    """OOM kills of the target, or None when unknown (:func:`known_oom_events`)."""
+    from greenkube.core.optimization.analyzers.rightsizing import known_oom_events
 
     if summary is None:
         return None
-    if summary.oom_kill_count is not None:
-        return summary.oom_kill_count
     pod_summary = context.usage_snapshot().summaries.get(summary.target, {}).get(POD_LEVEL)
-    return 0 if rollup_restarts(summary, pod_summary) == 0 else None
+    return known_oom_events(summary, pod_summary)
 
 
 def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> WorkloadRiskProfile:
@@ -92,11 +85,18 @@ def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> W
         else:
             hpa_resources = frozenset()
     summary = usage_summary_for(rec, context)
+    oom_events = _oom_events(summary, context)
+    oom_unknown_cause = None
+    if oom_events is None:
+        from greenkube.core.optimization.analyzers.rightsizing import oom_unknown_cause as _cause
+
+        oom_unknown_cause = _cause(summary, context.usage_snapshot().reliability_signal_status)
     return WorkloadRiskProfile(
         replicas=_current_replicas(series) if rec.owner_kind else None,
         replica_cpu_p95_max=_replica_p95_max(series, "cpu_usage_millicores"),
         replica_memory_p95_max=_replica_p95_max(series, "memory_usage_bytes"),
-        oom_events=_oom_events(summary, context),
+        oom_events=oom_events,
+        oom_unknown_cause=oom_unknown_cause,
         cpu_throttling_ratio=summary.throttling_ratio if summary is not None else None,
         hpa_resources=hpa_resources,
         jvm=True if summary is not None and summary.jvm_hint else None,
