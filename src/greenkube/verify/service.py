@@ -1675,6 +1675,8 @@ def container_resources(snapshot: Any) -> Optional[Dict[str, Dict[str, Optional[
         return None
     limits = getattr(snapshot, "container_limit_values", None)
     limits = limits if isinstance(limits, Mapping) else {}
+    kinds = getattr(snapshot, "container_kinds", None)
+    kinds = kinds if isinstance(kinds, Mapping) else {}
     resources: Dict[str, Dict[str, Optional[int]]] = {}
     for name, (cpu, memory) in sorted(requests.items()):
         cpu_limit, memory_limit = limits.get(name, (None, None))
@@ -1684,6 +1686,9 @@ def container_resources(snapshot: Any) -> Optional[Dict[str, Dict[str, Optional[
             "cpu_limit_millicores": cpu_limit,
             "memory_limit_bytes": memory_limit,
         }
+        if name in kinds:
+            # Classic init containers are left out of the released capacity (greenkube.verify.capacity).
+            resources[str(name)]["kind"] = kinds[name]
     return resources
 
 

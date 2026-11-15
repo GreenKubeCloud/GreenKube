@@ -76,6 +76,8 @@ class WorkloadSnapshot:
     container_request_values_valid: bool = True
     #: Per-container limits (CPU millicores, memory bytes), recorded with spec observations (WP-08.1).
     container_limit_values: Dict[str, Tuple[int | None, int | None]] = field(default_factory=dict)
+    #: ``container``, ``sidecar`` (native sidecar) or ``init`` per container name (WP-08.1).
+    container_kinds: Dict[str, str] = field(default_factory=dict)
     # Rollout state; ``None`` means the reader does not report it (legacy/fake readers).
     desired_replicas: int | None = None
     current_replicas: int | None = None
@@ -208,6 +210,21 @@ def _resource_field(value, name: str, camel_case: str | None = None):
         return value.get(camel_case) if camel_case is not None else None
     result = getattr(value, name, None)
     return result if result is not None or camel_case is None else getattr(value, camel_case, None)
+
+
+def _container_kinds(containers, init_containers) -> Dict[str, str]:
+    """``container``, ``sidecar`` (init container with ``restartPolicy: Always``) or ``init`` per name."""
+    kinds: Dict[str, str] = {}
+    for container in containers or []:
+        name = _resource_field(container, "name")
+        if isinstance(name, str) and name:
+            kinds[name] = "container"
+    for container in init_containers or []:
+        name = _resource_field(container, "name")
+        if isinstance(name, str) and name and name not in kinds:
+            policy = _resource_field(container, "restart_policy", "restartPolicy")
+            kinds[name] = "sidecar" if policy == "Always" else "init"
+    return kinds
 
 
 def _read_container_request_values(
@@ -483,6 +500,7 @@ class K8sWorkloadReader:
                     container_request_values=request_values,
                     container_request_values_valid=request_values_valid,
                     container_limit_values=limit_values if limit_values_valid else {},
+                    container_kinds=_container_kinds(containers, init_containers),
                     spec_digest=pod_template_digest(template),
                     resources_digest=resources_digest(template),
                     image_digest=image_digest(template),

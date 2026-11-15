@@ -45,6 +45,7 @@ async def _observe(scenario: Scenario, before_at, after_at) -> None:
                 namespace="prod",
                 kind="Deployment",
                 name="api",
+                workload_uid="uid-api",
                 generation=1,
                 spec_digest="digest-1",
                 container_resources=_resources(1000, 2 * GIB),
@@ -54,6 +55,7 @@ async def _observe(scenario: Scenario, before_at, after_at) -> None:
                 namespace="prod",
                 kind="Deployment",
                 name="api",
+                workload_uid="uid-api",
                 generation=2,
                 spec_digest="digest-2",
                 container_resources=_resources(300, GIB),
@@ -129,9 +131,11 @@ async def test_a_replica_change_in_the_post_window_is_reported_apart(database): 
     _, measurement = await _decide(scenario, change)
     capacity = measurement.capacity
     assert capacity is not None and capacity["verdict"] == "released"
-    # The release is booked per replica at the post-window replica count ...
+    # The request effect is booked per replica at the baseline replica count ...
     assert capacity["per_replica"]["cpu_cores"] == pytest.approx(0.7)
-    assert capacity["total"]["cpu_cores"] == pytest.approx(0.7 * 3)
+    assert capacity["total"]["cpu_cores"] == pytest.approx(0.7 * 2)
+    # ... so that request effect + replica effect = net (2 x 1000m before, 3 x 300m after).
+    assert capacity["net"]["cpu_cores"] == pytest.approx(2 * 1.0 - 3 * 0.3)
     # ... and the replica change is reported separately, never as a release.
     change_block = capacity["replica_change"]
     assert change_block["before"] == pytest.approx(2.0) and change_block["after"] == pytest.approx(3.0)
@@ -174,11 +178,25 @@ async def test_workload_observations_record_per_container_requests_and_limits(da
         container_request_values={"api": (300, GIB)},
         container_limit_values={"api": (None, 2 * GIB)},
     )
+    with_init = WorkloadSnapshot(
+        namespace="prod",
+        kind="Deployment",
+        name="web",
+        generation=1,
+        container_request_values={"web": (300, GIB), "migrate": (2000, GIB), "proxy": (100, GIB)},
+        container_kinds={"web": "container", "migrate": "init", "proxy": "sidecar"},
+    )
     assert await scenario.service.observe_workloads({("prod", "Deployment", "api"): snapshot}) == 1
     latest = await scenario.changes.latest_spec_observations()
     assert latest[("prod", "Deployment", "api")].container_resources == _resources(300, GIB)
     # Same revision: nothing new is recorded.
     assert await scenario.service.observe_workloads({("prod", "Deployment", "api"): snapshot}) == 0
+    # Container kinds are recorded so init containers stay out of the released capacity.
+    await scenario.service.observe_workloads({("prod", "Deployment", "web"): with_init})
+    web = (await scenario.changes.latest_spec_observations())[("prod", "Deployment", "web")]
+    assert web.container_resources is not None
+    assert web.container_resources["migrate"]["kind"] == "init"
+    assert web.container_resources["proxy"]["kind"] == "sidecar"
 
 
 def test_the_workload_reader_parses_container_limits():
@@ -189,3 +207,17 @@ def test_the_workload_reader_parses_container_limits():
     assert valid and limits == {"api": (None, 2 * GIB)}
     requests, _ = _read_container_request_values(containers)
     assert requests == {"api": (300, None)}
+
+
+def test_the_workload_reader_names_init_containers_and_native_sidecars():
+    from greenkube.core.optimization.applied_detector import _container_kinds
+
+    kinds = _container_kinds(
+        [{"name": "api"}],
+        [
+            {"name": "migrate"},
+            {"name": "proxy", "restart_policy": "Always"},
+            {"name": "mesh", "restartPolicy": "Always"},
+        ],
+    )
+    assert kinds == {"api": "container", "migrate": "init", "proxy": "sidecar", "mesh": "sidecar"}

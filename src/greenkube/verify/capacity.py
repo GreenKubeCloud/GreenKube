@@ -10,13 +10,16 @@ applied detector records with each workload spec observation
 the hour buckets of the baseline and the post-window:
 
 * ``per_replica``: requested cores and GiB per replica before minus after;
-* ``total``: ``per_replica x`` the post-window mean replicas, the release
-  booked for the change;
+* ``total``: ``per_replica x`` the baseline mean replicas, the request
+  effect booked for the change;
 * ``replica_change``: when the mean replica count moved between the windows,
   the capacity that move reserved (or freed) at the new request, reported
-  apart and never booked as a release;
-* ``cpu_core_hours`` / ``mem_gib_hours``: the release accrued over the
-  post-window, ``per_replica x`` the post-window replica-hours.
+  apart and never booked as a release; ``total + replica_change = net``;
+* ``net``: requested capacity before minus after, both effects together;
+* only containers present before and after are compared (removed and added
+  containers are listed apart) and classic init containers are left out;
+* ``cpu_core_hours`` / ``mem_gib_hours``: the request effect accrued over
+  the covered post-window hours.
 
 The verdict (``released``, ``partially_released``, ``not_released``) compares
 the measured per-replica release with the release the change's
@@ -58,6 +61,7 @@ UNITS = {
     "replicas": "replicas",
 }
 
+#: ``{container: (cores, GiB)}``; init containers are left out when the observation names their kind.
 Requests = Dict[str, Tuple[Optional[float], Optional[float]]]
 
 
@@ -72,6 +76,10 @@ def _from_resources(resources: Mapping[str, Any]) -> Requests:
     requests: Requests = {}
     for name, values in resources.items():
         if not isinstance(values, Mapping):
+            continue
+        if values.get("kind") == "init":
+            # A classic init container runs before the pod starts: its requests are not held while the pod
+            # runs, so they are never part of the released capacity (native sidecars are kept).
             continue
         cpu = _number(values.get("cpu_request_millicores"))
         memory = _number(values.get("memory_request_bytes"))
@@ -96,6 +104,10 @@ def _from_pairs(pairs: Mapping[str, Any]) -> Requests:
     return requests
 
 
+def _time(value: Any) -> Optional[datetime]:
+    return ensure_utc(value) if isinstance(value, datetime) else None
+
+
 def _observed_at(observation: Any) -> Optional[datetime]:
     value = getattr(observation, "observed_at", None)
     return ensure_utc(value) if isinstance(value, datetime) else None
@@ -106,14 +118,19 @@ def spec_requests(
 ) -> Tuple[Optional[Requests], str, Optional[Requests], str]:
     """Per-container requests before and after the change, with where each comes from.
 
-    Before: the latest observation recorded at or before the merge
-    (``baseline_window_end``). After: the latest observation recorded after
-    it and before the post-window end; without one the spec did not change
-    (the detector records every new revision), unless no ``before``
+    Before: the latest observation of the change's ``spec_digest_before``
+    recorded before the rollout completed, else the latest observation
+    recorded before the rollout started. The merge time is not used: for a
+    manual apply the baseline ends at the rollout completion, after the new
+    revision was first seen. After: the latest observation recorded from the
+    rollout start to the post-window end; without one the spec did not
+    change (the detector records every new revision), unless no ``before``
     observation exists, in which case the requests recorded with the change
     are used.
     """
-    merge = ensure_utc(change.baseline_window_end)
+    started = _time(getattr(change, "rollout_started_at", None)) or ensure_utc(change.baseline_window_end)
+    completed = _time(getattr(change, "rollout_completed_at", None)) or started
+    digest_before = getattr(change, "spec_digest_before", None)
     end = ensure_utc(post_end)
     stamped: list[Tuple[datetime, Any]] = []
     for item in observations:
@@ -121,8 +138,19 @@ def spec_requests(
         if stamp is not None:
             stamped.append((stamp, item))
     stamped.sort(key=lambda pair: pair[0])
-    before_obs = [item for stamp, item in stamped if stamp <= merge]
-    after_obs = [item for stamp, item in stamped if merge < stamp <= end]
+    by_digest = (
+        [item for stamp, item in stamped if stamp <= completed and getattr(item, "spec_digest", None) == digest_before]
+        if digest_before
+        else []
+    )
+    before_obs = by_digest or [item for stamp, item in stamped if stamp < started]
+    # After: every observation recorded later than the chosen ``before`` one (or from the rollout start).
+    after_from = next((index for index, (_, item) in enumerate(stamped) if item is before_obs[-1]), None)
+    after_obs = (
+        [item for stamp, item in stamped[after_from + 1 :] if stamp <= end]
+        if after_from is not None
+        else [item for stamp, item in stamped if started <= stamp <= end]
+    )
     before: Optional[Requests] = None
     before_source = "missing"
     if before_obs:
@@ -144,8 +172,9 @@ def spec_requests(
     return before, before_source, after, after_source
 
 
-def _per_replica(requests: Requests, containers: Sequence[str]) -> Tuple[Optional[float], Optional[float]]:
-    names = [name for name in containers if name in requests] if containers else list(requests)
+def _per_replica(requests: Requests, names: Sequence[str]) -> Tuple[Optional[float], Optional[float]]:
+    """Requested cores and GiB per replica of the ``names`` containers."""
+    names = [name for name in names if name in requests]
     if not names:
         return None, None
 
@@ -223,6 +252,14 @@ def capacity_verdict(
     return VERDICT_NOT_RELEASED, "the per-replica requests did not decrease"
 
 
+def _net(
+    before: Optional[float], replicas_before: Optional[float], after: Optional[float], replicas_after: Optional[float]
+) -> Optional[float]:
+    if None in (before, replicas_before, after, replicas_after):
+        return None
+    return before * replicas_before - after * replicas_after  # type: ignore[operator]
+
+
 def measure_capacity(
     change: Any,
     observations: Sequence[Any],
@@ -235,9 +272,18 @@ def measure_capacity(
 ) -> Dict[str, Any]:
     """The measured released capacity of a change and its verdict (see the module docstring)."""
     before, before_source, after, after_source = spec_requests(change, observations, post_end)
+    # Only containers present on both sides are compared: removing or adding a container is a
+    # structural change reported apart, never booked as a release.
     containers = list(getattr(change, "containers", None) or [])
-    before_cpu, before_mem = _per_replica(before, containers) if before is not None else (None, None)
-    after_cpu, after_mem = _per_replica(after, containers) if after is not None else (None, None)
+    before_names = set(before or {})
+    after_names = set(after or {})
+    common = sorted(before_names & after_names)
+    if containers:
+        common = [name for name in common if name in containers]
+    removed = sorted(before_names - after_names) if before is not None and after is not None else []
+    added = sorted(after_names - before_names) if before is not None and after is not None else []
+    before_cpu, before_mem = _per_replica(before, common) if before is not None else (None, None)
+    after_cpu, after_mem = _per_replica(after, common) if after is not None else (None, None)
     released_cpu = before_cpu - after_cpu if before_cpu is not None and after_cpu is not None else None
     released_mem = before_mem - after_mem if before_mem is not None and after_mem is not None else None
 
@@ -259,12 +305,15 @@ def measure_capacity(
             "before": replicas_before,
             "after": replicas_after,
             "delta": delta,
-            # More replicas reserve more: a negative release at the new per-replica request.
+            # More replicas reserve more: a negative release at the new per-replica request. With the
+            # request effect at the baseline replicas, request effect + replica effect = net change.
             "cpu_cores": -delta * after_cpu if after_cpu is not None else None,
             "mem_gib": -delta * after_mem if after_mem is not None else None,
             "note": "Replica change (HPA or manual scaling): reported apart, never booked as a release.",
         }
 
+    total_cpu = times(released_cpu, replicas_before)
+    total_mem = times(released_mem, replicas_before)
     proposed = proposed_release(members)
     verdict, reason = capacity_verdict((released_cpu, released_mem), proposed)
     direction = (
@@ -288,12 +337,21 @@ def measure_capacity(
         "per_replica": {"cpu_cores": released_cpu, "mem_gib": released_mem},
         "proposed_per_replica": {"cpu_cores": proposed[0], "mem_gib": proposed[1]},
         "replicas": {"before": replicas_before, "after": replicas_after},
-        "total": {"cpu_cores": times(released_cpu, replicas_after), "mem_gib": times(released_mem, replicas_after)},
+        # The request effect, at the baseline replica count (the release booked for the change).
+        "total": {"cpu_cores": total_cpu, "mem_gib": total_mem},
         "replica_change": replica_change,
+        # Requested capacity before minus after, both effects together.
+        "net": {
+            "cpu_cores": _net(before_cpu, replicas_before, after_cpu, replicas_after),
+            "mem_gib": _net(before_mem, replicas_before, after_mem, replicas_after),
+        },
+        "containers_compared": common,
+        "containers_removed": removed,
+        "containers_added": added,
         "post_window_hours": post_hours,
         "post_replica_hours": post_replica_hours,
-        "cpu_core_hours": times(released_cpu, post_replica_hours),
-        "mem_gib_hours": times(released_mem, post_replica_hours),
+        "cpu_core_hours": times(total_cpu, post_hours),
+        "mem_gib_hours": times(total_mem, post_hours),
         "units": dict(UNITS),
         "note": "Reserved capacity, not money: never added to cost savings. Negative values are increases.",
     }
