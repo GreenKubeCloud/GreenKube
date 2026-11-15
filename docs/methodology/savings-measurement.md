@@ -250,6 +250,7 @@ Values are **signed and never floored**: a cost increase is reported as a negati
 | The pod template changed again during the post-window with different requests or limits (a resources digest other than this change's), or without a resources digest on either side (`spec_change`) | severe |
 | The workload was deleted and recreated during the post-window | severe |
 | The workload's HPA changed after the rollout (replicas, so the allocated cost, moved without the change) | severe |
+| The baseline's trusted cost and the after-window's come from different price bases, OpenCost or Kubecost allocation (`allocated`) versus list prices (`list_price`) (`price_basis_change`, COST-01): the price switch would read as a saving. Hours frozen before the basis was recorded are not compared | severe |
 | The workload's own unit price of a resource (per charged unit, `price_card_change`) moved more than 20% | severe |
 | The node pool's CPU or memory unit price (all workloads of the pool) moved more than 20% (`pool_price_card_change`) | severe |
 | The node instance types running the workload changed on more than 50% of its pod-hours | severe |

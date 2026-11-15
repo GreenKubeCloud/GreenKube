@@ -168,6 +168,9 @@ class HourBucket(_Frozen):
     #: Independent of energy, so an hour with zero energy keeps its factor. ``None`` in snapshots
     #: frozen before it was recorded and when no row carried an intensity.
     carbon_factor: Optional[float] = None
+    #: Share of the hour's trusted cost time per price basis (``allocated``, ``list_price``), COST-01 (d).
+    #: ``None`` in snapshots frozen before it was recorded and in hours without trusted cost.
+    cost_bases: Optional[dict[str, float]] = None
 
     @property
     def hour_of_week(self) -> int:
@@ -181,6 +184,7 @@ _OPTIONAL_BUCKET_FIELDS = (
     "charged_core_hours",
     "charged_gib_hours",
     "carbon_factor",
+    "cost_bases",
 )
 
 

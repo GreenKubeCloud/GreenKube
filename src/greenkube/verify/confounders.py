@@ -261,6 +261,7 @@ class ConfounderDetector:
         findings.extend(self._other_changes(change, plan, other_changes))
         findings.extend(self._spec_changes(change, plan, observations))
         findings.extend(self._replica_shift(pre, post, load))
+        findings.extend(self._price_basis(pre, post))
         findings.extend(self._price_change(pre, post))
         findings.extend(self._constant_prices(pre, post, price_card))
         findings.extend(self._intensity_shift(pre, post))
@@ -401,6 +402,29 @@ class ConfounderDetector:
             previous_hpa = observation.hpa_digest
             seen_hpa = True
         return findings
+
+    @staticmethod
+    def _price_basis(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:
+        """``price_basis_change`` (severe) when the windows' trusted costs come from different bases (COST-01 d).
+
+        A baseline priced by OpenCost (spot, discounts, custom pricing) and an
+        after-window priced at on-demand list prices, or the other way round,
+        would measure the price switch as a saving. Hours without a recorded
+        basis (older snapshots) are not compared.
+        """
+        before = {basis for bucket in pre for basis, share in (bucket.cost_bases or {}).items() if share > 0}
+        after = {basis for bucket in post for basis, share in (bucket.cost_bases or {}).items() if share > 0}
+        if not before or not after or before == after:
+            return []
+        return [
+            Confounder(
+                kind="price_basis_change",
+                severity="severe",
+                detail=f"the cost of the baseline is priced on {', '.join(sorted(before))} and the cost after the "
+                f"change on {', '.join(sorted(after))}: the price switch cannot be measured as a saving",
+                evidence={"before": sorted(before), "after": sorted(after)},
+            )
+        ]
 
     @staticmethod
     def _replica_shift(

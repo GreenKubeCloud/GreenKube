@@ -31,6 +31,7 @@ def _without_embodied(buckets):
                 "charged_core_hours": None,
                 "charged_gib_hours": None,
                 "carbon_factor": None,
+                "cost_bases": None,
             }
         )
         for bucket in buckets
@@ -112,6 +113,7 @@ def test_digest_of_a_snapshot_frozen_before_embodied_co2e_still_verifies():
         bucket.pop("charged_core_hours")
         bucket.pop("charged_gib_hours")
         bucket.pop("carbon_factor")
+        bucket.pop("cost_bases")
     assert snapshot.with_digest().content_sha256 == sha256_hex(legacy)
 
 

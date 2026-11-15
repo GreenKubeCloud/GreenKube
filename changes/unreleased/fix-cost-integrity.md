@@ -9,6 +9,7 @@
 - OpenCost is queried with `aggregate=cluster,namespace,pod` and, when `OPENCOST_CLUSTER_ID` is set, filtered on that cluster; an answer covering several clusters without an id stores no OpenCost cost instead of merging same-named pods of different clusters (COST-10).
 - The OpenCost entry of `GET /health/services` calls the allocation endpoint with the configured credentials and reports `degraded` with the status code when it fails (401, 403, 5xx), instead of probing `/healthz` only (COST-01, COST-06).
 - While OpenCost is known for the cluster (a persisted `opencost_cost` watermark row, beyond the backfill horizon), a pod whose allocation carries no usable cost and an OpenCost whose URL cannot be resolved give `opencost_pending` rows and pending steps instead of a trusted modeled cost. Pending steps that leave the horizon become `opencost_pending_expired` with a warning and the counter `greenkube_collection_cost_pending_expired_steps_total`; only steps with rows count as re-priced (COST-01 review).
+- A change measurement whose baseline cost and after-window cost come from different price bases (OpenCost allocation versus list prices) is contaminated (`price_basis_change`) instead of booking the price switch as a saving; hour buckets record their `cost_bases` (COST-01 acceptance d).
 
 ### Added
 - Migration 0155 adds `collection_windows.cost_status`; gauge `greenkube_collection_cost_pending_steps`; counter `greenkube_opencost_unrebuilt_allocations_total`; gauge `greenkube_opencost_ambiguous_cluster`.

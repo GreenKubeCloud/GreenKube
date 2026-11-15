@@ -281,6 +281,25 @@ def cost_source_rank_sql(expression: str) -> str:
     return f"(CASE LOWER({expression}) {cases} ELSE 0 END)"
 
 
+#: Price basis of a trusted cost: an allocation engine's own figure, or a list price (COST-01 acceptance d).
+COST_BASIS_ALLOCATED = "allocated"
+COST_BASIS_LIST_PRICE = "list_price"
+
+
+def cost_basis_family(source: Optional[str]) -> Optional[str]:
+    """Price basis of a cost source: ``allocated`` (OpenCost, Kubecost), ``list_price`` (catalog), else ``None``.
+
+    A change measurement must not compare a baseline priced on one basis with
+    an after-window priced on the other: the price switch would read as a saving.
+    """
+    value = _normalized(source)
+    if value in ALLOCATED_COST_SOURCES:
+        return COST_BASIS_ALLOCATED
+    if value == CostSource.PRICING_CATALOG.value:
+        return COST_BASIS_LIST_PRICE
+    return None
+
+
 def cost_source_for(cost_found: bool) -> CostSource:
     """Provenance of an OpenCost-or-default cost lookup.
 
