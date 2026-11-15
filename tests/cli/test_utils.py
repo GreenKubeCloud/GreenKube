@@ -68,7 +68,7 @@ async def test_write_combined_metrics_to_database_saves_and_updates_gauges():
 
     assert report is not None and report.succeeded
     assert processor.run_range.await_count == 1
-    repo.write_combined_metrics.assert_awaited_once_with([metric])
+    repo.write_combined_metrics.assert_awaited_once_with([metric], replace_containers=True)
     update_cluster_metrics.assert_called_once_with([metric])
     assert watermarks.value is not None
     processor.close.assert_awaited_once()
@@ -139,7 +139,7 @@ async def test_write_combined_metrics_to_database_ignores_gauge_update_failure()
                 with patch("greenkube.cli.utils.update_cluster_metrics", side_effect=RuntimeError("gauge failed")):
                     await utils.write_combined_metrics_to_database()
 
-    repo.write_combined_metrics.assert_awaited_once_with([metric])
+    repo.write_combined_metrics.assert_awaited_once_with([metric], replace_containers=True)
     processor.close.assert_awaited_once()
 
 
