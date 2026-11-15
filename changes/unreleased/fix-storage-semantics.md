@@ -1,0 +1,2 @@
+### Fixed
+- PostgreSQL stores the additive measures of the metric tables (`joules`, `co2e_grams`, `embodied_co2e_grams`, `total_cost`, `pue`, `grid_intensity` of the raw, container and hourly tables) in double precision (migration 0145): sums over millions of rows no longer drift or saturate. Tables above 256 MB are converted online by the controller (batched backfill of a shadow column, then a short swap with a 5 s lock timeout); stored values keep their 7 significant digits (NRG-06, STO-11).

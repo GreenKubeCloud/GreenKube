@@ -55,6 +55,24 @@ data is preserved: the bundled PostgreSQL StatefulSet, its volume and its Secret
 | `config.recommendations.sourcePriority`, `vpaEnabled`, `karpenterEnabled` | `sources.priority`, `sources.settings.<id>.enabled` |
 | ConfigMap `<release>` (a Helm hook) | ConfigMap `<release>-config` (a regular release resource) |
 
+### Metric measures in double precision (PostgreSQL)
+
+Migration 0145 changes `joules`, `co2e_grams`, `embodied_co2e_grams`, `total_cost`, `pue` and
+`grid_intensity` of `combined_metrics`, `combined_metrics_hourly`, `container_metrics` and
+`container_metrics_hourly` from `real` (float4) to `double precision`, so sums over millions of rows no
+longer drift. Changing the type rewrites the table under an exclusive lock:
+
+- A table of at most 256 MB (indexes included) is converted inside the migration batch, in seconds.
+- A larger table is converted online, without a long lock: the migration only adds a `double precision`
+  shadow column per measure (`<column>__f8`), kept equal by a trigger, and records the work in
+  `online_column_upgrades`. The controller then backfills the shadow columns in the background, 50,000 ids
+  per short transaction (progress is recorded, a restart resumes), and swaps them in with one short
+  transaction that waits at most 5 s for its lock (otherwise it retries at the next controller start).
+  Collection and the API keep working during the backfill; sums keep the float4 drift until the swap.
+  `SELECT * FROM online_column_upgrades` is empty once every table is converted.
+
+Stored values keep their 7 significant digits. SQLite is not affected (its `REAL` is already 8 bytes).
+
 ### Deprecated values (accepted for this minor release)
 
 An upgrade that reuses a 0.3.x values file keeps working: the chart maps the old keys and lists each one under

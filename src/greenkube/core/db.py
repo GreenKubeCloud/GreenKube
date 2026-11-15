@@ -8,6 +8,7 @@ import asyncpg
 
 from .config import Config, get_config
 from .migrations import MigrationRunner
+from .migrations.online import complete_online_column_upgrades, pending_online_upgrades
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,8 @@ class DatabaseManager:
         self._sqlite_operation_lock = _ReentrantAsyncLock()
         self._savepoint_counter = 0
         self._schema_current = False
+        #: Background backfill of large-table column upgrades started by the migrating process (NRG-06).
+        self._online_upgrade_task: asyncio.Task | None = None
 
     @property
     def config(self) -> Config:
@@ -215,6 +218,13 @@ class DatabaseManager:
         await self.connect()
 
     async def close(self) -> None:
+        task, self._online_upgrade_task = self._online_upgrade_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
         pool, connection = self.pool, self.connection
         self.pool = None
         self.connection = None
@@ -256,6 +266,18 @@ class DatabaseManager:
             await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
             await MigrationRunner("postgres").run(connection)
             self._schema_current = True
+            if await pending_online_upgrades(connection):
+                self._online_upgrade_task = asyncio.create_task(self._complete_online_upgrades())
+
+    async def _complete_online_upgrades(self) -> None:
+        """Backfill and swap the large-table column upgrades left by migrations, in the background (NRG-06)."""
+        try:
+            async with self.connection_scope() as connection:
+                await complete_online_column_upgrades(connection)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Online column upgrade failed; it resumes on the next controller start.")
 
     async def schema_status(self) -> "SchemaStatus":
         """Whether every shipped migration is applied (F11 API readiness).
