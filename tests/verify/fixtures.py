@@ -199,6 +199,7 @@ class Scenario:
         fields: Optional[Dict[RecommendationType, Dict[str, Any]]] = None,
         resources_digest: Optional[str] = None,
         image_digest: Optional[str] = None,
+        with_snapshot: bool = True,
     ):
         """``fields`` adds or overrides fields of the CPU or memory recommendation.
 
@@ -265,7 +266,9 @@ class Scenario:
             resources_digest=resources_digest,
             image_digest=image_digest,
         )
-        change = await self.service.record_change(change_id, applied, snapshot=snapshot, now=completed)
+        change = await self.service.record_change(
+            change_id, applied, snapshot=snapshot if with_snapshot else None, now=completed
+        )
         assert change is not None
         return change, applied
 

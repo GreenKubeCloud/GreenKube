@@ -400,10 +400,15 @@ def get_change_recorder_factory():
     def build(lifecycle):
         from greenkube.core.factory import get_combined_metrics_repository
         from greenkube.storage.change_repository import get_change_repository
+        from greenkube.verify.drift import kubernetes_workload_snapshot
         from greenkube.verify.service import ChangeMeasurementService
 
         return ChangeMeasurementService(
-            lifecycle, get_combined_metrics_repository(), get_change_repository(), config=config
+            lifecycle,
+            get_combined_metrics_repository(),
+            get_change_repository(),
+            config=config,
+            workload_reader=kubernetes_workload_snapshot,
         )
 
     return build

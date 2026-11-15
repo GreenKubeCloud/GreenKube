@@ -455,6 +455,13 @@ class DriftMonitor:
             return "regressed"
         if await self._deleted(change, status, now):
             return "closed"
+        if drift is None and not change.spec_digest_after and change.action_kind == "container_resources":
+            # No pod-template digest (recorded without a workload snapshot): spec observations cannot
+            # tell a revert, so the live requests are compared on every pass (review wp07-4).
+            drift = await self._live_request_drift(change, now)
+            if drift is not None:
+                return await self._close_on_spec_drift(change, status, drift, now)
+            return None
         if drift is None or now - ensure_utc(drift.latest.observed_at) < SPEC_DRIFT_GRACE:
             return None
         drift = await self._confirm(change, drift)
@@ -511,12 +518,37 @@ class DriftMonitor:
         suffix = (
             " (its live requests differ from the applied ones)"
             if applied is False
-            else " (recorded before resources digests and its live requests could not be read)"
+            else " (recorded before resources digests and its live requests could not be read or compared)"
         )
         return replace(drift, reason=drift.reason + suffix)
 
+    async def _live_request_drift(self, change: ChangeEvent, now: datetime) -> Optional[SpecDrift]:
+        """A spec drift when the live requests of a change without a pod-template digest differ from it."""
+        if await self._requests_still_applied(change) is not False:
+            return None
+        latest = WorkloadSpecObservation(
+            namespace=change.target.namespace,
+            kind=change.target.kind,
+            name=change.target.name,
+            workload_uid=change.workload_uid,
+            observed_at=now,
+        )
+        return SpecDrift(
+            event_type="spec_drift",
+            reason="the workload no longer runs the measured change (its live requests differ from the applied ones)",
+            accrual_end=now,
+            latest=latest,
+        )
+
     async def _requests_still_applied(self, change: ChangeEvent) -> Optional[bool]:
-        """Whether the live workload still runs every member's applied request (``None`` when unknown)."""
+        """Whether the live workload still runs the change's requests (``None`` when unknown).
+
+        Every container counts: with the per-container requests recorded on the
+        change (``details.container_requests``) the whole live map must equal
+        them; without them each member's applied request is compared, and a
+        live container the change never recorded (a sibling) makes the answer
+        unknown, since its requests at the change are not known.
+        """
         if self.live_requests is None:
             return None
         try:
@@ -526,7 +558,12 @@ class DriftMonitor:
             return None
         if live is None:
             return None
+        recorded = (change.details or {}).get("container_requests")
+        if isinstance(recorded, dict) and recorded:
+            expected_map = {str(name): tuple(values) for name, values in recorded.items()}
+            return {str(name): tuple(values) for name, values in live.items()} == expected_map
         compared = False
+        members: Set[str] = set()
         for record in await self.service._records(change.recommendation_ids):
             kind = str(getattr(record.type, "value", record.type))
             if kind == "RIGHTSIZING_CPU":
@@ -542,7 +579,10 @@ class DriftMonitor:
             values = live.get(record.container_name)
             if values is None or values[index] != expected:
                 return False
+            members.add(record.container_name)
             compared = True
+        if set(live) - members:
+            return None
         return True if compared else None
 
     async def _assess(self, change: ChangeEvent, status: ChangeStatus, now: datetime) -> bool:
@@ -1006,6 +1046,64 @@ async def kubernetes_live_requests(namespace: str, kind: str, name: str) -> Opti
     return dict(values) if valid else None
 
 
+async def kubernetes_workload_snapshot(namespace: str, kind: str, name: str) -> Any:
+    """Live snapshot of one Deployment, StatefulSet or DaemonSet (``None`` when it cannot be read).
+
+    Used to record a change applied without a detector snapshot (``PATCH /apply``,
+    adoption): its UID, generation, pod-template, resources and image digests and
+    per-container requests back the spec-drift and live-request checks.
+    """
+    try:
+        from greenkube.core.k8s_client import get_apps_v1_api
+        from greenkube.core.optimization.applied_detector import (
+            WorkloadSnapshot,
+            _read_container_request_values,
+            _resource_field,
+        )
+        from greenkube.verify.digest import image_digest, pod_template_digest, resources_digest
+
+        api = await get_apps_v1_api()
+    except Exception as exc:  # pragma: no cover - configuration errors depend on the host
+        logger.debug("No Kubernetes client for the workload snapshot: %s", exc)
+        return None
+    if api is None:
+        return None
+    readers = {
+        "Deployment": api.read_namespaced_deployment,
+        "StatefulSet": api.read_namespaced_stateful_set,
+        "DaemonSet": api.read_namespaced_daemon_set,
+    }
+    reader = readers.get(kind)
+    if reader is None:
+        return None
+    try:
+        workload = await reader(name, namespace)
+    except Exception as exc:
+        logger.debug("Workload %s/%s/%s could not be read: %s", namespace, kind, name, exc)
+        return None
+    metadata = _resource_field(workload, "metadata")
+    spec = _resource_field(workload, "spec")
+    template = _resource_field(spec, "template") if spec else None
+    pod_spec = _resource_field(template, "spec") if template else None
+    if not metadata or not pod_spec:
+        return None
+    containers = list(_resource_field(pod_spec, "containers") or [])
+    init_containers = list(_resource_field(pod_spec, "init_containers", "initContainers") or [])
+    values, valid = _read_container_request_values([*containers, *init_containers])
+    return WorkloadSnapshot(
+        namespace=namespace,
+        kind=kind,
+        name=name,
+        uid=_resource_field(metadata, "uid"),
+        generation=_resource_field(metadata, "generation"),
+        container_request_values=values,
+        container_request_values_valid=valid,
+        spec_digest=pod_template_digest(template),
+        resources_digest=resources_digest(template),
+        image_digest=image_digest(template),
+    )
+
+
 async def kubernetes_workload_probe(namespace: str, kind: str, name: str) -> Optional[bool]:
     """Whether a Deployment, StatefulSet or DaemonSet exists: ``False`` only on HTTP 404, ``None`` when unknown."""
     try:
@@ -1108,5 +1206,6 @@ __all__ = [
     "detect_template_change",
     "kubernetes_live_requests",
     "kubernetes_workload_probe",
+    "kubernetes_workload_snapshot",
     "run_drift_monitor",
 ]

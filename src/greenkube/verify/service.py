@@ -28,7 +28,7 @@ import logging
 import math
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.automation.actions.delete_resource import deletion_target_for
 from greenkube.core.savings_attributor import REPRESENTATIVE_KEY
@@ -197,8 +197,13 @@ class ChangeMeasurementService:
         pull_request_repo: Any = None,
         node_repo: Any = None,
         clock: Optional[Callable[[], datetime]] = None,
+        workload_reader: Optional[Callable[[str, str, str], Awaitable[Any]]] = None,
     ):
         from greenkube.core.config import get_config
+
+        #: Reads one live workload snapshot when a change is recorded without one (PATCH /apply,
+        #: adoption): its pod-template, resources and image digests and UID back the drift checks.
+        self.workload_reader = workload_reader
 
         self.lifecycle = lifecycle
         self.combined_repo = combined_repo
@@ -525,6 +530,12 @@ class ChangeMeasurementService:
         baseline = _baseline(lead)
         plan_id = getattr(plan, "plan_id", None) or baseline.get("plan_id")
         deleted = deletion_target_for(lead)
+        if snapshot is None and deleted is None and self.workload_reader is not None and lead.owner_kind:
+            try:
+                snapshot = await self.workload_reader(lead.namespace or "", lead.owner_kind, lead.owner_name or "")
+            except Exception as exc:
+                logger.info("Live workload of change %s could not be read: %s", change_id, exc)
+                snapshot = None
         if snapshot is not None:
             target = WorkloadRef(namespace=snapshot.namespace, kind=snapshot.kind, name=snapshot.name)
         elif deleted is not None:
@@ -619,7 +630,11 @@ class ChangeMeasurementService:
             or ("delete_resource" if deleted is not None else "container_resources"),
             application_method=_application_method(lead, plan_id),
             load_metric=getattr(snapshot, "load_metric", None),
-            details={"spec_before_source": before_source, "rollout": rollout},
+            details={
+                "spec_before_source": before_source,
+                "rollout": rollout,
+                **_container_requests(snapshot),
+            },
             created_at=now,
         )
 
@@ -1635,6 +1650,14 @@ def _excused_baseline_restarts(baseline: Mapping[str, Any], relaxed: Iterable[Op
             return None
         total += float(value)
     return total
+
+
+def _container_requests(snapshot: Any) -> Dict[str, Any]:
+    """``{"container_requests": {container: [cpu millicores, memory bytes]}}`` of a snapshot (empty when unknown)."""
+    values = getattr(snapshot, "container_request_values", None)
+    if not values or not getattr(snapshot, "container_request_values_valid", True):
+        return {}
+    return {"container_requests": {str(name): list(requests) for name, requests in sorted(values.items())}}
 
 
 def _replica_hours(buckets: Sequence[Any], slot_seconds: int = 3600) -> Optional[float]:
