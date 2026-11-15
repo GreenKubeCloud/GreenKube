@@ -28,7 +28,7 @@ A Goldilocks VPA and a user VPA on the same container are two signals of the **s
 
 | Skipped | Why | Where it shows |
 |---|---|---|
-| VPAs whose `updateMode` is `Auto`, `Recreate`, `Initial`, `InPlaceOrRecreate` or any value other than `Off` | The VPA already writes the pods (or sets requests at pod creation): a GreenKube pull request would fight it. In `Auto`, `Recreate`, `InPlaceOrRecreate` or `InPlace` mode it also blocks automation plans for its workload ([approval and policy](../automation.md#approval-and-policy)). | Diagnostic `skipped_vpas`, counted by mode, on the `vpa` run |
+| VPAs whose `updateMode` is `Auto`, `Recreate`, `Initial`, `InPlaceOrRecreate` or any value other than `Off`, and VPAs without `updateMode` (the VPA API defaults it to an active mode; counted as `Auto (default)`) | The VPA already writes the pods (or sets requests at pod creation): a GreenKube pull request would fight it. In `Auto`, `Recreate`, `InPlaceOrRecreate` or `InPlace` mode it also blocks automation plans for its workload ([approval and policy](../automation.md#approval-and-policy)). | Diagnostic `skipped_vpas`, counted by mode, on the `vpa` run |
 | VPAs without a `targetRef` name, or without a recommendation yet | Nothing to compare. | Not counted |
 | Containers GreenKube has no usage series for | No current request to compare with, no projection. | Not counted |
 | v1 recommendations: increases, and targets equal to the current request | The v1 recommendation of this source is a decrease. Increases still reach consensus as signals. | Signals only |

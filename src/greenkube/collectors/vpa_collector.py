@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 VPA_GROUP = "autoscaling.k8s.io"
 VPA_VERSION = "v1"
 VPA_PLURAL = "verticalpodautoscalers"
+#: How a VPA without ``updateMode`` is reported: the API defaults it to an active mode, so it is skipped.
+UNSET_UPDATE_MODE = "Auto (default)"
 
 
 @dataclass
@@ -118,7 +120,8 @@ class VPACollector:
                 status = item.get("status") or {}
 
                 update_policy = spec.get("updatePolicy") or {}
-                update_mode = update_policy.get("updateMode") or spec.get("updateMode") or "Off"
+                # An unset updateMode is the VPA API default, an active mode (Auto), never Off.
+                update_mode = update_policy.get("updateMode") or spec.get("updateMode") or UNSET_UPDATE_MODE
                 if update_mode != "Off":
                     self.skipped_by_mode[str(update_mode)] = self.skipped_by_mode.get(str(update_mode), 0) + 1
                     logger.debug(
