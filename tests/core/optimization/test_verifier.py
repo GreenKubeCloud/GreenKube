@@ -98,6 +98,12 @@ def _applied_record(
     )
 
 
+def _pair(cost: float, co2: float, cpu: float, **values) -> list[CombinedMetric]:
+    """Two samples five minutes apart: an interim verdict needs an interval, so two samples per window (MEA-16)."""
+    first = datetime.now(timezone.utc) - timedelta(minutes=10)
+    return [_metric(cost, co2, cpu, timestamp=first + timedelta(minutes=5 * index), **values) for index in range(2)]
+
+
 def _metric(
     cost: float,
     co2: float,
@@ -170,8 +176,8 @@ class TestVerifierOutcomes:
             RecommendationLifecycle(repo),
             # After: 0.01 per 5-min sample; before: 0.05 per sample -> ~80% drop.
             FakeCombinedRepo(  # pyrefly: ignore[bad-argument-type]
-                [_metric(cost=0.01, co2=0.5, cpu=200)],
-                before_metrics=[_metric(cost=0.05, co2=2.5, cpu=200)],
+                _pair(cost=0.01, co2=0.5, cpu=200),
+                before_metrics=_pair(cost=0.05, co2=2.5, cpu=200),
             ),
             config=_config(),
         )
@@ -193,8 +199,8 @@ class TestVerifierOutcomes:
         verifier = RecommendationVerifier(
             RecommendationLifecycle(repo),
             FakeCombinedRepo(  # pyrefly: ignore[bad-argument-type]
-                [_metric(cost=0.01, co2=0.5, cpu=200)],
-                before_metrics=[_metric(cost=0.05, co2=2.5, cpu=200)],
+                _pair(cost=0.01, co2=0.5, cpu=200),
+                before_metrics=_pair(cost=0.05, co2=2.5, cpu=200),
             ),
             config=_config(),
         )
@@ -239,7 +245,7 @@ class TestVerifierOutcomes:
         ]
         verifier = RecommendationVerifier(
             RecommendationLifecycle(repo),
-            FakeCombinedRepo(after, before_metrics=[_metric(0.05, 2.5, 100, timestamp=first)]),  # pyrefly: ignore[bad-argument-type]
+            FakeCombinedRepo(after, before_metrics=_pair(0.05, 2.5, 100)),  # pyrefly: ignore[bad-argument-type]
             config=_config(),
         )
 
@@ -287,7 +293,7 @@ class TestVerifierOutcomes:
         await repo.save_recommendations([_applied_record(applied_at)])
         verifier = RecommendationVerifier(
             RecommendationLifecycle(repo),
-            FakeCombinedRepo([_metric(cost=0.05, co2=2.5, cpu=200)]),  # pyrefly: ignore[bad-argument-type]
+            FakeCombinedRepo(_pair(cost=0.05, co2=2.5, cpu=200)),  # pyrefly: ignore[bad-argument-type]
             config=_config(),
         )
 
@@ -381,7 +387,7 @@ class TestVerifierOutcomes:
         ]
         verifier = RecommendationVerifier(
             RecommendationLifecycle(repo),
-            FakeCombinedRepo(after, before_metrics=[_metric(0.05, 2.5, 100, timestamp=first)]),  # pyrefly: ignore[bad-argument-type]
+            FakeCombinedRepo(after, before_metrics=_pair(0.05, 2.5, 100)),  # pyrefly: ignore[bad-argument-type]
             config=_config(),
         )
 

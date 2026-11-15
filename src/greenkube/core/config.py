@@ -105,6 +105,26 @@ def parse_repository_allowlist(value: str) -> tuple[str, ...]:
 
 #: Shortest baseline window (days) an accelerated (demo/quickstart) change measurement accepts: 1 hour.
 ACCELERATED_MIN_PRE_WINDOW_DAYS = 1 / 24
+#: Shortest post-change window (days): a verdict needs 5 complete days of aligned hours (MEA-10).
+MIN_POST_WINDOW_DAYS = 5.0
+#: Shortest accelerated post-change window (days): six 5-minute slots, 30 minutes (MEA-10).
+ACCELERATED_MIN_POST_WINDOW_DAYS = 1 / 48
+
+
+#: Clamped window settings already reported (name, configured value): warn once per process.
+_CLAMP_WARNED: set[tuple[str, float]] = set()
+
+
+def _clamp_window(name: str, value: float, minimum: float, why: str) -> float:
+    """``value`` raised to ``minimum`` with a warning (once per value), never a startup failure."""
+    if value >= minimum - 1e-9:
+        return value
+    if (name, value) not in _CLAMP_WARNED:
+        _CLAMP_WARNED.add((name, value))
+        logging.getLogger(__name__).warning(
+            "%s=%g is below the minimum of %g days (%s): using %g days.", name, value, minimum, why, minimum
+        )
+    return minimum
 
 
 def _scan_interval_seconds(value: str) -> int:
@@ -510,7 +530,8 @@ class Config(BaseSettings):
     # Baseline window (days) ending at the PR merge or plan approval; at least 7 so every hour of the week matches
     # (at least 1 hour with CHANGE_MEASUREMENT_ACCELERATED, see below).
     CHANGE_MEASUREMENT_PRE_WINDOW_DAYS: float = Field(7.0, gt=0)
-    # Post-change window (days) starting after the rollout and its warm-up.
+    # Post-change window (days) starting after the rollout and its warm-up; at least 5 (a verdict needs
+    # 5 days of aligned hours), at least 30 minutes with CHANGE_MEASUREMENT_ACCELERATED.
     CHANGE_MEASUREMENT_POST_WINDOW_DAYS: float = Field(7.0, gt=0)
     # Hours after rollout completion excluded from the post-window.
     CHANGE_MEASUREMENT_WARMUP_HOURS: float = Field(1.0, ge=0)
@@ -1032,23 +1053,32 @@ class Config(BaseSettings):
                 self.DEFAULT_PUE,
             )
 
-        # Change measurement windows (C3): the 7-day baseline is the safe minimum; only an explicit
-        # accelerated (demo/quickstart) setting may shorten it, never below one hour.
-        minimum_pre_window = ACCELERATED_MIN_PRE_WINDOW_DAYS if self.CHANGE_MEASUREMENT_ACCELERATED else 7.0
-        if self.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS < minimum_pre_window:
-            raise ValueError(
-                f"CHANGE_MEASUREMENT_PRE_WINDOW_DAYS must be at least {minimum_pre_window:g} "
-                + (
-                    "with CHANGE_MEASUREMENT_ACCELERATED."
-                    if self.CHANGE_MEASUREMENT_ACCELERATED
-                    else "(7 days so every hour of the week is matched; CHANGE_MEASUREMENT_ACCELERATED "
-                    "allows shorter demo windows)."
-                )
-            )
+        # Change measurement windows (C3, MEA-10): the 7-day baseline and the 5-day post-window are the
+        # minimums a verdict needs; only an explicit accelerated (demo/quickstart) setting may shorten them
+        # (1 hour, 30 minutes). A shorter value is raised to the minimum with a warning, never a startup
+        # failure: a setting that was valid before must not stop GreenKube from starting.
+        accelerated = self.CHANGE_MEASUREMENT_ACCELERATED
+        self.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS = _clamp_window(
+            "CHANGE_MEASUREMENT_PRE_WINDOW_DAYS",
+            self.CHANGE_MEASUREMENT_PRE_WINDOW_DAYS,
+            ACCELERATED_MIN_PRE_WINDOW_DAYS if accelerated else 7.0,
+            "1 hour with CHANGE_MEASUREMENT_ACCELERATED"
+            if accelerated
+            else "7 days so every hour of the week is matched",
+        )
+        self.CHANGE_MEASUREMENT_POST_WINDOW_DAYS = _clamp_window(
+            "CHANGE_MEASUREMENT_POST_WINDOW_DAYS",
+            self.CHANGE_MEASUREMENT_POST_WINDOW_DAYS,
+            ACCELERATED_MIN_POST_WINDOW_DAYS if accelerated else MIN_POST_WINDOW_DAYS,
+            "30 minutes with CHANGE_MEASUREMENT_ACCELERATED"
+            if accelerated
+            else "a verdict needs 5 complete days of aligned post-change hours",
+        )
         if self.CHANGE_MEASUREMENT_ACCELERATED:
             logging.getLogger(__name__).warning(
-                "CHANGE_MEASUREMENT_ACCELERATED is on: change measurements use demo windows and are not "
-                "representative. Do not use it in production."
+                "CHANGE_MEASUREMENT_ACCELERATED is on: change measurements use demo windows, 5-minute slots, "
+                "a flat baseline-mean counterfactual and demo thresholds; their verdicts are labelled "
+                "representative=false. Do not use it in production."
             )
 
         # Cross-field validation

@@ -164,6 +164,23 @@ def _projection_components(record: RecommendationRecord) -> List[AccrualComponen
     return [component for component in components if not component.is_zero]
 
 
+#: Recommendation baseline key set to ``False`` by an accelerated demo measurement (MEA-10).
+REPRESENTATIVE_KEY = "measurement_representative"
+
+
+def is_non_representative(record: RecommendationRecord) -> bool:
+    """Whether the record's latest measurement is a demo verdict (``representative: false``).
+
+    Accelerated demo windows decide on demo thresholds: their measured saving
+    never accrues in the ledger and never restates a projection.
+    """
+    baseline = record.baseline
+    if baseline is None:
+        return False
+    values = baseline.model_dump() if hasattr(baseline, "model_dump") else dict(baseline)
+    return values.get(REPRESENTATIVE_KEY) is False
+
+
 def accrual_components(record: RecommendationRecord, at: Optional[datetime] = None) -> List[AccrualComponent]:
     """Return the annual rates a recommendation accrues, by method.
 
@@ -177,6 +194,9 @@ def accrual_components(record: RecommendationRecord, at: Optional[datetime] = No
         if at is not None and verified_at is not None and at <= ensure_utc(verified_at):
             return _projection_components(record)
         if record.measured_co2e_saved_grams is None and record.measured_cost_saved is None:
+            return []
+        if is_non_representative(record):
+            # A demo verdict (accelerated windows) is not a measured saving: nothing accrues.
             return []
         measured = AccrualComponent(
             METHOD_MEASURED,

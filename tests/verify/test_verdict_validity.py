@@ -263,4 +263,4 @@ def test_counterfactual_params_record_the_interval_method():
     assert params["interval_method"] == "circular_block_bootstrap_t_with_between_week"
     assert params["baseline_weeks"] == 4
     assert params["between_week_basis"] == "estimated"
-    assert RequestRightsizingStrategy.version == "2.4"
+    assert RequestRightsizingStrategy.version == "2.5"

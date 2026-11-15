@@ -11,6 +11,11 @@ Rates divide by the covered time, so raw 5-minute rows and hourly rollups
 mix correctly. Embodied CO2e (``embodied_co2e_grams``, allocated by
 reservation) is aggregated apart from the operational CO2e: it needs no
 measured intensity.
+
+Accelerated demo windows (``CHANGE_MEASUREMENT_ACCELERATED``, MEA-10) use a
+finer time grid: :func:`hourly_buckets` groups the rows into ``slot_seconds``
+slots instead of clock hours. Each bucket's ``hour`` is then the slot start,
+and its rates stay per hour of covered time.
 """
 
 from __future__ import annotations
@@ -38,16 +43,26 @@ def floor_hour(moment: datetime) -> datetime:
     return moment.replace(minute=0, second=0, microsecond=0)
 
 
-def window_hours(window: TimeWindow) -> List[datetime]:
-    """Every UTC clock hour starting inside ``window``."""
+def floor_slot(moment: datetime, slot_seconds: int = 3600) -> datetime:
+    """Start of the ``slot_seconds`` slot (aligned on the UTC epoch) holding ``moment``."""
+    moment = ensure_utc(moment)
+    if slot_seconds == 3600:
+        return floor_hour(moment)
+    epoch = moment.timestamp()
+    return datetime.fromtimestamp(epoch - epoch % slot_seconds, tz=timezone.utc)
+
+
+def window_hours(window: TimeWindow, slot_seconds: int = 3600) -> List[datetime]:
+    """Every UTC clock hour (or ``slot_seconds`` slot) starting inside ``window``."""
     hours: List[datetime] = []
-    current = floor_hour(window.start)
+    step = timedelta(seconds=slot_seconds)
+    current = floor_slot(window.start, slot_seconds)
     if current < ensure_utc(window.start):
-        current += timedelta(hours=1)
+        current += step
     end = ensure_utc(window.end)
     while current < end:
         hours.append(current)
-        current += timedelta(hours=1)
+        current += step
     return hours
 
 
@@ -108,11 +123,16 @@ def _number(value: Any) -> Optional[float]:
     return number if number == number and number not in (float("inf"), float("-inf")) else None
 
 
-def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -> List[HourBucket]:
+def hourly_buckets(
+    rows: Iterable[Any], window: TimeWindow, step_seconds: int, *, slot_seconds: int = 3600
+) -> List[HourBucket]:
     """Aggregate pod-level rows of one workload into hour buckets inside ``window``.
 
     Every hour of the window is returned, with ``coverage == 0`` when it has no
-    data, so callers can compute coverage against the full window.
+    data, so callers can compute coverage against the full window. With
+    ``slot_seconds`` below an hour (accelerated demo windows only, MEA-10) the
+    buckets are slots of that length; coverages are shares of the slot and
+    rates stay per hour.
     """
     start = ensure_utc(window.start)
     end = ensure_utc(window.end)
@@ -128,7 +148,7 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
 
     accumulators: Dict[datetime, _Accumulator] = defaultdict(_Accumulator)
     for moment, members in groups.items():
-        acc = accumulators[floor_hour(moment)]
+        acc = accumulators[floor_slot(moment, slot_seconds)]
         coverage = max(_coverage_seconds(row, step_seconds) for row in members)
         acc.covered += coverage
         for row in members:
@@ -183,7 +203,7 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
             acc.embodied_seconds += coverage
 
     buckets: List[HourBucket] = []
-    for hour in window_hours(TimeWindow(start=start, end=end)):
+    for hour in window_hours(TimeWindow(start=start, end=end), slot_seconds):
         acc = accumulators.get(hour)
         if acc is None or acc.covered <= 0:
             buckets.append(HourBucket(hour=hour))
@@ -194,7 +214,7 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
         buckets.append(
             HourBucket(
                 hour=hour,
-                coverage=min(covered / 3600.0, 1.0),
+                coverage=min(covered / slot_seconds, 1.0),
                 replicas=acc.pod_seconds / covered,
                 core_hours=acc.cpu_request / covered,
                 gib_hours=acc.memory_request / covered,
@@ -206,12 +226,12 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
                 cost=acc.cost / acc.cost_seconds * 3600.0 if acc.cost_seconds > 0 else None,
                 cost_cpu=acc.cost_cpu / acc.cost_seconds * 3600.0 if has_components else None,
                 cost_ram=acc.cost_ram / acc.cost_seconds * 3600.0 if has_components else None,
-                cost_coverage=min(acc.cost_seconds / 3600.0, 1.0),
+                cost_coverage=min(acc.cost_seconds / slot_seconds, 1.0),
                 energy_kwh=acc.energy_joules / _JOULES_PER_KWH * per_hour,
                 co2e_g=acc.co2e / acc.co2e_seconds * 3600.0 if acc.co2e_seconds > 0 else None,
-                co2e_coverage=min(acc.co2e_seconds / 3600.0, 1.0),
+                co2e_coverage=min(acc.co2e_seconds / slot_seconds, 1.0),
                 embodied_co2e_g=acc.embodied / acc.embodied_seconds * 3600.0 if acc.embodied_seconds > 0 else None,
-                embodied_coverage=min(acc.embodied_seconds / 3600.0, 1.0),
+                embodied_coverage=min(acc.embodied_seconds / slot_seconds, 1.0),
                 carbon_factor=acc.factor / acc.factor_seconds if acc.factor_seconds > 0 else None,
                 instance_types={key: value * per_hour for key, value in acc.instance_types.items()},
             )
@@ -375,6 +395,46 @@ def quantity_series(buckets: Sequence[HourBucket], quantity: str) -> Dict[dateti
             continue
         series[ensure_utc(bucket.hour)] = float(value)
     return series
+
+
+#: Quantities whose value comes from rows with trusted provenance (cost or carbon), and what is trusted.
+_TRUSTED_SOURCE = {
+    "cost_coverage": "cost provenance",
+    "co2e_coverage": "carbon (measured grid intensity and a profiled node)",
+}
+
+
+def missing_reason(
+    buckets: Sequence[HourBucket], quantity: str, description: str, window: str, *, unit: str = "hour"
+) -> str:
+    """Why ``buckets`` give no value of ``quantity``: the true cause, for an inconclusive reason (MEA-10).
+
+    Distinguishes a window without any metric row, rows without a trusted
+    value (cost or carbon provenance; request quantities are never called
+    trusted), and values present only in hours below
+    :data:`MIN_HOUR_COVERAGE` (with their count and best coverage). ``unit``
+    names a bucket (``slot`` on the accelerated time grid).
+    """
+    attribute, coverage_attribute = QUANTITY_FIELDS.get(quantity, ("cost", "cost_coverage"))
+    covered = [bucket for bucket in buckets if bucket.coverage > 0]
+    if not covered:
+        return f"no metric rows of the workload in the {window} window"
+    valued = [bucket for bucket in covered if getattr(bucket, attribute) is not None]
+    if not valued:
+        source = _TRUSTED_SOURCE.get(coverage_attribute)
+        rows = f"metric rows in the {window} window ({len(covered)} {unit}{'' if len(covered) == 1 else 's'})"
+        if source is not None:
+            return f"{rows} but no trusted {description} (no row with trusted {source})"
+        return f"{rows} but no {description}"
+    qualifying = [bucket for bucket in valued if (getattr(bucket, coverage_attribute) or 0.0) >= MIN_HOUR_COVERAGE]
+    if not qualifying:
+        best = max(getattr(bucket, coverage_attribute) or 0.0 for bucket in valued)
+        return (
+            f"{len(valued)} {unit}{'' if len(valued) == 1 else 's'} of {description} in the {window} window, "
+            "each below the "
+            f"{MIN_HOUR_COVERAGE:.0%} coverage a{'n' if unit[0] in 'aeiouh' else ''} {unit} needs (best {best:.0%})"
+        )
+    return f"no {description} per replica in the {window} window (no replica count in its qualifying hours)"
 
 
 def utc_hour(value: str | datetime) -> datetime:

@@ -346,6 +346,7 @@ async def run_recommendation_lifecycle() -> None:
         from ..core.factory import get_pull_request_repository as _pr_repo
         from ..storage.change_repository import get_change_repository
         from ..storage.measurement_repository import get_savings_measurement_repository
+        from ..verify.drift import kubernetes_workload_snapshot as _kubernetes_workload_snapshot
         from ..verify.load_driver import PrometheusRangeReader
         from ..verify.service import ChangeMeasurementService
 
@@ -369,6 +370,8 @@ async def run_recommendation_lifecycle() -> None:
             load_reader=load_reader,
             pull_request_repo=_pr_repo(),
             node_repo=_node_repo(),
+            # Changes recorded without a detector snapshot (adoption) read the live workload.
+            workload_reader=_kubernetes_workload_snapshot,
         )
         try:
             detector = AppliedDetector(lifecycle, action_status_repository=_gitops_repo(), change_recorder=changes)

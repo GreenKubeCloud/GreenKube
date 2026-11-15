@@ -197,3 +197,13 @@ def test_an_intensity_shift_does_not_lower_the_cost_confidence():
     _, _, confounders = _run((0.05, 300, 1.0), (0.04, 200, 0.5))
     assert [item.kind for item in confounders] == ["intensity_shift"]
     assert confidence_score(confounders, 1.0, None) == confidence_score([], 1.0, None)
+
+
+def test_a_carbon_factor_fallback_does_not_lower_the_cost_confidence():
+    """The fallback only touches the CO2e valuation, never the cost verdict the confidence describes."""
+    pre = _diurnal_window(datetime(2026, 11, 2, 10, 0, tzinfo=UTC), 0.05, 0.03)
+    post = [bucket for bucket in _diurnal_window(MERGE + timedelta(hours=1), 0.04, 0.03) if bucket.hour.hour >= 6]
+    _, _, confounders = _estimate_diurnal(pre, post)
+    fallback = [item for item in confounders if item.kind == "co2e_factor_fallback"]
+    assert fallback
+    assert confidence_score(fallback, 1.0, None) == confidence_score([], 1.0, None)

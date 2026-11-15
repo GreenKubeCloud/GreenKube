@@ -73,6 +73,31 @@ class TestApplyGuard:
         assert response.status_code == 200
         assert response.json()["status"] == "applied"
 
+    async def test_a_manual_apply_is_recorded_as_a_change(self, client, reco_repo):
+        """MEA-16: PATCH /apply goes through the change pipeline, so the interim verifier never judges it."""
+        from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+        from greenkube.core.optimization.verifier import RecommendationVerifier, change_id_of
+        from greenkube.storage.change_repository import ChangeRepository
+        from greenkube.verify.model import ChangeApplicationMethod
+
+        rec_id = await _saved(reco_repo)
+
+        response = client.patch(f"/api/v1/recommendations/{rec_id}/apply", json={"actual_cpu_request_millicores": 300})
+
+        assert response.status_code == 200
+        record = await reco_repo.get_recommendation_by_id(rec_id)
+        change_id = change_id_of(record)
+        assert change_id is not None
+        change = await ChangeRepository(db_manager).get_change(change_id)
+        assert change is not None and change.recommendation_ids == [rec_id]
+        assert change.application_method is ChangeApplicationMethod.MANUAL
+        verifier = RecommendationVerifier(
+            RecommendationLifecycle(reco_repo),
+            object(),  # pyrefly: ignore[bad-argument-type]
+            measurement_repo=None,
+        )
+        assert await verifier.verify_due() == []
+
     async def test_apply_unknown_recommendation_is_404(self, client):
         assert client.patch("/api/v1/recommendations/9999/apply", json={}).status_code == 404
 

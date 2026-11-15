@@ -180,6 +180,12 @@ Welcome to
    For accurate data, set: secrets.electricityMapsToken
    Or switch the provider to Wattnet (EU-only, free): config.electricityProvider=wattnet + secrets.wattnetEmail/wattnetPassword
 
+{{- $cm := .Values.config.recommendations.changeMeasurement | default dict }}
+{{- if and (not $cm.accelerated) (lt (float64 ($cm.postWindowDays | default 7)) 5.0) }}
+* changeMeasurement.postWindowDays={{ $cm.postWindowDays }} is below 5 days: a verdict needs 5 complete days
+  of aligned hours, so GreenKube raises it to 5 days at startup (warning in the logs).
+{{- end }}
+
 * Back up the database before every upgrade: migrations only move forward and a helm rollback
   does not undo them (docs/operations/backup-restore.md).
 {{- if (.Values.postgres.backup | default dict).enabled }}

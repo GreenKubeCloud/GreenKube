@@ -646,7 +646,9 @@ config:
       enabled: true
       # Baseline window in days, ending at the PR merge or plan approval (at least 7).
       preWindowDays: 7
-      # Post-change window in days, starting after the rollout and its warm-up.
+      # Post-change window in days, starting after the rollout and its warm-up. A verdict needs
+      # 5 complete days of aligned hours: a shorter value is raised to 5 days at startup, with a
+      # warning in the logs (30 minutes with accelerated).
       postWindowDays: 7
       # Hours after rollout completion excluded from the post-window.
       warmupHours: 1
@@ -663,8 +665,10 @@ config:
       # Consecutive drifted days (1 to 7) after which the change is regressed.
       driftSustainedDays: 3
       # Demo and quickstart only: lifts the 7-day minimum of preWindowDays (down to
-      # 1 hour) so a change is measured minutes after it lands. Measurements on such
-      # windows match few or no hours of the week and are mostly inconclusive. Keep
+      # 1 hour) and the 5-day minimum of postWindowDays (down to 30 minutes) so a
+      # change is decided minutes after it lands. Such measurements use 5-minute slots,
+      # a flat baseline-mean counterfactual and demo thresholds (6 post slots), and are
+      # labelled representative=false: they show the pipeline, not a saving. Keep
       # false in production: the defaults above are the safe minimum.
       accelerated: false
       # Week-to-week variation (share of the counterfactual, 0 to 1) assumed when the baseline

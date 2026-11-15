@@ -202,8 +202,9 @@ class ChangeRepository:
                     "synced_at, namespace, workload_kind, workload_name, containers, workload_uid, generation_before, "
                     "generation_after, spec_digest_before, spec_digest_after, rollout_started_at, "
                     "rollout_started_source, rollout_completed_at, rollout_completed_source, baseline_window_end, "
-                    "action_kind, application_method, load_metric, details, created_at, created_by, cluster_uid) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?j, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?j, ?, ?, "
+                    "action_kind, application_method, load_metric, details, created_at, created_by, "
+                    "resources_digest_after, image_digest_after, cluster_uid) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?j, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?j, ?, ?, ?, ?, "
                     # N9: the cluster UID stored next to CLUSTER_NAME, once the controller resolved it.
                     "(SELECT cluster_uid FROM cluster_identities WHERE cluster_name = ?))",
                     [
@@ -234,6 +235,8 @@ class ChangeRepository:
                         _dumps(change.details),
                         self._ts(now),
                         change.created_by,
+                        change.resources_digest_after,
+                        change.image_digest_after,
                         _cluster_name(),
                     ],
                 )
@@ -295,6 +298,8 @@ class ChangeRepository:
             generation_after=values.get("generation_after"),
             spec_digest_before=values.get("spec_digest_before"),
             spec_digest_after=values.get("spec_digest_after"),
+            resources_digest_after=values.get("resources_digest_after"),
+            image_digest_after=values.get("image_digest_after"),
             rollout_started_at=values["rollout_started_at"],
             rollout_started_source=values["rollout_started_source"],
             rollout_completed_at=values["rollout_completed_at"],
@@ -722,6 +727,8 @@ class ChangeRepository:
             generation=row.get("generation"),
             spec_digest=row.get("spec_digest"),
             hpa_digest=row.get("hpa_digest"),
+            resources_digest=row.get("resources_digest"),
+            image_digest=row.get("image_digest"),
             observed_at=_required_time(row["observed_at"]),
         )
 
@@ -743,7 +750,8 @@ class ChangeRepository:
                 await self._execute(
                     conn,
                     "INSERT INTO workload_spec_observations (namespace, workload_kind, workload_name, workload_uid, "
-                    "generation, spec_digest, hpa_digest, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "generation, spec_digest, hpa_digest, resources_digest, image_digest, observed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         item.namespace,
                         item.kind,
@@ -752,6 +760,8 @@ class ChangeRepository:
                         item.generation,
                         item.spec_digest,
                         item.hpa_digest,
+                        item.resources_digest,
+                        item.image_digest,
                         self._ts(item.observed_at),
                     ],
                 )

@@ -207,12 +207,23 @@ def test_load_growth_above_the_request_is_not_credited_on_the_claimed_cost():
 
 
 def test_a_request_cut_under_load_growth_claims_the_charged_saving():
-    result, estimates, truth, above = _charged_scenario(post_request=0.5, seed=23)
-    assert above[1] >= 0.3
-    claimed = estimates["allocated_cost"]
-    assert claimed.ci_low is not None and claimed.ci_high is not None
-    assert claimed.ci_low <= truth <= claimed.ci_high
-    assert result.outcome is ChangeOutcome.REALIZED
+    """Over 10 seeded workloads the interval holds the true charged saving and the cut is realized in most.
+
+    A single seed proves nothing about a 90% interval (seed 22 alone is
+    inconclusive: its interval straddles the noise floor, which a sound
+    interval must do now and then).
+    """
+    covered = realized = 0
+    for seed in range(20, 30):
+        result, estimates, truth, above = _charged_scenario(post_request=0.5, seed=seed)
+        assert above[1] >= 0.3
+        claimed = estimates["allocated_cost"]
+        assert claimed.ci_low is not None and claimed.ci_high is not None
+        assert result.outcome is not ChangeOutcome.NOT_REALIZED
+        covered += claimed.ci_low <= truth <= claimed.ci_high
+        realized += result.outcome is ChangeOutcome.REALIZED
+    assert covered >= 9
+    assert realized >= 7
 
 
 def test_interval_covers_the_true_effect_at_about_its_nominal_rate():

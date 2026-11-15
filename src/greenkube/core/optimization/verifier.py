@@ -25,8 +25,16 @@ applied recommendation gets **one fixed-horizon measurement**:
   embodied emissions the rows do not carry) and split between records
   measured together by their projected measurable CO2e, as change
   measurement does;
-* the projection is not a gate: a change is ``realized`` when the measured
-  saving clears the noise floor, and projection accuracy is only reported;
+* the projection is not a gate: a change is ``realized`` when the 90%
+  interval of the measured saving lies above the noise floor (strategy
+  ``c0.2``, MEA-16: never on the point estimate; the interval comes from a
+  circular block bootstrap of the per-sample rates of each window, so it only
+  sees within-window noise), ``not_realized`` when it lies at or below it and
+  ``inconclusive`` when it straddles it; projection accuracy is only reported;
+* the measurements are labelled ``windows.method = interim_before_after``:
+  two window means, no counterfactual, no confounders. With change
+  measurement on, every apply (detected, GitOps or ``PATCH /apply``) is
+  measured by :mod:`greenkube.verify` instead;
 * every decision is an immutable ``savings_measurements`` row (C0.13);
   ``not_realized`` and ``inconclusive`` are terminal for the measurement and
   only ``POST /recommendations/{id}/remeasure`` starts a new one (C0.5).
@@ -49,6 +57,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence,
 
 from greenkube.impact.comparison import measurable_co2e_projection
 from greenkube.models.measurement import (
+    INTERIM_METHOD,
     MeasurementOutcome,
     QuantityEstimate,
     QuantityOutcome,
@@ -222,6 +231,7 @@ class MeasurementWindows:
 
     def as_dict(self) -> dict:
         return {
+            "method": INTERIM_METHOD,
             "baseline": {"start": self.baseline_start.isoformat(), "end": self.baseline_end.isoformat()},
             "after": {"start": self.after_start.isoformat(), "end": self.after_end.isoformat()},
         }
@@ -238,6 +248,8 @@ class WindowRates:
     cost_steps: float = 0.0
     co2e_steps: float = 0.0
     traffic_bytes_per_second: Optional[float] = None
+    #: Per-sample hourly rates (``cost``, ``cost_cpu``, ``cost_ram``, ``co2e``), for the interval (MEA-16).
+    samples: Dict[str, List[float]] = field(default_factory=dict)
 
 
 def _step_seconds(config: "Config") -> int:
@@ -298,19 +310,28 @@ def window_rates(series: Sequence, step: int) -> WindowRates:
         # bucket, pods replaced during a rollout ran one after the other, so scaling
         # each to the bucket's coverage would count the bucket's cost about twice.
         coverage = max(_coverage_seconds(m, step) for m in rows)
+        per_hour = 3600.0 / coverage if coverage > 0 else 0.0
         if all(cost_is_trusted(m) for m in rows):
-            cost_total += sum(float(m.total_cost or 0.0) for m in rows)
+            group_cost = sum(float(m.total_cost or 0.0) for m in rows)
+            cost_total += group_cost
             cost_cover += coverage
+            rates.samples.setdefault("cost", []).append(group_cost * per_hour)
             cpu = [getattr(m, "cost_cpu", None) for m in rows]
             ram = [getattr(m, "cost_ram", None) for m in rows]
             if any(value is None for value in cpu + ram):
                 components = False
             else:
-                cpu_total += sum(float(value) for value in cpu if value is not None)
-                ram_total += sum(float(value) for value in ram if value is not None)
+                group_cpu = sum(float(value) for value in cpu if value is not None)
+                group_ram = sum(float(value) for value in ram if value is not None)
+                cpu_total += group_cpu
+                ram_total += group_ram
+                rates.samples.setdefault("cost_cpu", []).append(group_cpu * per_hour)
+                rates.samples.setdefault("cost_ram", []).append(group_ram * per_hour)
         if all(carbon_is_trusted(m) for m in rows):
-            co2_total += sum(float(m.co2e_grams or 0.0) for m in rows)
+            group_co2 = sum(float(m.co2e_grams or 0.0) for m in rows)
+            co2_total += group_co2
             co2_cover += coverage
+            rates.samples.setdefault("co2e", []).append(group_co2 * per_hour)
         traffic = [
             float(m.network_receive_bytes or 0.0) + float(m.network_transmit_bytes or 0.0)
             for m in rows
@@ -759,7 +780,7 @@ class RecommendationVerifier:
             )
         else:
             decisions = [self._decide(record, attribution, observation, failed, min_samples) for record in group]
-            if any(decision.outcome is MeasurementOutcome.INCONCLUSIVE for decision in decisions):
+            if any(decision.reasons == [INSUFFICIENT_SAMPLES] for decision in decisions):
                 trusted = min(observation.before.cost_steps, observation.after.cost_steps)
                 return replayed + await self._extend_or_close(
                     group,
@@ -1160,8 +1181,18 @@ class RecommendationVerifier:
             return _Decision(MeasurementOutcome.ROLLBACK_REVIEW, [gate.detail for gate in failed_gates], estimates)
         if any(estimate.outcome is QuantityOutcome.REALIZED for estimate in claimed):
             return _Decision(MeasurementOutcome.REALIZED, notes, estimates)
-        if not claimed or any(estimate.outcome is QuantityOutcome.INCONCLUSIVE for estimate in claimed):
-            return _Decision(MeasurementOutcome.INCONCLUSIVE, ["insufficient_trusted_savings_samples"], estimates)
+        if not claimed or any(
+            estimate.outcome is QuantityOutcome.INCONCLUSIVE and estimate.ci_low_per_hour is None
+            for estimate in claimed
+        ):
+            return _Decision(MeasurementOutcome.INCONCLUSIVE, [INSUFFICIENT_SAMPLES], estimates)
+        straddling = [estimate for estimate in claimed if estimate.outcome is QuantityOutcome.INCONCLUSIVE]
+        if straddling:
+            return _Decision(
+                MeasurementOutcome.INCONCLUSIVE,
+                [_straddle_reason(estimate) for estimate in straddling] + notes,
+                estimates,
+            )
         reasons = [_not_realized_reason(estimate) for estimate in claimed]
         return _Decision(MeasurementOutcome.NOT_REALIZED, reasons + notes, estimates)
 
@@ -1185,6 +1216,7 @@ class RecommendationVerifier:
             before_rate = before_rate * share if before_rate is not None else None
             after_rate = after_rate * share if after_rate is not None else None
         enough = min(before.cost_steps, after.cost_steps) >= min_samples
+        sample_key = basis if basis in ("cost_cpu", "cost_ram") else "cost"
         return _estimate(
             "cost",
             "currency",
@@ -1197,6 +1229,9 @@ class RecommendationVerifier:
             enough,
             claimed=True,
             projected=record.potential_savings_cost,
+            spread=_difference_se(
+                before.samples.get(sample_key), after.samples.get(sample_key), _step_seconds(self.config), share
+            ),
         )
 
     def _co2e_estimate(
@@ -1226,6 +1261,9 @@ class RecommendationVerifier:
             claimed=record.type not in _RIGHTSIZING_TYPES,
             # Component-matched: the rows carry operational CO2e only, never embodied emissions.
             projected=measurable_co2e_projection(getattr(record, "impact", None)),
+            spread=_difference_se(
+                before.samples.get("co2e"), after.samples.get("co2e"), _step_seconds(self.config), share
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -1472,7 +1510,16 @@ def _estimate(
     *,
     claimed: bool,
     projected: Optional[float],
+    spread: Optional[tuple[float, float]] = None,
 ) -> QuantityEstimate:
+    """One quantity of an interim measurement, decided on the 90% interval of its delta (MEA-16).
+
+    ``spread`` is the ``(standard error, degrees of freedom)`` of the delta
+    (:func:`_difference_se`). ``realized`` when the interval lies above the
+    noise floor ``MIN_RELATIVE_CHANGE x |before|``, ``not_realized`` when it
+    lies at or below it, ``inconclusive`` when it straddles it or when no
+    interval can be computed (never a verdict on the point estimate).
+    """
     values: dict[str, Any] = {
         "quantity": quantity,
         "unit": unit,
@@ -1490,18 +1537,86 @@ def _estimate(
         )
     delta = before - after
     annualized = delta * _HOURS_PER_YEAR
-    realized = delta > 0 and delta > MIN_RELATIVE_CHANGE * abs(before)
+    floor = MIN_RELATIVE_CHANGE * abs(before)
+    low = high = None
+    if spread is not None:
+        low, high = _t_bounds(delta, *spread)
+    realized = low is not None and low > floor
     if not claimed:
         outcome = QuantityOutcome.NOT_CLAIMED
+    elif low is None or high is None:
+        outcome = QuantityOutcome.INCONCLUSIVE
+    elif realized:
+        outcome = QuantityOutcome.REALIZED
+    elif high <= floor:
+        outcome = QuantityOutcome.NOT_REALIZED
     else:
-        outcome = QuantityOutcome.REALIZED if realized else QuantityOutcome.NOT_REALIZED
+        outcome = QuantityOutcome.INCONCLUSIVE
     return QuantityEstimate(
         **values,
         delta_per_hour=delta,
+        ci_low_per_hour=low,
+        ci_high_per_hour=high,
         annualized=annualized,
         claimed_annualized=annualized if claimed and realized else 0.0,
         outcome=outcome,
         projection_accuracy=annualized / projected if projected else None,
+    )
+
+
+#: Reason of an interim measurement without enough trusted samples (extended once, then closed).
+INSUFFICIENT_SAMPLES = "insufficient_trusted_savings_samples"
+#: Bootstrap resamples of the interim interval.
+_INTERIM_BOOTSTRAP_SAMPLES = 400
+
+
+def _difference_se(
+    before: Optional[Sequence[float]], after: Optional[Sequence[float]], step: int, share: float = 1.0
+) -> Optional[tuple[float, float]]:
+    """Standard error and Welch degrees of freedom of ``mean(before) - mean(after)`` (times ``share``).
+
+    Each window's per-sample hourly rates go through a circular block
+    bootstrap with one-hour blocks (:mod:`greenkube.verify.statistics`), so
+    autocorrelated samples are not counted as independent. ``None`` with fewer
+    than two samples on either side.
+    """
+    from greenkube.verify.statistics import circular_block_bootstrap
+
+    if not before or not after or len(before) < 2 or len(after) < 2:
+        return None
+    block = max(1, round(3600 / step)) if step > 0 else 1
+    parts = []
+    for index, values in enumerate((before, after)):
+        interval = circular_block_bootstrap(
+            [value * share for value in values], seed=index + 1, samples=_INTERIM_BOOTSTRAP_SAMPLES, block=block
+        )
+        if interval.se is None:
+            return None
+        parts.append((interval.se, interval.dof if interval.dof is not None else math.inf))
+    variance = math.fsum(se**2 for se, _ in parts)
+    if variance <= 0:
+        return 0.0, math.inf
+    denominator = math.fsum(se**4 / dof for se, dof in parts if not math.isinf(dof) and se > 0)
+    return math.sqrt(variance), (variance**2 / denominator if denominator > 0 else math.inf)
+
+
+def _t_bounds(delta: float, se: float, dof: float) -> tuple[float, float]:
+    """90% Student-t interval of ``delta``."""
+    from greenkube.verify.statistics import CONFIDENCE, student_t_quantile
+
+    if se <= 0:
+        return delta, delta
+    half = student_t_quantile(1.0 - (1.0 - CONFIDENCE) / 2.0, dof) * se
+    return delta - half, delta + half
+
+
+def _straddle_reason(estimate: QuantityEstimate) -> str:
+    low = estimate.ci_low_per_hour or 0.0
+    high = estimate.ci_high_per_hour or 0.0
+    floor = MIN_RELATIVE_CHANGE * abs(estimate.before_per_hour or 0.0)
+    return (
+        f"measured {estimate.quantity} saving inconclusive: its 90% interval [{low:+.6g}, {high:+.6g}] per hour "
+        f"straddles the noise floor {floor:.6g} ({MIN_RELATIVE_CHANGE:.0%} of the baseline rate)"
     )
 
 

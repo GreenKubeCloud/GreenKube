@@ -35,6 +35,7 @@ from greenkube.verify.service import DECISION_GRACE, LOAD_DRIVER_RETRY, UNAVAILA
 from greenkube.verify.strategy import HOURS_PER_YEAR
 from tests.verify.fixtures import (  # pyrefly: ignore[missing-import]
     Scenario,
+    Settings,
     change_event,
     hour_now,
     record_status,
@@ -673,3 +674,153 @@ async def test_a_realized_change_answers_a_late_re_measurement_request_explicitl
     ]
     latest = max(rows, key=lambda row: row.sequence)
     assert latest.sequence == 2 and latest.reasons[0].startswith("re-measurement not started")
+
+
+async def test_accelerated_demo_windows_decide_through_the_service(database):
+    """MEA-10: the quickstart windows (6 h baseline, 72 min post, 30 s samples) reach a decided verdict."""
+    settings = Settings(
+        PROMETHEUS_QUERY_RANGE_STEP="30s",
+        CHANGE_MEASUREMENT_PRE_WINDOW_DAYS=0.25,
+        CHANGE_MEASUREMENT_POST_WINDOW_DAYS=0.05,
+        CHANGE_MEASUREMENT_WARMUP_HOURS=0.05,
+        CHANGE_MEASUREMENT_ACCELERATED=True,
+    )
+    scenario = Scenario(database, settings)
+    completed = scenario.completed + timedelta(minutes=7, seconds=30)
+    scenario.completed = completed
+    scenario.decision = completed - timedelta(minutes=20)
+    step = timedelta(seconds=30)
+    scenario.add_rows(TimeWindow(start=completed - timedelta(hours=7), end=completed), step=step)
+    scenario.add_rows(
+        TimeWindow(start=completed, end=completed + timedelta(hours=3)),
+        cpu_request=300,
+        memory_request=1024**3,
+        step=step,
+    )
+    change, applied = await scenario.apply()
+    await scenario.service.run_due(now=completed + timedelta(minutes=10))
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.post_window_end is not None
+    await scenario.service.run_due(now=status.post_window_end + DECISION_GRACE)
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.REALIZED
+    (measurement,) = await scenario.changes.list_measurements(change.change_id)
+    cost = measurement.estimate("allocated_cost")
+    assert cost is not None and cost.method == "flat_mean_accelerated"
+    assert cost.rate_per_hour == pytest.approx(2 * 0.7 * 0.08 + 2 * 1.0 * 0.01, rel=0.05)
+    assert measurement.confidence > 0
+    assert measurement.counterfactual_params["representative"] is False
+    snapshot = await scenario.changes.get_snapshot_for_change(change.change_id)
+    assert snapshot is not None and snapshot.verify_digest()
+    # Replica-hours of 5-minute slots: 2 replicas over the 6-hour baseline.
+    assert snapshot.health["replica_hours"] == pytest.approx(12.0, rel=0.02)
+    # Demo verdicts never accrue measured savings in the ledger (review wp07-4 point 2).
+    from greenkube.core.savings_attributor import accrual_components, is_non_representative
+
+    records = await scenario.records()
+    assert {record_status(record) for record in records} == {"verified"}
+    assert all(is_non_representative(record) for record in records)
+    assert all(accrual_components(record) == [] for record in records)
+
+
+class _OomHealth:
+    """Health collector: ``before`` OOM-killed restarts in windows before ``completed``, ``after`` after it."""
+
+    def __init__(self, completed, before: int, after: int) -> None:
+        self.completed, self.before, self.after = completed, before, after
+
+    async def collect(self, **kwargs):
+        from greenkube.models.verification import WorkloadHealthObservation
+
+        kills = self.before if kwargs["start"] < self.completed else self.after
+        return WorkloadHealthObservation(
+            oom_kill_count=1 if kills else 0, oom_restart_count=kills, readiness_ratio=1.0, throttling_ratio=0.0
+        )
+
+
+@pytest.mark.parametrize(
+    ("kills_after", "state", "status"),
+    [(0, MeasurementState.REALIZED, "verified"), (12, MeasurementState.NOT_REALIZED, "rollback_review")],
+)
+async def test_a_reliability_fix_is_judged_on_its_oom_rate(database, kills_after, state, status):
+    """MEA-14: a memory increase with 12 OOM kills in the 7 days before is decided on the kill rate after it."""
+    from greenkube.models.evidence import RecommendationEvidence
+
+    scenario = Scenario(database)
+    completed = scenario.completed
+    scenario.verifier.health_collector = _OomHealth(completed, 12, kills_after)
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed), memory_request=1024**3)
+    scenario.add_rows(TimeWindow(start=completed, end=completed + timedelta(days=9)), memory_request=2 * 1024**3)
+    evidence = RecommendationEvidence(oom_events=12, observation_window_seconds=7 * 86400)
+    change, applied = await scenario.apply(
+        fields={
+            RecommendationType.RIGHTSIZING_CPU: {
+                "current_cpu_request_millicores": 500,
+                "recommended_cpu_request_millicores": 1000,
+                "evidence": evidence,
+            },
+            RecommendationType.RIGHTSIZING_MEMORY: {
+                "current_memory_request_bytes": 1024**3,
+                "recommended_memory_request_bytes": 2 * 1024**3,
+                "evidence": evidence,
+            },
+        }
+    )
+    await scenario.service.run_due(now=completed + timedelta(hours=2))
+    status_row = await scenario.changes.get_status(change.change_id)
+    assert status_row is not None and status_row.post_window_end is not None
+    await scenario.service.run_due(now=status_row.post_window_end + DECISION_GRACE)
+
+    status_row = await scenario.changes.get_status(change.change_id)
+    assert status_row is not None and status_row.state is state
+    (measurement,) = await scenario.changes.list_measurements(change.change_id)
+    assert measurement.counterfactual_params["objective"] == "reliability"
+    cost = measurement.estimate("allocated_cost")
+    assert cost is not None and cost.rate_per_hour is not None and cost.rate_per_hour < 0
+    assert measurement.counterfactual_params["cost_of_fix_annual"] > 0
+    records = await scenario.records()
+    assert {record_status(record) for record in records} == {status}
+    # The cost of the fix is never claimed as a saving.
+    assert all((record.measured_cost_saved or 0.0) <= 0.0 for record in records)
+    rows = await scenario.measurements.list_for_change(change.change_id)
+    assert all(row.estimates[0].claimed_annualized == 0.0 for row in rows)
+
+
+async def test_applied_records_without_a_change_are_adopted_by_change_measurement(database):
+    """MEA-16: an applied, undecided record without a change id gets a change; the interim verifier skips it."""
+    scenario = Scenario(database)
+    completed = scenario.completed
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed))
+    scenario.add_rows(
+        TimeWindow(start=completed, end=completed + timedelta(days=9)), cpu_request=300, memory_request=1024**3
+    )
+    await scenario.reco_repo.save_recommendations(
+        [
+            RecommendationRecord(
+                type=RecommendationType.RIGHTSIZING_CPU,
+                pod_name="api",
+                namespace="prod",
+                scope="workload",
+                owner_kind="Deployment",
+                owner_name="api",
+                container_name="api",
+                description="oversized",
+                current_cpu_request_millicores=1000,
+                recommended_cpu_request_millicores=300,
+                potential_savings_cost=900.0,
+            )
+        ]
+    )
+    (record,) = await scenario.records()
+    assert record.id is not None
+    # Applied the legacy way: no change id (before change measurement shipped).
+    await scenario.lifecycle.apply(record.id, actual_cpu=300, application_method="manual", applied_at=completed)
+
+    await scenario.service.run_due(now=completed + timedelta(hours=2))
+
+    (record,) = await scenario.records()
+    change_id = (record.baseline.model_dump() if record.baseline is not None else {}).get("change_id")
+    assert change_id
+    change = await scenario.changes.get_change(change_id)
+    assert change is not None and change.recommendation_ids == [record.id]
+    assert await scenario.verifier.verify_due() == []

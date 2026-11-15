@@ -459,3 +459,24 @@ def test_the_change_level_outcome_keeps_the_exposure_of_young_containers() -> No
     assert outcome is not None and outcome.baseline_events == 28
     assert outcome.baseline_hours == pytest.approx(40 / 60, abs=1e-3)
     assert outcome.baseline_exposure_source == "workload_first_observed"
+
+
+def test_a_mixed_change_keeps_the_savings_objective() -> None:
+    """MEA-14: only a change whose members all raise a request is judged on reliability."""
+    from greenkube.verify.strategy import (
+        OBJECTIVE_RELIABILITY,
+        OBJECTIVE_SAVINGS,
+        change_objective,
+        reliability_decision,
+    )
+
+    increase, decrease = _member(), _member(current=768 * MIB, proposed=512 * MIB)
+    assert change_objective([increase]) == OBJECTIVE_RELIABILITY
+    assert change_objective([increase, decrease]) == OBJECTIVE_SAVINGS
+    assert change_objective([]) == OBJECTIVE_SAVINGS
+    assert reliability_decision([increase, decrease], ChangeOutcome.NOT_REALIZED, [], None, []) is None
+    # A contaminated measurement stays contaminated; a missing reliability outcome is inconclusive.
+    contaminated = reliability_decision([increase], ChangeOutcome.CONTAMINATED, [], None, [])
+    assert contaminated is not None and contaminated.outcome is ChangeOutcome.CONTAMINATED
+    missing = reliability_decision([increase], ChangeOutcome.NOT_REALIZED, [], None, [])
+    assert missing is not None and missing.outcome is ChangeOutcome.INCONCLUSIVE

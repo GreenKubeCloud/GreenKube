@@ -51,6 +51,7 @@ class Settings:
     CHANGE_MEASUREMENT_MIN_COVERAGE: float = 0.8
     CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: int = 300
     CHANGE_MEASUREMENT_EPSILON_RATIO: float = 0.02
+    CHANGE_MEASUREMENT_ACCELERATED: bool = False
     RECOMMENDATION_APPLY_TOLERANCE: float = 0.25
     CURRENCY: str = "USD"
     extra: dict = field(default_factory=dict)
@@ -196,8 +197,14 @@ class Scenario:
         completed: Optional[datetime] = None,
         generation: int = 2,
         fields: Optional[Dict[RecommendationType, Dict[str, Any]]] = None,
+        resources_digest: Optional[str] = None,
+        image_digest: Optional[str] = None,
+        with_snapshot: bool = True,
     ):
-        """``fields`` adds or overrides fields of the CPU or memory recommendation."""
+        """``fields`` adds or overrides fields of the CPU or memory recommendation.
+
+        ``resources_digest``/``image_digest`` are the rolled-out template's digests (``None``: a legacy change).
+        """
         completed = completed or self.completed
         fields = fields or {}
         common = dict(
@@ -256,8 +263,12 @@ class Scenario:
             generation=generation,
             observed_generation=generation,
             spec_digest=f"digest-{generation}",
+            resources_digest=resources_digest,
+            image_digest=image_digest,
         )
-        change = await self.service.record_change(change_id, applied, snapshot=snapshot, now=completed)
+        change = await self.service.record_change(
+            change_id, applied, snapshot=snapshot if with_snapshot else None, now=completed
+        )
         assert change is not None
         return change, applied
 

@@ -28,9 +28,10 @@ import logging
 import math
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.automation.actions.delete_resource import deletion_target_for
+from greenkube.core.savings_attributor import REPRESENTATIVE_KEY
 from greenkube.impact.comparison import measurable_co2e_projection
 from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
 from greenkube.models.measurement import (
@@ -80,10 +81,14 @@ from greenkube.verify.model import (
 from greenkube.verify.series import floor_hour, hourly_buckets, price_card, utc_hour
 from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
+    OBJECTIVE_RELIABILITY,
+    OBJECTIVE_SAVINGS,
     MeasurementSettings,
     ReliabilityOutcome,
     SavingsMeasurementStrategy,
+    change_objective,
     increase_reliability_detail,
+    reliability_decision,
     strategy_for,
 )
 
@@ -192,8 +197,13 @@ class ChangeMeasurementService:
         pull_request_repo: Any = None,
         node_repo: Any = None,
         clock: Optional[Callable[[], datetime]] = None,
+        workload_reader: Optional[Callable[[str, str, str], Awaitable[Any]]] = None,
     ):
         from greenkube.core.config import get_config
+
+        #: Reads one live workload snapshot when a change is recorded without one (PATCH /apply,
+        #: adoption): its pod-template, resources and image digests and UID back the drift checks.
+        self.workload_reader = workload_reader
 
         self.lifecycle = lifecycle
         self.combined_repo = combined_repo
@@ -454,6 +464,8 @@ class ChangeMeasurementService:
                     generation=getattr(snapshot, "generation", None),
                     spec_digest=getattr(snapshot, "spec_digest", None),
                     hpa_digest=hpa,
+                    resources_digest=getattr(snapshot, "resources_digest", None),
+                    image_digest=getattr(snapshot, "image_digest", None),
                     observed_at=moment,
                 )
                 if previous is None or not previous.same_revision(observation):
@@ -518,6 +530,12 @@ class ChangeMeasurementService:
         baseline = _baseline(lead)
         plan_id = getattr(plan, "plan_id", None) or baseline.get("plan_id")
         deleted = deletion_target_for(lead)
+        if snapshot is None and deleted is None and self.workload_reader is not None and lead.owner_kind:
+            try:
+                snapshot = await self.workload_reader(lead.namespace or "", lead.owner_kind, lead.owner_name or "")
+            except Exception as exc:
+                logger.info("Live workload of change %s could not be read: %s", change_id, exc)
+                snapshot = None
         if snapshot is not None:
             target = WorkloadRef(namespace=snapshot.namespace, kind=snapshot.kind, name=snapshot.name)
         elif deleted is not None:
@@ -601,6 +619,8 @@ class ChangeMeasurementService:
             generation_after=generation_after,
             spec_digest_before=digest_before,
             spec_digest_after=digest_after,
+            resources_digest_after=getattr(snapshot, "resources_digest", None),
+            image_digest_after=getattr(snapshot, "image_digest", None),
             rollout_started_at=min(started, completed),
             rollout_started_source=started_source,
             rollout_completed_at=completed,
@@ -610,7 +630,11 @@ class ChangeMeasurementService:
             or ("delete_resource" if deleted is not None else "container_resources"),
             application_method=_application_method(lead, plan_id),
             load_metric=getattr(snapshot, "load_metric", None),
-            details={"spec_before_source": before_source, "rollout": rollout},
+            details={
+                "spec_before_source": before_source,
+                "rollout": rollout,
+                **_container_requests(snapshot),
+            },
             created_at=now,
         )
 
@@ -630,8 +654,11 @@ class ChangeMeasurementService:
         except Exception as exc:
             logger.warning("Could not read earlier changes of %s: %s", "/".join(change.target.key), exc)
             return
+        completed = ensure_utc(change.rollout_completed_at)
         for other in earlier:
-            if other.change_id == change.change_id:
+            # Only changes that landed before this one: a change recorded late (adopted, manual)
+            # never closes a newer realized change.
+            if other.change_id == change.change_id or ensure_utc(other.rollout_completed_at) >= completed:
                 continue
             status = await self.changes.get_status(other.change_id)
             if status is None or status.state is not MeasurementState.REALIZED:
@@ -661,7 +688,7 @@ class ChangeMeasurementService:
 
         plan = self._strategy(change).required_windows(change, self.settings)
         rows = await self._read_workload(change.target, plan.pre)
-        buckets = hourly_buckets(rows, plan.pre, self._step())
+        buckets = hourly_buckets(rows, plan.pre, self._step(), slot_seconds=self.settings.slot_seconds)
         collected = await self._collect_load(
             change, plan.pre, buckets, retry_until=ensure_utc(change.created_at) + LOAD_DRIVER_RETRY, now=now
         )
@@ -727,7 +754,8 @@ class ChangeMeasurementService:
         hours = (ensure_utc(window.end) - ensure_utc(window.start)).total_seconds() / 3600.0
         return freeze_health(
             gates,
-            replica_hours=math.fsum(replica_values) if replica_values else None,
+            # A bucket is one hour, or one slot of accelerated demo windows (MEA-10).
+            replica_hours=math.fsum(replica_values) * self.settings.slot_seconds / 3600.0 if replica_values else None,
             hours=hours,
             oom_restarts=oom_restarts,
         )
@@ -742,6 +770,8 @@ class ChangeMeasurementService:
             return []
         moment = ensure_utc(now) if now is not None else self._now()
         updated: List[RecommendationRecord] = []
+        # Applies the change pipeline never recorded (before it shipped, or by hand) join it (MEA-16).
+        await self._adopt_unmanaged(moment)
         # Changes with a recommendation awaiting its measurement (decided changes need nothing else).
         awaiting = await self._repair_unrecorded(moment)
         for state, handler, only_awaiting in (
@@ -767,6 +797,46 @@ class ChangeMeasurementService:
                 except Exception as exc:
                     logger.warning("Measurement of change %s failed: %s", status.change_id, exc)
         return updated
+
+    async def _adopt_unmanaged(self, now: datetime) -> int:
+        """Give every applied, undecided recommendation without a change id a recorded change (MEA-16).
+
+        Such records (applied before change measurement shipped, or by a client
+        that bypassed ``PATCH /apply``) would otherwise be judged by the interim
+        verifier. The records of one change (same container, same plan or
+        landed together) share one change id, stored on the recommendation so
+        the interim verifier leaves them alone; the change row itself is
+        written by :meth:`_repair_unrecorded`. Returns the number adopted.
+        """
+        from greenkube.core.optimization.verifier import attribution_groups, change_id_of
+
+        try:
+            records = await self.lifecycle.repo.get_recommendations_by_statuses(sorted(_AWAITING_STATUSES))
+        except Exception as exc:
+            logger.warning("Could not read applied recommendations: %s", exc)
+            return 0
+        unmanaged = [
+            record
+            for record in records or []
+            if record.id is not None
+            and record.applied_at is not None
+            and _awaiting(record)
+            and change_id_of(record) is None
+        ]
+        adopted = 0
+        for group in attribution_groups(unmanaged):
+            change_id = uuid.uuid4().hex
+            for record in group:
+                assert record.id is not None
+                baseline = {**_baseline(record), "change_id": change_id, "change_adopted_at": now.isoformat()}
+                try:
+                    await self.lifecycle.repo.update_recommendation_fields(record.id, {"baseline": baseline})
+                    adopted += 1
+                except Exception as exc:
+                    logger.warning("Could not adopt recommendation %s into change %s: %s", record.id, change_id, exc)
+        if adopted:
+            logger.info("Adopted %d applied recommendation(s) into change measurement.", adopted)
+        return adopted
 
     async def _repair_unrecorded(self, now: datetime) -> set[str]:
         """Record changes whose recommendations were applied but whose change row was never written.
@@ -1080,7 +1150,7 @@ class ChangeMeasurementService:
         strategy = self._strategy(change)
         snapshot = await self._ensure_snapshot(change, now)
         post_rows = await self._read_workload(change.target, plan.post)
-        post_buckets = hourly_buckets(post_rows, plan.post, self._step())
+        post_buckets = hourly_buckets(post_rows, plan.post, self._step(), slot_seconds=self.settings.slot_seconds)
         collected = await self._collect_load(
             change,
             plan.post,
@@ -1136,21 +1206,39 @@ class ChangeMeasurementService:
                 ensure_utc(plan.post.start),
                 ensure_utc(plan.post.end),
                 baseline=snapshot.health,
-                post_replica_hours=_replica_hours(post_buckets),
+                post_replica_hours=_replica_hours(post_buckets, self.settings.slot_seconds),
             )
             if awaiting
             else ([], None)
         )
+        if reliability is None and not awaiting and change_objective(in_effect) == OBJECTIVE_RELIABILITY:
+            # MEA-14: members already flagged by the interim health check still need the fix's outcome.
+            _, reliability = await self._health_and_reliability(
+                in_effect,
+                ensure_utc(plan.post.start),
+                ensure_utc(plan.post.end),
+                baseline=snapshot.health,
+                post_replica_hours=_replica_hours(post_buckets, self.settings.slot_seconds),
+            )
         counterfactual_params = dict(result.counterfactual_params)
         # Measured savings are allocated; the realization factor of the projections says how much of
         # them is expected on the bill (realized_billed is not measured yet, C10).
         counterfactual_params["projection_basis"] = PROJECTION_BASIS
         counterfactual_params["realization_factor"] = realization_factor(in_effect)
         reasons = list(result.reasons)
+        outcome = result.outcome
         if reliability is not None:
             # The outcome of a reliability increase (H1); its cost stays in the estimates, as a cost.
             counterfactual_params["reliability"] = reliability.as_dict()
             reasons.append(f"reliability ({reliability.outcome.value}): {reliability.reason}")
+        # MEA-14: a change whose members all raise a request is judged on its reliability outcome.
+        decision = reliability_decision(in_effect, result.outcome, result.estimates, reliability, gates)
+        if decision is not None:
+            outcome = decision.outcome
+            counterfactual_params.update(decision.params)
+            reasons = decision.reasons + [reason for reason in reasons if not reason.startswith("reliability (")]
+        else:
+            counterfactual_params["objective"] = OBJECTIVE_SAVINGS
         estimates = {item.quantity: item for item in result.estimates}
         allocations = []
         for share in allocate(in_effect, result.estimates):
@@ -1187,7 +1275,7 @@ class ChangeMeasurementService:
             confidence=confidence_score(confounders, result.coverage, load),
             health=gates,
             allocations=allocations,
-            outcome=result.outcome,
+            outcome=outcome,
             reasons=reasons,
             supersedes_measurement_id=previous[-1].measurement_id if previous else None,
             decided_at=now,
@@ -1300,6 +1388,9 @@ class ChangeMeasurementService:
             measured_co2e = co2e.claimed_annualized
         else:
             measured_co2e = co2e.annualized
+        if measurement.counterfactual_params.get("representative") is False:
+            # Accelerated demo verdict (MEA-10): marked so its saving never accrues in the ledger.
+            baseline = {**baseline, REPRESENTATIVE_KEY: False}
         try:
             return await self.verifier.apply_stored_measurement(
                 member, stored, baseline, previous_ids, measured_cost=measured_cost, measured_co2e=measured_co2e
@@ -1329,6 +1420,8 @@ class ChangeMeasurementService:
         allocation = next((item for item in measurement.allocations if item.recommendation_id == member.id), None)
         failed = [gate for gate in measurement.health if gate.status is HealthGateStatus.FAILED] if gates_apply else []
         reasons = list(measurement.reasons)
+        # MEA-14: a reliability fix is verified on its reliability outcome; its cost is never claimed.
+        reliability = measurement.counterfactual_params.get("objective") == OBJECTIVE_RELIABILITY
         if allocation is None:
             outcome = MeasurementOutcome.INCONCLUSIVE
             reasons = ["recommendation joined the change after it was measured"]
@@ -1341,7 +1434,8 @@ class ChangeMeasurementService:
             share = allocation.share
             basis = allocation.basis
             if (
-                measurement.outcome is ChangeOutcome.REALIZED
+                not reliability
+                and measurement.outcome is ChangeOutcome.REALIZED
                 and estimate is not None
                 and not estimate.claimed
                 and estimate.outcome is not ChangeOutcome.REALIZED
@@ -1357,14 +1451,18 @@ class ChangeMeasurementService:
         if failed:
             outcome = MeasurementOutcome.ROLLBACK_REVIEW
             reasons = [gate.detail for gate in failed]
-        cost = _quantity_estimate("cost", "currency", basis, share, estimate, outcome, allocated_projection(member))
+        cost = _quantity_estimate(
+            "cost", "currency", basis, share, estimate, outcome, allocated_projection(member), claimed=not reliability
+        )
         co2e_source = measurement.estimate("co2e_g")
         # The measured CO2e (operational, allocated by the Impact Model like the
         # projection) is claimed only when its own interval shows a saving, and
         # is compared with the projected components the measured rows carry.
         co2e_outcome = outcome
-        if outcome is MeasurementOutcome.REALIZED and (
-            co2e_source is None or co2e_source.outcome is not ChangeOutcome.REALIZED
+        if (
+            not reliability
+            and outcome is MeasurementOutcome.REALIZED
+            and (co2e_source is None or co2e_source.outcome is not ChangeOutcome.REALIZED)
         ):
             co2e_outcome = (
                 _OUTCOME_TO_RECOMMENDATION.get(co2e_source.outcome, MeasurementOutcome.INCONCLUSIVE)
@@ -1381,6 +1479,7 @@ class ChangeMeasurementService:
             co2e_source,
             co2e_outcome,
             _measurable_co2e(member, _co2e_components_of(measurement)),
+            claimed=not reliability,
         )
         windows = {
             "baseline": {
@@ -1553,10 +1652,18 @@ def _excused_baseline_restarts(baseline: Mapping[str, Any], relaxed: Iterable[Op
     return total
 
 
-def _replica_hours(buckets: Sequence[Any]) -> Optional[float]:
-    """Sum of the hourly replica counts of ``buckets`` (``None`` without any)."""
+def _container_requests(snapshot: Any) -> Dict[str, Any]:
+    """``{"container_requests": {container: [cpu millicores, memory bytes]}}`` of a snapshot (empty when unknown)."""
+    values = getattr(snapshot, "container_request_values", None)
+    if not values or not getattr(snapshot, "container_request_values_valid", True):
+        return {}
+    return {"container_requests": {str(name): list(requests) for name, requests in sorted(values.items())}}
+
+
+def _replica_hours(buckets: Sequence[Any], slot_seconds: int = 3600) -> Optional[float]:
+    """Replica-hours of ``buckets``: their replica counts times the bucket length (``None`` without any)."""
     values = [bucket.replicas for bucket in buckets if getattr(bucket, "replicas", None) is not None]
-    return math.fsum(values) if values else None
+    return math.fsum(values) * slot_seconds / 3600.0 if values else None
 
 
 def _quantity_estimate(

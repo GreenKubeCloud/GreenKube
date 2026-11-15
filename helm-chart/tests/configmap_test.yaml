@@ -646,6 +646,14 @@ tests:
     asserts:
       - failedTemplate: {}
 
+  - it: should keep rendering a post-window shorter than five days (the controller raises it to 5 days, MEA-10)
+    set:
+      config.recommendations.changeMeasurement.postWindowDays: 3
+    asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_POST_WINDOW_DAYS
+          value: "3"
+
   - it: should reject an accelerated baseline shorter than an hour
     set:
       config.recommendations.changeMeasurement.accelerated: true

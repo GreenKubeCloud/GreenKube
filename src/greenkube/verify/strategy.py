@@ -18,7 +18,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import partial
-from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence
 
 from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
 from greenkube.models.verification import HealthGateResult, HealthGateStatus
@@ -42,11 +42,13 @@ from greenkube.verify.series import (
     co2e_series,
     has_embodied,
     hourly_carbon_factors,
+    missing_reason,
     quantity_series,
     window_hours,
 )
 from greenkube.verify.statistics import (
     INTERVAL_METHOD,
+    BetweenWeekTerm,
     between_week_term,
     circular_block_bootstrap,
     outcome_rule,
@@ -62,6 +64,20 @@ CO2E_WITH_EMBODIED = "co2e_g_with_embodied"
 #: Fewest complete days of aligned post-change hours a decided verdict needs (MEA-01).
 MIN_POST_DAYS = 5
 
+# Accelerated demo windows (CHANGE_MEASUREMENT_ACCELERATED, quickstart only, MEA-10). These are
+# demo thresholds, never used outside the accelerated mode: a 30-minute post-window decides, so
+# the verdict shows the pipeline end to end, not a representative saving.
+#: Time grid of accelerated measurements: 5-minute slots instead of UTC clock hours.
+ACCELERATED_SLOT_SECONDS = 300
+#: Counterfactual of accelerated measurements: the baseline mean (no hour-of-week seasonality).
+ACCELERATED_MODEL = "flat_mean_accelerated"
+#: Fewest aligned post-window slots an accelerated verdict needs (30 minutes).
+ACCELERATED_MIN_POST_SLOTS = 6
+#: Block length (slots) of the accelerated bootstraps (15 minutes).
+ACCELERATED_BLOCK_SLOTS = 3
+#: ``counterfactual_params.interval_method`` of accelerated measurements.
+ACCELERATED_INTERVAL_METHOD = "circular_block_bootstrap_t_with_baseline_mean"
+
 
 @dataclass(frozen=True)
 class MeasurementSettings:
@@ -75,6 +91,13 @@ class MeasurementSettings:
     epsilon_ratio: float = 0.02
     #: Week-to-week coefficient of variation assumed with fewer than two baseline weeks (MEA-01).
     prior_week_cv: float = 0.05
+    #: Accelerated demo windows (MEA-10): 5-minute slots, flat counterfactual, demo thresholds.
+    accelerated: bool = False
+
+    @property
+    def slot_seconds(self) -> int:
+        """Length of a bucket: one clock hour, or :data:`ACCELERATED_SLOT_SECONDS` when accelerated."""
+        return ACCELERATED_SLOT_SECONDS if self.accelerated else 3600
 
     @classmethod
     def from_config(cls, config: Any) -> "MeasurementSettings":
@@ -86,6 +109,7 @@ class MeasurementSettings:
             bootstrap_samples=int(getattr(config, "CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES", 1000)),
             epsilon_ratio=float(getattr(config, "CHANGE_MEASUREMENT_EPSILON_RATIO", 0.02)),
             prior_week_cv=float(getattr(config, "CHANGE_MEASUREMENT_PRIOR_WEEK_CV", 0.05)),
+            accelerated=getattr(config, "CHANGE_MEASUREMENT_ACCELERATED", False) is True,
         )
 
 
@@ -212,10 +236,23 @@ class RequestRightsizingStrategy:
     post week is reported by the ``intensity_shift`` confounder, not booked. Without a post
     carbon factor (no energy) the raw difference is measured
     (``co2e_basis = raw_delta``).
+
+    **Template changes (2.5, MEA-08).** A pod-template change during the
+    measurement with the change's requests and limits (same resources digest:
+    an image deployment, an env change, a rollout restart) is a mild or
+    moderate ``template_change`` confounder instead of a severe
+    ``spec_change``, so it no longer contaminates the outcome.
+
+    **Accelerated demo windows (2.5, MEA-10).** With
+    ``MeasurementSettings.accelerated`` the buckets are 5-minute slots, the
+    counterfactual is the baseline mean (:func:`_fit_flat`) and a verdict
+    needs :data:`ACCELERATED_MIN_POST_SLOTS` slots; the result records
+    ``representative: false``. The reason of a quantity without a value names
+    the true cause (:func:`~greenkube.verify.series.missing_reason`).
     """
 
     key = "request_rightsizing"
-    version = "2.4"
+    version = "2.5"
     primary = "allocated_cost"
 
     QUANTITIES = (
@@ -263,7 +300,7 @@ class RequestRightsizingStrategy:
         """
         del rate_sources  # measured from the workload's own trusted rows
         constant = constant_price_windows(pre, post, price_card)
-        expected_hours = len(window_hours(plan.post)) or 1
+        expected_hours = len(window_hours(plan.post, settings.slot_seconds)) or 1
         estimates: List[SavingsEstimate] = []
         methods: Dict[str, str] = {}
         elasticities: Dict[str, float] = {}
@@ -301,7 +338,7 @@ class RequestRightsizingStrategy:
             if fitted.diagnostics is not None:
                 diagnostics[spec.quantity] = fitted.diagnostics
         params: Dict[str, Any] = {
-            "model": methods.get(self.primary, MVP_METHOD),
+            "model": ACCELERATED_MODEL if settings.accelerated else methods.get(self.primary, MVP_METHOD),
             "methods": methods,
             "elasticity": elasticities,
             "matched_hours_of_week": matched,
@@ -326,6 +363,19 @@ class RequestRightsizingStrategy:
             else None,
             "co2e_raw_delta": _raw_co2e_delta(pre, post, embodied),
         }
+        if settings.accelerated:
+            # Demo windows: decided on demo thresholds, not representative of a saving (MEA-10).
+            params.update(
+                representative=False,
+                time_grid_seconds=ACCELERATED_SLOT_SECONDS,
+                interval_method=ACCELERATED_INTERVAL_METHOD,
+                block_hours=ACCELERATED_BLOCK_SLOTS * ACCELERATED_SLOT_SECONDS / 3600,
+                demo_thresholds={
+                    "min_post_slots": ACCELERATED_MIN_POST_SLOTS,
+                    "slot_seconds": ACCELERATED_SLOT_SECONDS,
+                    "block_slots": ACCELERATED_BLOCK_SLOTS,
+                },
+            )
         claimed_rate = next(item for item in estimates if item.quantity == self.primary).rate_per_hour
         observed_rate = next(item for item in estimates if item.quantity == "allocated_cost_observed").rate_per_hour
         params["price_effect"] = (
@@ -377,6 +427,13 @@ class RequestRightsizingStrategy:
             pre_values = quantity_series(pre, spec.quantity)
             post_values = quantity_series(post, spec.quantity)
         post_replicas = quantity_series(post, "replicas")
+        unit = "slot" if settings.accelerated else "hour"
+        diagnosed = "co2e_g" if spec.quantity == "co2e_g" else spec.quantity
+
+        def missing(window: str) -> str:
+            buckets = pre if window == "baseline" else post
+            return missing_reason(buckets, diagnosed, spec.description, window, unit=unit)
+
         base: Dict[str, Any] = {
             "quantity": spec.quantity,
             "unit": spec.unit,
@@ -394,6 +451,7 @@ class RequestRightsizingStrategy:
             settings=settings,
             seed_parts=seed_parts,
             baseline_end=baseline_end,
+            missing=missing,
         )
         per_replica = fit(
             _per_replica(pre_values, quantity_series(pre, "replicas")),
@@ -422,20 +480,36 @@ class RequestRightsizingStrategy:
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
         baseline_end: Optional[datetime] = None,
+        missing: Optional[Callable[[str], str]] = None,
     ) -> "_Fitted":
         """Fit one basis: per-replica values scaled by ``post_replicas``, or workload totals (``None``).
 
         ``baseline_end`` (default: one hour after the last baseline hour) anchors
-        the baseline weeks of the between-week term.
+        the baseline weeks of the between-week term. ``missing(window)`` names
+        why a window has no value (MEA-10: no rows, untrusted cost, hours below
+        the coverage threshold). Accelerated settings fit the flat demo model
+        (:func:`_fit_flat`).
         """
         if not pre_values or not post_values:
-            missing = "baseline" if not pre_values else "post-change"
+            window = "baseline" if not pre_values else "post-change"
             return _Fitted(
                 SavingsEstimate(
                     **base,
                     outcome=ChangeOutcome.INCONCLUSIVE,
-                    reason=f"no trusted {spec.description} in the {missing} window",
+                    reason=missing(window) if missing is not None else f"no {spec.description} in the {window} window",
                 )
+            )
+        if settings.accelerated:
+            return _fit_flat(
+                spec,
+                pre_values,
+                post_values,
+                post_replicas,
+                base=base,
+                expected_hours=expected_hours,
+                projected=projected,
+                settings=settings,
+                seed=seed_for(*seed_parts, spec.quantity),
             )
         mvp = HourOfWeekCounterfactual.fit(pre_values, load.pre if load is not None else None)
         diagnostics: Optional[Dict[str, Any]] = None
@@ -542,6 +616,91 @@ class RequestRightsizingStrategy:
             diagnostics,
             interval_params=interval_params,
         )
+
+
+def _fit_flat(
+    spec: QuantitySpec,
+    pre_values: Mapping[datetime, float],
+    post_values: Mapping[datetime, float],
+    post_replicas: Optional[Mapping[datetime, float]],
+    *,
+    base: Mapping[str, Any],
+    expected_hours: int,
+    projected: Optional[float],
+    settings: MeasurementSettings,
+    seed: int,
+) -> "_Fitted":
+    """Accelerated demo fit (MEA-10): the counterfactual of every post slot is the baseline mean.
+
+    The saving of each slot is ``mean(baseline) - post(slot)``. Its interval
+    adds the standard error of the post-slot savings and of the baseline mean,
+    each from a circular block bootstrap with blocks of
+    :data:`ACCELERATED_BLOCK_SLOTS` slots (Welch-Satterthwaite degrees of
+    freedom). A verdict needs :data:`ACCELERATED_MIN_POST_SLOTS` aligned slots
+    and the usual minimum coverage and noise floor. No seasonality, load
+    driver or between-week term: the result is labelled
+    ``representative: false`` by the strategy.
+    """
+    baseline = [pre_values[hour] for hour in sorted(pre_values)]
+    level = math.fsum(baseline) / len(baseline)
+    hours = sorted(post_values)
+    savings = [level - post_values[hour] for hour in hours]
+    interval = circular_block_bootstrap(
+        savings, seed=seed, samples=settings.bootstrap_samples, block=ACCELERATED_BLOCK_SLOTS
+    )
+    level_interval = circular_block_bootstrap(
+        baseline, seed=seed + 1, samples=settings.bootstrap_samples, block=ACCELERATED_BLOCK_SLOTS
+    )
+    level_se = level_interval.se if level_interval.se is not None else 0.0
+    term = BetweenWeekTerm(
+        se=level_se,
+        dof=level_interval.dof if level_interval.dof is not None else math.inf,
+        baseline_weeks=0,
+        post_weeks=0.0,
+        basis="baseline_mean_accelerated",
+        cv=None,
+    )
+    interval = with_between_week(interval, term)
+    replicas = math.fsum(post_replicas[hour] for hour in hours) / len(hours) if post_replicas is not None else 1.0
+    interval = interval.scaled(replicas)
+    counterfactual = level * replicas
+    actual = math.fsum(post_values[hour] for hour in hours) / len(hours) * replicas
+    coverage = len(hours) / expected_hours
+    epsilon = settings.epsilon_ratio * abs(counterfactual)
+    if coverage < settings.min_coverage:
+        outcome = ChangeOutcome.INCONCLUSIVE
+        reason = f"aligned coverage {coverage:.0%} of the post-window is below {settings.min_coverage:.0%}"
+    elif len(hours) < ACCELERATED_MIN_POST_SLOTS:
+        outcome = ChangeOutcome.INCONCLUSIVE
+        reason = (
+            f"{len(hours)} post-change slots of {spec.description}: an accelerated (demo) verdict needs at least "
+            f"{ACCELERATED_MIN_POST_SLOTS} slots of {ACCELERATED_SLOT_SECONDS // 60} minutes"
+        )
+    else:
+        outcome = outcome_rule(interval.low, interval.high, epsilon)
+        reason = _reason(spec, outcome, interval.low, interval.high, epsilon) + " (accelerated demo windows)"
+    annualized = interval.mean * HOURS_PER_YEAR
+    return _Fitted(
+        SavingsEstimate(
+            **base,
+            rate_per_hour=interval.mean,
+            ci_low=interval.low,
+            ci_high=interval.high,
+            counterfactual_per_hour=counterfactual,
+            actual_per_hour=actual,
+            annualized=annualized,
+            annualized_ci_low=interval.low * HOURS_PER_YEAR if interval.low is not None else None,
+            annualized_ci_high=interval.high * HOURS_PER_YEAR if interval.high is not None else None,
+            coverage=round(coverage, 4),
+            aligned_hours=len(hours),
+            elasticity=0.0,
+            method=ACCELERATED_MODEL,
+            outcome=outcome,
+            reason=reason,
+            projection_accuracy=(annualized / projected) if projected else None,
+        ),
+        interval_params={"interval_method": ACCELERATED_INTERVAL_METHOD, **term.as_params()},
+    )
 
 
 #: Each post hour at its own carbon factor, each baseline hour at the post factor of its hour of week.
@@ -1018,6 +1177,75 @@ def _raises(current: Any, proposed: Any) -> bool:
         and not isinstance(proposed, bool)
         and proposed > current
     )
+
+
+#: Objective of a change (MEA-14): a saving, or a reliability fix (every member raises a request).
+OBJECTIVE_SAVINGS = "savings"
+OBJECTIVE_RELIABILITY = "reliability"
+
+
+def change_objective(members: Sequence[Any]) -> str:
+    """``reliability`` when every member raises a request (a reliability fix), else ``savings``.
+
+    A mixed change (a decrease and an increase) keeps the savings objective.
+    """
+    items = list(members)
+    return (
+        OBJECTIVE_RELIABILITY if items and all(is_reliability_increase(item) for item in items) else OBJECTIVE_SAVINGS
+    )
+
+
+@dataclass(frozen=True)
+class ReliabilityDecision:
+    """The change outcome of a reliability fix (MEA-14): its reliability outcome, its cost reported apart."""
+
+    outcome: ChangeOutcome
+    reasons: List[str]
+    params: Dict[str, Any]
+
+
+def reliability_decision(
+    members: Sequence[Any],
+    cost_outcome: ChangeOutcome,
+    estimates: Sequence[SavingsEstimate],
+    reliability: Optional["ReliabilityOutcome"],
+    gates: Sequence[HealthGateResult],
+) -> Optional[ReliabilityDecision]:
+    """Outcome of a change whose objective is reliability, ``None`` for a savings change (MEA-14).
+
+    A request increase always costs more, so its cost outcome is never a
+    saving: the change outcome is the reliability outcome instead (the OOM-kill
+    rate drop, :func:`oom_rate_outcome`), ``realized`` only when the health
+    gates pass too, and the cost is reported as ``cost_of_fix_annual``
+    (positive: what the fix costs per year), never claimed as a saving. A
+    contaminated measurement stays contaminated.
+    """
+    if change_objective(members) != OBJECTIVE_RELIABILITY:
+        return None
+    primary = next((item for item in estimates if item.quantity == "allocated_cost"), None)
+    cost = -primary.annualized if primary is not None and primary.annualized is not None else None
+    params: Dict[str, Any] = {"objective": OBJECTIVE_RELIABILITY, "cost_of_fix_annual": _rounded(cost)}
+    cost_note = (
+        f"cost of the fix {cost:+.2f}/yr (reported, not claimed as a saving)"
+        if cost is not None
+        else "cost of the fix not measured"
+    )
+    failed = [gate for gate in gates if gate.status is HealthGateStatus.FAILED]
+    if cost_outcome is ChangeOutcome.CONTAMINATED:
+        return ReliabilityDecision(ChangeOutcome.CONTAMINATED, [cost_note], params)
+    if reliability is None:
+        return ReliabilityDecision(
+            ChangeOutcome.INCONCLUSIVE, ["reliability fix: no OOM-kill outcome was measured", cost_note], params
+        )
+    outcome = reliability.outcome
+    if outcome is ChangeOutcome.REALIZED and failed:
+        outcome = ChangeOutcome.INCONCLUSIVE
+        reason = f"reliability fix: the OOM-kill rate dropped but {len(failed)} health gate(s) failed"
+    elif outcome is ChangeOutcome.REALIZED:
+        reason = f"reliability fix confirmed: {reliability.reason}"
+    else:
+        reason = f"reliability fix {outcome.value.replace('_', ' ')}: {reliability.reason}"
+    return ReliabilityDecision(outcome, [reason, cost_note], params)
 
 
 def is_reliability_increase(record: Any) -> bool:

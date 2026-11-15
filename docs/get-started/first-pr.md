@@ -159,10 +159,12 @@ measurement (`config.recommendations.changeMeasurement.enabled`) is off and
 `/changes` stays empty. To record merged changes and measure them against a
 counterfactual on accelerated demo windows (a 6-hour baseline and a 72-minute
 post-window, decided about 80 minutes after the merge), add
-`-f docs/examples/quickstart/values-change-measurement.yaml`. A fresh cluster
-has no baseline for the same hours of the week, so the outcome is usually
-`inconclusive`; run `make e2e` with `E2E_ALLOW_REGRESSION=1` and an
-`E2E_TIMEOUT_VERDICT` above two hours with that overlay. The savings ledger
+`-f docs/examples/quickstart/values-change-measurement.yaml`. Accelerated
+measurements use 5-minute slots, the baseline mean as counterfactual and demo
+thresholds, so they reach a decided outcome; each records
+`representative: false` (a demonstration of the pipeline, not a saving). Run
+`make e2e` with an `E2E_TIMEOUT_VERDICT` above two hours with that overlay
+(and `E2E_ALLOW_REGRESSION=1` if the outcome may be inconclusive). The savings ledger
 (`/api/v2/ledger/*`) fills and is verified every 5 minutes either way.
 
 ### 2. Sample repository and GitOps controllers

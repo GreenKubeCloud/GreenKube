@@ -206,7 +206,7 @@ def test_the_frozen_price_card_values_the_saving():
 
 
 def test_the_strategy_version_is_bumped():
-    assert RequestRightsizingStrategy.version == "2.4"
+    assert RequestRightsizingStrategy.version == "2.5"
 
 
 # --------------------------------------------------------------------------- #

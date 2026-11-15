@@ -562,3 +562,51 @@ class TestPassHardening:
         assert [record.status for record in updated] == [RecommendationStatus.VERIFIED] * 2
         # Two container-scoped groups, one window: container and pod rows are read once per window.
         assert len(metrics.reads) == len(set(metrics.reads)) == 4
+
+
+def _noisy(metrics, seed: int, spread: float):
+    import random
+
+    rng = random.Random(seed)
+    return [
+        row.model_copy(update={"total_cost": row.total_cost * (1 + rng.uniform(-spread, spread))}) for row in metrics
+    ]
+
+
+class TestIntervalDecision:
+    """The interim verifier decides on an interval, never on a point estimate (MEA-16)."""
+
+    async def test_a_saving_inside_the_noise_is_inconclusive_not_realized(self, repo, measurements):
+        now, applied_at = _timeline()
+        await repo.save_recommendations([_record(applied_at)])
+        # A 5% point saving (above the old 2% rule) under +-40% sample noise.
+        metrics = WindowedMetricsRepo(
+            _noisy(rows(applied_at - WINDOW, applied_at, cost=0.01), 1, 0.4)
+            + _noisy(rows(applied_at, now, cost=0.0095), 2, 0.4)
+        )
+
+        record = (await _verifier(repo, metrics).verify_due())[0]
+
+        assert record.status is not RecommendationStatus.VERIFIED
+        measurement = (await measurements.list_for_recommendation(record.id))[0]
+        assert measurement.outcome is MeasurementOutcome.INCONCLUSIVE
+        cost = measurement.estimates[0]
+        assert cost.outcome is QuantityOutcome.INCONCLUSIVE
+        floor = 0.02 * (cost.before_per_hour or 0.0)
+        assert cost.ci_low_per_hour is not None and cost.ci_high_per_hour is not None
+        assert cost.ci_low_per_hour <= floor < cost.ci_high_per_hour
+        assert measurement.windows["method"] == "interim_before_after"
+        assert any("straddles the noise floor" in reason for reason in measurement.reasons)
+
+    async def test_a_deterministic_saving_is_still_realized_with_a_zero_width_interval(self, repo, measurements):
+        now, applied_at = _timeline()
+        await repo.save_recommendations([_record(applied_at)])
+        metrics = WindowedMetricsRepo(
+            rows(applied_at - WINDOW, applied_at, cost=0.01) + rows(applied_at, now, cost=0.008)
+        )
+
+        record = (await _verifier(repo, metrics).verify_due())[0]
+
+        assert record.status is RecommendationStatus.VERIFIED
+        cost = (await measurements.list_for_recommendation(record.id))[0].estimates[0]
+        assert cost.ci_low_per_hour == pytest.approx(0.024) and cost.ci_high_per_hour == pytest.approx(0.024)

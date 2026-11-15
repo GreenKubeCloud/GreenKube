@@ -17,9 +17,12 @@ from pydantic import BaseModel, Field
 
 from greenkube.models.verification import HealthGateResult
 
-#: Version of the interim request-rightsizing measurement method (C0).
+#: Version of the interim request-rightsizing measurement method (C0). ``c0.2`` (MEA-16) decides on a
+#: 90% interval of the before/after difference instead of its point estimate.
 MEASUREMENT_STRATEGY_KEY = "legacy_before_after"
-MEASUREMENT_STRATEGY_VERSION = "c0.1"
+MEASUREMENT_STRATEGY_VERSION = "c0.2"
+#: ``windows.method`` of interim measurements: two window means, no counterfactual (MEA-16).
+INTERIM_METHOD = "interim_before_after"
 
 
 class MeasurementOutcome(str, Enum):
@@ -46,7 +49,8 @@ class QuantityEstimate(BaseModel):
     Rates are per hour. ``delta_per_hour`` and ``annualized`` are signed (a
     positive value is a saving); ``claimed_annualized`` is what the
     recommendation is credited with (0 when the quantity is not claimed or not
-    realized).
+    realized). ``ci_low_per_hour``/``ci_high_per_hour`` bound the 90% interval
+    of ``delta_per_hour`` (``None`` on rows decided before ``c0.2``).
     """
 
     quantity: str
@@ -56,6 +60,8 @@ class QuantityEstimate(BaseModel):
     before_per_hour: Optional[float] = None
     after_per_hour: Optional[float] = None
     delta_per_hour: Optional[float] = None
+    ci_low_per_hour: Optional[float] = None
+    ci_high_per_hour: Optional[float] = None
     annualized: Optional[float] = None
     claimed_annualized: float = 0.0
     before_coverage_steps: float = 0.0

@@ -46,6 +46,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 from prometheus_client import Counter, Gauge
 
 from greenkube.core.observability import REGISTRY as OBSERVABILITY_REGISTRY
+from greenkube.core.savings_attributor import is_non_representative
 from greenkube.storage.ledger_repository import V1_RAW_TABLE, V1_TABLES, LedgerRepository, Provenance
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.ledger.identity import ClusterIdentity, ClusterIdentityResolver, ClusterIdentityUnavailable
@@ -358,6 +359,8 @@ class LedgerProjector:
             and _value(record.status) in RESTATED_STATUSES
             and record.verified_at is not None
             and (record.measured_cost_saved is not None or record.measured_co2e_saved_grams is not None)
+            # A demo verdict (accelerated windows, MEA-10) restates nothing.
+            and not is_non_representative(record)
         }
         if not records:
             return
