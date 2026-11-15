@@ -48,80 +48,83 @@ class PostgresNodeRepository(NodeRepository):
         new_records = 0
         try:
             async with self.db_manager.connection_scope() as conn:
-                for node in ordered_nodes:
-                    now = node.timestamp or datetime.utcnow()
-                    # Fetch the current active SCD record for this node
-                    current = await conn.fetchrow(
-                        """
-                        SELECT id, instance_type, cpu_capacity_cores, architecture,
-                               cloud_provider, region, zone, node_pool,
-                               is_active,
-                               memory_capacity_bytes, embodied_emissions_kg
-                        FROM node_snapshots_scd
-                        WHERE node_name = $1 AND is_current = TRUE
-                        """,
-                        node.name,
-                    )
+                # One transaction: closing a version and opening the next commit together (STO-03 step 5).
+                async with conn.transaction():
+                    for node in ordered_nodes:
+                        now = node.timestamp or datetime.utcnow()
+                        # Fetch the current active SCD record for this node
+                        current = await conn.fetchrow(
+                            """
+                            SELECT id, instance_type, cpu_capacity_cores, architecture,
+                                   cloud_provider, region, zone, node_pool,
+                                   is_active,
+                                   memory_capacity_bytes, embodied_emissions_kg
+                            FROM node_snapshots_scd
+                            WHERE node_name = $1 AND is_current = TRUE
+                            FOR UPDATE
+                            """,
+                            node.name,
+                        )
 
-                    if current:
-                        # Compare attributes to detect change
-                        changed = False
-                        for col in _SCD_COMPARE_COLS:
-                            old_val = current[col]
-                            new_val = getattr(node, col, None)
-                            # Normalize None vs None comparison
-                            if old_val != new_val:
-                                changed = True
-                                break
+                        if current:
+                            # Compare attributes to detect change
+                            changed = False
+                            for col in _SCD_COMPARE_COLS:
+                                old_val = current[col]
+                                new_val = getattr(node, col, None)
+                                # Normalize None vs None comparison
+                                if old_val != new_val:
+                                    changed = True
+                                    break
 
-                        if not changed:
-                            # Unchanged: the version is confirmed until this observation (review 1).
+                            if not changed:
+                                # Unchanged: the version is confirmed until this observation (review 1).
+                                await conn.execute(
+                                    """
+                                    UPDATE node_snapshots_scd
+                                    SET last_seen = GREATEST(COALESCE(last_seen, $1), $1)
+                                    WHERE id = $2
+                                    """,
+                                    now,
+                                    current["id"],
+                                )
+                                continue
+
+                            # Close the current record
                             await conn.execute(
                                 """
                                 UPDATE node_snapshots_scd
-                                SET last_seen = GREATEST(COALESCE(last_seen, $1), $1)
+                                SET valid_to = $1, is_current = FALSE
                                 WHERE id = $2
                                 """,
                                 now,
                                 current["id"],
                             )
-                            continue
 
-                        # Close the current record
+                        # Insert new current record
                         await conn.execute(
                             """
-                            UPDATE node_snapshots_scd
-                            SET valid_to = $1, is_current = FALSE
-                            WHERE id = $2
+                            INSERT INTO node_snapshots_scd (
+                                node_name, instance_type, cpu_capacity_cores,
+                                architecture, cloud_provider, region, zone, node_pool,
+                                memory_capacity_bytes, is_active, embodied_emissions_kg,
+                                valid_from, valid_to, is_current, last_seen
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, TRUE, $12)
                             """,
+                            node.name,
+                            node.instance_type,
+                            node.cpu_capacity_cores,
+                            node.architecture,
+                            node.cloud_provider,
+                            node.region,
+                            node.zone,
+                            node.node_pool,
+                            node.memory_capacity_bytes,
+                            node.is_active,
+                            node.embodied_emissions_kg,
                             now,
-                            current["id"],
                         )
-
-                    # Insert new current record
-                    await conn.execute(
-                        """
-                        INSERT INTO node_snapshots_scd (
-                            node_name, instance_type, cpu_capacity_cores,
-                            architecture, cloud_provider, region, zone, node_pool,
-                            memory_capacity_bytes, is_active, embodied_emissions_kg,
-                            valid_from, valid_to, is_current, last_seen
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, TRUE, $12)
-                        """,
-                        node.name,
-                        node.instance_type,
-                        node.cpu_capacity_cores,
-                        node.architecture,
-                        node.cloud_provider,
-                        node.region,
-                        node.zone,
-                        node.node_pool,
-                        node.memory_capacity_bytes,
-                        node.is_active,
-                        node.embodied_emissions_kg,
-                        now,
-                    )
-                    new_records += 1
+                        new_records += 1
 
             if new_records:
                 logger.info("SCD2: created %d new node record(s).", new_records)

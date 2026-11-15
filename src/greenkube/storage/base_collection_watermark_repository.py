@@ -26,8 +26,14 @@ class CollectionWatermarkRepository(ABC):
         """Return the watermark, or ``None`` when the source was never collected."""
 
     @abstractmethod
-    async def advance(self, cluster_uid: str, source: str, last_complete_end: datetime) -> CollectionWatermark:
-        """Move the watermark forward to ``last_complete_end``; never moves it backwards."""
+    async def advance(
+        self, cluster_uid: str, source: str, last_complete_end: datetime, *, connection: Any = None
+    ) -> CollectionWatermark:
+        """Move the watermark forward to ``last_complete_end``; never moves it backwards.
+
+        On ``connection`` (inside the caller's transaction, not committed) when
+        given, so a window's rows and its watermark commit together (STO-03).
+        """
 
     @abstractmethod
     async def list_all(self, cluster_uid: str | None = None) -> list[CollectionWatermark]:

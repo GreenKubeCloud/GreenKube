@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Collection, Dict, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, Collection, Dict, List, Mapping, Optional
 
 from ..models.metrics import (
     ApplyRecommendationRequest,
@@ -264,6 +264,27 @@ class ContainerMetricsRepository(ABC):
         return hourly + raw
 
 
+@dataclass(frozen=True)
+class WindowStepProfile:
+    """Stored pod rows of one step: their ``(namespace, pod_name)`` and the count with an allocated cost."""
+
+    pods: frozenset[tuple[str, str]]
+    allocated_cost_rows: int
+
+
+def window_step_profiles(rows: Any) -> dict[datetime, WindowStepProfile]:
+    """Build :class:`WindowStepProfile` per step from ``(namespace, pod_name, timestamp, cost_source)`` rows."""
+    from ..models.provenance import ALLOCATED_COST_SOURCES
+
+    pods: dict[datetime, set[tuple[str, str]]] = {}
+    allocated: dict[datetime, int] = {}
+    for namespace, pod_name, timestamp, cost_source in rows:
+        step = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+        pods.setdefault(step, set()).add((namespace, pod_name))
+        allocated[step] = allocated.get(step, 0) + (1 if cost_source in ALLOCATED_COST_SOURCES else 0)
+    return {step: WindowStepProfile(frozenset(names), allocated[step]) for step, names in pods.items()}
+
+
 class CombinedMetricsRepository(ABC):
     """
     Abstract base class for combined metrics data repositories.
@@ -271,9 +292,20 @@ class CombinedMetricsRepository(ABC):
     """
 
     @abstractmethod
-    async def write_combined_metrics(self, metrics: List[CombinedMetric], *, replace_containers: bool = False) -> int:
+    async def write_combined_metrics(
+        self,
+        metrics: List[CombinedMetric],
+        *,
+        replace_containers: bool = False,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+    ) -> int:
         """
         Writes a list of CombinedMetric objects to the repository.
+
+        A stored row's cost is never replaced by a cost of a strictly worse
+        ``cost_source`` (STO-01), and a row without pod metadata never replaces
+        a stored row that had metadata (COL-01).
 
         Args:
             metrics: A list of CombinedMetric objects to persist.
@@ -281,11 +313,49 @@ class CombinedMetricsRepository(ABC):
                 rows (a collected window): stored container rows of those pods
                 and steps that the batch no longer has are deleted in the same
                 transaction, so pod and container rows agree.
+            window: ``[start, end)`` of the collection pass that produced the
+                batch: stored pod rows (and their container rows) of the steps
+                the batch covers that the batch does not hold are deleted in the
+                same transaction (STO-01).
+            run_id: Identifier of the collection pass, stored with
+                ``collected_at`` on every written row.
 
         Returns:
             The number of records saved.
         """
         pass
+
+    async def write_window(
+        self,
+        rows: List[CombinedMetric],
+        idle_rows: List[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+        force: bool = False,
+    ) -> int:
+        """Write one collected window atomically (STO-03).
+
+        ``force`` (an operator's ``--last ... --force`` re-collection) replaces
+        stored costs whatever their source rank.
+
+        Pod and container ``rows`` (as :meth:`write_combined_metrics` with
+        ``replace_containers``, ``window`` and ``run_id``) and ``idle_rows`` are
+        written in one transaction; ``on_commit(connection)`` runs last inside
+        it (the collection job records the window and advances the watermark
+        there). Any failure rolls everything back. Returns the pod and container
+        rows written.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot write a collection window atomically")
+
+    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, "WindowStepProfile"]:
+        """Per step of ``[start, end)``: the stored pods and how many rows carry an allocated cost (STO-01).
+
+        The collection job compares a re-collection with it before replacing a
+        window. Backends without stored rows return an empty mapping.
+        """
+        return {}
 
     @abstractmethod
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
@@ -301,10 +371,19 @@ class CombinedMetricsRepository(ABC):
         """
         pass
 
-    async def write_idle_metrics(self, metrics: List[Any]) -> int:
+    async def write_idle_metrics(
+        self,
+        metrics: List[Any],
+        *,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+        conn: Any = None,
+    ) -> int:
         """Upserts ``__idle__`` rows (``greenkube.impact.rows.NodeIdleMetric``) keyed by node and timestamp.
 
-        Backends without a ``node_idle_metrics`` table store nothing.
+        ``window`` and ``run_id`` have the meaning of :meth:`write_combined_metrics`;
+        ``conn`` runs the write inside the caller's transaction. Backends
+        without a ``node_idle_metrics`` table store nothing.
         """
         return 0
 

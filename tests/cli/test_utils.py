@@ -29,12 +29,29 @@ class _MemoryWatermarks:
             return None
         return CollectionWatermark(cluster_uid, source, self.value, self.value)
 
-    async def advance(self, cluster_uid, source, last_complete_end):
+    async def advance(self, cluster_uid, source, last_complete_end, *, connection=None):
         self.value = max(self.value, last_complete_end) if self.value else last_complete_end
         return CollectionWatermark(cluster_uid, source, self.value, self.value)
 
     async def list_all(self, cluster_uid=None):
         return []
+
+
+class _MemoryMetrics:
+    """Metrics repository double: records the rows of every window and commits its watermark (STO-03)."""
+
+    def __init__(self) -> None:
+        self.windows: list[list[CombinedMetric]] = []
+
+    async def stored_window_profile(self, start, end):
+        return {}
+
+    async def write_window(self, rows, idle_rows, *, window, run_id, on_commit=None, force=False):
+        if rows:
+            self.windows.append(list(rows))
+        if on_commit is not None:
+            await on_commit(None)
+        return len(rows)
 
 
 @pytest.fixture(autouse=True)
@@ -62,8 +79,7 @@ def test_parse_last_duration_wraps_invalid_values():
 @pytest.mark.asyncio
 async def test_write_combined_metrics_to_database_saves_and_updates_gauges():
     metric = _metric()
-    repo = MagicMock()
-    repo.write_combined_metrics = AsyncMock(return_value=1)
+    repo = _MemoryMetrics()
     processor = MagicMock()
     processor.run_range = AsyncMock(return_value=[metric])
     processor.close = AsyncMock()
@@ -78,7 +94,7 @@ async def test_write_combined_metrics_to_database_saves_and_updates_gauges():
 
     assert report is not None and report.succeeded
     assert processor.run_range.await_count == 1
-    repo.write_combined_metrics.assert_awaited_once_with([metric], replace_containers=True)
+    assert repo.windows == [[metric]]
     update_cluster_metrics.assert_called_once_with([metric])
     assert watermarks.value is not None
     processor.close.assert_awaited_once()
@@ -86,8 +102,7 @@ async def test_write_combined_metrics_to_database_saves_and_updates_gauges():
 
 @pytest.mark.asyncio
 async def test_write_combined_metrics_to_database_handles_empty_results():
-    repo = MagicMock()
-    repo.write_combined_metrics = AsyncMock()
+    repo = _MemoryMetrics()
     processor = MagicMock()
     processor.run_range = AsyncMock(return_value=[])
     processor.close = AsyncMock()
@@ -99,7 +114,7 @@ async def test_write_combined_metrics_to_database_handles_empty_results():
             with patch("greenkube.cli.utils.get_collection_watermark_repository", return_value=watermarks):
                 report = await utils.write_combined_metrics_to_database()
 
-    repo.write_combined_metrics.assert_not_awaited()
+    assert repo.windows == []
     # An answered-but-empty window is complete: the watermark still moves forward.
     assert report is not None and report.succeeded
     assert watermarks.value is not None and before is not None and watermarks.value > before
@@ -134,8 +149,7 @@ async def test_write_combined_metrics_to_database_keeps_watermark_after_processi
 @pytest.mark.asyncio
 async def test_write_combined_metrics_to_database_ignores_gauge_update_failure():
     metric = _metric()
-    repo = MagicMock()
-    repo.write_combined_metrics = AsyncMock(return_value=1)
+    repo = _MemoryMetrics()
     processor = MagicMock()
     processor.run_range = AsyncMock(return_value=[metric])
     processor.close = AsyncMock()
@@ -149,7 +163,7 @@ async def test_write_combined_metrics_to_database_ignores_gauge_update_failure()
                 with patch("greenkube.cli.utils.update_cluster_metrics", side_effect=RuntimeError("gauge failed")):
                     await utils.write_combined_metrics_to_database()
 
-    repo.write_combined_metrics.assert_awaited_once_with([metric], replace_containers=True)
+    assert repo.windows == [[metric]]
     processor.close.assert_awaited_once()
 
 

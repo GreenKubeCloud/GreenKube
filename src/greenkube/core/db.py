@@ -2,12 +2,14 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import aiosqlite
 import asyncpg
 
 from .config import Config, get_config
 from .migrations import MigrationRunner
+from .migrations.online import complete_online_column_upgrades, pending_online_upgrades
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,27 @@ async def _rollback_quietly(connection: aiosqlite.Connection) -> None:
         logger.exception("SQLite rollback after a failed database scope failed.")
 
 
+async def warn_on_exhausting_sequences(connection: Any, threshold: float = 0.5) -> list[str]:
+    """Log a warning for every sequence of the schema above ``threshold`` of its maximum (STO-05).
+
+    Returns the names of those sequences.
+    """
+    rows = await connection.fetch(
+        "SELECT sequencename, last_value, max_value FROM pg_sequences "
+        "WHERE schemaname = current_schema() AND last_value IS NOT NULL AND last_value > max_value * $1::float8",
+        threshold,
+    )
+    for row in rows:
+        logger.warning(
+            "Sequence %s is at %d of %d (%.0f%%): writes fail once it reaches its maximum.",
+            row["sequencename"],
+            row["last_value"],
+            row["max_value"],
+            100.0 * row["last_value"] / row["max_value"],
+        )
+    return [row["sequencename"] for row in rows]
+
+
 @dataclass(frozen=True)
 class SchemaStatus:
     """Migration state of the connected database."""
@@ -91,6 +114,10 @@ class DatabaseManager:
         self._sqlite_operation_lock = _ReentrantAsyncLock()
         self._savepoint_counter = 0
         self._schema_current = False
+        #: Background backfill of large-table column upgrades started by the migrating process (NRG-06).
+        self._online_upgrade_task: asyncio.Task | None = None
+        #: Seconds between two attempts of a pending online upgrade (a swap that missed its lock).
+        self.online_upgrade_retry_seconds: float = 600.0
 
     @property
     def config(self) -> Config:
@@ -124,6 +151,8 @@ class DatabaseManager:
                         server_settings={
                             "search_path": self.config.DB_SCHEMA,
                             "statement_timeout": str(self.config.DB_STATEMENT_TIMEOUT_MS),
+                            # Day, week, month and year buckets are UTC whatever the server default (STO-10).
+                            "timezone": "UTC",
                         },
                     )
                     await self.setup_postgres()
@@ -215,6 +244,13 @@ class DatabaseManager:
         await self.connect()
 
     async def close(self) -> None:
+        task, self._online_upgrade_task = self._online_upgrade_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
         pool, connection = self.pool, self.connection
         self.pool = None
         self.connection = None
@@ -237,6 +273,8 @@ class DatabaseManager:
         await self.connection.execute("PRAGMA cache_size=-65536")
         await self.connection.execute("PRAGMA mmap_size=268435456")
         await self.connection.execute("PRAGMA synchronous=NORMAL")
+        # A writer waits up to 30 s for another process's lock instead of failing at once (STO-04).
+        await self.connection.execute("PRAGMA busy_timeout=30000")
         await MigrationRunner("sqlite").run(self.connection)
         self._schema_current = True
 
@@ -256,6 +294,27 @@ class DatabaseManager:
             await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
             await MigrationRunner("postgres").run(connection)
             self._schema_current = True
+            await warn_on_exhausting_sequences(connection)
+            if await pending_online_upgrades(connection):
+                self._online_upgrade_task = asyncio.create_task(self._complete_online_upgrades())
+
+    async def _complete_online_upgrades(self) -> None:
+        """Backfill and swap the large-table column upgrades left by migrations, in the background (NRG-06).
+
+        A swap that missed its lock (or a failed attempt) is retried every
+        ``online_upgrade_retry_seconds`` until nothing is pending.
+        """
+        while True:
+            try:
+                async with self.connection_scope() as connection:
+                    await complete_online_column_upgrades(connection)
+                    if not await pending_online_upgrades(connection):
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Online column upgrade failed; it is retried.")
+            await asyncio.sleep(self.online_upgrade_retry_seconds)
 
     async def schema_status(self) -> "SchemaStatus":
         """Whether every shipped migration is applied (F11 API readiness).

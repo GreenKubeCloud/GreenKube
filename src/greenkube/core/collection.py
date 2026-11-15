@@ -16,19 +16,23 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, Protocol
+from uuid import uuid4
 
 from ..collectors.promql import parse_duration_seconds
 from ..models.metrics import CombinedMetric
+from ..models.provenance import ALLOCATED_COST_SOURCES
 from ..storage.base_collection_watermark_repository import CollectionWatermark, CollectionWatermarkRepository
 from ..storage.base_collection_window_repository import (
     REASON_BEYOND_BACKFILL,
     REASON_NO_SCRAPE_DATA,
     REASON_NOT_PROBED,
     REASON_POD_LEVEL_ONLY,
+    REASON_RECOLLECT_SKIPPED,
+    REASON_ROWS_REJECTED,
     REASON_SEEDED,
     STATUS_COLLECTED,
     STATUS_EMPTY,
@@ -210,8 +214,28 @@ class RangeProcessor(Protocol):
 
 
 class MetricsWriter(Protocol):
-    async def write_combined_metrics(self, metrics: list[CombinedMetric], *, replace_containers: bool = False) -> int:
+    async def write_combined_metrics(
+        self,
+        metrics: list[CombinedMetric],
+        *,
+        replace_containers: bool = False,
+        window: tuple[datetime, datetime] | None = None,
+        run_id: str | None = None,
+    ) -> int:
         """Upsert combined and container rows; ``replace_containers`` rewrites the container rows of each pod."""
+        ...
+
+    async def write_window(
+        self,
+        rows: list[CombinedMetric],
+        idle_rows: list[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Callable[[Any], Awaitable[Any]] | None = None,
+        force: bool = False,
+    ) -> int:
+        """Write pod, container and idle rows of a window and run ``on_commit`` in one transaction (STO-03)."""
         ...
 
 
@@ -285,8 +309,15 @@ class MetricsCollectionJob:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._fence_provider = fence_provider or current_leader_fence
 
-    async def run(self, last: timedelta | None = None) -> CollectionReport:
-        """Collect missing windows (or the explicit ``last`` range) oldest first."""
+    async def run(self, last: timedelta | None = None, *, force: bool = False) -> CollectionReport:
+        """Collect missing windows (or the explicit ``last`` range) oldest first.
+
+        ``force`` (only with ``last``) replaces the stored rows of the range
+        even when the new pass looks worse and whatever the stored cost source:
+        the operator's way to repair wrong stored rows (STO-01).
+        """
+        if force and last is None:
+            raise ValueError("force applies to an explicit --last re-collection only")
         report = CollectionReport()
         now = ensure_utc(self._clock())
         fence = self._fence_provider()
@@ -310,7 +341,9 @@ class MetricsCollectionJob:
                 if watermark is not None and plan.horizon_start is not None:
                     await self._record_gap(watermark.last_complete_end, plan.horizon_start, plan.gap_windows, fence)
             for window in plan.windows:
-                watermark = await self._collect_window(window, watermark, fence, report, forced=last is not None)
+                watermark = await self._collect_window(
+                    window, watermark, fence, report, forced=last is not None, force_replace=force
+                )
             if last is None:
                 await self._retry_failed_steps(now, fence, report)
                 await self._check_scrape_interval(now, report)
@@ -351,25 +384,127 @@ class MetricsCollectionJob:
         )
         return CollectionWatermark(self.cluster_uid, self.source, resume_at, now)
 
-    async def _write_rows(self, rows: list[CombinedMetric]) -> int:
-        """Write a collected window; its container rows replace the stored ones of its pods (review 4)."""
-        return await self.metrics_repository.write_combined_metrics(rows, replace_containers=True)
+    async def _write_window(
+        self,
+        window: CollectionWindow,
+        rows: list[CombinedMetric],
+        records: list[CollectionWindowRecord],
+        fence: LeaderFence,
+        *,
+        advance: bool,
+        force: bool = False,
+    ) -> tuple[int, CollectionWatermark | None]:
+        """Commit a collected window in one transaction (STO-01, STO-03).
 
-    async def _write_idle_metrics(self) -> None:
-        """Commits the ``__idle__`` rows of the window just collected (roadmap B2).
-
-        Called after the fence check, like the pod rows. A failed write raises,
-        so the watermark never advances over a window without its idle rows.
+        Pod, container and ``__idle__`` rows of the pass (one generation:
+        stored rows of its steps it no longer produces are deleted), the step
+        records and, when ``advance``, the watermark are written together: a
+        failure anywhere leaves the database as it was. The leader fence is
+        checked inside the transaction, just before the watermark moves.
         """
-        idle_rows = getattr(self.processor, "last_idle_metrics", None)
-        write = getattr(self.metrics_repository, "write_idle_metrics", None)
-        # Processors without idle rows (other range processors, test doubles) commit none.
-        if not isinstance(idle_rows, (list, tuple)) or not idle_rows or write is None:
+        idle = getattr(self.processor, "last_idle_metrics", None)
+        idle_rows = list(idle) if isinstance(idle, (list, tuple)) else []
+        watermark: CollectionWatermark | None = None
+
+        async def on_commit(connection: Any) -> None:
+            nonlocal watermark
+            if self.window_repository is not None and records:
+                await self.window_repository.record(records, connection=connection)
+            if advance:
+                fence.check("advance watermark")
+                watermark = await self.watermark_repository.advance(
+                    self.cluster_uid, self.source, window.end, connection=connection
+                )
+
+        fence.check("write metrics")
+        written = await self.metrics_repository.write_window(
+            rows,
+            idle_rows,
+            window=(window.start, window.end),
+            run_id=uuid4().hex,
+            on_commit=on_commit,
+            force=force,
+        )
+        return written or 0, watermark
+
+    def _quarantine(self, rows: list[CombinedMetric]) -> tuple[list[CombinedMetric], int]:
+        """Drop rows that cannot be stored (no timestamp) and count them (STO-03 step 3).
+
+        A row the database would reject must not fail the whole window again on
+        every run: it is left out, counted in
+        ``greenkube_collection_rows_rejected_total`` and the window's step
+        records name the rejection.
+        """
+        kept = [row for row in rows if row.timestamp is not None]
+        rejected = len(rows) - len(kept)
+        if rejected:
+            logger.warning("Left %d collected row(s) without a timestamp out of the window.", rejected)
+            collection_telemetry.record_rows_rejected(
+                self.source, collection_telemetry.REJECT_REASON_NO_TIMESTAMP, rejected
+            )
+        return kept, rejected
+
+    async def _recollection_degradation(
+        self, window: CollectionWindow, rows: list[CombinedMetric]
+    ) -> tuple[str | None, dict[datetime, Any]]:
+        """Why a re-collection of ``window`` must not replace its stored rows, or ``None`` (STO-01).
+
+        A step of the new pass that misses a stored pod (gone from Prometheus
+        or from the cluster), or has no allocated cost where the stored rows
+        had one (OpenCost unavailable), is worse than what is stored: the
+        window is then left as stored. Steps the pass has no row for are never
+        replaced and are not compared. Returns the reason and the stored
+        profile per step.
+        """
+        profile = getattr(self.metrics_repository, "stored_window_profile", None)
+        if profile is None:
+            return None, {}
+        stored = await profile(window.start, window.end)
+        if not stored:
+            return None, {}
+        produced: dict[datetime, list[CombinedMetric]] = {}
+        for row in rows:
+            if row.timestamp is not None and not getattr(row, "container_name", None):
+                produced.setdefault(ensure_utc(row.timestamp), []).append(row)
+        for step, step_profile in stored.items():
+            step_rows = produced.get(step)
+            if not step_rows:
+                continue
+            if step_profile.pods - {(row.namespace, row.pod_name) for row in step_rows}:
+                return collection_telemetry.RECOLLECT_REASON_FEWER_PODS, stored
+            if step_profile.allocated_cost_rows and not any(
+                row.cost_source in ALLOCATED_COST_SOURCES for row in step_rows
+            ):
+                return collection_telemetry.RECOLLECT_REASON_COST_UNAVAILABLE, stored
+        return None, stored
+
+    async def _record_skipped(
+        self, window: CollectionWindow, rows: list[CombinedMetric], stored: dict[datetime, Any], reason: str
+    ) -> None:
+        """Log, count and record a re-collection left as stored (step reason ``recollect_skipped``)."""
+        logger.warning(
+            "Re-collection of %s -> %s is worse than the stored rows (%s); the window is left as stored. "
+            "Use --last with --force to replace it anyway.",
+            window.start.isoformat(),
+            window.end.isoformat(),
+            reason,
+        )
+        collection_telemetry.record_recollect_skipped(self.source, reason)
+        if self.window_repository is None:
             return
-        try:
-            await write(list(idle_rows))
-        except Exception as error:
-            raise RuntimeError(f"Could not store {len(idle_rows)} node idle row(s): {error}") from error
+        records = [
+            replace(
+                record,
+                status=STATUS_COLLECTED,
+                reason=REASON_RECOLLECT_SKIPPED,
+                steps_with_data=1,
+                pod_rows=len(stored[record.window_start].pods),
+            )
+            for record in await self._window_records(window, rows)
+            if record.window_start in stored
+        ]
+        if records:
+            await self.window_repository.record(records)
 
     def _plan(self, now: datetime, watermark: CollectionWatermark | None, last: timedelta | None) -> CollectionPlan:
         if last is None:
@@ -394,16 +529,31 @@ class MetricsCollectionJob:
         report: CollectionReport,
         *,
         forced: bool,
+        force_replace: bool = False,
     ) -> CollectionWatermark | None:
         started = monotonic()
         fence.check("collect metrics")
-        rows = await self.processor.run_range(start=window.start, end=window.end)
-        records = await self._window_records(window, rows)
-        fence.check("write metrics")
-        written = await self._write_rows(rows) if rows else 0
-        await self._write_idle_metrics()
-        await self._store_records(records, report)
-        report.rows_written += written or 0
+        rows, rejected = self._quarantine(await self.processor.run_range(start=window.start, end=window.end))
+        contiguous = watermark is None or watermark.last_complete_end >= window.start
+        # An explicit --last range that does not touch the watermark must not
+        # hide the windows between the watermark and this range.
+        advance = not (forced and not contiguous)
+        degraded, stored = (
+            (None, {}) if force_replace or not rows else await self._recollection_degradation(window, rows)
+        )
+        if degraded is not None:
+            # The stored rows of this window come from a better pass: keep them as they are.
+            await self._record_skipped(window, rows, stored, degraded)
+        else:
+            records = self._flag_rejected(await self._window_records(window, rows), rejected)
+            written, advanced = await self._write_window(
+                window, rows, records, fence, advance=advance, force=force_replace
+            )
+            self._account_records(records, report)
+            report.rows_written += written
+            if advanced is not None:
+                watermark = advanced
+                advance = False
         report.windows_collected += 1
         if rows:
             # Dashboard gauges describe "now": keep only the most recent sample.
@@ -411,11 +561,9 @@ class MetricsCollectionJob:
             report.latest_rows = [row for row in rows if row.timestamp == latest]
         collection_telemetry.record_window(self.source, monotonic() - started)
 
-        contiguous = watermark is None or watermark.last_complete_end >= window.start
-        if forced and not contiguous:
-            # An explicit --last range that does not touch the watermark must not
-            # hide the windows between the watermark and this range.
+        if not advance:
             return watermark
+        # A window left as stored (degraded re-collection) still moves the watermark over its stored rows.
         fence.check("advance watermark")
         return await self.watermark_repository.advance(self.cluster_uid, self.source, window.end)
 
@@ -489,11 +637,22 @@ class MetricsCollectionJob:
             )
         return records
 
-    async def _store_records(self, records: list[CollectionWindowRecord], report: CollectionReport) -> None:
-        """Write step records after the rows, before the watermark moves (a failure fails the window)."""
+    @staticmethod
+    def _flag_rejected(records: list[CollectionWindowRecord], rejected: int) -> list[CollectionWindowRecord]:
+        """Name the rejection on the collected steps of a window that lost rows (STO-03 step 3)."""
+        if not rejected:
+            return records
+        return [
+            replace(record, reason=REASON_ROWS_REJECTED)
+            if record.status == STATUS_COLLECTED and record.reason is None
+            else record
+            for record in records
+        ]
+
+    def _account_records(self, records: list[CollectionWindowRecord], report: CollectionReport) -> None:
+        """Telemetry and report counters of step records committed with their window."""
         if self.window_repository is None or not records:
             return
-        await self.window_repository.record(records)
         by_status: dict[str, int] = {}
         for record in records:
             by_status[record.status] = by_status.get(record.status, 0) + 1
@@ -579,14 +738,18 @@ class MetricsCollectionJob:
         for window in _contiguous_windows(starts, self.step):
             try:
                 fence.check("retry failed window")
-                rows = await self.processor.run_range(start=window.start, end=window.end)
-                records = await self._window_records(window, rows)
+                rows, rejected = self._quarantine(await self.processor.run_range(start=window.start, end=window.end))
+                degraded, stored = await self._recollection_degradation(window, rows) if rows else (None, {})
+                if degraded is not None:
+                    # A partial retry pass must not delete stored pods it does not see.
+                    await self._record_skipped(window, rows, stored, degraded)
+                    continue
+                records = self._flag_rejected(await self._window_records(window, rows), rejected)
                 fence.check("write retried window")
-                if rows:
-                    report.rows_written += await self._write_rows(rows) or 0
-                    await self._write_idle_metrics()
+                written, _ = await self._write_window(window, rows, records, fence, advance=False)
+                report.rows_written += written
                 failed_before = report.failed_steps
-                await self._store_records(records, report)
+                self._account_records(records, report)
                 still_failed = report.failed_steps - failed_before
                 report.failed_steps = failed_before
                 report.recovered_steps += len(records) - still_failed

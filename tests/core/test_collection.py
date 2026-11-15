@@ -21,6 +21,7 @@ from greenkube.core.config import Config
 from greenkube.core.db import DatabaseManager
 from greenkube.core.leader_election import LeaderFence
 from greenkube.storage.sqlite.collection_watermark_repository import SQLiteCollectionWatermarkRepository
+from greenkube.storage.sqlite.collection_window_repository import SQLiteCollectionWindowRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 from tests.core.fake_prometheus import FakePrometheus  # pyrefly: ignore[missing-import]
 from tests.core.range_harness import FakeOpenCost, build_range_processor  # pyrefly: ignore[missing-import]
@@ -393,7 +394,7 @@ async def test_failed_idle_write_does_not_advance_the_watermark(stack):
     metrics_repo = stack["metrics_repo"]
     original = metrics_repo.write_idle_metrics
 
-    async def failing_write(_rows):
+    async def failing_write(_rows, **_kwargs):
         raise RuntimeError("disk full")
 
     metrics_repo.write_idle_metrics = failing_write
@@ -404,6 +405,72 @@ async def test_failed_idle_write_does_not_advance_the_watermark(stack):
 
     assert not report.succeeded and "idle" in (report.error or "")
     assert report.watermark == BASE
+    # STO-03: the window is atomic, so the failed idle write leaves no pod or container row behind.
+    assert await metrics_repo.read_combined_metrics(BASE, BASE + STEP) == []
+    assert await metrics_repo.read_container_metrics(BASE, BASE + STEP) == []
+
+    recovered = await _run_scheduled(stack, BASE + STEP + timedelta(minutes=1))
+    assert recovered.succeeded and recovered.watermark == BASE + STEP
+    assert len(await _pod_rows(metrics_repo, BASE, BASE + STEP)) == len(PODS)
+    assert len(await metrics_repo.read_idle_metrics(BASE, BASE + STEP)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_row_the_database_rejects_fails_the_window_without_storing_any_row(stack):
+    """STO-04 (SIM A1): one out-of-range value rolls back the whole window instead of being logged away."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    processor = stack["processor"]
+    collect = processor.run_range
+
+    async def with_bad_row(*args, **kwargs):
+        rows = await collect(*args, **kwargs)
+        pod_rows = [row for row in rows if not row.container_name]
+        pod_rows[0].restart_count = 2**64
+        return rows
+
+    processor.run_range = with_bad_row
+    try:
+        failed = await _run_scheduled(stack, BASE + STEP + timedelta(minutes=1))
+    finally:
+        processor.run_range = collect
+
+    assert not failed.succeeded and failed.watermark == BASE
+    assert await stack["metrics_repo"].read_combined_metrics(BASE, BASE + STEP) == []
+    recovered = await _run_scheduled(stack, BASE + STEP + timedelta(minutes=1))
+    assert recovered.succeeded and len(await _pod_rows(stack["metrics_repo"], BASE, BASE + STEP)) == len(PODS)
+
+
+@pytest.mark.asyncio
+async def test_a_row_without_timestamp_is_rejected_and_counted_and_the_window_logged_partial(stack):
+    """STO-03 step 3: invalid rows are quarantined; the other rows of the window are stored."""
+    window_repository = SQLiteCollectionWindowRepository(stack["metrics_repo"].db_manager)
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    processor = stack["processor"]
+    collect = processor.run_range
+
+    async def with_unplaced_container_row(*args, **kwargs):
+        rows = await collect(*args, **kwargs)
+        container = next(row for row in rows if row.container_name)
+        return [*rows, container.model_copy(update={"timestamp": None, "container_name": "ghost"})]
+
+    rejected = collection_telemetry.ROWS_REJECTED.labels(source=METRICS_WATERMARK_SOURCE, reason="no_timestamp")
+    before = rejected._value.get()
+    processor.run_range = with_unplaced_container_row
+    try:
+        stack["clock"].current = BASE + STEP + timedelta(minutes=1)
+        report = await stack["job"](window_repository=window_repository).run()
+    finally:
+        processor.run_range = collect
+
+    assert report.succeeded, report.error
+    assert report.watermark == BASE + STEP
+    assert rejected._value.get() == before + 1
+    assert len(await _pod_rows(stack["metrics_repo"], BASE, BASE + STEP)) == len(PODS)
+    assert "ghost" not in {
+        c.container_name for c in await stack["metrics_repo"].read_container_metrics(BASE, BASE + STEP)
+    }
+    records = await window_repository.list_overlapping("test-cluster", METRICS_WATERMARK_SOURCE, BASE, BASE + STEP)
+    assert [(r.status, r.reason) for r in records] == [("collected", "rows_rejected")]
 
 
 @pytest.mark.asyncio
@@ -452,3 +519,147 @@ async def test_intensity_lookup_error_does_not_advance_the_watermark(stack):
     assert recovered.succeeded
     rows = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
     assert [r.timestamp for r in rows if r.pod_name == "p"] == [BASE, BASE + STEP]
+
+
+async def _generations(stack, start: datetime, end: datetime) -> set:
+    connection = stack["metrics_repo"].db_manager.connection
+    found = set()
+    for table in ("combined_metrics", "container_metrics", "node_idle_metrics"):
+        async with connection.execute(
+            f'SELECT DISTINCT collection_run_id, collected_at IS NOT NULL FROM {table} WHERE "timestamp" >= ? '
+            'AND "timestamp" < ?',
+            (start.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")),
+        ) as cursor:
+            found.update(tuple(row) for row in await cursor.fetchall())
+    return found
+
+
+def _skipped(reason: str) -> float:
+    return collection_telemetry.RECOLLECT_SKIPPED.labels(source=METRICS_WATERMARK_SOURCE, reason=reason)._value.get()
+
+
+@pytest.mark.asyncio
+async def test_recollected_window_holds_one_generation_with_the_same_totals(stack):
+    """STO-01 c): after a re-collection every pod, container and idle row of W carries the same run id."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    await _run_scheduled(stack, BASE + 2 * STEP + timedelta(minutes=1))
+    first = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    first_idle = await stack["metrics_repo"].read_idle_metrics(BASE, BASE + 2 * STEP)
+    before = await _generations(stack, BASE, BASE + 2 * STEP)
+
+    stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+    report = await stack["job"]().run(last=timedelta(minutes=10))
+
+    assert report.succeeded and report.rows_written > 0
+    after = await _generations(stack, BASE, BASE + 2 * STEP)
+    assert len(after) == 1 and after != before
+    (run_id, stamped) = next(iter(after))
+    assert run_id and stamped
+    second = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    second_idle = await stack["metrics_repo"].read_idle_metrics(BASE, BASE + 2 * STEP)
+    total = sum(r.joules for r in first) + sum(r.joules for r in first_idle)
+    assert sum(r.joules for r in second) + sum(r.joules for r in second_idle) == pytest.approx(total, rel=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_recollection_without_opencost_leaves_the_stored_window(stack):
+    """STO-01 a): a re-collection while OpenCost has no data keeps the OpenCost rows and counts the skip."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    await _run_scheduled(stack, BASE + 2 * STEP + timedelta(minutes=1))
+    first = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    assert {r.cost_source for r in first} == {"opencost"}
+    skipped = _skipped("cost_unavailable")
+
+    stack["opencost"].pods = []
+    stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+    report = await stack["job"]().run(last=timedelta(minutes=10))
+
+    assert report.succeeded and report.rows_written == 0
+    second = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    assert [(r.pod_name, r.cost_source, r.total_cost, r.cpu_request) for r in second] == [
+        (r.pod_name, r.cost_source, r.total_cost, r.cpu_request) for r in first
+    ]
+    assert _skipped("cost_unavailable") == skipped + 1
+
+
+def _windows(stack) -> SQLiteCollectionWindowRepository:
+    return SQLiteCollectionWindowRepository(stack["metrics_repo"].db_manager)
+
+
+@pytest.mark.asyncio
+async def test_skipped_recollection_is_recorded_and_force_replaces_the_window(stack):
+    """Review 2: a skipped re-collection is a step record; --last --force replaces the stored rows anyway."""
+    windows = _windows(stack)
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+    await stack["job"](window_repository=windows).run()
+
+    stack["opencost"].pods = []
+    skipped = await stack["job"](window_repository=windows).run(last=timedelta(minutes=10))
+    assert skipped.succeeded and skipped.rows_written == 0
+    records = await windows.list_overlapping("test-cluster", METRICS_WATERMARK_SOURCE, BASE, BASE + 2 * STEP)
+    assert {(r.status, r.reason, r.pod_rows) for r in records} == {("collected", "recollect_skipped", len(PODS))}
+
+    forced = await stack["job"](window_repository=windows).run(last=timedelta(minutes=10), force=True)
+    assert forced.succeeded and forced.rows_written > 0
+    rows = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    assert rows and {r.cost_source for r in rows} != {"opencost"}
+    with pytest.raises(ValueError):
+        await stack["job"]().run(force=True)
+
+
+@pytest.mark.asyncio
+async def test_recollection_missing_a_stored_pod_is_skipped_even_with_the_same_pod_count(stack):
+    """Review 4: pod sets are compared, not counts."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    await _run_scheduled(stack, BASE + 2 * STEP + timedelta(minutes=1))
+    processor = stack["processor"]
+    collect = processor.run_range
+
+    async def renamed(*args, **kwargs):
+        return [
+            row.model_copy(update={"pod_name": "r"}) if row.pod_name == "q" else row
+            for row in await collect(*args, **kwargs)
+        ]
+
+    skipped = _skipped("missing_pods")
+    processor.run_range = renamed
+    try:
+        stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+        report = await stack["job"]().run(last=timedelta(minutes=10))
+    finally:
+        processor.run_range = collect
+    assert report.succeeded and report.rows_written == 0
+    assert {r.pod_name for r in await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)} == {"p", "q"}
+    assert _skipped("missing_pods") == skipped + 1
+
+
+@pytest.mark.asyncio
+async def test_retry_of_a_failed_step_never_deletes_stored_pods_a_partial_pass_misses(stack):
+    """Review 3: the retry path applies the same degradation check as a re-collection."""
+    windows = _windows(stack)
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+    await stack["job"](window_repository=windows).run()
+    # The first step is recorded as failed although it holds rows (for example a record lost in a crash).
+    await windows.db_manager.connection.execute(
+        "UPDATE collection_windows SET status = 'failed', reason = 'no_scrape_data' WHERE window_start = ?",
+        (BASE.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),),
+    )
+    await windows.db_manager.connection.commit()
+    processor = stack["processor"]
+    collect = processor.run_range
+
+    async def without_q(*args, **kwargs):
+        return [row for row in await collect(*args, **kwargs) if row.pod_name != "q"]
+
+    processor.run_range = without_q
+    try:
+        stack["clock"].current = BASE + 3 * STEP + timedelta(minutes=1)
+        report = await stack["job"](window_repository=windows).run()
+    finally:
+        processor.run_range = collect
+    assert report.succeeded, report.error
+    assert {r.pod_name for r in await _pod_rows(stack["metrics_repo"], BASE, BASE + STEP)} == {"p", "q"}
+    (record,) = await windows.list_overlapping("test-cluster", METRICS_WATERMARK_SOURCE, BASE, BASE + STEP)
+    assert record.reason == "recollect_skipped"

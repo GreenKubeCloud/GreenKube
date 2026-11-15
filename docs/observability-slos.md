@@ -199,6 +199,8 @@ The metric collection job publishes, on the control-loop registry:
 | `greenkube_collection_cost_unattributed_ratio{source}` | Share of the OpenCost allocation total of the last collected window that no stored pod row carries (pods without any CPU, memory or Running sample); a warning is logged above 1%. |
 | `greenkube_collection_coverage_ratio{source}` | Share of the steps of the backfill horizon that were collected or confirmed empty, read from `collection_windows` after each run (it survives restarts). |
 | `greenkube_collection_gap_windows_total{source}` | Windows abandoned because they were older than `COLLECTION_MAX_BACKFILL`. |
+| `greenkube_collection_recollect_skipped_total{source,reason}` | Re-collected windows left as stored because the new pass was worse: `missing_pods` (a step of the new pass misses a stored pod) or `cost_unavailable` (no OpenCost cost where the stored rows had one). |
+| `greenkube_collection_rows_rejected_total{source,reason}` | Collected rows left out of their window because they cannot be stored (`no_timestamp`); the window's steps are recorded with reason `rows_rejected`. |
 | `greenkube_collection_dropped_samples_total{reason}` | Prometheus samples dropped (`non_finite`, `malformed`, `out_of_window`) or clamped (`negative_clamped`). |
 | `greenkube_unknown_power_profile_nodes` | Nodes that fell back to `DEFAULT_INSTANCE_PROFILE` in the latest collection. |
 

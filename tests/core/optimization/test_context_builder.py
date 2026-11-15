@@ -211,7 +211,7 @@ class TestBuild:
         )
 
         class ContainerAwareRepository(CombinedMetricsRepository, ContainerMetricsRepository):
-            async def write_combined_metrics(self, metrics, *, replace_containers=False):
+            async def write_combined_metrics(self, metrics, *, replace_containers=False, window=None, run_id=None):
                 return len(metrics)
 
             async def read_combined_metrics(self, start_time, end_time):

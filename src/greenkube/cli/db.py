@@ -227,7 +227,7 @@ async def copy_sqlite_to_postgres(
         raise typer.BadParameter("--schema contains invalid identifier characters")
     working = await _prepare_source(source, work_dir)
     report = CopyReport(dry_run=dry_run)
-    target = await asyncpg.connect(dsn, server_settings={"search_path": schema})
+    target = await asyncpg.connect(dsn, server_settings={"search_path": schema, "timezone": "UTC"})
     try:
         if not dry_run:
             await target.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")

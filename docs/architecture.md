@@ -680,7 +680,10 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      └─ Generate CombinedMetrics (+ container rows) for chunk
    ```
 
-5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}`, `greenkube_collection_k8s_list_errors_total{resource}`, `greenkube_collection_degraded_windows_total{list}`, `greenkube_collection_steps_total{source,status}`, `greenkube_collection_coverage_ratio{source}` and `greenkube_unknown_power_profile_nodes`.
+5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}`, `greenkube_collection_k8s_list_errors_total{resource}`, `greenkube_collection_degraded_windows_total{list}`, `greenkube_collection_steps_total{source,status}`, `greenkube_collection_coverage_ratio{source}`, `greenkube_collection_recollect_skipped_total{source,reason}`, `greenkube_collection_rows_rejected_total{source,reason}` and `greenkube_unknown_power_profile_nodes`.
+
+   Each window is committed in one transaction (`write_window`): pod, container and `__idle__` rows, the
+   step records and the watermark, so readers never see a partial window and a failure leaves nothing behind.
 
 ### Recommendation Flow
 

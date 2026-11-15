@@ -55,6 +55,39 @@ data is preserved: the bundled PostgreSQL StatefulSet, its volume and its Secret
 | `config.recommendations.sourcePriority`, `vpaEnabled`, `karpenterEnabled` | `sources.priority`, `sources.settings.<id>.enabled` |
 | ConfigMap `<release>` (a Helm hook) | ConfigMap `<release>-config` (a regular release resource) |
 
+### Metric measures in double precision (PostgreSQL)
+
+Migration 0145 changes `joules`, `co2e_grams`, `embodied_co2e_grams`, `total_cost`, `pue` and
+`grid_intensity` of `combined_metrics`, `combined_metrics_hourly`, `container_metrics` and
+`container_metrics_hourly` from `real` (float4) to `double precision`, so sums over millions of rows no
+longer drift. Changing the type rewrites the table under an exclusive lock:
+
+- A table of at most 256 MB (indexes included) is converted inside the migration batch, in seconds.
+- A larger table is converted online, without a long lock: the migration only adds a `double precision`
+  shadow column per measure (`<column>__f8`), kept equal by a trigger, and records the work in
+  `online_column_upgrades`. The controller then backfills the shadow columns in the background, 50,000 ids
+  per short transaction (progress is recorded, a restart resumes), and swaps them in with one short
+  transaction that waits at most 5 s for its lock (otherwise it retries at the next controller start).
+  Collection and the API keep working during the backfill; sums keep the float4 drift until the swap.
+  `SELECT * FROM online_column_upgrades` is empty once every table is converted.
+  The backfill rewrites every row once: table and index size roughly double until autovacuum reclaims the
+  old row versions, so keep at least the size of the table free on the database volume. The upgrade lifts the
+  session `statement_timeout` (the concurrent index build and constraint validation of a large table take longer
+  than `DB_STATEMENT_TIMEOUT_MS`), and a swap that missed its lock is retried every 10 minutes until it succeeds.
+
+Stored values keep their 7 significant digits. SQLite is not affected (its `REAL` is already 8 bytes).
+
+### 64-bit ids (PostgreSQL)
+
+Migration 0147 turns every `integer` id column and its sequence into `bigint`. The sequences change at once.
+Tables of at most 256 MB are rewritten inside the migration batch (seconds). `combined_metrics` and
+`combined_metrics_hourly` above 256 MB are converted online like the measures above: a `bigint` shadow column
+`id__i8` kept equal by a trigger, a batched backfill, a unique index built with `CREATE INDEX CONCURRENTLY`, then a
+short swap that re-creates the primary key on that index. Until the swap, these two tables keep their 32-bit
+column. The concurrent index build waits for transactions already open in the database (it does not block
+writers); a session left `idle in transaction` delays it. At every start the controller logs a warning for any
+sequence above half of its maximum.
+
 ### Deprecated values (accepted for this minor release)
 
 An upgrade that reuses a 0.3.x values file keeps working: the chart maps the old keys and lists each one under

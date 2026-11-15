@@ -196,3 +196,33 @@ def set_watermark_lag(source: str, now: datetime, watermark: datetime | None) ->
 
 def set_unknown_power_profile_nodes(count: int) -> None:
     UNKNOWN_POWER_PROFILE_NODES.set(max(count, 0))
+
+
+#: Reasons a re-collected window was left as stored (STO-01).
+RECOLLECT_REASON_FEWER_PODS = "missing_pods"
+RECOLLECT_REASON_COST_UNAVAILABLE = "cost_unavailable"
+RECOLLECT_SKIPPED = Counter(
+    "greenkube_collection_recollect_skipped_total",
+    "Re-collected windows not written because the new pass was worse than the stored rows, by reason.",
+    ["source", "reason"],
+    registry=REGISTRY,
+)
+
+
+def record_recollect_skipped(source: str, reason: str) -> None:
+    RECOLLECT_SKIPPED.labels(source=source, reason=reason).inc()
+
+
+#: Reasons a collected row was left out of its window (STO-03).
+REJECT_REASON_NO_TIMESTAMP = "no_timestamp"
+ROWS_REJECTED = Counter(
+    "greenkube_collection_rows_rejected_total",
+    "Collected rows left out of their window because they cannot be stored, by reason.",
+    ["source", "reason"],
+    registry=REGISTRY,
+)
+
+
+def record_rows_rejected(source: str, reason: str, count: int = 1) -> None:
+    if count > 0:
+        ROWS_REJECTED.labels(source=source, reason=reason).inc(count)

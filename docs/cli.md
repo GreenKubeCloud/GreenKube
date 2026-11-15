@@ -22,7 +22,8 @@ greenkube start [OPTIONS]
 
 | Flag | Description |
 |------|-------------|
-| `--last TEXT` | Re-collect this range at startup, e.g. `10min`, `2h`, `7d`, `3w`, `1m` (month), overwriting existing rows with an idempotent upsert. Without it, the initial and scheduled runs catch up every window missing since the collection watermark (bounded by `COLLECTION_MAX_BACKFILL`). |
+| `--last TEXT` | Re-collect this range at startup, e.g. `10min`, `2h`, `7d`, `3w`, `1m` (month), rewriting existing rows (a stored cost is never replaced by one of a lower-ranked source, see `--force`). Without it, the initial and scheduled runs catch up every window missing since the collection watermark (bounded by `COLLECTION_MAX_BACKFILL`). |
+| `--force` | With `--last` only: replace the stored rows of the range even when the new pass looks worse than them (a step misses a stored pod, or has no OpenCost cost where the stored rows had one) and whatever the stored cost source (for example list prices corrected by configured rates). Without it such a re-collection leaves the window as stored, logs it, counts it in `greenkube_collection_recollect_skipped_total` and records its steps with reason `recollect_skipped`. |
 
 This is the runtime of the controller Deployment in the Helm chart (`command: ["greenkube"]`, `args: ["start"]`).
 

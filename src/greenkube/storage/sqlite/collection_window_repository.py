@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from greenkube.storage.base_collection_window_repository import (
     STATUS_FAILED,
@@ -49,7 +52,7 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
     def __init__(self, db_manager) -> None:
         self.db_manager = db_manager
 
-    async def record(self, records: list[CollectionWindowRecord]) -> int:
+    async def record(self, records: list[CollectionWindowRecord], *, connection: Any = None) -> int:
         """Upsert records keyed by ``(cluster_uid, source, window_start)``."""
         if not records:
             return 0
@@ -73,7 +76,7 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
             )
             for r in records
         ]
-        async with self.db_manager.connection_scope() as conn:
+        async with self._transaction(connection) as conn:
             await conn.executemany(
                 f"""INSERT INTO collection_windows ({_COLUMNS})
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -93,8 +96,16 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
                 WHERE NOT (collection_windows.status = 'collected' AND excluded.status = 'failed')""",
                 params,
             )
-            await conn.commit()
         return len(params)
+
+    @asynccontextmanager
+    async def _transaction(self, connection: Any = None) -> AsyncIterator[Any]:
+        """``connection`` when given (the caller commits), else an own committed transaction."""
+        if connection is not None:
+            yield connection
+            return
+        async with self.db_manager.transaction() as conn:
+            yield conn
 
     async def list_overlapping(
         self, cluster_uid: str, source: str, start: datetime, end: datetime

@@ -2,15 +2,23 @@ import json
 import logging
 import sqlite3
 from collections import defaultdict
-from datetime import datetime
-from typing import Any, List, Mapping, Optional
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, List, Mapping, Optional
 
 import aiosqlite
 
 from greenkube.core.observability import record_metric_provenance
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
+from greenkube.storage.base_repository import WindowStepProfile, window_step_profiles
 from greenkube.storage.container_rows import complete_container_rows, container_rows_of
+from greenkube.storage.write_guards import (
+    IDLE_COST_COLUMNS,
+    cost_guard_assignments,
+    forced_replace,
+    produced_idle_keys,
+    produced_pod_keys,
+)
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ...core.exceptions import QueryError
@@ -72,6 +80,10 @@ IDLE_METRIC_COLUMNS: tuple[str, ...] = (
     "intensity_source",
     "model_version",
 )
+
+
+#: Keys per batched lookup (three parameters each, below SQLite's historical 999-parameter limit).
+_KEY_CHUNK = 300
 
 
 def _quote_idle(column: str) -> str:
@@ -239,75 +251,57 @@ class SQLiteCarbonIntensityRepository(CarbonIntensityRepository):
 
     async def save_history(self, history_data: list, zone: str) -> int:
         """
-        Saves historical carbon intensity data to the SQLite database.
-        It ignores records that would be duplicates based on zone and datetime.
+        Saves historical carbon intensity data to the SQLite database, upserting on zone and datetime.
+
         Static zone defaults are never persisted: they are computed at read time.
+        All records are written in one transaction: a record the database
+        rejects rolls the batch back and raises QueryError (STO-04).
         """
-        saved_count = 0
-
+        records = []
+        for record in history_data or []:
+            if not isinstance(record, dict):
+                logging.warning("Skipping invalid record (not a dict): %s", record)
+                continue
+            if not is_persistable_intensity_record(record):
+                logger.debug("Skipping non-measured intensity record for zone %s: %s", zone, record)
+                continue
+            raw_dt = record.get("datetime")
+            records.append(
+                (
+                    zone,
+                    record.get("carbonIntensity"),
+                    to_iso_z(ensure_utc(raw_dt)) if raw_dt else None,
+                    record.get("updatedAt"),
+                    record.get("createdAt"),
+                    record.get("emissionFactorType"),
+                    record.get("isEstimated"),
+                    record.get("estimationMethod"),
+                )
+            )
+        if not records:
+            return 0
         try:
-            async with self.db_manager.connection_scope() as conn:
-                for record in history_data:
-                    # Basic validation that record is a dictionary
-                    if not isinstance(record, dict):
-                        logging.warning("Skipping invalid record (not a dict): %s", record)
-                        continue
-                    if not is_persistable_intensity_record(record):
-                        logger.debug("Skipping non-measured intensity record for zone %s: %s", zone, record)
-                        continue
-
-                    try:
-                        # Normalize datetime
-                        raw_dt = record.get("datetime")
-                        if raw_dt:
-                            normalized_dt = to_iso_z(ensure_utc(raw_dt))
-                        else:
-                            normalized_dt = None
-
-                        # Use default value None if key is missing
-                        cursor = await conn.execute(
-                            """
-                            INSERT INTO carbon_intensity_history
-                                (zone, carbon_intensity, datetime, updated_at, created_at,
-                                 emission_factor_type, is_estimated, estimation_method)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(zone, datetime)
-                            DO UPDATE SET
-                                carbon_intensity = excluded.carbon_intensity,
-                                updated_at = excluded.updated_at,
-                                is_estimated = excluded.is_estimated,
-                                estimation_method = excluded.estimation_method,
-                                emission_factor_type = excluded.emission_factor_type;
-                        """,
-                            (
-                                zone,
-                                record.get("carbonIntensity"),
-                                normalized_dt,
-                                record.get("updatedAt"),
-                                record.get("createdAt"),
-                                record.get("emissionFactorType"),
-                                record.get("isEstimated"),
-                                record.get("estimationMethod"),
-                            ),
-                        )
-                        # cursor.rowcount will be 1 for a successful insert, 0 for conflict/no insert
-                        # actually for ON CONFLICT DO UPDATE it might be 1?
-                        saved_count += cursor.rowcount
-                    except sqlite3.Error as e:
-                        # Use logging for errors
-                        logging.error("Could not save record for zone %s at %s: %s", zone, record.get("datetime"), e)
-                    except Exception as e:
-                        # Catch potential errors from record.get() if record structure is unexpected
-                        logging.error("Unexpected error processing record %s: %s", record, e)
-
-                await conn.commit()
-                return saved_count
-        except sqlite3.Error as e:
-            logging.error("Failed to commit transaction: %s", e)
-            raise QueryError(f"Failed to commit transaction: {e}") from e
+            async with self.db_manager.transaction(immediate=True) as conn:
+                await conn.executemany(
+                    """
+                    INSERT INTO carbon_intensity_history
+                        (zone, carbon_intensity, datetime, updated_at, created_at,
+                         emission_factor_type, is_estimated, estimation_method)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(zone, datetime)
+                    DO UPDATE SET
+                        carbon_intensity = excluded.carbon_intensity,
+                        updated_at = excluded.updated_at,
+                        is_estimated = excluded.is_estimated,
+                        estimation_method = excluded.estimation_method,
+                        emission_factor_type = excluded.emission_factor_type
+                    """,
+                    records,
+                )
         except Exception as e:
-            logging.error("Unexpected error in save_history: %s", e)
-            raise QueryError(f"Unexpected error in save_history: {e}") from e
+            logging.error("Could not save carbon intensity history for zone %s; nothing was stored: %s", zone, e)
+            raise QueryError(f"Could not save carbon intensity history: {e}") from e
+        return len(records)
 
 
 class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetricsRepository):
@@ -325,159 +319,232 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         """
         self.db_manager = db_manager
 
-    async def write_combined_metrics(self, metrics: List[CombinedMetric], *, replace_containers: bool = False) -> int:
+    async def write_combined_metrics(
+        self,
+        metrics: List[CombinedMetric],
+        *,
+        replace_containers: bool = False,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+    ) -> int:
         """See :meth:`CombinedMetricsRepository.write_combined_metrics`."""
         container_metrics = [metric for metric in metrics if metric.container_name]
         metrics = [metric for metric in metrics if not metric.container_name]
+        collected_at = to_iso_z(datetime.now(timezone.utc)) if run_id else None
         if not metrics:
-            return await self.write_container_metrics(container_metrics) if container_metrics else 0
+            if not container_metrics:
+                return 0
+            return await self.write_container_metrics(container_metrics, run_id=run_id, collected_at=collected_at)
+        produced = produced_pod_keys(metrics)
 
-        saved_count = 0
         try:
-            async with self.db_manager.connection_scope() as conn:
+            # One transaction: any rejected row rolls the whole batch back (STO-04). Inside a
+            # write_window transaction this is a savepoint of the window's transaction.
+            async with self.db_manager.transaction(immediate=True) as conn:
                 if replace_containers:
                     complete = complete_container_rows(container_metrics)
                     metrics = await self._without_rows_over_stored_containers(conn, metrics, complete)
                     container_metrics = container_rows_of(metrics, container_metrics)
                 for metric in metrics:
-                    try:
-                        timestamp_iso = to_iso_z(metric.timestamp) if metric.timestamp else None
-                        grid_intensity_timestamp_iso = (
-                            to_iso_z(metric.grid_intensity_timestamp) if metric.grid_intensity_timestamp else None
-                        )
+                    timestamp_iso = to_iso_z(metric.timestamp) if metric.timestamp else None
+                    grid_intensity_timestamp_iso = (
+                        to_iso_z(metric.grid_intensity_timestamp) if metric.grid_intensity_timestamp else None
+                    )
 
-                        cursor = await conn.execute(
-                            """
-                            INSERT INTO combined_metrics
-                                 (pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
-                                  cpu_request, memory_request, cpu_usage_millicores, memory_usage_bytes,
-                                  network_receive_bytes, network_transmit_bytes,
-                                  disk_read_bytes, disk_write_bytes,
-                                  storage_request_bytes, storage_usage_bytes,
-                                  ephemeral_storage_request_bytes, ephemeral_storage_usage_bytes,
-                                  gpu_usage_millicores, restart_count,
-                                  owner_kind, owner_name,
-                                  period, "timestamp", duration_seconds,
-                                  grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
-                                  is_estimated, estimation_reasons, embodied_co2e_grams,
-                                  calculation_version,
-                                  cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
-                                  cost_source, usage_source, power_source, intensity_source,
-                                  model_version, gpu_power_watts, node_source, metadata_source)
-                            VALUES (
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?
-                            )
-                            ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
-                                total_cost = excluded.total_cost,
-                                co2e_grams = excluded.co2e_grams,
-                                pue = excluded.pue,
-                                grid_intensity = excluded.grid_intensity,
-                                joules = excluded.joules,
-                                cpu_usage_millicores = excluded.cpu_usage_millicores,
-                                memory_usage_bytes = excluded.memory_usage_bytes,
-                                network_receive_bytes = excluded.network_receive_bytes,
-                                network_transmit_bytes = excluded.network_transmit_bytes,
-                                disk_read_bytes = excluded.disk_read_bytes,
-                                disk_write_bytes = excluded.disk_write_bytes,
-                                storage_request_bytes = excluded.storage_request_bytes,
-                                storage_usage_bytes = excluded.storage_usage_bytes,
-                                ephemeral_storage_request_bytes = excluded.ephemeral_storage_request_bytes,
-                                ephemeral_storage_usage_bytes = excluded.ephemeral_storage_usage_bytes,
-                                gpu_usage_millicores = excluded.gpu_usage_millicores,
-                                restart_count = excluded.restart_count,
-                                period = excluded.period,
-                                duration_seconds = excluded.duration_seconds,
-                                grid_intensity_timestamp = excluded.grid_intensity_timestamp,
-                                node = excluded.node,
-                                node_instance_type = excluded.node_instance_type,
-                                node_zone = excluded.node_zone,
-                                emaps_zone = excluded.emaps_zone,
-                                is_estimated = excluded.is_estimated,
-                                estimation_reasons = excluded.estimation_reasons,
-                                embodied_co2e_grams = excluded.embodied_co2e_grams,
-                                calculation_version = excluded.calculation_version,
-                                cost_cpu = excluded.cost_cpu,
-                                cost_ram = excluded.cost_ram,
-                                cost_storage = excluded.cost_storage,
-                                cost_network = excluded.cost_network,
-                                cost_lb = excluded.cost_lb,
-                                cost_source = excluded.cost_source,
-                                usage_source = excluded.usage_source,
-                                power_source = excluded.power_source,
-                                intensity_source = excluded.intensity_source,
-                                model_version = excluded.model_version,
-                                gpu_power_watts = excluded.gpu_power_watts,
+                    await conn.execute(
                         """
-                            + _metadata_upsert("combined_metrics")
-                            + ";",
-                            (
-                                metric.pod_name,
-                                metric.namespace,
-                                metric.total_cost,
-                                metric.co2e_grams,
-                                metric.pue,
-                                metric.grid_intensity,
-                                metric.joules,
-                                metric.cpu_request,
-                                metric.memory_request,
-                                metric.cpu_usage_millicores,
-                                metric.memory_usage_bytes,
-                                metric.network_receive_bytes,
-                                metric.network_transmit_bytes,
-                                metric.disk_read_bytes,
-                                metric.disk_write_bytes,
-                                metric.storage_request_bytes,
-                                metric.storage_usage_bytes,
-                                metric.ephemeral_storage_request_bytes,
-                                metric.ephemeral_storage_usage_bytes,
-                                metric.gpu_usage_millicores,
-                                metric.restart_count,
-                                metric.owner_kind,
-                                metric.owner_name,
-                                metric.period,
-                                timestamp_iso,
-                                metric.duration_seconds,
-                                grid_intensity_timestamp_iso,
-                                metric.node,
-                                metric.node_instance_type,
-                                metric.node_zone,
-                                metric.emaps_zone,
-                                metric.is_estimated,
-                                json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
-                                metric.embodied_co2e_grams,
-                                metric.calculation_version,
-                                *_provenance_values(metric),
-                                *_allocation_values(metric),
-                                *_row_source_values(metric),
-                            ),
+                        INSERT INTO combined_metrics
+                             (pod_name, namespace, total_cost, co2e_grams, pue, grid_intensity, joules,
+                              cpu_request, memory_request, cpu_usage_millicores, memory_usage_bytes,
+                              network_receive_bytes, network_transmit_bytes,
+                              disk_read_bytes, disk_write_bytes,
+                              storage_request_bytes, storage_usage_bytes,
+                              ephemeral_storage_request_bytes, ephemeral_storage_usage_bytes,
+                              gpu_usage_millicores, restart_count,
+                              owner_kind, owner_name,
+                              period, "timestamp", duration_seconds,
+                              grid_intensity_timestamp, node, node_instance_type, node_zone, emaps_zone,
+                              is_estimated, estimation_reasons, embodied_co2e_grams,
+                              calculation_version,
+                              cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                              cost_source, usage_source, power_source, intensity_source,
+                              model_version, gpu_power_watts, node_source, metadata_source,
+                              collected_at, collection_run_id)
+                        VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?,
+                            ?, ?
                         )
-                        saved_count += cursor.rowcount
-                    except sqlite3.Error as e:
-                        logging.error("Could not save combined metric for pod %s: %s", metric.pod_name, e)
-                    except Exception as e:
-                        logging.error("Unexpected error processing combined metric %s: %s", metric.pod_name, e)
+                        ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
+                            co2e_grams = excluded.co2e_grams,
+                            pue = excluded.pue,
+                            grid_intensity = excluded.grid_intensity,
+                            joules = excluded.joules,
+                            cpu_usage_millicores = excluded.cpu_usage_millicores,
+                            memory_usage_bytes = excluded.memory_usage_bytes,
+                            network_receive_bytes = excluded.network_receive_bytes,
+                            network_transmit_bytes = excluded.network_transmit_bytes,
+                            disk_read_bytes = excluded.disk_read_bytes,
+                            disk_write_bytes = excluded.disk_write_bytes,
+                            storage_request_bytes = excluded.storage_request_bytes,
+                            storage_usage_bytes = excluded.storage_usage_bytes,
+                            ephemeral_storage_request_bytes = excluded.ephemeral_storage_request_bytes,
+                            ephemeral_storage_usage_bytes = excluded.ephemeral_storage_usage_bytes,
+                            gpu_usage_millicores = excluded.gpu_usage_millicores,
+                            restart_count = excluded.restart_count,
+                            period = excluded.period,
+                            duration_seconds = excluded.duration_seconds,
+                            grid_intensity_timestamp = excluded.grid_intensity_timestamp,
+                            node = excluded.node,
+                            node_instance_type = excluded.node_instance_type,
+                            node_zone = excluded.node_zone,
+                            emaps_zone = excluded.emaps_zone,
+                            is_estimated = excluded.is_estimated,
+                            estimation_reasons = excluded.estimation_reasons,
+                            embodied_co2e_grams = excluded.embodied_co2e_grams,
+                            calculation_version = excluded.calculation_version,
+                            usage_source = excluded.usage_source,
+                            power_source = excluded.power_source,
+                            intensity_source = excluded.intensity_source,
+                            model_version = excluded.model_version,
+                            gpu_power_watts = excluded.gpu_power_watts,
+                            collected_at = excluded.collected_at,
+                            collection_run_id = excluded.collection_run_id,
+                    """
+                        + cost_guard_assignments("combined_metrics", excluded="excluded")
+                        + ",\n"
+                        + _metadata_upsert("combined_metrics")
+                        + ";",
+                        (
+                            metric.pod_name,
+                            metric.namespace,
+                            metric.total_cost,
+                            metric.co2e_grams,
+                            metric.pue,
+                            metric.grid_intensity,
+                            metric.joules,
+                            metric.cpu_request,
+                            metric.memory_request,
+                            metric.cpu_usage_millicores,
+                            metric.memory_usage_bytes,
+                            metric.network_receive_bytes,
+                            metric.network_transmit_bytes,
+                            metric.disk_read_bytes,
+                            metric.disk_write_bytes,
+                            metric.storage_request_bytes,
+                            metric.storage_usage_bytes,
+                            metric.ephemeral_storage_request_bytes,
+                            metric.ephemeral_storage_usage_bytes,
+                            metric.gpu_usage_millicores,
+                            metric.restart_count,
+                            metric.owner_kind,
+                            metric.owner_name,
+                            metric.period,
+                            timestamp_iso,
+                            metric.duration_seconds,
+                            grid_intensity_timestamp_iso,
+                            metric.node,
+                            metric.node_instance_type,
+                            metric.node_zone,
+                            metric.emaps_zone,
+                            metric.is_estimated,
+                            json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
+                            metric.embodied_co2e_grams,
+                            metric.calculation_version,
+                            *_provenance_values(metric),
+                            *_allocation_values(metric),
+                            *_row_source_values(metric),
+                            collected_at,
+                            run_id,
+                        ),
+                    )
 
                 # Container rows are rewritten with their pod rows, in the same
                 # transaction, so pod and container rows of a step agree (review 4).
                 if replace_containers:
                     await self._delete_stale_container_rows(conn, metrics, container_metrics)
-                saved_count += await self._upsert_container_rows(conn, container_metrics)
-                await conn.commit()
-        except sqlite3.Error as e:
-            logging.error("Failed to commit transaction for combined_metrics: %s", e)
-            raise QueryError(f"Failed to commit combined_metrics: {e}") from e
+                await self._upsert_container_rows(conn, container_metrics, run_id=run_id, collected_at=collected_at)
+                if window is not None:
+                    await self._delete_rows_not_produced(conn, window, produced)
         except Exception as e:
-            logging.error("Unexpected error in write_combined_metrics: %s", e)
-            raise QueryError(f"Unexpected error in write_combined_metrics: {e}") from e
+            logging.error("Could not write combined metrics; no row of the batch was stored: %s", e)
+            raise QueryError(f"Could not write combined metrics: {e}") from e
         record_metric_provenance(metrics)
         if container_metrics:
             record_metric_provenance(container_metrics)
-        return saved_count
+        return len(metrics) + len(container_metrics)
+
+    async def write_window(
+        self,
+        rows: List[CombinedMetric],
+        idle_rows: List[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+        force: bool = False,
+    ) -> int:
+        """See :meth:`CombinedMetricsRepository.write_window`."""
+        with forced_replace(force):
+            return await self._write_window(rows, idle_rows, window=window, run_id=run_id, on_commit=on_commit)
+
+    async def _write_window(
+        self,
+        rows: List[CombinedMetric],
+        idle_rows: List[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ) -> int:
+        async with self.db_manager.transaction(immediate=True) as conn:
+            written = (
+                await self.write_combined_metrics(rows, replace_containers=True, window=window, run_id=run_id)
+                if rows
+                else 0
+            )
+            await self._write_window_idle_rows(conn, list(idle_rows), window, run_id)
+            if on_commit is not None:
+                await on_commit(conn)
+        return written
+
+    async def _write_window_idle_rows(
+        self, conn: Any, idle_rows: List[Any], window: tuple[datetime, datetime], run_id: str
+    ) -> None:
+        """Idle rows of a window inside its transaction; a failure names them and rolls the window back."""
+        try:
+            await self.write_idle_metrics(idle_rows, window=window, run_id=run_id, conn=conn)
+        except Exception as error:
+            raise QueryError(f"Could not store {len(idle_rows)} node idle row(s): {error}") from error
+
+    @staticmethod
+    async def _delete_rows_not_produced(conn, window: tuple[datetime, datetime], produced: set[tuple]) -> int:
+        """Delete pod and container rows of ``window`` that the new pass did not produce (STO-01).
+
+        Only steps where the pass produced at least one pod row are touched: a
+        step without any row in the pass (no scrape data) keeps what is stored.
+        """
+        async with conn.execute(
+            'SELECT namespace, pod_name, "timestamp" FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ?',
+            (to_iso_z(window[0]), to_iso_z(window[1])),
+        ) as cursor:
+            stored = await cursor.fetchall()
+        steps = {key[2] for key in produced}
+        stale = [
+            (row[0], row[1], row[2])
+            for row in stored
+            if ensure_utc(row[2]) in steps and (row[0], row[1], ensure_utc(row[2])) not in produced
+        ]
+        for table in ("container_metrics", "combined_metrics"):
+            if stale:
+                await conn.executemany(
+                    f'DELETE FROM {table} WHERE namespace = ? AND pod_name = ? AND "timestamp" = ?', stale
+                )
+        return len(stale)
 
     @staticmethod
     async def _without_rows_over_stored_containers(
@@ -494,21 +561,26 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
             for row in container_rows
             if row.timestamp is not None
         }
-        kept = []
-        for row in pod_rows:
-            if row.timestamp is None:
-                kept.append(row)
-                continue
-            key = (row.namespace, row.pod_name, to_iso_z(row.timestamp))
-            if key not in with_containers:
-                async with conn.execute(
-                    "SELECT 1 FROM container_metrics WHERE namespace = ? AND pod_name = ? AND timestamp = ? LIMIT 1",
-                    key,
-                ) as cursor:
-                    if await cursor.fetchone() is not None:
-                        continue
-            kept.append(row)
-        return kept
+        candidates = sorted(
+            {(row.namespace, row.pod_name, to_iso_z(row.timestamp)) for row in pod_rows if row.timestamp is not None}
+            - with_containers
+        )
+        covered: set[tuple] = set()
+        # One query per chunk of keys, not one per pod (cri-dockerd backfills have no container row at all).
+        for offset in range(0, len(candidates), _KEY_CHUNK):
+            chunk = candidates[offset : offset + _KEY_CHUNK]
+            values = ", ".join("(?, ?, ?)" for _ in chunk)
+            async with conn.execute(
+                "SELECT DISTINCT namespace, pod_name, timestamp FROM container_metrics"
+                f" WHERE (namespace, pod_name, timestamp) IN (VALUES {values})",
+                [value for key in chunk for value in key],
+            ) as cursor:
+                covered.update(tuple(found) for found in await cursor.fetchall())
+        return [
+            row
+            for row in pod_rows
+            if row.timestamp is None or (row.namespace, row.pod_name, to_iso_z(row.timestamp)) not in covered
+        ]
 
     @staticmethod
     async def _delete_stale_container_rows(
@@ -539,6 +611,20 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 f" AND container_name NOT IN ({placeholders})",
                 (*key, *keep),
             )
+
+    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, WindowStepProfile]:
+        """See :meth:`CombinedMetricsRepository.stored_window_profile`."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                async with conn.execute(
+                    """SELECT namespace, pod_name, "timestamp", cost_source FROM combined_metrics
+                    WHERE "timestamp" >= ? AND "timestamp" < ?""",
+                    (to_iso_z(start), to_iso_z(end)),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+        except sqlite3.Error as e:
+            raise QueryError(f"Could not read the stored rows of a window: {e}") from e
+        return window_step_profiles((row[0], row[1], ensure_utc(row[2]), row[3]) for row in rows)
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         try:
@@ -1164,12 +1250,19 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
             logging.error("Could not read hourly metrics: %s", e)
             raise QueryError(f"Could not read hourly metrics: {e}") from e
 
-    async def write_container_metrics(self, metrics: List[CombinedMetric]) -> int:
+    async def write_container_metrics(
+        self,
+        metrics: List[CombinedMetric],
+        *,
+        run_id: Optional[str] = None,
+        collected_at: Optional[str] = None,
+    ) -> int:
+        """Upsert container rows in one transaction."""
         if not metrics:
             return 0
         try:
             async with self.db_manager.connection_scope() as conn:
-                saved_count = await self._upsert_container_rows(conn, metrics)
+                saved_count = await self._upsert_container_rows(conn, metrics, run_id=run_id, collected_at=collected_at)
                 await conn.commit()
             record_metric_provenance(metrics)
             return saved_count
@@ -1178,7 +1271,13 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
             raise QueryError(f"Could not write container metrics: {e}") from e
 
     @staticmethod
-    async def _upsert_container_rows(conn, metrics: List[CombinedMetric]) -> int:
+    async def _upsert_container_rows(
+        conn,
+        metrics: List[CombinedMetric],
+        *,
+        run_id: Optional[str] = None,
+        collected_at: Optional[str] = None,
+    ) -> int:
         """Upsert container rows on ``conn`` without committing."""
         saved_count = 0
         for metric in metrics:
@@ -1197,13 +1296,12 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                     cost_source, usage_source, power_source, intensity_source,
                     emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
-                    node_source, metadata_source
+                    node_source, metadata_source, collected_at, collection_run_id
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(namespace, pod_name, container_name, timestamp) DO UPDATE SET
-                    total_cost = excluded.total_cost,
                     co2e_grams = excluded.co2e_grams,
                     embodied_co2e_grams = excluded.embodied_co2e_grams,
                     pue = excluded.pue,
@@ -1221,12 +1319,6 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     is_estimated = excluded.is_estimated,
                     estimation_reasons = excluded.estimation_reasons,
                     calculation_version = excluded.calculation_version,
-                    cost_cpu = excluded.cost_cpu,
-                    cost_ram = excluded.cost_ram,
-                    cost_storage = excluded.cost_storage,
-                    cost_network = excluded.cost_network,
-                    cost_lb = excluded.cost_lb,
-                    cost_source = excluded.cost_source,
                     usage_source = excluded.usage_source,
                     power_source = excluded.power_source,
                     intensity_source = excluded.intensity_source,
@@ -1236,8 +1328,11 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     model_version = excluded.model_version,
                     gpu_power_watts = excluded.gpu_power_watts,
                     node_source = excluded.node_source,
-                    metadata_source = excluded.metadata_source
-                """,
+                    metadata_source = excluded.metadata_source,
+                    collected_at = excluded.collected_at,
+                    collection_run_id = excluded.collection_run_id,
+                """
+                + cost_guard_assignments("container_metrics", excluded="excluded"),
                 (
                     metric.pod_name,
                     metric.namespace,
@@ -1267,35 +1362,82 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     metric.memory_limit,
                     *_allocation_values(metric),
                     *_row_source_values(metric),
+                    collected_at,
+                    run_id,
                 ),
             )
             saved_count += cursor.rowcount
         return saved_count
 
-    async def write_idle_metrics(self, metrics: List[Any]) -> int:
-        """Upserts ``__idle__`` rows (one per node and step) into ``node_idle_metrics`` (B2)."""
+    async def write_idle_metrics(
+        self,
+        metrics: List[Any],
+        *,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+        conn: Any = None,
+    ) -> int:
+        """Upserts ``__idle__`` rows (one per node and step) into ``node_idle_metrics`` (B2).
+
+        With ``window``, idle rows of the window's steps that the pass did not
+        produce (a node gone since the first pass) are deleted (STO-01). On
+        ``conn`` (inside the caller's transaction, not committed) when given.
+        """
         if not metrics:
             return 0
         columns = IDLE_METRIC_COLUMNS
-        placeholders = ", ".join("?" for _ in columns)
+        placeholders = ", ".join("?" for _ in range(len(columns) + 2))
         updates = ", ".join(
-            f"{column} = excluded.{column}" for column in columns if column not in ("node", "timestamp")
+            f"{column} = excluded.{column}"
+            for column in columns
+            if column not in ("node", "timestamp") and column not in IDLE_COST_COLUMNS
         )
+        updates += ", collected_at = excluded.collected_at, collection_run_id = excluded.collection_run_id"
+        updates += ", " + cost_guard_assignments("node_idle_metrics", IDLE_COST_COLUMNS, excluded="excluded")
         query = (
-            f"INSERT INTO node_idle_metrics ({', '.join(_quote_idle(c) for c in columns)}) VALUES ({placeholders}) "
-            f'ON CONFLICT(node, "timestamp") DO UPDATE SET {updates}'
+            f"INSERT INTO node_idle_metrics ({', '.join(_quote_idle(c) for c in columns)}, collected_at, "
+            f'collection_run_id) VALUES ({placeholders}) ON CONFLICT(node, "timestamp") DO UPDATE SET {updates}'
         )
+        collected_at = to_iso_z(datetime.now(timezone.utc)) if run_id else None
+        rows = []
+        for metric in metrics:
+            values = [getattr(metric, column) for column in columns]
+            values[columns.index("timestamp")] = to_iso_z(metric.timestamp)
+            rows.append((*values, collected_at, run_id))
+
+        async def write(connection) -> None:
+            await connection.executemany(query, rows)
+            if window is not None:
+                await self._delete_idle_not_produced(connection, window, produced_idle_keys(metrics))
+
         try:
-            async with self.db_manager.connection_scope() as conn:
-                for metric in metrics:
-                    values = [getattr(metric, column) for column in columns]
-                    values[columns.index("timestamp")] = to_iso_z(metric.timestamp)
-                    await conn.execute(query, values)
-                await conn.commit()
-            return len(metrics)
-        except sqlite3.Error as e:
+            if conn is not None:
+                await write(conn)
+            else:
+                async with self.db_manager.transaction(immediate=True) as scoped:
+                    await write(scoped)
+        except Exception as e:
             logging.error("Could not write node idle metrics: %s", e)
             raise QueryError(f"Could not write node idle metrics: {e}") from e
+        return len(rows)
+
+    @staticmethod
+    async def _delete_idle_not_produced(conn, window: tuple[datetime, datetime], produced: set[tuple]) -> int:
+        """Delete idle rows of the pass's steps in ``window`` whose node the pass did not produce (STO-01)."""
+        async with conn.execute(
+            'SELECT node, "timestamp" FROM node_idle_metrics WHERE "timestamp" >= ? AND "timestamp" < ?',
+            (to_iso_z(window[0]), to_iso_z(window[1])),
+        ) as cursor:
+            stored = await cursor.fetchall()
+        steps = {key[1] for key in produced}
+        stale = [
+            (row[0], row[1])
+            for row in stored
+            if ensure_utc(row[1]) in steps and (row[0], ensure_utc(row[1])) not in produced
+        ]
+        if stale:
+            await conn.executemany('DELETE FROM node_idle_metrics WHERE node = ? AND "timestamp" = ?', stale)
+        return len(stale)
 
     async def read_idle_metrics(self, start_time: datetime, end_time: datetime) -> List[Any]:
         """Reads ``__idle__`` rows whose timestamp is in ``[start_time, end_time)``."""
