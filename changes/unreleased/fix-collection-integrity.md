@@ -1,5 +1,5 @@
 ### Added
-- Pod metadata history (`pod_snapshots`, migration 0120): every collection records the owner, requests, limits and containers of the live pods, one version per spec.
+- Pod metadata history (`pod_snapshots`, migration 0120): every collection records the owner, requests, limits and containers of the live pods, one version per spec; versions older than `NODE_DATA_MAX_AGE_DAYS` are pruned.
 - Raw pod and container rows record `node_source` (`snapshot`, `current_api`, `unknown`) and `metadata_source` (`k8s_snapshot`, `missing`).
 
 ### Fixed

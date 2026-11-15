@@ -77,3 +77,12 @@ class PostgresPodSnapshotRepository(PodSnapshotRepository):
                 )
             )
         return dict(result)
+
+    async def prune(self, before: datetime) -> int:
+        """See :meth:`PodSnapshotRepository.prune`."""
+        async with self.db_manager.connection_scope() as conn:
+            status = await conn.execute("DELETE FROM pod_snapshots WHERE last_seen < $1", ensure_utc(before))
+        try:
+            return int(str(status).rsplit(" ", 1)[-1])
+        except ValueError:
+            return 0

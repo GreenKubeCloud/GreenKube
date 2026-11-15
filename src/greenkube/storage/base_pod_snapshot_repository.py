@@ -126,3 +126,7 @@ class PodSnapshotRepository(ABC):
     @abstractmethod
     async def get_snapshots(self, start: datetime, end: datetime) -> dict[tuple[str, str], list[PodSnapshot]]:
         """Versions observed during ``[start, end]``, keyed by ``(namespace, pod)`` and sorted by first_seen."""
+
+    @abstractmethod
+    async def prune(self, before: datetime) -> int:
+        """Delete versions last observed before ``before``; returns the number deleted."""

@@ -85,3 +85,10 @@ class SQLitePodSnapshotRepository(PodSnapshotRepository):
                 )
             )
         return dict(result)
+
+    async def prune(self, before: datetime) -> int:
+        """See :meth:`PodSnapshotRepository.prune`."""
+        async with self.db_manager.connection_scope() as conn:
+            cursor = await conn.execute("DELETE FROM pod_snapshots WHERE last_seen < ?", (_encode(before),))
+            await conn.commit()
+            return cursor.rowcount or 0

@@ -129,3 +129,15 @@ async def test_recollection_without_metadata_keeps_stored_owner_and_requests(sto
     assert (stored[0].owner_kind, stored[0].owner_name) == ("Deployment", "d")
     assert stored[0].cpu_request == 500
     assert stored[0].metadata_source == "k8s_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_collection_prunes_pod_history_older_than_node_data_max_age(storage):
+    cfg, repo, snapshots = storage
+    old = PodMetric(pod_name="old", namespace="ns", container_name="app", cpu_request=1, memory_request=1)
+    await snapshots.save_pods([old], datetime.now(timezone.utc) - timedelta(days=cfg.NODE_DATA_MAX_AGE_DAYS + 1))
+
+    await _build(cfg, repo, snapshots, pod_list=[POD_P]).run_range(BASE, BASE + timedelta(seconds=STEP))
+
+    stored = await snapshots.get_snapshots(datetime(2000, 1, 1, tzinfo=timezone.utc), datetime.now(timezone.utc))
+    assert ("ns", "old") not in stored

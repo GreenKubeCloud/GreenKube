@@ -465,6 +465,8 @@ class HistoricalRangeProcessor:
         try:
             if live_pods:
                 await repository.save_pods(live_pods, now)
+                # Versions older than node snapshots are ignored anyway; keep the table bounded.
+                await repository.prune(now - timedelta(days=self._config.NODE_DATA_MAX_AGE_DAYS))
             # No upper bound: a version first observed after the range is the
             # nearest one for a pod first seen after its samples.
             return await repository.get_snapshots(start - margin, now + margin)

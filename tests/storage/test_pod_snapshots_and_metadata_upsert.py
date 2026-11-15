@@ -140,3 +140,17 @@ async def test_row_without_metadata_never_erases_stored_owner_and_requests(datab
     await repo.write_combined_metrics([_row(cpu_request=700)])
     (stored,) = await repo.read_combined_metrics(BASE, BASE + timedelta(minutes=5))
     assert stored.cpu_request == 700
+
+
+@pytest.mark.asyncio
+async def test_pod_snapshots_older_than_the_retention_are_pruned(database):
+    backend, manager = database
+    repo = SQLitePodSnapshotRepository(manager) if backend == "sqlite" else PostgresPodSnapshotRepository(manager)
+    old = PodMetric(pod_name="old", namespace="ns", container_name="app", cpu_request=1, memory_request=1)
+    await repo.save_pods([old], BASE - timedelta(days=40))
+    await repo.save_pods([_pod(500)], BASE)
+
+    assert await repo.prune(BASE - timedelta(days=30)) == 1
+
+    remaining = await repo.get_snapshots(BASE - timedelta(days=60), BASE + timedelta(hours=1))
+    assert list(remaining) == [("ns", "p")]
