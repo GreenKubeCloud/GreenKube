@@ -303,6 +303,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pod_snapshots` records the pod UID and the cluster identity (migration 0121); `node_snapshots_scd.last_seen` records when an unchanged node version was last confirmed.
 - Pod metadata history (`pod_snapshots`, migration 0120): every collection records the owner, requests, limits and containers of the live pods with the interval each version was observed in; versions last observed more than `NODE_DATA_MAX_AGE_DAYS` ago are pruned.
 - Raw pod and container rows record `node_source` (`snapshot`, `current_api`, `unknown`) and `metadata_source` (`k8s_snapshot`, `kube_state_metrics`, `stored_row`, `missing`). Rows written before stay NULL.
+- Workload spec observations and change records store a resources digest (requests and limits of every container, init container and native sidecar) and an image digest next to the pod-template digest (migration 0136, MEA-08).
 
 ### Changed
 - **Positioning and documentation:** GreenKube is now presented as an optimization loop: aggregate recommendations, deliver them as GitOps pull requests, prove the savings.
@@ -508,6 +509,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Change drift monitor: the baseline, post-window and monitored days are valued at the constant baseline prices of the snapshot price card, so a later price rise no longer reverses a saving claimed at constant prices; the `regressed` payload records `constant_price_basis`.
 - Calculation version `+range.5`. `+range.4` rows are not rewritten; a re-collection of their window applies the new rules.
 - Calculation version `+range.4`. Rows stored before keep the node and pod state of their collection time and are not rewritten.
+- `request_rightsizing` strategy version 2.5: a pod-template change during a measurement with the change's requests and limits is a `template_change` confounder (mild, moderate when the image changed or is unknown) instead of a severe `spec_change`, so an image deployment, an env change or a rollout restart no longer contaminates the measurement (MEA-08). Measurements stored with earlier versions are kept as they were; a contaminated change can be re-measured.
+- Accelerated demo windows (`CHANGE_MEASUREMENT_ACCELERATED`, quickstart only) bucket rows into 5-minute slots, use the baseline mean as counterfactual (`flat_mean_accelerated`) and demo thresholds (6 post slots), so the quickstart windows reach a decided verdict; such measurements record `representative: false` and their measured saving never accrues in the savings ledger (MEA-10).
+- `CHANGE_MEASUREMENT_POST_WINDOW_DAYS` below 5 days (30 minutes with `CHANGE_MEASUREMENT_ACCELERATED`) is raised to that minimum at startup with a warning, since a verdict needs 5 complete days of aligned hours (MEA-10). `CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` below its minimum is now raised the same way instead of stopping GreenKube from starting.
 
 ### Fixed
 - **Automation worker heartbeat recovery:** Idle workers refresh their heartbeat and clear expired lease state without overwriting an active lease.
@@ -723,6 +727,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed Kubernetes pod list fails the collection window (retried, watermark unchanged) unless a pod snapshot newer than one step exists; a failed node list fails it unless node snapshots exist. Counted in `greenkube_collection_k8s_list_errors_total` (COL-07).
 - Historical rows take node zone, Electricity Maps zone, provider and PUE, instance type and embodied profile from the node snapshot valid at the sample time, so rows of a node that left the cluster no longer fall back to the default zone and PUE with zero embodied carbon, provided the node was saved in `node_snapshots_scd` while it existed (RECON-05, COL-01).
 - Historical rows take owner, requests and container list from the pod history at the sample time, so a pod deleted before its window was collected keeps its owner, requests and container rows when a collection observed it while it ran. (COL-01, steps 1, 2, 3 and 5 partly; steps 4 and 6 are not done).
+- Manual and adopted changes read the live workload when they are recorded (pod-template, resources and image digests, UID, per-container requests), and a change without a pod-template digest is compared with its live requests on every drift pass, so a manual revert stops its accrual. The live-request check compares every container of the workload, and a change recorded late never supersedes a change that landed after it.
+- A request increase whose members all raise a request (a reliability fix) is decided on its OOM-kill rate: `realized` and its recommendations `verified` when the rate dropped and the gates pass, with the cost reported as `cost_of_fix_annual` and never claimed as a saving (`counterfactual_params.objective`, MEA-14).
+- Recommendations applied by hand (`PATCH /apply`) are recorded as changes (application method `manual`) and measured by change measurement instead of the interim verifier; applied, undecided recommendations without a change id are adopted into change measurement on the next lifecycle pass (MEA-16).
+- The interim verifier (only used with `CHANGE_MEASUREMENT_ENABLED=false` and for older applies) decides on a 90% interval of the before/after difference, never on its point estimate (strategy `c0.2`), and labels its measurements `windows.method = interim_before_after` (MEA-16).
+- The reason of an undecided quantity names the true cause: no metric rows, rows without trusted cost or carbon, or hours below the 50% coverage threshold (with count and best coverage); request quantities are no longer called "trusted" (MEA-10).
+- The `co2e_factor_fallback` confounder no longer lowers the confidence of the cost verdict: it only touches the CO2e valuation.
+- The drift monitor closes a realized change only when the requests or limits changed (or the workload was recreated with other resources); a template change with the same resources keeps the change realized and accruing and records an informational `template_change` event. For changes recorded before the resources digest, the live container requests are read before closing (MEA-08).
 
 ### Removed
 - **CI: the dead README-badge step** and its `contents: write` permission (O6).
