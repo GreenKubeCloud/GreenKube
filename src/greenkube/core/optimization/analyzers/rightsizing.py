@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, List, Literal, Mapping, Optional, Tuple
 
 from greenkube.core.optimization.statistics import balanced_rightsizing_target, coverage_days
@@ -254,8 +255,40 @@ def oom_unknown_cause(
     return OOM_UNKNOWN_SIGNAL_FAILED if status == "failed" else OOM_UNKNOWN_SIGNAL_UNAVAILABLE
 
 
+def _recent_change_after_failures(
+    summary: Optional["WorkloadUsageSummary"], config: Optional["Config"], now: Optional[datetime] = None
+) -> bool:
+    """True when kills or restarts happened before a configuration change that is too young (REC-02 review).
+
+    Kills and restarts under a previous request or limit are not held against
+    the current one for an increase, but a decrease needs clean days under the
+    current configuration: ``RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS`` since
+    the change. Until then the samples of the lookback mostly show the old
+    configuration and its failures.
+    """
+    if summary is None or not (summary.oom_kills_before_change or summary.restarts_before_change):
+        return False
+    since = [
+        value
+        for value in (
+            summary.memory_config_since if summary.oom_kills_before_change else None,
+            summary.resources_config_since if summary.restarts_before_change else None,
+            summary.memory_config_since if summary.restarts_before_change else None,
+        )
+        if value is not None
+    ]
+    if not since:
+        return True
+    days = float(getattr(config, "RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", 7.0) or 7.0)
+    reference = now or datetime.now(timezone.utc)
+    latest = max(value if value.tzinfo else value.replace(tzinfo=timezone.utc) for value in since)
+    return reference - latest < timedelta(days=days)
+
+
 def decrease_reliability_block(
-    summary: "WorkloadUsageSummary", pod_summary: Optional["WorkloadUsageSummary"] = None
+    summary: "WorkloadUsageSummary",
+    pod_summary: Optional["WorkloadUsageSummary"] = None,
+    config: Optional["Config"] = None,
 ) -> Optional[str]:
     """Why reliability history forbids a decrease, or None when it is known to be clean.
 
@@ -265,12 +298,18 @@ def decrease_reliability_block(
     * :data:`RELIABILITY_SIGNALS_UNKNOWN`: a signal is unknown (None) and the
       rollup holds no restart count to fall back on.
 
+    * ``restarted_before_change``: kills or restarts happened under a previous
+      configuration changed less than ``RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS``
+      ago (no clean days under the current one yet, REC-02).
+
     None only for explicit zeros, or, when a signal is unknown, a rollup
     restart history without restart: an OOM kill restarts the container, so no
     restart rules out a kill too. Unknown is never treated as healthy.
     """
     if summary.oom_kill_count or summary.restarts_in_window:
         return "restarted"
+    if _recent_change_after_failures(summary, config) or _recent_change_after_failures(pod_summary, config):
+        return "restarted_before_change"
     if summary.oom_kill_count == 0 and summary.restarts_in_window == 0:
         return None
     restarts = rollup_restarts(summary, pod_summary)
@@ -447,7 +486,7 @@ def cpu_proposal(
     if evidence or _cpu_increase_triggered(config, summary):
         # The container's own data contradicts its pod's: no decrease from it either (fail closed).
         return None
-    if decrease_reliability_block(summary, pod_summary) is not None:
+    if decrease_reliability_block(summary, pod_summary, config) is not None:
         # A crash-looping container's samples cover its back-off, not its load; and its CPU
         # decrease would share one action with its memory fix, so the fix would no longer be
         # increase-only and its own unhealthiness would block it (e2e). Unknown signals fail
@@ -622,7 +661,7 @@ def memory_proposal(
     if evidence or _memory_triggers(config, summary):
         # The container's own data contradicts its pod's: no decrease from it either (fail closed).
         return None
-    if decrease_reliability_block(summary, pod_summary) is not None:
+    if decrease_reliability_block(summary, pod_summary, config) is not None:
         # A container OOM-killed or restarted in the window may have peaks the samples missed;
         # unknown signals fail closed (REC-04).
         return None

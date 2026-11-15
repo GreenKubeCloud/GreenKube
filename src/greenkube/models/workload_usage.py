@@ -180,8 +180,9 @@ class WorkloadUsageSummary:
     #: An hour of the lookback was rolled before migration 0130 (restart count without
     #: per-pod increase) and could not be re-rolled: ``restart_increase`` is None for that.
     restart_increase_legacy: bool = False
-    #: Since when the container runs with its current memory request and limit (REC-02): the end
-    #: of the last observed hour that had another value. None when the whole lookback ran with them.
+    #: Since when the container may run with its current memory request and limit (REC-02): the
+    #: start of the last observed hour that had another value (a kill in that transition hour still
+    #: counts). None when the whole lookback ran with them.
     memory_config_since: Optional[datetime] = None
     #: The same for any request or limit (CPU or memory): a new pod template, so restarts before it
     #: happened under another configuration (REC-02).

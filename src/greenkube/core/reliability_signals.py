@@ -425,6 +425,13 @@ def _current_config_signals(snapshot: UsageSnapshot, signals: ReliabilitySignals
             if restarts_before:
                 summary.restarts_before_change = restarts_before
                 signals.restarts.pop(key, None)
+            pod = containers.get(POD_LEVEL)
+            if pod is not None and kills_before:
+                pod.oom_kills_before_change = (pod.oom_kills_before_change or 0) + kills_before
+                pod.memory_config_since = _latest(pod.memory_config_since, summary.memory_config_since)
+            if pod is not None and restarts_before:
+                pod.restarts_before_change = (pod.restarts_before_change or 0) + restarts_before
+                pod.resources_config_since = _latest(pod.resources_config_since, restart_since)
 
 
 def apply_signals(snapshot: UsageSnapshot, signals: ReliabilitySignals) -> None:

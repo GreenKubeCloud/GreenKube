@@ -13,7 +13,7 @@ as :func:`greenkube.core.workload_usage.nearest_rank`.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.models.provenance import cost_source_aggregate_sql
@@ -428,11 +428,6 @@ def _stats(row: Mapping[str, Any], alias: str, sq: bool) -> Optional[UsageStats]
     )
 
 
-def _hour_end(bucket: Optional[datetime]) -> Optional[datetime]:
-    """End of an hour bucket, or None (REC-02: since when the configuration is current)."""
-    return bucket + timedelta(hours=1) if bucket is not None else None
-
-
 def summary_from_row(row: Mapping[str, Any], decode_time: Callable[[Any], Optional[datetime]]) -> WorkloadUsageSummary:
     intensity_n = int(row["intensity_n"] or 0)
     return WorkloadUsageSummary(
@@ -456,8 +451,8 @@ def summary_from_row(row: Mapping[str, Any], decode_time: Callable[[Any], Option
         restart_count=_i(row["restart_count"]),
         restart_increase=_i(row["restart_increase"]),
         restart_increase_legacy=bool(row["restart_increase_legacy"] or 0),
-        memory_config_since=_hour_end(decode_time(row["memory_changed_hour"])),
-        resources_config_since=_hour_end(decode_time(row["resources_changed_hour"])),
+        memory_config_since=decode_time(row["memory_changed_hour"]),
+        resources_config_since=decode_time(row["resources_changed_hour"]),
         total_cost=float(row["total_cost"] or 0.0),
         co2e_grams=float(row["co2e_grams"] or 0.0),
         embodied_co2e_grams=float(row["embodied_co2e_grams"] or 0.0),

@@ -764,7 +764,7 @@ async def test_previous_restart_counts_are_looked_up_in_bounded_chunks(db, monke
     assert len(lookup_queries) <= 2 * len(lookups) + 4
 
 
-async def test_config_since_is_the_end_of_the_last_hour_with_other_requests_on_sql_and_python(db):
+async def test_config_since_is_the_start_of_the_last_hour_with_other_requests_on_sql_and_python(db):
     """REC-02: since when the container runs its current memory request and limit (and any request)."""
     start = _base_hour()
     rows = []
@@ -791,5 +791,5 @@ async def test_config_since_is_the_end_of_the_last_hour_with_other_requests_on_s
     reference = summarize(await repository.read_hours(*window))
     for summaries in (snapshot.summaries, reference.summaries):
         web = summaries[("shop", "Deployment", "api")]["web"]
-        assert web.memory_config_since == start + timedelta(hours=2)
-        assert web.resources_config_since == start + timedelta(hours=4)
+        assert web.memory_config_since == start + timedelta(hours=1)
+        assert web.resources_config_since == start + timedelta(hours=3)

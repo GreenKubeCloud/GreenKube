@@ -157,7 +157,8 @@ def test_the_summary_records_since_when_the_memory_configuration_is_current() ->
 
     summary = summarize(rollup_rows(pods, containers, step_seconds=300)).summaries[TARGET]["app"]
 
-    assert summary.memory_config_since == T0 - timedelta(hours=8)
+    # The start of the last hour with the old limit: a kill under the new limit in that hour counts.
+    assert summary.memory_config_since == T0 - timedelta(hours=9)
 
 
 def test_an_unchanged_configuration_has_no_since() -> None:
@@ -178,3 +179,27 @@ def test_the_source_run_says_the_kills_happened_under_a_previous_limit() -> None
 
     assert diagnostic["code"] == OOM_KILLS_BEFORE_CHANGE
     assert "previous memory request or limit" in diagnostic["message"]
+
+
+async def test_no_decrease_one_hour_after_an_oom_fix() -> None:
+    """Review: kills before the fix must not open a decrease before clean days under the new limit."""
+    stats = UsageStats(sample_count=4032, avg=30 * MIB, p50=30 * MIB, p90=35 * MIB, p95=35 * MIB, p99=36 * MIB,
+                       max=40 * MIB)  # fmt: skip
+    summary = _summary(
+        stats, memory_config_since=T0 - timedelta(hours=1), memory_request=256 * MIB, memory_limit=256 * MIB
+    )
+
+    attached = await _attach(summary, _prometheus(kill_at=T0 - timedelta(hours=2)))
+
+    assert attached.oom_kills_before_change == 1
+    assert memory_proposal(Config(), attached) is None
+
+
+async def test_no_cpu_decrease_one_hour_after_a_configuration_change_with_restarts() -> None:
+    from greenkube.core.optimization.analyzers.rightsizing import cpu_proposal
+
+    summary = _summary(SMALL, memory_config_since=T0 - timedelta(hours=1), cpu_request=2000)
+
+    attached = await _attach(summary, _prometheus(kill_at=T0 - timedelta(hours=2)))
+
+    assert cpu_proposal(Config(), attached) is None

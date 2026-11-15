@@ -874,9 +874,12 @@ _RESOURCE_FIELDS = ("cpu_request", "memory_request", "cpu_limit", "memory_limit"
 
 
 def _config_since(ordered: List[_HourTotals], fields: Sequence[str]) -> Optional[datetime]:
-    """End of the last hour whose ``fields`` differ from the latest hour's, or None (REC-02).
+    """Start of the last hour whose ``fields`` differ from the latest hour's, or None (REC-02).
 
-    Kills and restarts at or after it happened under the current configuration.
+    Kills and restarts at or after it may have happened under the current
+    configuration: during a rollout the hour still shows the old values (the
+    rollup keeps the latest sample's), so a kill under the new limit in that
+    hour counts.
     Hours without a known request (0) are skipped: they say nothing about it.
     Same rule as ``memory_changed_hour`` / ``resources_changed_hour`` of the SQL summary.
     """
@@ -887,16 +890,16 @@ def _config_since(ordered: List[_HourTotals], fields: Sequence[str]) -> Optional
         if not item.memory_request and not item.cpu_request:
             continue
         if tuple(getattr(item, name) for name in fields) != latest and item.hour_bucket is not None:
-            return _hour_end(item.hour_bucket)
+            return _hour_start(item.hour_bucket)
     return None
 
 
-def _hour_end(bucket: Any) -> datetime:
-    """The end of an hour bucket (datetime or ISO string)."""
+def _hour_start(bucket: Any) -> datetime:
+    """An hour bucket as an aware datetime (datetime or ISO string)."""
     value = bucket if isinstance(bucket, datetime) else datetime.fromisoformat(str(bucket).replace("Z", "+00:00"))
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return value + timedelta(hours=1)
+    return value
 
 
 def _restart_increase(ordered: List[_HourTotals]) -> Optional[int]:
