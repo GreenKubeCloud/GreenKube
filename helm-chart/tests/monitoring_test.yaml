@@ -88,6 +88,12 @@ tests:
       - matchRegex:
           path: spec.groups[3].rules[1].annotations.description
           pattern: '\{\{ \$labels.source_table \}\}'
+      - equal:
+          path: spec.groups[3].rules[2].alert
+          value: GreenKubeLedgerReconciliationFailed
+      - equal:
+          path: spec.groups[3].rules[2].expr
+          value: min by (cluster_uid) (greenkube_ledger_reconciliation_ok) == 0
 
   - it: should leave the controller loop alerts out when disabled
     set:

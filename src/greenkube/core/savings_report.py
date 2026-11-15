@@ -5,8 +5,11 @@ Projected, measured and user-declared savings are reported in separate blocks
 and are never summed (product principle 3, roadmap C0.14):
 
 - annual blocks are the *current* yearly rates of applied recommendations;
-- ``*_to_date`` blocks are ledger accruals over the window (all time without
-  a window), each restricted to one method.
+- ``*_to_date`` blocks are the restated totals of the hash-chained savings
+  ledger v2 over the window (all time without a window), each restricted to
+  one method (LED-04): after a measurement the measured period is moved from
+  ``projected`` to ``measured``. The accrued book alone stays visible
+  (``accrued_only_*``).
 """
 
 from __future__ import annotations
@@ -115,20 +118,33 @@ def realization_summary(records: Iterable[RecommendationRecord]) -> RealizationS
     )
 
 
+LEDGER_V1_FALLBACK_DIAGNOSTIC = (
+    "ledger_v1_fallback: the savings ledger v2 has no cluster identity yet; the to-date figures come from the "
+    "v1 staging ledger and do not include restatements."
+)
+
+
 def _accrued_block(
     breakdown: Iterable[SavingsAccrualTotal],
     method: str,
     start: Optional[datetime],
     end: Optional[datetime],
+    *,
+    source: Optional[str] = None,
+    accrued_only: Optional[Iterable[SavingsAccrualTotal]] = None,
 ) -> SavingsBlock:
     rows = [row for row in breakdown if row.method == method]
+    only = [row for row in accrued_only if row.method == method] if accrued_only is not None else None
     return SavingsBlock(
         method=method,  # type: ignore[arg-type]
         basis="accrued",
-        co2e_grams=sum(row.co2e_saved_grams for row in rows),
-        cost=sum(row.cost_saved_dollars for row in rows),
+        co2e_grams=math.fsum(row.co2e_saved_grams for row in rows),
+        cost=math.fsum(row.cost_saved_dollars for row in rows),
         start=start,
         end=end,
+        source=source,  # type: ignore[arg-type]
+        accrued_only_co2e_grams=math.fsum(row.co2e_saved_grams for row in only) if only is not None else None,
+        accrued_only_cost=math.fsum(row.cost_saved_dollars for row in only) if only is not None else None,
     )
 
 
@@ -140,11 +156,36 @@ def assemble_savings_report(
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     legacy_compressed: bool = False,
+    accrued_only: Optional[List[SavingsAccrualTotal]] = None,
+    source: str = "ledger_v2",
+    projected_unverified: Optional[List[SavingsAccrualTotal]] = None,
 ) -> SavingsReport:
-    """Build the report from applied recommendations and ledger accruals."""
+    """Build the report from applied recommendations and ledger totals.
+
+    ``breakdown`` is the restated ledger v2 (``LedgerRepository.accrual_breakdown``,
+    both books, LED-04) and ``accrued_only`` its accrued book alone; with
+    ``source="ledger_v1"`` it is the v1 staging ledger (fallback, flagged).
+    ``projected_unverified`` holds the ledger totals of the changes whose
+    measurement was inconclusive: reported apart and left out of
+    ``projected_to_date`` (LED-03).
+    """
     rates = annual_rates_by_method(applied_records)
-    realized = _accrued_block(breakdown, METHOD_MEASURED, start, end)
-    projected_to_date = _accrued_block(breakdown, METHOD_PROJECTED, start, end)
+    blocks = {"source": source, "accrued_only": accrued_only}
+    realized = _accrued_block(breakdown, METHOD_MEASURED, start, end, **blocks)  # type: ignore[arg-type]
+    projected_to_date = _accrued_block(breakdown, METHOD_PROJECTED, start, end, **blocks)  # type: ignore[arg-type]
+    unverified_block: Optional[SavingsBlock] = None
+    if projected_unverified is not None:
+        # LED-03: the projections of inconclusive changes are kept but never shown as projected savings to date.
+        unverified_block = _accrued_block(projected_unverified, METHOD_PROJECTED, start, end, source=source)
+        projected_to_date = projected_to_date.model_copy(
+            update={
+                "cost": projected_to_date.cost - unverified_block.cost,
+                "co2e_grams": projected_to_date.co2e_grams - unverified_block.co2e_grams,
+            }
+        )
+    diagnostics = [LEGACY_COMPRESSED_DIAGNOSTIC] if legacy_compressed else []
+    if source == "ledger_v1":
+        diagnostics.append(LEDGER_V1_FALLBACK_DIAGNOSTIC)
 
     counts: dict[str, int] = defaultdict(int)
     for record in applied_records:
@@ -176,10 +217,17 @@ def assemble_savings_report(
         realized_to_date=realized,
         projected_to_date=projected_to_date,
         user_declared_annual=_annual_block(rates, METHOD_USER_DECLARED),
-        user_declared_to_date=_accrued_block(breakdown, METHOD_USER_DECLARED, start, end),
+        projected_unverified_to_date=unverified_block,
+        user_declared_to_date=_accrued_block(
+            breakdown,
+            METHOD_USER_DECLARED,
+            start,
+            end,
+            **blocks,  # type: ignore[arg-type]
+        ),
         applied_count=len(applied_records),
         verified_count=sum(1 for record in applied_records if _status(record) == "verified"),
-        diagnostics=[LEGACY_COMPRESSED_DIAGNOSTIC] if legacy_compressed else [],
+        diagnostics=diagnostics,
         realization=realization_summary(applied_records),
         total_carbon_saved_co2e_grams=realized.co2e_grams,
         total_cost_saved=realized.cost,

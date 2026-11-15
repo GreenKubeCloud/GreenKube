@@ -221,7 +221,7 @@ class LedgerFilters:
         method: Optional[str] = Query(
             None, description="projected, measured_allocated, realized_billed, user_declared"
         ),
-        quantity: Optional[str] = Query(None, description="cost or co2e_g"),
+        quantity: Optional[str] = Query(None, description="cost, co2e_g, cpu_core_h or mem_gib_h"),
         entry_kind: Optional[str] = Query(None, description="accrual, reversal or restatement"),
         book: Optional[str] = Query(None, description="accrued (reconciles with v1) or restatement"),
         reason: Optional[str] = Query(None, description="accrual, drift, supersession or restatement"),
@@ -526,6 +526,9 @@ async def _focus_lines(entries: AsyncIterator[LedgerEntry], filters: LedgerFilte
     pending: Dict[Tuple[str, str, str], Dict[str, LedgerEntry]] = {}
     order: List[Tuple[str, str, str]] = []
     async for entry in entries:
+        if entry.quantity not in (QUANTITY_COST, QUANTITY_CO2E):
+            # Released capacity is not money: it has no place in a FOCUS cost row (CSV export and summary carry it).
+            continue
         key = (entry.group_key, entry.method, entry.entry_kind)
         if key not in pending:
             pending[key] = {}

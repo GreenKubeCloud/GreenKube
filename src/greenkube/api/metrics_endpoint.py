@@ -433,7 +433,9 @@ NS_REC_SAVINGS_COST = Gauge(
 # Savings ledger metrics (DB-backed)
 #
 # The ``*_attributed_*_total`` and ``*_reversed_*_total`` families are monotonic
-# counters computed from the append-only ledger, labelled by ``method``
+# counters computed from the append-only, hash-chained ledger v2 (LED-04:
+# positive entries are attributed, negative entries such as supersession,
+# drift and restatement reversals are reversed), labelled by ``method``
 # (projected, measured, user_declared). Net savings = attributed − reversed.
 # Never sum methods: only ``method="measured"`` is realized savings.
 # ---------------------------------------------------------------------------
@@ -456,12 +458,12 @@ class _SavingsLedgerCounterCollector:
         ),
         (
             "greenkube_co2e_savings_reversed_grams",
-            "Cumulative CO2e (grams) reversed: superseded accruals and negative declarations. Monotonic.",
+            "Cumulative CO2e (grams) reversed: negative ledger entries (supersession, drift, restatement). Monotonic.",
             "reversed_co2e_grams",
         ),
         (
             "greenkube_cost_savings_reversed_dollars",
-            "Cumulative cost (dollars) reversed: superseded accruals and negative declarations. Monotonic.",
+            "Cumulative cost reversed: negative ledger entries (supersession, drift, restatement). Monotonic.",
             "reversed_cost_dollars",
         ),
     )
@@ -1320,12 +1322,25 @@ async def refresh_metrics_from_db(
             cluster = _get_cluster_name()
             ledger_key = f"ledger:{ledger_cluster}:{cluster}"
             if _savings_refresh_due(savings_repo, ledger_key):
-                counters = await savings_repo.get_lifetime_counters(ledger_cluster)
+                # LED-04: counters and dashboard windows come from the hash-chained ledger v2 (restated,
+                # reversals visible); the v1 staging ledger only before the ledger has a cluster identity.
+                from ..storage.ledger_repository import get_ledger_repository
+
+                ledger_repo = get_ledger_repository()
+                identity = await ledger_repo.get_identity(ledger_cluster)
+                if identity is not None:
+                    counters = await ledger_repo.lifetime_counters(identity[0])
+                else:
+                    logger.info("Savings ledger v2 has no cluster identity yet: savings metrics read the v1 ledger.")
+                    counters = await savings_repo.get_lifetime_counters(ledger_cluster)
                 update_attributed_savings_metrics(counters, cluster=cluster)
                 clear_dashboard_savings_metrics()
                 savings_namespaces = await get_dashboard_namespaces("savings")
                 for window_slug, start_time, end_time in _dashboard_window_ranges(now):
-                    breakdown = await savings_repo.get_accrual_breakdown(ledger_cluster, start_time, end_time)
+                    if identity is not None:
+                        breakdown = await ledger_repo.accrual_breakdown(identity[0], start_time, end_time)
+                    else:
+                        breakdown = await savings_repo.get_accrual_breakdown(ledger_cluster, start_time, end_time)
                     update_dashboard_savings_from_breakdown(
                         window_slug,
                         breakdown,

@@ -14,11 +14,12 @@ updated or deleted (database triggers reject it): a correction is a new entry.
   ``reversal`` of that projected accrual (BUG-39).
 
 ``book`` keeps the two views apart: ``accrued`` entries mirror the v1 ledger
-(``recommendation_savings_ledger``) and reconcile with
-``GET /recommendations/savings``; ``restatement`` entries (restatements, the
+(``recommendation_savings_ledger``, a staging table since LED-04);
+``restatement`` entries (restatements, the
 reversals of the projections they restate, and later reversals of either)
 move projected amounts to measured ones. The restated total of a method is
-the sum over both books.
+the sum over both books: what ``GET /recommendations/savings``, the savings
+counters and the dashboard gauges show.
 
 Each cluster's entries form a hash chain: ``seq`` is a gap-free position and
 ``hash = sha256(prev_hash || canonical_json(entry))``, where the canonical
@@ -57,7 +58,24 @@ REASON_ACCRUAL = "accrual"
 REASON_DRIFT = "drift"
 REASON_SUPERSESSION = "supersession"
 REASON_RESTATEMENT = "restatement"
-REASONS = (REASON_ACCRUAL, REASON_DRIFT, REASON_SUPERSESSION, REASON_RESTATEMENT)
+#: A projection reversed because its measurement refuted it (not realized, LED-03).
+REASON_NOT_REALIZED = "not_realized"
+#: A supersession reversal cancelled because the rollback review was dismissed (LED-08).
+REASON_REINSTATEMENT = "reinstatement"
+#: The measured cost of a reliability fix (a request increase), booked as a negative cost, never a saving.
+REASON_COST_OF_FIX = "cost_of_fix"
+#: Released capacity accrued from the change measurement.
+REASON_RELEASED_CAPACITY = "released_capacity"
+REASONS = (
+    REASON_COST_OF_FIX,
+    REASON_RELEASED_CAPACITY,
+    REASON_ACCRUAL,
+    REASON_DRIFT,
+    REASON_SUPERSESSION,
+    REASON_RESTATEMENT,
+    REASON_NOT_REALIZED,
+    REASON_REINSTATEMENT,
+)
 
 #: Accounting basis of an amount (LED-01): what the number measures. One basis per method.
 BASIS_ALLOCATED = "allocated"
@@ -76,8 +94,15 @@ LEGACY_BASIS = {
 
 QUANTITY_COST = "cost"
 QUANTITY_CO2E = "co2e_g"
-QUANTITIES = (QUANTITY_COST, QUANTITY_CO2E)
+#: Released capacity (WP-08.1): reserved CPU and memory released by a change, never money.
+QUANTITY_CPU_CORE_HOURS = "cpu_core_h"
+QUANTITY_MEM_GIB_HOURS = "mem_gib_h"
+CAPACITY_QUANTITIES = (QUANTITY_CPU_CORE_HOURS, QUANTITY_MEM_GIB_HOURS)
+#: Money and carbon: the quantities of savings totals (capacity is reported apart, never added).
+SAVINGS_QUANTITIES = (QUANTITY_COST, QUANTITY_CO2E)
+QUANTITIES = (QUANTITY_COST, QUANTITY_CO2E, QUANTITY_CPU_CORE_HOURS, QUANTITY_MEM_GIB_HOURS)
 CO2E_UNIT = "gCO2e"
+CAPACITY_UNITS = {QUANTITY_CPU_CORE_HOURS: "core-hours", QUANTITY_MEM_GIB_HOURS: "GiB-hours"}
 
 #: v1 ledger method labels mapped onto the v2 vocabulary.
 V1_METHODS = {
@@ -288,7 +313,16 @@ __all__ = [
     "QUANTITY_COST",
     "REASONS",
     "REASON_ACCRUAL",
+    "CAPACITY_QUANTITIES",
+    "CAPACITY_UNITS",
+    "QUANTITY_CPU_CORE_HOURS",
+    "QUANTITY_MEM_GIB_HOURS",
+    "REASON_COST_OF_FIX",
+    "REASON_RELEASED_CAPACITY",
+    "SAVINGS_QUANTITIES",
     "REASON_DRIFT",
+    "REASON_NOT_REALIZED",
+    "REASON_REINSTATEMENT",
     "REASON_RESTATEMENT",
     "REASON_SUPERSESSION",
     "canonical_json",

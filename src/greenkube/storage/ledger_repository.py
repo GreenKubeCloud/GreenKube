@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.models.savings import SavingsAccrualTotal, SavingsCounterTotal
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.ledger.model import (
     BOOK_RESTATEMENT,
@@ -38,6 +39,7 @@ from greenkube.verify.ledger.model import (
     format_time,
     parse_time,
     place,
+    v2_method,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,8 @@ _CHUNK = 500
 V1_RAW_TABLE = "recommendation_savings_ledger"
 V1_HOURLY_TABLE = "recommendation_savings_ledger_hourly"
 V1_TABLES = (V1_RAW_TABLE, V1_HOURLY_TABLE)
+#: v2 methods under the names the v1 report, gauges and counters use.
+V1_METHOD_NAMES = {"measured_allocated": "measured"}
 
 _COLUMNS = (
     "entry_id",
@@ -445,7 +449,8 @@ class LedgerRepository:
                     f"ON p.source_table = '{table}' AND p.source_id = l.id "
                     f"JOIN savings_ledger_entries e ON e.{link} = p.entry_id "
                     f"WHERE {superseded} AND e.cluster_uid = ? AND e.book = '{BOOK_RESTATEMENT}' "
-                    f"AND e.reason = '{REASON_RESTATEMENT}' AND {not_reversed} ORDER BY e.seq LIMIT ?",
+                    f"AND e.reason IN ('{REASON_RESTATEMENT}', 'not_realized') AND {not_reversed} "
+                    "ORDER BY e.seq LIMIT ?",
                     [cluster_uid, limit],
                 )
                 direct.extend(restated)
@@ -453,6 +458,116 @@ class LedgerRepository:
                 entry = self._entry(row)
                 entries[entry.entry_id] = entry
         return sorted(entries.values(), key=lambda item: item.seq)
+
+    async def supersede_v1(self, recommendation_ids: Iterable[int]) -> int:
+        """Flag every v1 row of ``recommendation_ids`` superseded (the only update the v1 triggers allow)."""
+        ids = sorted({int(item) for item in recommendation_ids})
+        changed = 0
+        if not ids:
+            return 0
+        async with self.db_manager.transaction() as conn:
+            for table in V1_TABLES:
+                for offset in range(0, len(ids), _CHUNK):
+                    chunk = ids[offset : offset + _CHUNK]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    truth = "TRUE" if self.postgres else "1"
+                    changed += await self._execute(
+                        conn,
+                        f"UPDATE {table} SET superseded = {truth} "
+                        f"WHERE recommendation_id IN ({placeholders}) AND NOT ({self._true('superseded')})",
+                        chunk,
+                    )
+        return changed
+
+    async def unreversed_corrections(self, cluster_uid: str, recommendation_ids: Iterable[int]) -> List[LedgerEntry]:
+        """Slot restatements and reinstatements of ``recommendation_ids`` no supersession reversal cancels yet.
+
+        They have no v1 source row, so the v1 ``superseded`` flag cannot reach them.
+        """
+        ids = sorted({int(item) for item in recommendation_ids})
+        result: List[LedgerEntry] = []
+        for offset in range(0, len(ids), _CHUNK):
+            chunk = ids[offset : offset + _CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = await self._select(
+                f"SELECT {_SELECT_E} FROM savings_ledger_entries e "
+                f"WHERE e.cluster_uid = ? AND e.recommendation_id IN ({placeholders}) "
+                "AND (e.entry_key LIKE 'restatement:slot:%' OR e.reason IN ('reinstatement', 'cost_of_fix', "
+                "'released_capacity')) "
+                "AND NOT EXISTS (SELECT 1 FROM savings_ledger_entries r WHERE r.reverses_entry_id = e.entry_id "
+                f"AND r.reason = '{REASON_SUPERSESSION}') ORDER BY e.seq",
+                [cluster_uid, *chunk],
+            )
+            result.extend(self._entry(row) for row in rows)
+        return result
+
+    async def measured_quantity_ends(
+        self, cluster_uid: str, recommendation_ids: Iterable[int]
+    ) -> Dict[Tuple[int, str, str], datetime]:
+        """End of the last released-capacity or cost-of-fix entry per (recommendation, reason, quantity)."""
+        ids = sorted({int(item) for item in recommendation_ids})
+        ends: Dict[Tuple[int, str, str], datetime] = {}
+        for offset in range(0, len(ids), _CHUNK):
+            chunk = ids[offset : offset + _CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = await self._select(
+                "SELECT recommendation_id, reason, quantity, MAX(period_end) AS period_end FROM savings_ledger_entries "
+                f"WHERE cluster_uid = ? AND recommendation_id IN ({placeholders}) "
+                "AND reason IN ('cost_of_fix', 'released_capacity') AND entry_kind = 'accrual' "
+                "GROUP BY recommendation_id, reason, quantity",
+                [cluster_uid, *chunk],
+            )
+            for row in rows:
+                end = parse_time(row.get("period_end"))
+                if end is not None:
+                    ends[(int(row["recommendation_id"]), str(row["reason"]), str(row["quantity"]))] = end
+        return ends
+
+    async def change_measurement_facts(self, change_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """Latest decided measurement of each change: ``capacity``, ``counterfactual_params``, ``allocations``."""
+        ids = sorted({str(item) for item in change_ids if item})
+        facts: Dict[str, Dict[str, Any]] = {}
+        for offset in range(0, len(ids), _CHUNK):
+            chunk = ids[offset : offset + _CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = await self._select(
+                "SELECT measurement_id, change_id, capacity, counterfactual_params, allocations "
+                "FROM change_measurements "
+                f"WHERE change_id IN ({placeholders}) ORDER BY change_id, sequence",
+                chunk,
+            )
+            for row in rows:
+                fact: Dict[str, Any] = {"measurement_id": row["measurement_id"]}
+                for column in ("capacity", "counterfactual_params", "allocations"):
+                    raw = row.get(column)
+                    if isinstance(raw, (str, bytes)):
+                        try:
+                            raw = json.loads(raw)
+                        except ValueError:
+                            raw = None
+                    fact[column] = raw
+                facts[str(row["change_id"])] = fact
+        return facts
+
+    async def unreinstated_supersessions(
+        self, cluster_uid: str, recommendation_ids: Iterable[int]
+    ) -> List[LedgerEntry]:
+        """Supersession reversals of ``recommendation_ids`` that no reinstatement cancels yet (LED-08)."""
+        ids = sorted({int(item) for item in recommendation_ids})
+        result: List[LedgerEntry] = []
+        for offset in range(0, len(ids), _CHUNK):
+            chunk = ids[offset : offset + _CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = await self._select(
+                f"SELECT {_SELECT_E} FROM savings_ledger_entries e "
+                f"WHERE e.cluster_uid = ? AND e.recommendation_id IN ({placeholders}) "
+                f"AND e.reason = '{REASON_SUPERSESSION}' "
+                "AND NOT EXISTS (SELECT 1 FROM savings_ledger_entries r WHERE r.reverses_entry_id = e.entry_id "
+                "AND r.reason = 'reinstatement') ORDER BY e.seq",
+                [cluster_uid, *chunk],
+            )
+            result.extend(self._entry(row) for row in rows)
+        return result
 
     async def unrestated_projections(self, cluster_uid: str, recommendation_ids: Iterable[int]) -> List[LedgerEntry]:
         """Projected accruals of ``recommendation_ids`` that no reversal (of any reason) cancels."""
@@ -662,6 +777,138 @@ class LedgerRepository:
         )
         return [self._entry(row) for row in rows]
 
+    def _share(self, start: Optional[datetime], end: Optional[datetime]) -> Tuple[str, List[Any]]:
+        """SQL of the share of an entry's period inside ``[start, end)`` (1.0 without a full window)."""
+        if start is None or end is None:
+            return "1.0", []
+        if self.postgres:
+            share = (
+                "CASE WHEN period_start >= ? AND period_end <= ? THEN 1.0 ELSE GREATEST(0.0, "
+                "EXTRACT(EPOCH FROM (LEAST(period_end, ?) - GREATEST(period_start, ?)))) "
+                "/ NULLIF(EXTRACT(EPOCH FROM (period_end - period_start)), 0) END"
+            )
+        else:
+            share = (
+                "CASE WHEN period_start >= ? AND period_end <= ? THEN 1.0 ELSE MAX(0.0, "
+                "MIN(julianday(period_end), julianday(?)) - MAX(julianday(period_start), julianday(?))) "
+                "/ NULLIF(julianday(period_end) - julianday(period_start), 0) END"
+            )
+        return share, [self._ts(start), self._ts(end), self._ts(end), self._ts(start)]
+
+    async def accrual_breakdown(
+        self,
+        cluster_uid: str,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        *,
+        namespace: Optional[str] = None,
+        books: Optional[Sequence[str]] = None,
+        recommendation_ids: Optional[Sequence[int]] = None,
+    ) -> List[SavingsAccrualTotal]:
+        """Net amounts per namespace, recommendation type and method, in the v1 report shape (LED-04).
+
+        Both books by default: the *restated* figures (a measured period moved
+        from ``projected`` to ``measured_allocated``). ``books=("accrued",)``
+        gives the accrued book alone (what the v1 ledger says);
+        ``recommendation_ids`` restricts the totals to those recommendations. Methods use the
+        v1 names (``measured_allocated`` -> ``measured``). Over a window an
+        entry contributes the share of its period inside it, as the v1 report.
+        """
+        where, params = self._filters(cluster_uid, {"namespace": namespace}, start, end)
+        if books:
+            marks = ", ".join("?" for _ in books)
+            where += f" AND book IN ({marks})"
+            params.extend(books)
+        if recommendation_ids is not None:
+            ids = [int(item) for item in recommendation_ids]
+            if not ids:
+                return []
+            where += f" AND recommendation_id IN ({', '.join('?' for _ in ids)})"
+            params.extend(ids)
+
+        where += " AND quantity IN ('cost', 'co2e_g')"
+        share, share_params = self._share(start, end)
+        rows = await self._select(
+            "SELECT namespace, recommendation_type, method, quantity, SUM(value * share) AS value "
+            f"FROM (SELECT namespace, recommendation_type, method, quantity, value, {share} AS share "
+            f"FROM savings_ledger_entries WHERE {where}) AS windowed "
+            "GROUP BY namespace, recommendation_type, method, quantity ORDER BY namespace, recommendation_type, method",
+            [*share_params, *params],
+        )
+        totals: Dict[Tuple[str, str, str], SavingsAccrualTotal] = {}
+        for row in rows:
+            method = V1_METHOD_NAMES.get(row["method"], row["method"])
+            key = (row["namespace"] or "", row["recommendation_type"] or "unknown", method)
+            total = totals.setdefault(
+                key, SavingsAccrualTotal(namespace=key[0], recommendation_type=key[1], method=method)
+            )
+            value = float(row["value"] or 0.0)
+            if row["quantity"] == "cost":
+                total.cost_saved_dollars += value
+            else:
+                total.co2e_saved_grams += value
+        return list(totals.values())
+
+    async def lifetime_counters(self, cluster_uid: str) -> List[SavingsCounterTotal]:
+        """Monotonic counters per recommendation type and method from the entries (LED-04).
+
+        ``accrued`` sums the positive entries of both books and ``reversed``
+        the magnitude of the negative ones, so reversals and restatements are
+        visible to Prometheus; ``accrued - reversed`` is the restated total.
+        Methods use the v1 names.
+        """
+        rows = await self._select(
+            "SELECT recommendation_type, method, quantity, "
+            "SUM(CASE WHEN value > 0 THEN value ELSE 0 END) AS accrued, "
+            "SUM(CASE WHEN value < 0 THEN -value ELSE 0 END) AS reversed "
+            "FROM savings_ledger_entries WHERE cluster_uid = ? AND quantity IN ('cost', 'co2e_g') "
+            "GROUP BY recommendation_type, method, quantity",
+            [cluster_uid],
+        )
+        counters: Dict[Tuple[str, str], SavingsCounterTotal] = {}
+        for row in rows:
+            method = V1_METHOD_NAMES.get(row["method"], row["method"])
+            key = (row["recommendation_type"] or "unknown", method)
+            counter = counters.setdefault(key, SavingsCounterTotal(recommendation_type=key[0], method=method))
+            accrued, reversed_ = float(row["accrued"] or 0.0), float(row["reversed"] or 0.0)
+            if row["quantity"] == "cost":
+                counter.accrued_cost_dollars += accrued
+                counter.reversed_cost_dollars += reversed_
+            else:
+                counter.accrued_co2e_grams += accrued
+                counter.reversed_co2e_grams += reversed_
+        return sorted(counters.values(), key=lambda item: (item.recommendation_type, item.method))
+
+    async def accrued_book_totals(self, cluster_uid: str) -> Dict[Tuple[str, str], float]:
+        """Net ``accrued`` book per (v1 method, quantity): what the v1 ledger must reconcile with."""
+        rows = await self._select(
+            "SELECT method, quantity, SUM(value) AS value FROM savings_ledger_entries "
+            "WHERE cluster_uid = ? AND book = 'accrued' AND quantity IN ('cost', 'co2e_g') GROUP BY method, quantity",
+            [cluster_uid],
+        )
+        return {
+            (V1_METHOD_NAMES.get(row["method"], row["method"]), row["quantity"]): float(row["value"] or 0.0)
+            for row in rows
+        }
+
+    async def v1_totals(self, cluster_name: str) -> Dict[Tuple[str, str], float]:
+        """Net non-superseded v1 amounts per (v1 method, quantity), legacy compressed rows included."""
+        totals: Dict[Tuple[str, str], float] = {}
+        for table in V1_TABLES:
+            scope = "cluster_name = ? AND NOT (" + self._true("superseded") + ")"
+            if table == V1_HOURLY_TABLE:
+                scope += " AND " + self._true("legacy_compressed")
+            rows = await self._select(
+                "SELECT measurement_method AS method, SUM(cost_saved_dollars) AS cost, SUM(co2e_saved_grams) AS co2e "
+                f"FROM {table} WHERE {scope} GROUP BY measurement_method",
+                [cluster_name],
+            )
+            for row in rows:
+                method = V1_METHOD_NAMES.get(v2_method(row["method"]), row["method"])
+                for quantity, column in (("cost", "cost"), ("co2e_g", "co2e")):
+                    totals[(method, quantity)] = totals.get((method, quantity), 0.0) + float(row[column] or 0.0)
+        return totals
+
     async def summary(
         self,
         cluster_uid: str,
@@ -676,22 +923,7 @@ class LedgerRepository:
         ``[start, end)``, as ``GET /recommendations/savings`` does.
         """
         where, params = self._filters(cluster_uid, {"namespace": namespace}, start, end)
-        share = "1.0"
-        share_params: List[Any] = []
-        if start is not None and end is not None:
-            if self.postgres:
-                share = (
-                    "CASE WHEN period_start >= ? AND period_end <= ? THEN 1.0 ELSE GREATEST(0.0, "
-                    "EXTRACT(EPOCH FROM (LEAST(period_end, ?) - GREATEST(period_start, ?)))) "
-                    "/ NULLIF(EXTRACT(EPOCH FROM (period_end - period_start)), 0) END"
-                )
-            else:
-                share = (
-                    "CASE WHEN period_start >= ? AND period_end <= ? THEN 1.0 ELSE MAX(0.0, "
-                    "MIN(julianday(period_end), julianday(?)) - MAX(julianday(period_start), julianday(?))) "
-                    "/ NULLIF(julianday(period_end) - julianday(period_start), 0) END"
-                )
-            share_params = [self._ts(start), self._ts(end), self._ts(end), self._ts(start)]
+        share, share_params = self._share(start, end)
         rows = await self._select(
             "SELECT method, quantity, unit, book, entry_kind, basis, SUM(value * share) AS value, COUNT(*) AS entries "
             f"FROM (SELECT method, quantity, unit, book, entry_kind, {_BASIS_SQL} AS basis, value, {share} AS share "

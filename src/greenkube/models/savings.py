@@ -179,6 +179,19 @@ class SavingsBlock(BaseModel):
     recommendation_count: int = Field(0, description="Recommendations contributing to an annual rate.")
     start: Optional[datetime] = Field(None, description="Window start for accrued blocks (None means all time).")
     end: Optional[datetime] = Field(None, description="Window end for accrued blocks.")
+    source: Optional[Literal["ledger_v2", "ledger_v1"]] = Field(
+        None,
+        description=(
+            "For accrued blocks: 'ledger_v2' (restated totals of the hash-chained ledger, LED-04) or "
+            "'ledger_v1' (fallback before the ledger has a cluster identity, flagged in diagnostics)."
+        ),
+    )
+    accrued_only_co2e_grams: Optional[float] = Field(
+        None, description="Accrued book alone (without restatements), for transparency during the transition."
+    )
+    accrued_only_cost: Optional[float] = Field(
+        None, description="Accrued book alone (without restatements), for transparency during the transition."
+    )
 
 
 class RealizationSummary(BaseModel):
@@ -255,6 +268,13 @@ class SavingsReport(BaseModel):
     projected_to_date: SavingsBlock
     user_declared_annual: SavingsBlock
     user_declared_to_date: SavingsBlock
+    projected_unverified_to_date: Optional[SavingsBlock] = Field(
+        None,
+        description=(
+            "Projected accruals of changes whose measurement was inconclusive (LED-03): kept, never confirmed, "
+            "and left out of projected_to_date. Projections refuted by a not-realized verdict are reversed."
+        ),
+    )
     applied_count: int = Field(0, description="Recommendations in an applied, verifying, verified or review state.")
     verified_count: int = Field(0, description="Recommendations with a verified (measured) outcome.")
     diagnostics: List[str] = Field(default_factory=list, description="Caveats that apply to these figures.")

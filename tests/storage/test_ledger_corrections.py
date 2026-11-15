@@ -1,0 +1,139 @@
+"""Savings ledger WP-09.3: refuted projections, measured losses and state-derived supersession (LED-03, LED-08).
+
+Runs on SQLite and, with ``GREENKUBE_TEST_POSTGRES_DSN``, on PostgreSQL.
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+import pytest
+
+from greenkube.core.savings_attributor import SavingsAttributor
+from greenkube.core.savings_report import assemble_savings_report
+from greenkube.models.metrics import RecommendationStatus
+from greenkube.models.savings import SavingsLedgerRecord
+from greenkube.verify.ledger.model import (
+    METHOD_MEASURED_ALLOCATED,
+    METHOD_PROJECTED,
+    QUANTITY_COST,
+    REASON_NOT_REALIZED,
+)
+from greenkube.verify.ledger.verification import verify_chain
+from tests.storage import test_ledger_v2_contract as _contract  # pyrefly: ignore[missing-import]
+from tests.storage.test_ledger_basis import HOURS_PER_YEAR, _allocated_record  # pyrefly: ignore[missing-import]
+from tests.storage.test_ledger_v2_contract import (  # pyrefly: ignore[missing-import]
+    CLUSTER,
+    CLUSTER_UID,
+    LedgerDb,
+    _hour,
+    _projector,
+)
+
+ledger = _contract.ledger  # the SQLite and PostgreSQL fixture
+
+
+async def _net_of(db: LedgerDb, rec_id: int, method: str) -> float:
+    entries = await db.repo.list_entries(
+        CLUSTER_UID, filters={"recommendation_id": rec_id, "method": method, "quantity": QUANTITY_COST}, limit=5000
+    )
+    return sum(entry.value for entry in entries)
+
+
+def _attributor(db: LedgerDb, hours: int = 100) -> SavingsAttributor:
+    return SavingsAttributor(db.v1, CLUSTER, initial_backfill=timedelta(hours=hours), max_slots_per_run=hours + 4)
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_refuted_projections_are_reversed_and_measured_losses_booked(ledger: LedgerDb):
+    # LED-03 (SIM1): three changes accrue 72 h of projection (0.01/h allocated) before their verdict.
+    pending = [_allocated_record(rec_id, applied_hours_ago=72, realization=1.0) for rec_id in (1, 2, 3)]
+    await _attributor(ledger).accrue(pending, now=_hour(0) + timedelta(minutes=3))
+    await _projector(ledger, records=pending).sync(full=True)
+    decided = {
+        "verification_status": "failed",
+        "verification_window_end": _hour(0),
+    }
+    # 1: not realized, the change costs 0.005/h more (a measured loss).
+    loss = pending[0].model_copy(update={**decided, "measured_cost_saved": -0.005 * HOURS_PER_YEAR})
+    # 2: inconclusive, the projection stays but is unverified.
+    undecided = pending[1].model_copy(update={"verification_status": "inconclusive"})
+    # 3: not realized without a signed measured value.
+    refuted = pending[2].model_copy(update=decided)
+    records = [loss, undecided, refuted]
+    projector = _projector(ledger, records=records)
+    await projector.sync(full=True)
+
+    assert await _net_of(ledger, 1, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+    assert await _net_of(ledger, 1, METHOD_MEASURED_ALLOCATED) == pytest.approx(-0.36, rel=1e-9)
+    assert await _net_of(ledger, 2, METHOD_PROJECTED) == pytest.approx(0.72, rel=1e-9)
+    assert await _net_of(ledger, 3, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+    assert await _net_of(ledger, 3, METHOD_MEASURED_ALLOCATED) == pytest.approx(0.0, abs=1e-12)
+    reversals = await ledger.repo.list_entries(CLUSTER_UID, filters={"reason": REASON_NOT_REALIZED}, limit=5000)
+    assert {entry.recommendation_id for entry in reversals} == {3}
+
+    # The report keeps the refuted projections out and labels the inconclusive one unverified.
+    uid = CLUSTER_UID
+    report = assemble_savings_report(
+        records,
+        await ledger.repo.accrual_breakdown(uid),
+        projected_unverified=await ledger.repo.accrual_breakdown(uid, recommendation_ids=[2]),
+    )
+    assert report.projected_to_date.cost == pytest.approx(0.0, abs=1e-12)
+    assert report.projected_unverified_to_date is not None
+    assert report.projected_unverified_to_date.cost == pytest.approx(0.72, rel=1e-9)
+    assert report.realized_to_date.cost == pytest.approx(-0.36, rel=1e-9)
+
+    # State-derived and idempotent.
+    assert (await projector.sync(full=True)).written == 0
+    assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_supersession_is_derived_from_the_recommendation_state(ledger: LedgerDb):
+    # LED-08 acceptance 1 and 2: the one-shot supersede call failed, and a late accrual row lands after it.
+    pending = _allocated_record(5, applied_hours_ago=10, realization=1.0)
+    await _attributor(ledger).accrue([pending], now=_hour(0) + timedelta(minutes=3))
+    review = pending.model_copy(update={"status": RecommendationStatus.ROLLBACK_REVIEW})
+    projector = _projector(ledger, records=[review])
+    await projector.sync(full=True)
+    assert await _net_of(ledger, 5, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+
+    late = SavingsLedgerRecord(
+        recommendation_id=5,
+        cluster_name=CLUSTER,
+        namespace="prod",
+        recommendation_type="RIGHTSIZING_CPU",
+        cost_saved_dollars=0.01,
+        period_seconds=3600,
+        timestamp=_hour(1),
+        period_start=_hour(0),
+        period_end=_hour(1),
+        measurement_method="projected",
+    )
+    await ledger.v1.save_records([late])
+    await projector.sync(full=True)
+    assert await _net_of(ledger, 5, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+    assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_dismissed_rollback_review_reinstates_the_accruals_before_it(ledger: LedgerDb):
+    # LED-08 acceptance 3: rollback_review, then dismissed -> accruals before the review plus after the dismissal.
+    pending = _allocated_record(6, applied_hours_ago=10, realization=1.0)
+    attributor = _attributor(ledger, hours=20)
+    await attributor.accrue([pending], now=_hour(-5) + timedelta(minutes=3))
+    review = pending.model_copy(update={"status": RecommendationStatus.ROLLBACK_REVIEW})
+    await _projector(ledger, records=[review]).sync(full=True)
+    assert await _net_of(ledger, 6, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+
+    dismissed = pending.model_copy(update={"status": RecommendationStatus.APPLIED, "verification_status": "pending"})
+    await attributor.accrue([dismissed], now=_hour(0) + timedelta(minutes=3))
+    projector = _projector(ledger, records=[dismissed])
+    await projector.sync(full=True)
+    assert await _net_of(ledger, 6, METHOD_PROJECTED) == pytest.approx(0.10, rel=1e-9)
+    assert (await projector.sync(full=True)).written == 0
+    assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok

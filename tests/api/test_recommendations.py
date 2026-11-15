@@ -350,7 +350,9 @@ class TestRecommendationsEndpoint:
         assert data["measured_carbon_saved_co2e_grams"] == 8.0
         assert data["prorated_carbon_saved_co2e_grams"] == 42.0
         assert data["total_cost_saved"] == 0.8
-        assert data["diagnostics"] == []
+        # No ledger v2 identity in this test: the v1 fallback is flagged, never silent (LED-04).
+        assert [item.split(":")[0] for item in data["diagnostics"]] == ["ledger_v1_fallback"]
+        assert data["realized_to_date"]["source"] == "ledger_v1"
 
     def test_savings_report_flags_legacy_compressed_rows(self, client, mock_savings_repo):
         mock_savings_repo.has_legacy_compressed_rows = AsyncMock(return_value=True)

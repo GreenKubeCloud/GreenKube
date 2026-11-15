@@ -127,6 +127,7 @@ The `ledger-chain` loop also exports the integrity of the savings ledger v2 ([me
 | --- | --- |
 | `greenkube_ledger_chain_verification_failures_total{reason}` | Verifications that found a modified, missing or reordered entry (`hash_mismatch`, `broken_link`, `missing_entry`, `identity_mismatch`, `truncated`, `head_rewritten`). |
 | `greenkube_ledger_chain_ok{cluster_uid}` | 1 when the last verification of the cluster's chain passed, 0 when it failed (failures are sticky until the anchor is reset). Alerted by `GreenKubeLedgerChainVerificationFailed` (critical, `== 0`) with the controller alerts. |
+| `greenkube_ledger_reconciliation_ok{cluster_uid}` | 1 when the accrued book of the savings ledger v2 equals the non-superseded v1 accrual rows per method and quantity (relative 1e-9), checked on every `ledger-chain` tick. Alerted by `GreenKubeLedgerReconciliationFailed` (warning, `== 0` for 3 hours). |
 | `greenkube_ledger_unprojected_rows{source_table}` | v1 ledger rows with a non-zero saving that have no ledger v2 entry after the last full sweep. Alerted by `GreenKubeLedgerProjectionBacklog` (warning, `> 0` for 3 hours): the v2 totals do not reconcile with the savings report. |
 | `greenkube_ledger_late_rows_projected_total{source_table}` | v1 rows found by a full sweep below the incremental window (committed out of id order) and projected late. |
 | `greenkube_ledger_chain_verified_entries` | Entries verified by the last pass, all clusters. |

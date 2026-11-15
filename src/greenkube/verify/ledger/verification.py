@@ -228,7 +228,7 @@ async def verify_ledger(
 
 
 async def run_ledger_chain() -> None:
-    """Controller loop job: catch the v2 ledger up with the v1 ledger, then verify its chains."""
+    """Controller loop job: catch the v2 ledger up with the v1 ledger, verify its chains and reconcile (LED-04)."""
     from greenkube.storage.ledger_repository import get_ledger_repository
     from greenkube.verify.ledger.projector import build_projector
 
@@ -240,7 +240,16 @@ async def run_ledger_chain() -> None:
             result.superseded,
             result.restated,
         )
-    await verify_ledger(get_ledger_repository())
+    repo = get_ledger_repository()
+    await verify_ledger(repo)
+    if result.cluster_uid is not None and not result.skipped:
+        from greenkube.core.savings_attributor import savings_cluster_name
+        from greenkube.verify.ledger.reconciliation import reconcile
+
+        try:
+            await reconcile(repo, result.cluster_uid, savings_cluster_name())
+        except Exception as exc:
+            logger.error("Savings ledger reconciliation failed: %s", exc)
 
 
 __all__ = [
