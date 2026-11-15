@@ -68,7 +68,8 @@ logger = logging.getLogger(__name__)
 #: range.7 (COL-10): a pod's OpenCost cost is spread over the steps of a multi-step window by its running
 #: seconds in each step (OpenCost ``start``/``end``), not ``step / running time`` per row.  ``+range.6``
 #: rows of catch-up and backfill windows keep their cost: re-collect a window inside retention to apply it.
-CALCULATION_VERSION = f"{__version__}+range.7"
+#: range.8 (COST-02): container rows split the pod cost by reservation max(request, usage), not by usage.
+CALCULATION_VERSION = f"{__version__}+range.8"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.

@@ -23,6 +23,7 @@ observed cost).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -409,6 +410,43 @@ def group_rows_by_node_interval(
             continue
         groups.setdefault((row.node or "", row.timestamp), []).append(row)
     return groups
+
+
+def _reservation(requests: Sequence[Optional[float]], usages: Sequence[Optional[float]]) -> List[float]:
+    weights = []
+    for request, usage in zip(requests, usages, strict=True):
+        values = [float(value) for value in (request, usage) if value is not None and math.isfinite(float(value))]
+        weights.append(max([0.0, *values]))
+    return weights
+
+
+def container_cost_shares(
+    cpu_requests: Sequence[Optional[float]],
+    cpu_usages: Sequence[Optional[float]],
+    memory_requests: Sequence[Optional[float]],
+    memory_usages: Sequence[Optional[float]],
+) -> Tuple[List[float], List[float]]:
+    """CPU and RAM cost shares of a pod's containers by reservation (COST-02, IMP-02).
+
+    OpenCost and the Impact Model charge the reservation ``max(request,
+    usage)``, so the CPU cost of a pod row is split by each container's
+    ``max(cpu_request, cpu_usage)`` and the RAM cost by ``max(memory_request,
+    memory_usage)``, never by usage alone. Without any CPU reservation the
+    memory one is used (and the other way round); the split is equal only
+    when neither is known. Collection and ``greenkube recompute`` share this
+    rule. Each list sums to 1.
+    """
+    count = len(cpu_requests)
+    if count == 0:
+        return [], []
+    cpu = _reservation(cpu_requests, cpu_usages)
+    memory = _reservation(memory_requests, memory_usages)
+    if sum(cpu) <= 0:
+        cpu = memory if sum(memory) > 0 else [1.0] * count
+    if sum(memory) <= 0:
+        memory = cpu
+    cpu_total, memory_total = sum(cpu), sum(memory)
+    return [value / cpu_total for value in cpu], [value / memory_total for value in memory]
 
 
 def is_modeled_cost(source: Optional[str]) -> bool:
