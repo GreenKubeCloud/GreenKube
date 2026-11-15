@@ -21,7 +21,7 @@ GreenKube turns that advice into reviewed pull requests in your GitOps repositor
 
 ### Released capacity: savings for clusters that do not shrink
 
-On an on-premises cluster or a fixed node pool without an autoscaler, a smaller request does not lower the bill until nodes are removed. GreenKube says so, and reports what you do get: **released capacity**, the CPU cores and memory GiB a change frees. It is projected on every recommendation and pull request, measured from the workload specs after the rollout (verdict `released`, `partially released` or `not released`), and never converted to money or added to cost savings.
+On an on-premises cluster or a fixed node pool without an autoscaler, a smaller request does not lower the bill until nodes are removed. GreenKube says so, and reports what you do get: **released capacity**, the CPU cores and memory GiB a change frees. It is projected on each request change and in its pull request, measured from the workload specs after the rollout (verdict `released`, `partially released` or `not released`), and never converted to money or added to cost savings.
 
 ## Screenshots
 
