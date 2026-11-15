@@ -152,12 +152,50 @@ def test_a_snapshot_without_charged_quantities_uses_requests_and_says_so():
     post = _post(0.021, 0.0035, charged=False)
     result, estimates, confounders = _measure(pre, post)
     assert estimates["allocated_cost"].rate_per_hour == pytest.approx(TRUE_SAVING, rel=0.01)
-    assert result.counterfactual_params["constant_price_basis"] == "requested"
+    # Charged quantities derived as max(request, mean usage) and gib_hours (review wp07-2 S3).
+    assert result.counterfactual_params["constant_price_basis"] == "charged_derived"
     # sim_measure.py C1: usage (0.01 core) stays below the request, so the per-request price is a price.
     assert sorted((item.evidence["resource"], item.severity) for item in confounders) == [
         ("cpu", "severe"),
         ("memory", "severe"),
     ]
+
+
+def test_an_older_snapshot_cut_below_usage_books_only_the_real_saving():
+    """Review wp07-2 S3: 1.0 -> 0.5 core with 0.8 core used after, snapshot without charged quantities.
+
+    The per-request basis claimed 0.0200/h; the allocator charges 0.8 core
+    after, so the true saving is 0.2 x 0.03 + 1 GiB x 0.005 = 0.0110/h.
+    """
+    pre = _pre(charged=False)
+    legacy_card = price_card(pre, "EUR")
+    assert "cpu_charged_core_hour" not in legacy_card
+    post = [bucket.model_copy(update={"cpu_usage_cores": 0.8}) for bucket in _post(0.03, 0.005, charged_cores=0.8)]
+    result, estimates, confounders = _measure(pre, post, card=legacy_card)
+    assert estimates["allocated_cost"].rate_per_hour == pytest.approx(0.0110, rel=1e-6)
+    assert result.counterfactual_params["constant_price_basis"] == "charged_derived"
+    assert confounders == []
+
+
+def test_without_cost_components_the_observed_basis_is_a_confounder():
+    """Review wp07-2 S4: no CPU/RAM components, so a -30% price move cannot be removed: say so."""
+
+    def bare(buckets: List[HourBucket]) -> List[HourBucket]:
+        return [bucket.model_copy(update={"cost_cpu": None, "cost_ram": None}) for bucket in buckets]
+
+    pre, post = bare(_pre()), bare(_post(0.021, 0.0035))
+    change = ChangeEvent(
+        change_id="c1",
+        target=WorkloadRef(namespace="ns", kind="Deployment", name="web"),
+        rollout_started_at=MERGE,
+        rollout_completed_at=MERGE,
+        baseline_window_end=MERGE,
+    )
+    plan = RequestRightsizingStrategy().required_windows(change, MeasurementSettings())
+    confounders = ConfounderDetector().detect(change, plan, pre=pre, post=post, price_card=None)
+    assert [(item.kind, item.severity) for item in confounders] == [("constant_prices_unavailable", "moderate")]
+    # With components, no such finding.
+    assert ConfounderDetector().detect(change, plan, pre=_pre(), post=_post(0.03, 0.005), price_card=None) == []
 
 
 def test_the_frozen_price_card_values_the_saving():

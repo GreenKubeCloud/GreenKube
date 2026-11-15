@@ -194,8 +194,8 @@ class RequestRightsizingStrategy:
     quantity, ``max(request, usage)`` per sample as OpenCost charges it, times
     the baseline unit price per charged unit of the frozen snapshot
     ``price_card`` (snapshots frozen before charged quantities were measured:
-    the requested quantity and the per-request price,
-    ``constant_price_basis = requested``); the rest of the cost (GPU, storage)
+    ``max(request, mean usage)`` derived per hour,
+    ``constant_price_basis = charged_derived``); the rest of the cost (GPU, storage)
     is kept as observed. The observed delta is reported as
     ``allocated_cost_observed`` and ``price_effect = observed - constant`` is
     recorded; the ``price_card_change`` confounder reports the move. Without
@@ -624,6 +624,8 @@ def _raw_co2e_delta(pre: Sequence[HourBucket], post: Sequence[HourBucket], embod
 
 
 CONSTANT_PRICE_CHARGED = "charged"
+#: Charged quantities derived for the hours without them: ``max(core_hours, cpu_usage_cores)`` and ``gib_hours``.
+CONSTANT_PRICE_DERIVED = "charged_derived"
 CONSTANT_PRICE_REQUESTED = "requested"
 CONSTANT_PRICE_OBSERVED = "observed"
 
@@ -634,7 +636,8 @@ class ConstantPriceWindows:
 
     pre: Sequence[HourBucket]
     post: Sequence[HourBucket]
-    #: ``charged`` (max(request, usage) per sample), ``requested`` (older snapshots) or ``observed``.
+    #: ``charged`` (max(request, usage) per sample), ``charged_derived`` (older snapshots: max(request,
+    #: mean usage) per hour), ``requested`` (no usage to derive it from) or ``observed`` (no prices).
     basis: str
     prices: Dict[str, float]
     #: ``snapshot_price_card`` or ``baseline_hours`` (computed from the baseline buckets).
@@ -667,30 +670,80 @@ def _card_prices(card: Optional[Mapping[str, Any]], basis: str) -> Optional[Dict
     return prices
 
 
+def _with_derived_charge(buckets: Sequence[HourBucket]) -> tuple[List[HourBucket], bool]:
+    """``buckets`` with the charged quantities derived where missing, and whether all costed hours have them.
+
+    An hour without ``charged_core_hours`` gets ``max(core_hours, cpu_usage_cores)``
+    (the hourly mean usage: a lower bound of the per-sample maximum OpenCost
+    charges) and ``charged_gib_hours = gib_hours`` (memory usage is not in the
+    buckets). An hour without CPU usage keeps no charged quantity.
+    """
+    out: List[HourBucket] = []
+    for bucket in buckets:
+        if bucket.charged_core_hours is not None and bucket.charged_gib_hours is not None:
+            out.append(bucket)
+            continue
+        if bucket.core_hours is None or bucket.cpu_usage_cores is None or bucket.gib_hours is None:
+            out.append(bucket)
+            continue
+        out.append(
+            bucket.model_copy(
+                update={
+                    "charged_core_hours": max(bucket.core_hours, bucket.cpu_usage_cores),
+                    "charged_gib_hours": bucket.gib_hours,
+                }
+            )
+        )
+    from greenkube.verify.series import has_charged
+
+    return out, has_charged(out)
+
+
 def constant_price_windows(
     pre: Sequence[HourBucket], post: Sequence[HourBucket], card: Optional[Mapping[str, Any]]
 ) -> ConstantPriceWindows:
     """Revalue the CPU and RAM cost of every hour at the baseline unit prices.
 
     The charged basis needs the charged quantities in both windows and the
-    charged prices (from ``card``, else from ``pre``); otherwise the requested
-    basis. An hour without cost components or quantities loses its cost (it is
-    not measured, which lowers the coverage). Without any baseline price the
-    windows are returned unchanged with ``basis = observed``.
+    charged prices (from ``card``, else from ``pre``). Windows from snapshots
+    frozen before charged quantities were measured get them derived from the
+    request and the hourly CPU usage (``charged_derived``, review wp07-2: a
+    request cut below the usage otherwise books a saving the allocator never
+    gives), priced from ``card``'s charged prices, else from the derived
+    baseline hours, else at ``card``'s per-request prices. Without usage to
+    derive from, the requested basis. An hour without cost components or
+    quantities loses its cost (it is not measured, which lowers the coverage).
+    Without any baseline price the windows are returned unchanged with
+    ``basis = observed`` (the ``constant_prices_unavailable`` confounder).
     """
     from greenkube.verify.series import PRICED_RESOURCES, has_charged, unit_prices
 
-    basis = CONSTANT_PRICE_CHARGED if has_charged(pre) and has_charged(post) else CONSTANT_PRICE_REQUESTED
-    prices = _card_prices(card, basis)
+    prices: Optional[Dict[str, float]] = None
     source: Optional[str] = "snapshot_price_card"
+    if has_charged(pre) and has_charged(post):
+        basis = CONSTANT_PRICE_CHARGED
+        prices = _card_prices(card, CONSTANT_PRICE_CHARGED)
+    else:
+        derived_pre, pre_ok = _with_derived_charge(pre)
+        derived_post, post_ok = _with_derived_charge(post)
+        if pre_ok and post_ok:
+            basis = CONSTANT_PRICE_DERIVED
+            pre, post = derived_pre, derived_post
+            prices = _card_prices(card, CONSTANT_PRICE_CHARGED)
+        else:
+            basis = CONSTANT_PRICE_REQUESTED
+            prices = _card_prices(card, CONSTANT_PRICE_REQUESTED)
     if prices is None:
-        computed = unit_prices(pre, charged=basis == CONSTANT_PRICE_CHARGED)
+        computed = unit_prices(pre, charged=basis != CONSTANT_PRICE_REQUESTED)
         if all(value is not None for value in computed.values()):
             prices = {key: float(value) for key, value in computed.items() if value is not None}
             source = "baseline_hours"
+    if prices is None and basis == CONSTANT_PRICE_DERIVED:
+        prices = _card_prices(card, CONSTANT_PRICE_REQUESTED)
+        source = "snapshot_price_card_requested"
     if prices is None:
         return ConstantPriceWindows(pre=pre, post=post, basis=CONSTANT_PRICE_OBSERVED, prices={}, source=None)
-    quantity_index = 1 if basis == CONSTANT_PRICE_CHARGED else 2
+    quantity_index = 2 if basis == CONSTANT_PRICE_REQUESTED else 1
 
     def revalue(buckets: Sequence[HourBucket]) -> List[HourBucket]:
         out: List[HourBucket] = []

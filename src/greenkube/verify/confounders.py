@@ -246,12 +246,15 @@ class ConfounderDetector:
         post: Sequence[HourBucket] = (),
         load: Optional[ResolvedLoad] = None,
         pool: Optional[PoolContext] = None,
+        price_card: Optional[Mapping[str, Any]] = None,
     ) -> List[Confounder]:
+        """Every confounder of ``change``; ``price_card`` is the frozen baseline snapshot's price card."""
         findings: List[Confounder] = []
         findings.extend(self._other_changes(change, plan, other_changes))
         findings.extend(self._spec_changes(change, plan, observations))
         findings.extend(self._replica_shift(pre, post, load))
         findings.extend(self._price_change(pre, post))
+        findings.extend(self._constant_prices(pre, post, price_card))
         findings.extend(self._intensity_shift(pre, post))
         findings.extend(self._instance_types(pre, post))
         if pool is not None:
@@ -440,6 +443,33 @@ class ConfounderDetector:
             if finding is not None:
                 findings.append(finding)
         return findings
+
+    @staticmethod
+    def _constant_prices(
+        pre: Sequence[HourBucket], post: Sequence[HourBucket], price_card: Optional[Mapping[str, Any]]
+    ) -> List[Confounder]:
+        """``constant_prices_unavailable`` (moderate) when the cost cannot be revalued at baseline prices.
+
+        Without CPU/RAM cost components and without a priced card the strategy
+        measures the observed cost (``constant_price_basis = observed``), so a
+        price move between the windows is booked as saving and no
+        ``price_card_change`` can see it (review wp07-2, MEA-02).
+        """
+        from greenkube.verify.strategy import CONSTANT_PRICE_OBSERVED, constant_price_windows
+
+        if not quantity_series(pre, "allocated_cost") or not quantity_series(post, "allocated_cost"):
+            return []
+        if constant_price_windows(pre, post, price_card).basis != CONSTANT_PRICE_OBSERVED:
+            return []
+        return [
+            Confounder(
+                kind="constant_prices_unavailable",
+                severity="moderate",
+                detail="no CPU/RAM cost components or baseline unit prices: the cost saving is measured at "
+                "observed prices, so a price move between the windows cannot be told apart from the change",
+                evidence={"constant_price_basis": CONSTANT_PRICE_OBSERVED},
+            )
+        ]
 
     @staticmethod
     def _intensity_shift(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:

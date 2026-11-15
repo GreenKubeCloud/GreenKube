@@ -1106,6 +1106,7 @@ class ChangeMeasurementService:
             post=post_buckets,
             load=load,
             pool=pool,
+            price_card=snapshot.price_card,
         )
         in_effect = [member for member in members if _value(member.status) in _IN_EFFECT]
         # Measured rows are allocated (projected != allocated != realized): compare with the allocated projection.
