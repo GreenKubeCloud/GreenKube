@@ -130,7 +130,7 @@ The fitted elasticities and the number of matched hours of the week are stored i
 
 ## 5. Quantities
 
-The `request_rightsizing` strategy (version 2.2) measures, per hour:
+The `request_rightsizing` strategy (version 2.3) measures, per hour:
 
 **Per replica.** A request change moves what each replica is charged, not how many replicas run. Every quantity below is fitted *per replica* (each hour's value over its replica count) and the per-replica saving is multiplied by the mean replica count of the aligned post-window hours: `saving = Δ(per-replica rate) × post replica-hours`, which is `Σ Δrequest × replica-hours` for requested capacity. A replica count that drops for another reason (an HPA scaling 4 → 2 during the post-window) is therefore never credited to the change: it saves nothing per replica. It is reported by the `replica_shift` confounder (moderate). Hours without a replica count are left out. The interval and counterfactual are scaled by the same replica count, so the outcome rule decides exactly as it would per replica. Measurements decided by version 2.0 compared workload totals (stated by `strategy_version`).
 
@@ -152,11 +152,26 @@ Deleting an orphaned LoadBalancer Service or PersistentVolume releases the asset
 
 ## 6. Uncertainty and outcome (C4)
 
-### Interval
+### Interval (version 2.3, MEA-01)
 
-The hourly savings of the aligned post-window hours, in time order, are resampled with a **moving-block bootstrap**: blocks of 24 consecutive hours (one day, starting at any hour) are drawn with replacement until the series length is reached, and the mean is taken. `CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES` resamples (1000 by default) give the distribution of the mean; its 5th and 95th percentiles are the **90% confidence interval**. Day blocks keep the within-day correlation of the savings, which resampling single hours would ignore.
+The interval of the mean hourly saving has two variance terms.
 
-With the load regression, the interval also carries the uncertainty of the fit: each resample adds a **residual bootstrap** of the baseline. The baseline residuals, inflated by `√(n / dof)`, are resampled in the same one-day blocks; refitting on the fitted values plus those residuals moves the counterfactual of every aligned post-window hour, and the mean saving with it. The move is linear in the residuals (slot means move by their slot's mean residual, `β` by `Σ dx·e / Sxx`), so it is computed with one weight per baseline hour instead of a refit.
+**Within the windows.** The hourly savings of the aligned post-window hours, in time order, are resampled with a **circular block bootstrap**: blocks of 24 consecutive hours (one day) start at any hour and wrap around the end of the series, so every hour is drawn equally often, and are concatenated to the series length. `CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES` resamples (1000 by default) give the distribution of the mean. Its standard deviation is the within-window standard error, multiplied by `√(b / (b − 1))` for the `b` day blocks of the series (the bootstrap divides by `b`, which understates the variance with 7 blocks); it carries `b − 1` degrees of freedom. Day blocks keep the within-day correlation of the savings, which resampling single hours would ignore.
+
+With the load regression, each resample also adds a **residual bootstrap** of the baseline. The baseline residuals, inflated by `√(n / dof)`, are resampled in the same circular one-day blocks; refitting on the fitted values plus those residuals moves the counterfactual of every aligned post-window hour, and the mean saving with it. The move is linear in the residuals (slot means move by their slot's mean residual, `β` by `Σ dx·e / Sxx`), so it is computed with one weight per baseline hour instead of a refit.
+
+**Between weeks.** Anything that moves the level of a whole week (traffic, a replica level, a spot or reserved price, grid intensity, a holiday) is a constant offset in every hourly saving of that week, which no resampling inside the windows can see. Before 2.3 such a shift was read as a certain effect: with a true saving of zero, a 5% week-to-week level variation produced `realized` in half of the simulated changes. Its variance is `σ_w² × (1/K + 1/P)`, for `K` complete baseline weeks (at least 84 of their 168 hours, counted back from the baseline end) and `P = max(1, aligned post hours / 168)` post weeks:
+
+- with **`K ≥ 2`** (`CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` ≥ 14), `σ_w` is the sample standard deviation of the weekly mean residuals of the baseline (each hour minus its fitted counterfactual), with `K − 1` degrees of freedom. Those weekly means already carry the within-week noise the bootstrap measures, so only the excess of the between-week variance over the within-window variance is added (a method-of-moments split; the noise is not counted twice);
+- with **`K < 2`** (the default 7-day baseline), the weekly level cannot be estimated, and `σ_w = CHANGE_MEASUREMENT_PRIOR_WEEK_CV × |mean counterfactual|` (5% by default), taken as known (infinite degrees of freedom). Exception: a **deterministic** baseline (every hourly value equal within 10⁻⁶ relative, e.g. fixed requests on fixed-price nodes) gets no between-week term: its level is set by configuration, whose changes the price and pool confounders report.
+
+The interval is `mean ± t(0.95, ν) × √(se_within² + se_between²)`, with `ν` from the Welch-Satterthwaite formula. A deterministic series (constant before, constant lower after) keeps a zero-width interval.
+
+**Assumptions.** Week-level shifts are independent between weeks and of the change (no trend); hourly savings are stationary within the windows, with correlations shorter than a day; with one baseline week, the prior is an upper bound of the true week-to-week variation of the quantity (5% is the order observed for HPA-scaled cost and is lower than typical weekly grid-intensity moves, so CO₂e verdicts with a 7-day baseline are optimistic). A longer baseline replaces the prior by an estimate; the default stays 7 days until hourly rollup rows (older than the raw retention) give exact hour buckets.
+
+**Validated rates.** `tests/verify/test_verdict_validity.py` runs the real fit on seeded synthetic series (400 trials, true saving 0, 7-day post window). Observed false-`realized` rates with the noise floor: independent hourly noise 0% (7-day baseline) and 0% (28-day), AR(1) φ = 0.9 0% and 1.0%, a 5% week-level shift 2.5% and 3.0%. Without the noise floor (the interval alone, nominal one-sided rate 5%): 3.7% for the week-level shift with the prior, and 1.3% / 2.8% / 5.0% for independent, AR(1) and week-level noise with a 28-day baseline. A true 30% saving with a 5% week-level shift is `realized` in 100% (7-day) and 98.8% (28-day) of trials; a 10% saving in about 28% (the price of the between-week term with one baseline week).
+
+Measurements decided by version 2.2 or earlier used a percentile moving-block bootstrap without the between-week term and the old outcome rule; they are kept unchanged with their `strategy_version`. Their `realized` verdicts on a non-deterministic baseline can be re-measured.
 
 The generator is seeded from the change, the measurement sequence and the quantity, so the same evidence always produces the same interval.
 
@@ -168,9 +183,14 @@ The rule is applied once, at the end of the post-window (plus one hour of grace 
 |---|---|
 | A severe confounder was found | `contaminated` |
 | Coverage below `CHANGE_MEASUREMENT_MIN_COVERAGE` (0.8), or no trusted cost in a window | `inconclusive` |
-| CI lower bound > 0 | `realized` |
-| CI upper bound ≤ ε, with ε = `CHANGE_MEASUREMENT_EPSILON_RATIO` × mean counterfactual (2%) | `not_realized` |
-| Otherwise | `inconclusive` |
+| Fewer than 5 complete days (120) of aligned post-window hours | `inconclusive` |
+| CI lower bound > ε, with ε = `CHANGE_MEASUREMENT_EPSILON_RATIO` × mean counterfactual (2%) | `realized` |
+| CI upper bound ≤ ε | `not_realized` |
+| Otherwise (the interval straddles ε) | `inconclusive` |
+
+The noise floor applies to both verdicts (MEA-09): before version 2.3 `realized` needed only a lower bound above zero, so a deterministic 0.3% drift (a price refresh, a rounding) was a verified saving. A saving whose interval is above zero but not above ε is reported with a "negligible saving" note in its reason. The change verdict is taken on `allocated_cost` alone; a component (`cost_cpu`, `cost_ram`) or CO₂e claim needs its own interval to be `realized` **and** the change to be realized, so the extra quantities never add a chance of a false claim.
+
+`counterfactual_params` records `interval_method` (`circular_block_bootstrap_t_with_between_week`), `prior_week_cv`, and per quantity `baseline_weeks`, `between_week_cv` (σ_w over the counterfactual) and `between_week_basis` (`estimated`, `prior` or `deterministic_baseline`).
 
 Values are **signed and never floored**: a cost increase is reported as a negative saving with its interval.
 
@@ -346,6 +366,6 @@ A failure is sticky. `ledger_chain_status` keeps the last head that passed (`ver
 - **Deletion and supersession.** A deletion ends the measured accrual at the first absent observation, up to one monitor interval (1 hour) after the actual deletion; the accruals of that hour are kept. A change superseded by a newer recorded change is closed, but its recommendations keep accruing their measured step next to the new change's until a newer change ends or the workload is deleted or drifts; the earlier step is then ended too, even when only the newer step was lost (conservative).
 - **A superseded change under a newer change that is not realized.** While the newest change on the workload is not realized (`not_realized`, `inconclusive`, closed), a superseded change is watched for deletion and for a pod-template drift away from the newest change, not for a usage drift (its own usage-drift assessment would misfire against the newer template); a slow erosion of its saving is then only seen once a newer change is measured. A newer change that partly undoes the superseded one (a CPU cut followed by a reliability increase) and is not realized does not end the superseded change's accrual either, and its cost step is not booked: the books can then overstate the workload's saving by that increase until the newer change is measured as `realized` or `regressed`.
 - **Accelerated demo windows.** `CHANGE_MEASUREMENT_ACCELERATED` (quickstart only) accepts a baseline of 1 hour or more. Such a baseline holds no other hour of the week than its own, so the post-window rarely matches it and the outcome is usually `inconclusive`. It shows the pipeline end to end (`/changes`, `/ledger`), not a saving.
-- **One baseline week.** With the default windows each hour of the week has a single baseline value; the load regression then uses weekday/weekend hours of the day instead. The interval reflects the noise, but an unusual baseline week (a holiday, an incident) biases the counterfactual. Use a longer `CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` (14 days enables hour-of-week slots) for such workloads.
+- **One baseline week.** With the default windows each hour of the week has a single baseline value; the load regression then uses weekday/weekend hours of the day instead. The interval adds the assumed week-to-week variation `CHANGE_MEASUREMENT_PRIOR_WEEK_CV` (5%) instead of measuring it, so a quantity that varies more between weeks (CO₂e in a wind-heavy zone) is decided with an optimistic interval, and an unusual baseline week (a holiday, an incident) biases the counterfactual. No control group is subtracted yet (a level shift common to the cluster is not cancelled, only covered by the interval). Use a longer `CHANGE_MEASUREMENT_PRE_WINDOW_DAYS` (14 days enables hour-of-week slots) for such workloads.
 - **Load-driver heuristics.** The ingress-nginx and Envoy drivers assume a Service named after the workload, and the Envoy driver assumes Contour's cluster naming. Set `greenkube.io/load-metric` when that does not hold.
 - **Spec observations depend on the lifecycle interval.** A spec change reverted between two detection passes is not seen.

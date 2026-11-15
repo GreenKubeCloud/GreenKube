@@ -37,13 +37,22 @@ from greenkube.verify.model import (
 )
 from greenkube.verify.regression import METHOD_OLS, OlsCounterfactual, residual_bootstrap
 from greenkube.verify.series import co2e_series, has_embodied, quantity_series, window_hours
-from greenkube.verify.statistics import moving_block_bootstrap, outcome_rule, seed_for
+from greenkube.verify.statistics import (
+    INTERVAL_METHOD,
+    between_week_term,
+    circular_block_bootstrap,
+    outcome_rule,
+    seed_for,
+    with_between_week,
+)
 
 HOURS_PER_YEAR = 365.25 * 24
 #: The hour-of-week MVP counterfactual (C3), the fallback of the regression.
 MVP_METHOD = "hour_of_week_mean"
 #: Projection key of the CO2e of every component, embodied included (component matching).
 CO2E_WITH_EMBODIED = "co2e_g_with_embodied"
+#: Fewest complete days of aligned post-change hours a decided verdict needs (MEA-01).
+MIN_POST_DAYS = 5
 
 
 @dataclass(frozen=True)
@@ -56,6 +65,8 @@ class MeasurementSettings:
     min_coverage: float = 0.8
     bootstrap_samples: int = 1000
     epsilon_ratio: float = 0.02
+    #: Week-to-week coefficient of variation assumed with fewer than two baseline weeks (MEA-01).
+    prior_week_cv: float = 0.05
 
     @classmethod
     def from_config(cls, config: Any) -> "MeasurementSettings":
@@ -66,6 +77,7 @@ class MeasurementSettings:
             min_coverage=float(getattr(config, "CHANGE_MEASUREMENT_MIN_COVERAGE", 0.8)),
             bootstrap_samples=int(getattr(config, "CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES", 1000)),
             epsilon_ratio=float(getattr(config, "CHANGE_MEASUREMENT_EPSILON_RATIO", 0.02)),
+            prior_week_cv=float(getattr(config, "CHANGE_MEASUREMENT_PRIOR_WEEK_CV", 0.05)),
         )
 
 
@@ -153,10 +165,17 @@ class RequestRightsizingStrategy:
     (``counterfactual_params.replica_basis``). It stays ``realized`` only
     when both bases are realized; otherwise it is ``inconclusive``. Neither a
     replica drop nor a replica rise is credited to the change.
+
+    **Valid verdicts (2.3, MEA-01/MEA-09).** The interval adds a between-week
+    term to the circular block bootstrap (:mod:`greenkube.verify.statistics`),
+    ``realized`` needs its lower bound above the noise floor, and a decided
+    verdict needs at least ``MIN_POST_DAYS`` days of aligned post-change hours.
+    Measurements decided before 2.3 used a percentile moving-block bootstrap
+    without the between-week term and ``realized`` above zero.
     """
 
     key = "request_rightsizing"
-    version = "2.2"
+    version = "2.3"
     primary = "allocated_cost"
 
     QUANTITIES = (
@@ -201,6 +220,7 @@ class RequestRightsizingStrategy:
         matched: Dict[str, int] = {}
         diagnostics: Dict[str, Any] = {}
         bases: Dict[str, str] = {}
+        intervals: Dict[str, Dict[str, Any]] = {}
         embodied = has_embodied(pre) and has_embodied(post)
         for spec in self.QUANTITIES:
             fitted = self._estimate_quantity(
@@ -213,9 +233,12 @@ class RequestRightsizingStrategy:
                 settings,
                 seed_parts,
                 embodied=embodied,
+                baseline_end=ensure_utc(plan.pre.end),
             )
             estimates.append(fitted.estimate)
             bases[spec.quantity] = fitted.basis
+            if fitted.interval_params:
+                intervals[spec.quantity] = fitted.interval_params
             if fitted.mvp is not None:
                 elasticities[spec.quantity] = round(fitted.mvp.elasticity, 6)
                 matched[spec.quantity] = len(fitted.mvp.means)
@@ -234,6 +257,11 @@ class RequestRightsizingStrategy:
             "block_hours": 24,
             "bootstrap_samples": settings.bootstrap_samples,
             "epsilon_ratio": settings.epsilon_ratio,
+            "interval_method": INTERVAL_METHOD,
+            "prior_week_cv": settings.prior_week_cv,
+            "baseline_weeks": {key: value["baseline_weeks"] for key, value in intervals.items()},
+            "between_week_cv": {key: value["between_week_cv"] for key, value in intervals.items()},
+            "between_week_basis": {key: value["between_week_basis"] for key, value in intervals.items()},
         }
 
         primary = next(item for item in estimates if item.quantity == self.primary)
@@ -265,6 +293,7 @@ class RequestRightsizingStrategy:
         seed_parts: Sequence[object],
         *,
         embodied: bool = False,
+        baseline_end: Optional[datetime] = None,
     ) -> "_Fitted":
         components: List[str] = []
         projected = projections.get(spec.quantity)
@@ -295,6 +324,7 @@ class RequestRightsizingStrategy:
             projected=projected,
             settings=settings,
             seed_parts=seed_parts,
+            baseline_end=baseline_end,
         )
         per_replica = fit(
             _per_replica(pre_values, quantity_series(pre, "replicas")),
@@ -322,8 +352,13 @@ class RequestRightsizingStrategy:
         projected: Optional[float],
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
+        baseline_end: Optional[datetime] = None,
     ) -> "_Fitted":
-        """Fit one basis: per-replica values scaled by ``post_replicas``, or workload totals (``None``)."""
+        """Fit one basis: per-replica values scaled by ``post_replicas``, or workload totals (``None``).
+
+        ``baseline_end`` (default: one hour after the last baseline hour) anchors
+        the baseline weeks of the between-week term.
+        """
         if not pre_values or not post_values:
             missing = "baseline" if not pre_values else "post-change"
             return _Fitted(
@@ -345,8 +380,10 @@ class RequestRightsizingStrategy:
             else:
                 diagnostics["fallback"] = MVP_METHOD
         seed = seed_for(*seed_parts, spec.quantity)
+        residuals: Dict[datetime, float] = {}
         if ols is not None and load is not None:
             method = METHOD_OLS
+            residuals = {hour: residual for hour, _, _, residual in ols.baseline}
             aligned = ols.align(post_values, load.post)
             interval = residual_bootstrap(
                 [item.saving for item in aligned],
@@ -360,10 +397,14 @@ class RequestRightsizingStrategy:
         else:
             method = MVP_METHOD
             aligned = align(mvp, post_values, load.post if load is not None else None)
-            interval = moving_block_bootstrap(
+            interval = circular_block_bootstrap(
                 [item.saving for item in aligned], seed=seed, samples=settings.bootstrap_samples
             )
             elasticity = mvp.elasticity
+            for hour, value in pre_values.items():
+                fitted_value = mvp.predict(hour, load.pre.get(hour) if load is not None else None)
+                if fitted_value is not None:
+                    residuals[hour] = value - fitted_value
         coverage = len(aligned) / expected_hours
         if not aligned:
             return _Fitted(
@@ -377,6 +418,17 @@ class RequestRightsizingStrategy:
                 mvp,
                 diagnostics,
             )
+        # Week-level shifts are constant offsets of every hourly saving: add their variance (MEA-01).
+        term = between_week_term(
+            residuals,
+            list(pre_values.values()),
+            baseline_end if baseline_end is not None else max(pre_values) + timedelta(hours=1),
+            counterfactual=math.fsum(item.counterfactual for item in aligned) / len(aligned),
+            post_hours=len(aligned),
+            prior_cv=settings.prior_week_cv,
+        )
+        interval = with_between_week(interval, term)
+        interval_params = {"interval_method": INTERVAL_METHOD, **term.as_params()}
         # Per-replica rates times the replicas that ran: the saving of the post-window's replica-hours.
         replicas = (
             math.fsum(post_replicas[item.hour] for item in aligned) / len(aligned) if post_replicas is not None else 1.0
@@ -388,6 +440,12 @@ class RequestRightsizingStrategy:
         if coverage < settings.min_coverage:
             outcome = ChangeOutcome.INCONCLUSIVE
             reason = f"aligned coverage {coverage:.0%} of the post-window is below {settings.min_coverage:.0%}"
+        elif len(aligned) < MIN_POST_DAYS * 24:
+            outcome = ChangeOutcome.INCONCLUSIVE
+            reason = (
+                f"{len(aligned)} aligned post-change hours of {spec.description}: a verdict needs at least "
+                f"{MIN_POST_DAYS} complete days"
+            )
         else:
             outcome = outcome_rule(interval.low, interval.high, epsilon)
             reason = _reason(spec, outcome, interval.low, interval.high, epsilon)
@@ -413,6 +471,7 @@ class RequestRightsizingStrategy:
             ),
             mvp,
             diagnostics,
+            interval_params=interval_params,
         )
 
 
@@ -435,6 +494,8 @@ class _Fitted:
     mvp: Optional[HourOfWeekCounterfactual] = None
     diagnostics: Optional[Dict[str, Any]] = None
     basis: str = BASIS_PER_REPLICA
+    #: Interval method, baseline weeks and between-week variation (``counterfactual_params``).
+    interval_params: Optional[Dict[str, Any]] = None
 
 
 def _conservative(per_replica: _Fitted, totals: _Fitted) -> _Fitted:
@@ -474,10 +535,13 @@ def _reason(
         return f"{spec.description}: too few aligned hours for an interval"
     interval = f"90% CI [{low:+.6g}, {high:+.6g}] per hour"
     if outcome is ChangeOutcome.REALIZED:
-        return f"{spec.description} saving realized: {interval} is above zero"
+        return f"{spec.description} saving realized: {interval} is above the noise floor {epsilon:.6g}"
+    floor = f"the noise floor {epsilon:.6g}"
+    if 0 < low <= epsilon:
+        floor += " (a negligible saving: above zero but not above the floor)"
     if outcome is ChangeOutcome.NOT_REALIZED:
-        return f"{spec.description} saving not realized: {interval} is at most the noise floor {epsilon:.6g}"
-    return f"{spec.description} saving inconclusive: {interval} straddles the noise floor {epsilon:.6g}"
+        return f"{spec.description} saving not realized: {interval} is at most {floor}"
+    return f"{spec.description} saving inconclusive: {interval} straddles {floor}"
 
 
 #: Strategies by the ``action_kind`` of the change (H0 registry keys).

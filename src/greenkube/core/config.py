@@ -513,9 +513,10 @@ class Config(BaseSettings):
     CHANGE_MEASUREMENT_WARMUP_HOURS: float = Field(1.0, ge=0)
     # Minimum share of post-window hours matched with a baseline hour of the week.
     CHANGE_MEASUREMENT_MIN_COVERAGE: float = Field(0.8, gt=0, le=1)
-    # Moving-block bootstrap resamples for the 90% confidence interval.
+    # Circular block bootstrap resamples for the within-window part of the 90% confidence interval.
     CHANGE_MEASUREMENT_BOOTSTRAP_SAMPLES: int = Field(1000, ge=100, le=100000)
-    # Noise floor: not realized when the CI upper bound is at most this share of the counterfactual.
+    # Noise floor: realized only when the CI lower bound is above this share of the counterfactual,
+    # not realized when the CI upper bound is at most this share.
     CHANGE_MEASUREMENT_EPSILON_RATIO: float = Field(0.02, ge=0, le=1)
     # Drift monitor (C8): a realized change regresses when at least this share of its per-replica
     # saving is lost on each of CHANGE_DRIFT_SUSTAINED_DAYS consecutive days.
@@ -524,6 +525,9 @@ class Config(BaseSettings):
     # Demo and quickstart only: lifts the 7-day minimum of the baseline window down to 1 hour so a
     # change is decided minutes after it lands. Off in every production default.
     CHANGE_MEASUREMENT_ACCELERATED: bool = False
+    # Week-to-week coefficient of variation of a measured quantity assumed when the baseline holds
+    # fewer than two complete weeks (MEA-01); with two or more it is estimated from the baseline.
+    CHANGE_MEASUREMENT_PRIOR_WEEK_CV: float = Field(0.05, ge=0, le=1)
     # --- Savings ledger v2 (roadmap C6) ---
     # How often the controller catches the hash-chained ledger up and verifies its chain (s, m or h).
     LEDGER_CHAIN_VERIFY_INTERVAL: str = "1h"

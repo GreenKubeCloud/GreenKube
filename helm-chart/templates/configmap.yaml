@@ -254,6 +254,7 @@ data:
   CHANGE_DRIFT_THRESHOLD: {{ if hasKey . "driftThreshold" }}{{ .driftThreshold | quote }}{{ else }}"0.5"{{ end }}
   CHANGE_DRIFT_SUSTAINED_DAYS: {{ if hasKey . "driftSustainedDays" }}{{ .driftSustainedDays | int | quote }}{{ else }}"3"{{ end }}
   CHANGE_MEASUREMENT_ACCELERATED: {{ ternary "true" "false" (eq .accelerated true) | quote }}
+  CHANGE_MEASUREMENT_PRIOR_WEEK_CV: {{ if hasKey . "priorWeekCv" }}{{ .priorWeekCv | quote }}{{ else }}"0.05"{{ end }}
   {{- end }}
   {{- end }}
 

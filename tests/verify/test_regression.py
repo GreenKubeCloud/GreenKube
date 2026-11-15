@@ -61,10 +61,11 @@ def _scenario(
     post_scale: float = 1.1,
     ar: float = 0.0,
     pre_days: float = 7.0,
+    prior_week_cv: float = 0.05,
 ):
     """Per-pod hourly cost = 0.02 + slope x load + AR(1) noise, minus ``effect`` per pod after the change."""
     rng = random.Random(seed)
-    settings = MeasurementSettings(bootstrap_samples=400, pre_window_days=pre_days)
+    settings = MeasurementSettings(bootstrap_samples=400, pre_window_days=pre_days, prior_week_cv=prior_week_cv)
     change = change_event(COMPLETED)
     plan = STRATEGY.required_windows(change, settings)
     pre_load = _load_series(plan.pre, rng)
@@ -101,7 +102,9 @@ def _scenario(
 
 
 def test_load_regression_recovers_a_known_saving_within_its_interval():
-    result, estimates = _scenario(effect=0.004, seed=3)
+    # The synthetic weeks share one level: no prior week-to-week variation (MEA-01) is assumed,
+    # so the interval is the regression's own.
+    result, estimates = _scenario(effect=0.004, seed=3, prior_week_cv=0.0)
     cost = estimates["allocated_cost"]
     assert cost.method == METHOD_OLS
     assert result.counterfactual_params["model"] == METHOD_OLS
