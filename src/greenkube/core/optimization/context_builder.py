@@ -193,8 +193,7 @@ class ContextBuilder:
             snapshot.reliability_signal_status = {name: SIGNAL_FAILED for name in SIGNAL_NAMES}
             return None
 
-    @staticmethod
-    async def _filter_live_targets(snapshot, end: datetime, signals):
+    async def _filter_live_targets(self, snapshot, end: datetime, signals):
         """Leaves targets that no longer run out of the analyzers (REC-05, see ``liveness``)."""
         from greenkube.core.optimization.liveness import (
             filter_live_targets,
@@ -203,10 +202,14 @@ class ContextBuilder:
         )
 
         live = getattr(signals, "live_containers", None)
-        scaled_to_zero = (
-            await read_scaled_to_zero() if needs_controller_check(snapshot, end=end, live_containers=live) else set()
+        hours = float(getattr(self.config, "RECOMMENDATION_TARGET_MAX_STALENESS_HOURS", 2.0) or 2.0)
+        staleness = timedelta(hours=hours)
+        scaled_to_zero: Optional[set] = set()
+        if needs_controller_check(snapshot, end=end, live_containers=live, max_staleness=staleness):
+            scaled_to_zero = await read_scaled_to_zero()
+        return filter_live_targets(
+            snapshot, end=end, live_containers=live, scaled_to_zero=scaled_to_zero, max_staleness=staleness
         )
-        return filter_live_targets(snapshot, end=end, live_containers=live, scaled_to_zero=scaled_to_zero)
 
     async def _build_from_rows(
         self,

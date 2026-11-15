@@ -395,6 +395,9 @@ class Config(BaseSettings):
     # Minutes after a container (re)start excluded from usage percentiles:
     # startup work (WAL replay, JIT, caches) is not steady-state demand.
     RIGHTSIZING_WARMUP_MINUTES: int = Field(10, ge=0, le=1440)
+    # Hours after its last sample a target without a running pod is left out of
+    # rightsizing (REC-05): deleted, renamed or scaled-to-zero workloads.
+    RECOMMENDATION_TARGET_MAX_STALENESS_HOURS: float = Field(2.0, gt=0)
     # Observed coverage (days) required before a request decrease is recommended.
     RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: float = 7.0
     # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.

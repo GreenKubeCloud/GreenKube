@@ -320,6 +320,7 @@
             "lookbackDays": {"type": "integer", "minimum": 1},
             "maxMetricRows": {"type": "integer", "minimum": 1},
             "limitsPolicy": {"type": "string", "enum": ["keep", "remove_cpu", "memory_equals_request"]},
+            "targetMaxStalenessHours": {"type": "number", "exclusiveMinimum": 0},
             "rankingProfile": {"type": "string", "enum": ["balanced", "carbon_first", "cost_first", "quick_wins", "low_risk"]},
             "minSamples": {"type": "integer", "minimum": 1},
             "scanInterval": {"type": "string", "pattern": "^[0-9]+(s|m|h)$"},

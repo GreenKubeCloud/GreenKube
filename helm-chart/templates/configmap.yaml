@@ -201,6 +201,7 @@ data:
   RIGHTSIZING_MAX_INCREASE_FACTOR: {{ .rightsizingMaxIncreaseFactor | default 2.0 | quote }}
   RIGHTSIZING_WARMUP_MINUTES: {{ if kindIs "invalid" .rightsizingWarmupMinutes }}"10"{{ else }}{{ .rightsizingWarmupMinutes | int | quote }}{{ end }}
   RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: {{ .minDecreaseCoverageDays | default 7 | quote }}
+  RECOMMENDATION_TARGET_MAX_STALENESS_HOURS: {{ .targetMaxStalenessHours | default 2 | quote }}
   RECOMMENDATION_LIMITS_POLICY: {{ .limitsPolicy | default "keep" | quote }}
   ZOMBIE_COST_THRESHOLD: {{ .zombieCostThreshold | quote }}
   ZOMBIE_ENERGY_THRESHOLD: {{ .zombieEnergyThreshold | quote }}

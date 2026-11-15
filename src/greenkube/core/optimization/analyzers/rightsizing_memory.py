@@ -48,6 +48,32 @@ _SIGNAL_LABELS = {"oom_kills": "OOM kills", "restarts": "restarts", "throttling"
 OOM_KILLS_BEFORE_CHANGE = "oom_kills_before_change"
 
 
+def liveness_diagnostics(gone: int, not_running: int) -> List[Dict[str, Any]]:
+    """Source-run diagnostics of the targets left out because they no longer run (REC-05)."""
+    notes: List[Dict[str, Any]] = []
+    if not_running:
+        notes.append(
+            {
+                "level": "info",
+                "code": "target_not_running",
+                "message": f"{not_running} target(s) not running (scaled to zero, or their pods could not be "
+                "listed): no new rightsizing advice, their recommendations are kept.",
+                "count": not_running,
+            }
+        )
+    if gone:
+        notes.append(
+            {
+                "level": "info",
+                "code": "target_gone",
+                "message": f"{gone} target(s) no longer exist in the cluster (or are Jobs): their recommendations "
+                "are retired (target_gone).",
+                "count": gone,
+            }
+        )
+    return notes
+
+
 def stale_oom_diagnostics(skipped: List[Skip]) -> List[Dict[str, Any]]:
     """Source-run diagnostic of the containers whose OOM kills predate their current limit (REC-02)."""
     stale = [skip for skip in skipped if skip[3] == OOM_KILLS_BEFORE_CHANGE]
@@ -202,12 +228,15 @@ class MemoryRightsizingAnalyzer(Analyzer):
         self.skipped: List[Skip] = []
         self._signal_status: Dict[str, str] = {}
         self._snapshot: Optional["UsageSnapshot"] = None
+        #: (gone, not running) target counts of the last scan (REC-05).
+        self._liveness: Tuple[int, int] = (0, 0)
 
     def scan_diagnostics(self) -> List[Dict[str, Any]]:
         """Decreases withheld for unknown reliability signals in the last scan."""
         return [
             *reliability_diagnostics(self.skipped, self._signal_status, self._snapshot),
             *stale_oom_diagnostics(self.skipped),
+            *liveness_diagnostics(*self._liveness),
         ]
 
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
@@ -217,6 +246,7 @@ class MemoryRightsizingAnalyzer(Analyzer):
         self.skipped = []
 
         snapshot = context.usage_snapshot()
+        self._liveness = (len(context.gone_targets), len(context.not_running_targets))
         self._signal_status = dict(snapshot.reliability_signal_status)
         self._snapshot = snapshot
         for target, container_name, summary in context.iter_container_summaries():

@@ -32,7 +32,8 @@ from greenkube.models.workload_usage import POD_LEVEL, TargetKey, UsageSnapshot
 
 logger = logging.getLogger(__name__)
 
-#: A target without a running pod whose last sample is older than this before the scan no longer runs.
+#: A target without a running pod whose last sample is older than this before the scan no longer runs
+#: (default of ``RECOMMENDATION_TARGET_MAX_STALENESS_HOURS``).
 TARGET_MAX_STALENESS = timedelta(hours=2)
 #: Target kinds never rightsized from their own usage (one run of a CronJob, a one-off Job).
 EPHEMERAL_KINDS = frozenset({"Job"})
@@ -113,7 +114,11 @@ def filter_live_targets(
 
 
 def needs_controller_check(
-    snapshot: UsageSnapshot, *, end: datetime, live_containers: Optional[Set[ContainerKey]]
+    snapshot: UsageSnapshot,
+    *,
+    end: datetime,
+    live_containers: Optional[Set[ContainerKey]],
+    max_staleness: timedelta = TARGET_MAX_STALENESS,
 ) -> bool:
     """True when a stale scalable target has no running pod (only then are controllers listed)."""
     if live_containers is None:
@@ -123,7 +128,7 @@ def needs_controller_check(
         if target[1] not in SCALABLE_KINDS or target in live_targets:
             continue
         last = _last_hour(containers)
-        if last is None or last + timedelta(hours=1) < end - TARGET_MAX_STALENESS:
+        if last is None or last + timedelta(hours=1) < end - max_staleness:
             return True
     return False
 

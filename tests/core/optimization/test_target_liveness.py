@@ -127,3 +127,12 @@ async def test_a_gone_target_is_retired_and_a_scaled_to_zero_one_is_kept(repo) -
     assert any(
         event.event_type == "stale" and getattr(event.payload, "reason", None) == "target_gone" for event in events
     )
+
+
+def test_the_source_run_says_which_targets_were_left_out() -> None:
+    from greenkube.core.optimization.analyzers.rightsizing_memory import liveness_diagnostics
+
+    codes = {note["code"]: note["count"] for note in liveness_diagnostics(gone=2, not_running=1)}
+
+    assert codes == {"target_gone": 2, "target_not_running": 1}
+    assert liveness_diagnostics(0, 0) == []

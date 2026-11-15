@@ -358,6 +358,20 @@ tests:
           path: data.RIGHTSIZING_WARMUP_MINUTES
           value: "10"
 
+  - it: should render the target staleness of rightsizing, default and configured
+    set:
+      config.recommendations.targetMaxStalenessHours: 6
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_TARGET_MAX_STALENESS_HOURS
+          value: "6"
+
+  - it: should default the target staleness of rightsizing to 2 hours
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_TARGET_MAX_STALENESS_HOURS
+          value: "2"
+
   - it: should default the consensus policy to safest
     asserts:
       - equal:
