@@ -9,6 +9,7 @@ Endpoints:
   GET  /recommendations/ignored    - All permanently ignored recommendations
   GET  /recommendations/history    - Historical records filtered by time range
   GET  /recommendations/savings    - Aggregate CO2 and cost savings from applied recs
+  GET  /recommendations/export     - Active recommendations as CSV or JSON, with released capacity
   PATCH /recommendations/{id}/apply  - Mark a recommendation as applied
   POST /recommendations/{id}/remeasure - Start a new measurement of a not-realized/inconclusive change
   POST /recommendations/{id}/rollback-review/dismiss - Dismiss a false-positive rollback review
@@ -26,6 +27,9 @@ controller and returns its id in the ``X-GreenKube-Run-Id`` header; use
 ``POST /api/v1/optimization/runs`` instead.
 """
 
+import csv
+import io
+import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
@@ -359,6 +363,129 @@ async def get_savings_summary(
         start=start,
         end=end,
         legacy_compressed=legacy,
+    )
+
+
+#: CSV columns of the recommendation export: projected cost (billable and allocated) and projected
+#: released capacity, each in its own unit (WP-08.1). Released capacity is never money.
+EXPORT_COLUMNS = (
+    "id",
+    "type",
+    "namespace",
+    "owner_kind",
+    "owner_name",
+    "container_name",
+    "status",
+    "description",
+    "currency",
+    "projected_billable_cost_annual",
+    "projected_allocated_cost_annual",
+    "projected_allocated_co2e_annual_g",
+    "realization_factor",
+    "projection_note",
+    "capacity_method",
+    "capacity_direction",
+    "released_cpu_cores",
+    "released_mem_gib",
+    "released_cpu_cores_per_replica",
+    "released_mem_gib_per_replica",
+    "replicas",
+    "released_cpu_core_hours_per_year",
+    "released_mem_gib_hours_per_year",
+    "released_replica_hours_per_year",
+    "released_node_hours_per_year",
+    "released_storage_gib",
+    "released_load_balancers",
+)
+
+
+def _export_row(record: RecommendationRecord) -> dict:
+    impact = record.impact if isinstance(record.impact, dict) else {}
+    capacity = record.released_capacity or {}
+    annual = capacity.get("annual") or {}
+    now = capacity.get("instantaneous") or {}
+    return {
+        "id": record.id,
+        "type": _enum_value(record.type),
+        "namespace": record.namespace,
+        "owner_kind": record.owner_kind,
+        "owner_name": record.owner_name,
+        "container_name": record.container_name,
+        "status": _enum_value(record.status),
+        "description": record.description,
+        "currency": impact.get("currency"),
+        "projected_billable_cost_annual": record.projected_billable_cost_annual,
+        "projected_allocated_cost_annual": record.projected_allocated_cost_annual,
+        "projected_allocated_co2e_annual_g": record.projected_allocated_co2e_annual_g,
+        "realization_factor": impact.get("realization_factor"),
+        "projection_note": record.projection_note,
+        "capacity_method": capacity.get("method"),
+        "capacity_direction": capacity.get("direction"),
+        "released_cpu_cores": now.get("cpu_cores"),
+        "released_mem_gib": now.get("mem_gib"),
+        "released_cpu_cores_per_replica": now.get("cpu_cores_per_replica"),
+        "released_mem_gib_per_replica": now.get("mem_gib_per_replica"),
+        "replicas": now.get("replicas"),
+        "released_cpu_core_hours_per_year": annual.get("cpu_core_hours"),
+        "released_mem_gib_hours_per_year": annual.get("mem_gib_hours"),
+        "released_replica_hours_per_year": annual.get("replica_hours"),
+        "released_node_hours_per_year": annual.get("node_hours"),
+        "released_storage_gib": now.get("storage_gib"),
+        "released_load_balancers": now.get("load_balancers"),
+    }
+
+
+def _csv_cell(value) -> str:
+    """Prevent CSV formula injection, including leading-whitespace bypasses."""
+    text = str(value) if value is not None else ""
+    return f"'{text}" if text.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")) and not _is_number(text) else text
+
+
+def _is_number(text: str) -> bool:
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+@router.get("/recommendations/export")
+async def export_recommendations(
+    namespace: Optional[str] = Depends(validate_namespace),
+    fmt: Literal["csv", "json"] = Query("csv", alias="format", description="Export format: 'csv' or 'json'."),
+    reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
+):
+    """Active recommendations as CSV or JSON, with their projected cost and released capacity (WP-08.1).
+
+    Every figure is projected. Cost columns are per year in ``currency``;
+    released capacity columns carry their unit in their name (cores, GiB,
+    core-hours, GiB-hours, replica-hours and node-hours per year, storage GiB,
+    LoadBalancer count). Released capacity is never converted to money and
+    never added to a cost; negative values are increases. The JSON form returns
+    the full records, including the ``released_capacity`` object with its units.
+    """
+    try:
+        records = await reco_repo.get_active_recommendations(namespace=namespace)
+    except Exception as exc:
+        logger.error("Could not load active recommendations for the export: %s", exc)
+        raise HTTPException(status_code=503, detail="Recommendation store unavailable.") from exc
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if fmt == "json":
+        payload = json.dumps([record.model_dump(mode="json") for record in records], default=str)
+        return Response(
+            content=payload,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="greenkube-recommendations-{stamp}.json"'},
+        )
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=list(EXPORT_COLUMNS), lineterminator="\n")
+    writer.writeheader()
+    for record in records:
+        writer.writerow({key: _csv_cell(value) for key, value in _export_row(record).items()})
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="greenkube-recommendations-{stamp}.csv"'},
     )
 
 
