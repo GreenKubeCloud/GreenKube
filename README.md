@@ -25,13 +25,13 @@ On an on-premises cluster or a fixed node pool without an autoscaler, a smaller 
 
 ## Screenshots
 
-| Recommendations | Overview |
+| Overview: measured, pending and projected savings | Recommendations, ranked, with the capacity they free |
 |---|---|
-| <img src="assets/demo-recommendations.png" width="460"> | <img src="assets/demo-dashboard.png" width="460"> |
+| <img src="assets/demo-dashboard.png" width="460"> | <img src="assets/demo-recommendations.png" width="460"> |
 
-| Automation & GitOps | Report |
+| Changes: plan, pull request, sync, rollout, outcome | A measured change: cost interval and released capacity |
 |---|---|
-| <img src="assets/demo-automation.png" width="460"> | <img src="assets/demo-report.png" width="460"> |
+| <img src="assets/demo-automation.png" width="460"> | <img src="assets/demo-change.png" width="460"> |
 
 ## Quick start
 
