@@ -107,10 +107,11 @@ class ResourceDeletionStrategy:
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
         rate_sources: Sequence[str] = (),
+        price_card: Optional[Mapping[str, Any]] = None,
     ) -> StrategyResult:
         from greenkube.verify.strategy import StrategyResult
 
-        del plan, load, settings, seed_parts
+        del plan, load, settings, seed_parts, price_card  # a deletion releases the whole rate
         absence_verified = change.rollout_completed_source == COMPLETION_RESOURCE_ABSENT
         projected = projections.get("allocated_cost")
         base: Dict[str, Any] = {

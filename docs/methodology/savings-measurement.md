@@ -71,11 +71,25 @@ Rows of the workload (pod level, all containers) are reduced to one bucket per U
 - **Allocated cost** — only from rows whose cost provenance is trusted (`opencost`, `opencost_derived`, `kubecost`, `pricing_catalog`; or, for legacy rows, a positive cost not flagged estimated). A sample time counts only when every replica row at that time is trusted. The rate divides by the covered time, so raw 5-minute rows and hourly rollups mix correctly. A missing cost is missing, never zero: an OpenCost allocation whose `totalCost`, `cpuCost` or `ramCost` is NaN, infinite or absent (with no CPU and RAM cost to rebuild the total), or whose total is 0 for a pod that ran (`minutes > 0`) with non-zero requests, is stored with `cost_source = none` and the default placeholder cost, and a stored row with a zero total and non-zero requests is not trusted either. Such hours do not count; they never read as the whole cost saved. A zero that is only OpenCost's 5-decimal rounding (a small pod over a one-minute step) is not missing: its cost is rebuilt from its resource-hours at OpenCost's node unit prices and stored as `opencost_derived` (see [OpenCost precision](impact-model.md#opencost-precision-sub-precision-costs)).
 - **CPU and RAM cost components** (`cost_cpu`, `cost_ram`) when every trusted row carries them.
 - **Requested capacity** — requested CPU cores and memory GiB summed over replicas.
+- **Charged capacity** (`charged_core_hours`, `charged_gib_hours`, MEA-02) — `max(request, usage)` per sample, summed over replicas: the quantity OpenCost charges. A sample without trusted usage counts its request. Hourly rollup rows carry a mean usage, so their charged quantity is `max(request, mean usage)`, a lower bound when usage peaked above the request inside the hour. Snapshots frozen before it was measured have no value for it (absent from their hours and digest).
 - **Replicas** — the mean number of pods covering the hour (pod-seconds over covered seconds).
 - **CPU usage**, **energy**, **CO₂e** (only from rows with measured intensity and a profiled node), and the node **instance types** running the pods.
 - **Embodied CO₂e** (`embodied_co2e_grams`, the hardware manufacturing emissions the Impact Model allocates by reservation). It does not depend on the grid intensity, so it needs no measured intensity. Snapshots frozen before it was measured have no value for it (`embodied_co2e_g` is absent from their hours and from their digest, which therefore still verifies).
 
 An hour counts for a quantity when at least half of it is covered by qualifying data.
+
+### Constant prices (version 2.4, MEA-02)
+
+A request change moves the charged quantity, not the price. Before 2.4 the claimed `allocated_cost` was the difference of the stored costs, each valued at the prices of its own window, so a price move between the windows (spot prices, a reserved-instance or custom-pricing edit) was booked as a saving or erased one: in the audit simulation a true saving of 175.32/yr was measured as 227.92/yr after a 30% price cut and 122.72/yr after a 30% rise, with no confounder on clusters without node-pool labels.
+
+Since 2.4, every hour of both windows is revalued before the counterfactual is fitted:
+
+- CPU cost = charged core-hours × the baseline CPU price per charged core-hour, RAM cost = charged GiB-hours × the baseline memory price per charged GiB-hour; any other cost component (GPU, storage: total − CPU − RAM) is kept as observed. `allocated_cost`, `cost_cpu` and `cost_ram` are these constant-price values.
+- The prices are the frozen baseline snapshot's `price_card` (`cpu_charged_core_hour`, `memory_charged_gib_hour`: trusted CPU and RAM cost of the baseline hours over their charged quantities). Valuing the **charged** quantity, not the request, keeps usage-driven allocation: when a request is cut below the usage, OpenCost keeps charging the usage, and so does the measurement (no phantom saving).
+- Snapshots frozen before the charged quantities were measured use the requested quantity and the per-request prices of their price card (`cpu_core_hour`, `memory_gib_hour`), recorded as `constant_price_basis = requested`. Without any baseline price (no CPU/RAM cost components) the observed cost is measured, recorded as `constant_price_basis = observed`. An hour without cost components or quantities is not measured (lower coverage).
+- The cost at the observed prices is reported as a second quantity, `allocated_cost_observed` (not claimed), and `counterfactual_params.price_effect` = observed saving − constant-price saving. `counterfactual_params` also records `constant_price_basis`, `constant_prices` and `constant_price_source` (`snapshot_price_card`, or `baseline_hours` when no card was passed).
+
+Within-window price variation is removed with the window-level move: hourly cost noise of fixed requests is price noise and no longer widens the interval; variation of the charged quantity (usage above the request, replicas) still does. Measurements decided by 2.3 or earlier keep their observed-price values; they are not recomputed.
 
 ## 4. Counterfactual (C3)
 
@@ -132,7 +146,7 @@ The fitted elasticities and the number of matched hours of the week are stored i
 
 ## 5. Quantities
 
-The `request_rightsizing` strategy (version 2.3) measures, per hour:
+The `request_rightsizing` strategy (version 2.4) measures, per hour:
 
 **Per replica.** A request change moves what each replica is charged, not how many replicas run. Every quantity below is fitted *per replica* (each hour's value over its replica count) and the per-replica saving is multiplied by the mean replica count of the aligned post-window hours: `saving = Δ(per-replica rate) × post replica-hours`, which is `Σ Δrequest × replica-hours` for requested capacity. A replica count that drops for another reason (an HPA scaling 4 → 2 during the post-window) is therefore never credited to the change: it saves nothing per replica. It is reported by the `replica_shift` confounder (moderate). Hours without a replica count are left out. The interval and counterfactual are scaled by the same replica count, so the outcome rule decides exactly as it would per replica. Measurements decided by version 2.0 compared workload totals (stated by `strategy_version`).
 
@@ -140,8 +154,9 @@ The `request_rightsizing` strategy (version 2.3) measures, per hour:
 
 | Quantity | Unit | Claimed | Role |
 |---|---|---|---|
-| `allocated_cost` | currency | yes | Decides the outcome. |
-| `cost_cpu`, `cost_ram` | currency | no | Split the saving between the change's recommendations. |
+| `allocated_cost` | currency | yes | Decides the outcome. At the baseline unit prices since 2.4 ([constant prices](#constant-prices-version-24-mea-02)). |
+| `allocated_cost_observed` | currency | no | The allocated cost at the prices of each window, as stored (reported; `price_effect` = its saving − the `allocated_cost` saving). |
+| `cost_cpu`, `cost_ram` | currency | no | At the baseline unit prices; split the saving between the change's recommendations. |
 | `core_hours`, `gib_hours` | core-hours, GiB-hours | no | Requested capacity freed. |
 | `co2e_g` | gCO₂e | yes | CO₂e as the Impact Model allocates it: operational (idle and memory power follow the reservation) plus embodied (allocated by reservation) when both windows measured it. Claimed when the change is realized and its own interval shows a saving; compared with the projection of the same components only ([component matching](impact-model.md#co2e-components-and-component-matched-comparison)), listed in the estimate's `components` and in `counterfactual_params.co2e_components`. Split between the change's recommendations by their projections of those components. |
 | `embodied_co2e_g` | gCO₂e | no | The embodied part alone (reported). |
@@ -208,7 +223,7 @@ Values are **signed and never floored**: a cost increase is reported as a negati
 | The pod template changed again during the post-window (a spec digest other than this change's) | severe |
 | The workload was deleted and recreated during the post-window | severe |
 | The workload's HPA changed after the rollout (replicas, so the allocated cost, moved without the change) | severe |
-| The unit price of a resource whose per-replica requests the change did not touch moved more than 20% | severe |
+| The workload's own unit price of a resource (per charged unit, `price_card_change`) moved more than 20% | severe |
 | The node pool's CPU or memory unit price (all workloads of the pool) moved more than 20% (`pool_price_card_change`) | severe |
 | The node instance types running the workload changed on more than 50% of its pod-hours | severe |
 | The node pool's hardware changed: its CPU-capacity-weighted instance-type mix moved by more than 25% (`pool_instance_type_change`) | severe |
@@ -216,7 +231,7 @@ Values are **signed and never floored**: a cost increase is reported as a negati
 | Another change on the same workload landed inside the baseline window | moderate |
 | The workload's HPA changed inside the baseline window | moderate |
 | Mean replicas deviate more than 25% from the replicas predicted by the same counterfactual | moderate |
-| The unit price of a resource whose per-replica requests the change did not touch moved more than 5% | moderate |
+| The workload's own unit price of a resource (per charged unit, `price_card_change`) moved more than 5% | moderate |
 | The node pool's CPU or memory unit price moved more than 5% (`pool_price_card_change`) | moderate |
 | The node instance types running the workload changed (total-variation distance above 25% of pod-hours) | moderate |
 | The node pool's mean CPU capacity changed by more than 25% (the cluster autoscaler, `pool_capacity_change`) | moderate |
@@ -226,9 +241,11 @@ Values are **signed and never floored**: a cost increase is reported as a negati
 
 A severe confounder's detail is the reason of the `contaminated` outcome.
 
-**Node-pool checks.** The workload's pools are the `node_pool` of the nodes its pods ran on during the post-window. The node snapshots (SCD2) are sampled every 6 hours over both windows; samples without any node of the pools (before the snapshots began) are ignored. A change to another workload counts when it completed between the merge and the end of the post-window and its pods ran on one of the pools' nodes in the two hours after its rollout. Allocated cost is requests × unit price, so other workloads' changes and autoscaling only move the idle share of CO₂e allocated to this workload (moderate), while new hardware in the pool changes its unit prices and power profile (severe). Nodes without a pool label are not grouped, and the checks are skipped. A failed read of the node snapshots or of the changes delays the decision to the next pass.
+**Node-pool checks.** The workload's pools are the `node_pool` of the nodes its pods ran on during the post-window. The node snapshots (SCD2) are sampled every 6 hours over both windows; samples without any node of the pools (before the snapshots began) are ignored. A change to another workload counts when it completed between the merge and the end of the post-window and its pods ran on one of the pools' nodes in the two hours after its rollout. Allocated cost is requests × unit price, so other workloads' changes and autoscaling only move the idle share of CO₂e allocated to this workload (moderate), while new hardware in the pool changes its unit prices and power profile (severe). When none of the workload's nodes carries a pool label, only the price-card control runs, over every other pod of the nodes the workload ran on (`pool_price_card_change` with `evidence.scope = workload_nodes`, MEA-02); the hardware, capacity and neighbour-change checks are skipped. A failed read of the node snapshots or of the changes delays the decision to the next pass.
 
-**Pool price card.** At each pool sample the metrics of every pod are read for one hour, and the CPU (per core-hour) and memory (per GiB-hour) unit prices of the pods that ran on the pools' nodes are computed from trusted cost with CPU/RAM components, for each window. The measured workload's own pods are left out: an allocator that charges `max(request, usage)` moves the cost-per-request ratio of a workload resized below its usage although no price changed. A unit price belongs to the nodes, not to the requests, so this control works even when the change resized both resources of the workload (the workload-level check then has no untouched resource). A pool-wide finding replaces the workload-level finding of the same resource, so a price change is never penalized twice.
+**Workload price card (MEA-02).** `price_card_change` compares the workload's own unit price of each resource, trusted CPU (RAM) cost over charged core-hours (GiB-hours), between the windows. A price per charged unit stays a price when the change resized the resource, so every resource is checked, including when CPU and memory were both resized. The saving itself is already measured at the baseline prices (section 3): the finding says that the observed cost moved for another reason, and above 20% that the measurement window is too disturbed to trust (contaminated). Snapshots without charged quantities use the price per requested unit; CPU is then checked only when its mean usage stayed at or below the request in both windows or its request was not resized (memory usage is not in those buckets, so a resized memory request is checked as it is).
+
+**Pool price card.** At each pool sample the metrics of every pod are read for one hour, and the CPU (per core-hour) and memory (per GiB-hour) unit prices of the pods that ran on the pools' nodes are computed from trusted cost with CPU/RAM components, for each window. The measured workload's own pods are left out: an allocator that charges `max(request, usage)` moves the cost-per-request ratio of a workload resized below its usage although no price changed. A unit price belongs to the nodes, not to the requests, so this control works even when the change resized both resources of the workload. A pool-wide finding replaces the workload-level finding of the same resource, so a price change is never penalized twice.
 
 **Confidence** starts at the coverage and loses 0.15 per moderate confounder, 0.05 per mild one and 0.10 when the counterfactual has no load driver or only the CPU-usage driver; it is 0 when the measurement is contaminated.
 
@@ -380,7 +397,7 @@ A failure is sticky. `ledger_chain_status` keeps the last head that passed (`ver
 
 - **Request changes and asset deletions only.** `request_rightsizing` and `resource_deletion` are the only strategies. Replica, schedule and node-pool changes need their own strategies.
 - **Allocated, not billed.** The measured saving is allocated cost. The bill only drops when nodes are removed; pool-level realization (C10) is not implemented.
-- **Pool confounders need pool labels.** Node-pool checks, the pool price card included, use the `node_pool` of the node snapshots; clusters whose nodes carry no pool label get no pool-level check, and price changes are then seen per workload only (the unit price of an untouched resource).
+- **Pool confounders need pool labels.** The node-pool hardware, capacity and neighbour-change checks use the `node_pool` of the node snapshots; clusters whose nodes carry no pool label get only the price control over the workload's nodes. The saving is measured at the baseline prices either way (MEA-02).
 - **Drift is per replica.** The drift monitor watches allocated cost per replica-hour, the quantity a request change moves; a regression that only shows in replica counts (an HPA retuned) is not a drift of this change, and CO₂e is not monitored on its own.
 - **Reversals are whole.** A regression reverses the full measured rate from the onset, even when only part of the saving was lost (for example 60%). This is conservative: the remaining part is not credited until a new change is measured.
 - **Deletion and supersession.** A deletion ends the measured accrual at the first absent observation, up to one monitor interval (1 hour) after the actual deletion; the accruals of that hour are kept. A change superseded by a newer recorded change is closed, but its recommendations keep accruing their measured step next to the new change's until a newer change ends or the workload is deleted or drifts; the earlier step is then ended too, even when only the newer step was lost (conservative).

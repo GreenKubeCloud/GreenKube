@@ -148,6 +148,11 @@ class PoolContext:
     #: Pool-wide unit prices (``cpu`` per core-hour, ``memory`` per GiB-hour) in each window (price-card control).
     prices_pre: Mapping[str, float] = field(default_factory=dict)
     prices_post: Mapping[str, float] = field(default_factory=dict)
+    #: ``pool`` (labelled node pools) or ``workload_nodes``: the nodes carry no pool label, so only the
+    #: price control runs, over the pods of the nodes the workload ran on (MEA-02).
+    scope: str = "pool"
+    #: The nodes of a ``workload_nodes`` context.
+    nodes: Tuple[str, ...] = ()
 
 
 _GIB = 1024.0**3
@@ -382,36 +387,52 @@ class ConfounderDetector:
 
     @staticmethod
     def _price_change(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:
-        """Unit price of a resource whose requests the change did not touch (it acts as a control)."""
-        findings: List[Confounder] = []
+        """Unit price of each resource on the workload's own rows, before and after (MEA-02).
+
+        With the charged quantities (``max(request, usage)`` per sample) in both
+        windows, the price per charged unit is a price even for a resource the
+        change resized, so every resource is checked. Windows without them
+        (snapshots frozen earlier) use the price per requested unit, which is a
+        price too unless the allocator charged usage above the request: CPU is
+        then checked only when its mean usage stays at or below the request in
+        both windows (or the change did not resize it). Memory usage is not in
+        those buckets, so a resized memory request is checked as it is.
+        """
+        from greenkube.verify.series import has_charged, unit_prices
+
+        if has_charged(pre) and has_charged(post):
+            findings: List[Confounder] = []
+            before_prices = unit_prices(pre, charged=True)
+            after_prices = unit_prices(post, charged=True)
+            for resource in ("cpu", "memory"):
+                finding = _price_finding(resource, before_prices.get(resource), after_prices.get(resource), "charged")
+                if finding is not None:
+                    findings.append(finding)
+            return findings
+        findings = []
         for resource, cost_attr, quantity_attr in (
             ("cpu", "cost_cpu", "core_hours"),
             ("memory", "cost_ram", "gib_hours"),
         ):
             requested_before = _per_replica(pre, quantity_attr)
             requested_after = _per_replica(post, quantity_attr)
-            if (
+            resized = (
                 requested_before is None
                 or requested_after is None
                 or requested_before <= 0
                 or abs(requested_after / requested_before - 1.0) > PRICE_CHANGE_TOLERANCE
-            ):
-                # The change moved this resource's per-replica requests: its unit price is no control.
+            )
+            if resized and resource == "cpu" and not (_usage_within_request(pre) and _usage_within_request(post)):
+                # Usage above (or unknown against) a resized request: the cost-per-request ratio is no price.
                 continue
-            before = _unit_price(pre, cost_attr, quantity_attr)
-            after = _unit_price(post, cost_attr, quantity_attr)
-            if before is None or after is None or before <= 0:
-                continue
-            deviation = after / before - 1.0
-            if abs(deviation) > PRICE_CHANGE_TOLERANCE:
-                findings.append(
-                    Confounder(
-                        kind="price_card_change",
-                        severity="severe" if abs(deviation) > PRICE_CHANGE_SEVERE else "moderate",
-                        detail=f"{resource} unit price changed {deviation:+.0%} between the windows",
-                        evidence={"resource": resource, "before": before, "after": after},
-                    )
-                )
+            finding = _price_finding(
+                resource,
+                _unit_price(pre, cost_attr, quantity_attr),
+                _unit_price(post, cost_attr, quantity_attr),
+                "requested",
+            )
+            if finding is not None:
+                findings.append(finding)
         return findings
 
     @staticmethod
@@ -434,6 +455,8 @@ class ConfounderDetector:
 
     @staticmethod
     def _pool(change: ChangeEvent, pool: PoolContext) -> List[Confounder]:
+        if pool.scope == SCOPE_WORKLOAD_NODES:
+            return _node_prices(pool)
         findings: List[Confounder] = []
         pools = ", ".join(pool.pools)
         before, after = _pool_mix(pool.pre), _pool_mix(pool.post)
@@ -510,6 +533,32 @@ class ConfounderDetector:
         return findings
 
 
+def _usage_within_request(buckets: Sequence[HourBucket]) -> bool:
+    """Whether the mean CPU usage stays at or below the CPU request in every costed hour that has both."""
+    known = [
+        bucket
+        for bucket in buckets
+        if bucket.cpu_usage_cores is not None and bucket.core_hours is not None and bucket.cost is not None
+    ]
+    return bool(known) and all((bucket.cpu_usage_cores or 0.0) <= (bucket.core_hours or 0.0) for bucket in known)
+
+
+def _price_finding(resource: str, before: Optional[float], after: Optional[float], basis: str) -> Optional[Confounder]:
+    """``price_card_change`` when a unit price moved more than 5% (severe above 20%)."""
+    if before is None or after is None or before <= 0:
+        return None
+    deviation = after / before - 1.0
+    if abs(deviation) <= PRICE_CHANGE_TOLERANCE:
+        return None
+    return Confounder(
+        kind="price_card_change",
+        severity="severe" if abs(deviation) > PRICE_CHANGE_SEVERE else "moderate",
+        detail=f"{resource} unit price changed {deviation:+.0%} between the windows (the saving is measured at "
+        "the baseline prices; the observed difference is reported as allocated_cost_observed)",
+        evidence={"resource": resource, "before": before, "after": after, "basis": basis},
+    )
+
+
 def _pool_prices(pool: PoolContext, pools: str) -> List[Confounder]:
     findings: List[Confounder] = []
     for resource, unit in (("cpu", "core-hour"), ("memory", "GiB-hour")):
@@ -526,6 +575,39 @@ def _pool_prices(pool: PoolContext, pools: str) -> List[Confounder]:
                 detail=f"{resource} unit price per {unit} in node pool {pools} changed {deviation:+.0%} between "
                 "the windows (all workloads of the pool)",
                 evidence={"resource": resource, "pools": list(pool.pools), "before": before, "after": after},
+            )
+        )
+    return findings
+
+
+#: :attr:`PoolContext.scope` of a price control built from the workload's nodes (no pool label).
+SCOPE_WORKLOAD_NODES = "workload_nodes"
+
+
+def _node_prices(pool: PoolContext) -> List[Confounder]:
+    """Price control over every pod of the workload's nodes, for clusters without pool labels (MEA-02)."""
+    findings: List[Confounder] = []
+    nodes = ", ".join(pool.nodes)
+    for resource, unit in (("cpu", "core-hour"), ("memory", "GiB-hour")):
+        before, after = pool.prices_pre.get(resource), pool.prices_post.get(resource)
+        if before is None or after is None or before <= 0:
+            continue
+        deviation = after / before - 1.0
+        if abs(deviation) <= PRICE_CHANGE_TOLERANCE:
+            continue
+        findings.append(
+            Confounder(
+                kind="pool_price_card_change",
+                severity="severe" if abs(deviation) > PRICE_CHANGE_SEVERE else "moderate",
+                detail=f"{resource} unit price per {unit} on the nodes the workload ran on ({nodes}; no node-pool "
+                f"label) changed {deviation:+.0%} between the windows (all workloads of those nodes)",
+                evidence={
+                    "resource": resource,
+                    "scope": SCOPE_WORKLOAD_NODES,
+                    "nodes": list(pool.nodes),
+                    "before": before,
+                    "after": after,
+                },
             )
         )
     return findings

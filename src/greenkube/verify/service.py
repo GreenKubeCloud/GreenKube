@@ -45,6 +45,7 @@ from greenkube.storage.change_repository import ChangeConflictError, ChangeRepos
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.attribution import allocate, allocated_projection
 from greenkube.verify.confounders import (
+    SCOPE_WORKLOAD_NODES,
     ConfounderDetector,
     PoolContext,
     PoolNode,
@@ -76,7 +77,7 @@ from greenkube.verify.model import (
     WorkloadRef,
     WorkloadSpecObservation,
 )
-from greenkube.verify.series import floor_hour, hourly_buckets, utc_hour
+from greenkube.verify.series import floor_hour, hourly_buckets, price_card, utc_hour
 from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
     MeasurementSettings,
@@ -282,8 +283,10 @@ class ChangeMeasurementService:
         """The workload's node pools over both windows and the changes that landed in them (C4).
 
         The pools are those of the nodes the workload's pods ran on during the
-        post-window; nodes without a pool label are not grouped (no pool check).
-        A failed read raises :class:`MeasurementReadError`, so the decision waits.
+        post-window. When none of those nodes carries a pool label, only the
+        price control runs, over every other pod of those nodes (scope
+        ``workload_nodes``, MEA-02). A failed read raises
+        :class:`MeasurementReadError`, so the decision waits.
         """
         workload_nodes = {getattr(row, "node", None) for row in post_rows} - {None}
         if self.node_repo is None or not workload_nodes:
@@ -299,7 +302,20 @@ class ChangeMeasurementService:
             }
         )
         if not pools:
-            return None
+            nodes = {str(node) for node in workload_nodes}
+            return PoolContext(
+                pools=(),
+                pre=(),
+                post=(),
+                prices_pre=pool_unit_prices(
+                    await self._pool_rows(plan.pre), nodes, self._step(), exclude=change.target.key
+                ),
+                prices_post=pool_unit_prices(
+                    await self._pool_rows(plan.post), nodes, self._step(), exclude=change.target.key
+                ),
+                scope=SCOPE_WORKLOAD_NODES,
+                nodes=tuple(sorted(str(node) for node in nodes)),
+            )
 
         def in_pools(samples: List[Tuple[datetime, List[Any]]]) -> Tuple[PoolSample, ...]:
             # A sample without any node of the pools predates the node snapshots: it is no data.
@@ -673,7 +689,7 @@ class ChangeMeasurementService:
                 key: {floor_hour(hour).isoformat(): value for hour, value in sorted(series.items())}
                 for key, series in load.items()
             },
-            price_card=_price_card(buckets, getattr(self.config, "CURRENCY", None)),
+            price_card=price_card(buckets, getattr(self.config, "CURRENCY", None)),
             health=health,
             intensity_source=max(sources, key=lambda key: sources[key]) if sources else None,
             impact_model_version=IMPACT_MODEL_VERSION,
@@ -1110,6 +1126,7 @@ class ChangeMeasurementService:
             settings=self.settings,
             seed_parts=(change.change_id, status.sequence),
             rate_sources=[_rate_source(member) for member in in_effect],
+            price_card=snapshot.price_card,
         )
         awaiting = [member for member in in_effect if _awaiting(member)]
         gates, reliability = (
@@ -1539,25 +1556,6 @@ def _replica_hours(buckets: Sequence[Any]) -> Optional[float]:
     """Sum of the hourly replica counts of ``buckets`` (``None`` without any)."""
     values = [bucket.replicas for bucket in buckets if getattr(bucket, "replicas", None) is not None]
     return math.fsum(values) if values else None
-
-
-def _price_card(buckets: Sequence[Any], currency: Optional[str]) -> dict:
-    """Unit prices observed in the baseline (allocated cost per requested core-hour and GiB-hour)."""
-    card: dict = {"currency": currency}
-    for name, cost_attr, quantity_attr in (
-        ("cpu_core_hour", "cost_cpu", "core_hours"),
-        ("memory_gib_hour", "cost_ram", "gib_hours"),
-    ):
-        cost = quantity = 0.0
-        for bucket in buckets:
-            value = getattr(bucket, cost_attr)
-            amount = getattr(bucket, quantity_attr)
-            if value is None or amount is None or amount <= 0:
-                continue
-            cost += value
-            quantity += amount
-        card[name] = cost / quantity if quantity > 0 else None
-    return card
 
 
 def _quantity_estimate(

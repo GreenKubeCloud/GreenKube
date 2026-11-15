@@ -119,6 +119,7 @@ class SavingsMeasurementStrategy(Protocol):
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
         rate_sources: Sequence[str] = (),
+        price_card: Optional[Mapping[str, Any]] = None,
     ) -> StrategyResult: ...
 
 
@@ -127,10 +128,14 @@ class RequestRightsizingStrategy:
 
     Quantities, all per hour and signed (positive = saving):
 
-    * ``allocated_cost`` — trusted allocated cost of the workload (claimed;
-      decides the outcome);
-    * ``cost_cpu`` / ``cost_ram`` — its CPU and RAM components (used to split
-      the saving between the change's recommendations, C5);
+    * ``allocated_cost`` — trusted allocated cost of the workload at the
+      baseline unit prices (claimed; decides the outcome, see 2.4 below);
+    * ``allocated_cost_observed`` — the same cost at the prices of each window,
+      as stored (reported; its difference from ``allocated_cost`` is the price
+      effect);
+    * ``cost_cpu`` / ``cost_ram`` — its CPU and RAM components at the baseline
+      unit prices (used to split the saving between the change's
+      recommendations, C5);
     * ``core_hours`` / ``gib_hours`` — requested capacity freed (reported);
     * ``co2e_g`` — CO2e of the workload as the Impact Model allocates it
       (idle power by CPU reservation, memory power by memory reservation,
@@ -172,14 +177,29 @@ class RequestRightsizingStrategy:
     verdict needs at least ``MIN_POST_DAYS`` days of aligned post-change hours.
     Measurements decided before 2.3 used a percentile moving-block bootstrap
     without the between-week term and ``realized`` above zero.
+
+    **Constant prices (2.4, MEA-02).** A price move between the windows (a
+    spot price, a reserved-instance or custom-pricing edit) is not a saving of
+    the change. Each hour's CPU and RAM cost is revalued as its *charged*
+    quantity, ``max(request, usage)`` per sample as OpenCost charges it, times
+    the baseline unit price per charged unit of the frozen snapshot
+    ``price_card`` (snapshots frozen before charged quantities were measured:
+    the requested quantity and the per-request price,
+    ``constant_price_basis = requested``); the rest of the cost (GPU, storage)
+    is kept as observed. The observed delta is reported as
+    ``allocated_cost_observed`` and ``price_effect = observed - constant`` is
+    recorded; the ``price_card_change`` confounder reports the move. Without
+    baseline prices the observed cost is measured (``constant_price_basis =
+    observed``). Measurements decided before 2.4 used the observed cost.
     """
 
     key = "request_rightsizing"
-    version = "2.3"
+    version = "2.4"
     primary = "allocated_cost"
 
     QUANTITIES = (
         QuantitySpec("allocated_cost", "currency", True, "allocated cost"),
+        QuantitySpec("allocated_cost_observed", "currency", False, "allocated cost at observed prices"),
         QuantitySpec("cost_cpu", "currency", False, "allocated CPU cost"),
         QuantitySpec("cost_ram", "currency", False, "allocated RAM cost"),
         QuantitySpec("core_hours", "core-hours", False, "requested CPU cores"),
@@ -211,8 +231,16 @@ class RequestRightsizingStrategy:
         settings: MeasurementSettings,
         seed_parts: Sequence[object],
         rate_sources: Sequence[str] = (),
+        price_card: Optional[Mapping[str, Any]] = None,
     ) -> StrategyResult:
+        """Estimate every quantity of :attr:`QUANTITIES` and the change outcome.
+
+        ``price_card`` is the frozen baseline snapshot's price card (the unit
+        prices the request effect is valued at, MEA-02); without one, the
+        same prices are computed from ``pre``.
+        """
         del rate_sources  # measured from the workload's own trusted rows
+        constant = constant_price_windows(pre, post, price_card)
         expected_hours = len(window_hours(plan.post)) or 1
         estimates: List[SavingsEstimate] = []
         methods: Dict[str, str] = {}
@@ -223,10 +251,11 @@ class RequestRightsizingStrategy:
         intervals: Dict[str, Dict[str, Any]] = {}
         embodied = has_embodied(pre) and has_embodied(post)
         for spec in self.QUANTITIES:
+            observed = spec.quantity == "allocated_cost_observed"
             fitted = self._estimate_quantity(
                 spec,
-                pre,
-                post,
+                pre if observed else constant.pre,
+                post if observed else constant.post,
                 load,
                 expected_hours,
                 projections,
@@ -262,7 +291,13 @@ class RequestRightsizingStrategy:
             "baseline_weeks": {key: value["baseline_weeks"] for key, value in intervals.items()},
             "between_week_cv": {key: value["between_week_cv"] for key, value in intervals.items()},
             "between_week_basis": {key: value["between_week_basis"] for key, value in intervals.items()},
+            **constant.as_params(),
         }
+        claimed_rate = next(item for item in estimates if item.quantity == self.primary).rate_per_hour
+        observed_rate = next(item for item in estimates if item.quantity == "allocated_cost_observed").rate_per_hour
+        params["price_effect"] = (
+            observed_rate - claimed_rate if observed_rate is not None and claimed_rate is not None else None
+        )
 
         primary = next(item for item in estimates if item.quantity == self.primary)
         reasons: List[str] = []
@@ -473,6 +508,98 @@ class RequestRightsizingStrategy:
             diagnostics,
             interval_params=interval_params,
         )
+
+
+CONSTANT_PRICE_CHARGED = "charged"
+CONSTANT_PRICE_REQUESTED = "requested"
+CONSTANT_PRICE_OBSERVED = "observed"
+
+
+@dataclass(frozen=True)
+class ConstantPriceWindows:
+    """Both windows with CPU and RAM cost revalued at the baseline unit prices (MEA-02)."""
+
+    pre: Sequence[HourBucket]
+    post: Sequence[HourBucket]
+    #: ``charged`` (max(request, usage) per sample), ``requested`` (older snapshots) or ``observed``.
+    basis: str
+    prices: Dict[str, float]
+    #: ``snapshot_price_card`` or ``baseline_hours`` (computed from the baseline buckets).
+    source: Optional[str]
+
+    def as_params(self) -> Dict[str, Any]:
+        """Values recorded in ``counterfactual_params``."""
+        return {
+            "constant_price_basis": self.basis,
+            "constant_prices": {key: round(value, 10) for key, value in self.prices.items()},
+            "constant_price_source": self.source,
+        }
+
+
+_CARD_KEYS = {
+    CONSTANT_PRICE_CHARGED: {"cpu": "cpu_charged_core_hour", "memory": "memory_charged_gib_hour"},
+    CONSTANT_PRICE_REQUESTED: {"cpu": "cpu_core_hour", "memory": "memory_gib_hour"},
+}
+
+
+def _card_prices(card: Optional[Mapping[str, Any]], basis: str) -> Optional[Dict[str, float]]:
+    if not card:
+        return None
+    prices: Dict[str, float] = {}
+    for resource, key in _CARD_KEYS[basis].items():
+        value = card.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+            return None
+        prices[resource] = float(value)
+    return prices
+
+
+def constant_price_windows(
+    pre: Sequence[HourBucket], post: Sequence[HourBucket], card: Optional[Mapping[str, Any]]
+) -> ConstantPriceWindows:
+    """Revalue the CPU and RAM cost of every hour at the baseline unit prices.
+
+    The charged basis needs the charged quantities in both windows and the
+    charged prices (from ``card``, else from ``pre``); otherwise the requested
+    basis. An hour without cost components or quantities loses its cost (it is
+    not measured, which lowers the coverage). Without any baseline price the
+    windows are returned unchanged with ``basis = observed``.
+    """
+    from greenkube.verify.series import PRICED_RESOURCES, has_charged, unit_prices
+
+    basis = CONSTANT_PRICE_CHARGED if has_charged(pre) and has_charged(post) else CONSTANT_PRICE_REQUESTED
+    prices = _card_prices(card, basis)
+    source: Optional[str] = "snapshot_price_card"
+    if prices is None:
+        computed = unit_prices(pre, charged=basis == CONSTANT_PRICE_CHARGED)
+        if all(value is not None for value in computed.values()):
+            prices = {key: float(value) for key, value in computed.items() if value is not None}
+            source = "baseline_hours"
+    if prices is None:
+        return ConstantPriceWindows(pre=pre, post=post, basis=CONSTANT_PRICE_OBSERVED, prices={}, source=None)
+    quantity_index = 1 if basis == CONSTANT_PRICE_CHARGED else 2
+
+    def revalue(buckets: Sequence[HourBucket]) -> List[HourBucket]:
+        out: List[HourBucket] = []
+        for bucket in buckets:
+            if bucket.cost is None:
+                out.append(bucket)
+                continue
+            components: Dict[str, float] = {}
+            for resource, fields in PRICED_RESOURCES.items():
+                amount = getattr(bucket, fields[quantity_index])
+                if getattr(bucket, fields[0]) is None or amount is None:
+                    break
+                components[fields[0]] = float(amount) * prices[resource]
+            if len(components) != len(PRICED_RESOURCES):
+                out.append(bucket.model_copy(update={"cost": None, "cost_cpu": None, "cost_ram": None}))
+                continue
+            # GPU, storage and any other cost component is not moved by a request change: kept as observed.
+            other = float(bucket.cost) - float(bucket.cost_cpu or 0.0) - float(bucket.cost_ram or 0.0)
+            out.append(bucket.model_copy(update={**components, "cost": math.fsum(components.values()) + other}))
+        return out
+
+    return ConstantPriceWindows(pre=revalue(pre), post=revalue(post), basis=basis, prices=prices, source=source)
 
 
 def _per_replica(values: Mapping[datetime, float], replicas: Mapping[datetime, float]) -> Dict[datetime, float]:

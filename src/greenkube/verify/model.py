@@ -153,6 +153,11 @@ class HourBucket(_Frozen):
     embodied_co2e_g: Optional[float] = None
     embodied_coverage: Optional[float] = None
     instance_types: dict[str, float] = Field(default_factory=dict)
+    #: Charged CPU cores and memory GiB summed over pods (per hour): ``max(request, usage)`` per
+    #: sample, the quantity an allocator such as OpenCost charges (MEA-02). ``None`` in snapshots
+    #: frozen before it was measured.
+    charged_core_hours: Optional[float] = None
+    charged_gib_hours: Optional[float] = None
 
     @property
     def hour_of_week(self) -> int:
@@ -160,7 +165,7 @@ class HourBucket(_Frozen):
 
 
 #: HourBucket fields added after snapshots were first frozen (omitted from the digest while unset).
-_OPTIONAL_BUCKET_FIELDS = ("embodied_co2e_g", "embodied_coverage")
+_OPTIONAL_BUCKET_FIELDS = ("embodied_co2e_g", "embodied_coverage", "charged_core_hours", "charged_gib_hours")
 
 
 def hour_of_week(moment: datetime) -> int:

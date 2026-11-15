@@ -57,6 +57,8 @@ class _Accumulator:
         "pod_seconds",
         "cpu_request",
         "memory_request",
+        "cpu_charged",
+        "memory_charged",
         "cpu_usage",
         "usage_seconds",
         "cost",
@@ -77,6 +79,8 @@ class _Accumulator:
         self.pod_seconds = 0.0
         self.cpu_request = 0.0
         self.memory_request = 0.0
+        self.cpu_charged = 0.0
+        self.memory_charged = 0.0
         self.cpu_usage = 0.0
         self.usage_seconds = 0.0
         self.cost = 0.0
@@ -126,11 +130,22 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
         for row in members:
             seconds = _coverage_seconds(row, step_seconds)
             acc.pod_seconds += seconds
-            acc.cpu_request += float(getattr(row, "cpu_request", 0) or 0) / 1000.0 * seconds
-            acc.memory_request += float(getattr(row, "memory_request", 0) or 0) / _GIB * seconds
+            cpu_request = float(getattr(row, "cpu_request", 0) or 0) / 1000.0
+            memory_request = float(getattr(row, "memory_request", 0) or 0) / _GIB
+            acc.cpu_request += cpu_request * seconds
+            acc.memory_request += memory_request * seconds
+            trusted_usage = usage_is_trusted(row)
             usage = _number(getattr(row, "cpu_usage_millicores", None))
-            if usage is not None and usage >= 0 and usage_is_trusted(row):
-                acc.cpu_usage += usage / 1000.0 * seconds
+            memory_usage = _number(getattr(row, "memory_usage_bytes", None))
+            # The charged quantity: max(request, usage) per sample (MEA-02); the request without trusted usage.
+            cpu_used = usage / 1000.0 if usage is not None and usage >= 0 and trusted_usage else None
+            memory_used = (
+                memory_usage / _GIB if memory_usage is not None and memory_usage >= 0 and trusted_usage else None
+            )
+            acc.cpu_charged += max(cpu_request, cpu_used or 0.0) * seconds
+            acc.memory_charged += max(memory_request, memory_used or 0.0) * seconds
+            if cpu_used is not None:
+                acc.cpu_usage += cpu_used * seconds
                 acc.usage_seconds += seconds
             acc.energy_joules += float(getattr(row, "joules", 0.0) or 0.0)
             instance_type = getattr(row, "node_instance_type", None)
@@ -172,6 +187,8 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
                 replicas=acc.pod_seconds / covered,
                 core_hours=acc.cpu_request / covered,
                 gib_hours=acc.memory_request / covered,
+                charged_core_hours=acc.cpu_charged / covered,
+                charged_gib_hours=acc.memory_charged / covered,
                 cpu_usage_cores=acc.cpu_usage / acc.usage_seconds * (acc.pod_seconds / covered)
                 if acc.usage_seconds > 0
                 else None,
@@ -193,6 +210,7 @@ def hourly_buckets(rows: Iterable[Any], window: TimeWindow, step_seconds: int) -
 #: HourBucket attribute backing each measured quantity, and the coverage that qualifies it.
 QUANTITY_FIELDS: Dict[str, tuple[str, str]] = {
     "allocated_cost": ("cost", "cost_coverage"),
+    "allocated_cost_observed": ("cost", "cost_coverage"),
     "cost_cpu": ("cost_cpu", "cost_coverage"),
     "cost_ram": ("cost_ram", "cost_coverage"),
     "core_hours": ("core_hours", "coverage"),
@@ -205,6 +223,72 @@ QUANTITY_FIELDS: Dict[str, tuple[str, str]] = {
 
 #: Minimum share of an hour with qualifying data for the hour to count.
 MIN_HOUR_COVERAGE = 0.5
+
+
+#: Cost, charged quantity and requested quantity of each priced resource (MEA-02).
+PRICED_RESOURCES: Dict[str, tuple[str, str, str]] = {
+    "cpu": ("cost_cpu", "charged_core_hours", "core_hours"),
+    "memory": ("cost_ram", "charged_gib_hours", "gib_hours"),
+}
+
+
+def has_charged(buckets: Sequence[HourBucket]) -> bool:
+    """Whether every costed hour of ``buckets`` carries the charged quantities (at least one does)."""
+    costed = [bucket for bucket in buckets if bucket.cost is not None and bucket.cost_coverage >= MIN_HOUR_COVERAGE]
+    return bool(costed) and all(
+        bucket.charged_core_hours is not None and bucket.charged_gib_hours is not None for bucket in costed
+    )
+
+
+def unit_prices(buckets: Sequence[HourBucket], *, charged: bool) -> Dict[str, Optional[float]]:
+    """Allocated cost per charged (or requested) core-hour and GiB-hour over ``buckets``.
+
+    Only hours with trusted cost components on at least half the hour count.
+    With ``charged`` the quantity is ``max(request, usage)`` per sample, so the
+    price of a resource stays a price even when the change resized it below its
+    usage (an allocator that charges usage then charges the same quantity).
+    """
+    prices: Dict[str, Optional[float]] = {}
+    for resource, (cost_attr, charged_attr, requested_attr) in PRICED_RESOURCES.items():
+        cost = quantity = 0.0
+        for bucket in buckets:
+            value = getattr(bucket, cost_attr)
+            amount = getattr(bucket, charged_attr if charged else requested_attr)
+            if value is None or amount is None or amount <= 0 or bucket.cost_coverage < MIN_HOUR_COVERAGE:
+                continue
+            cost += value
+            quantity += amount
+        prices[resource] = cost / quantity if quantity > 0 else None
+    return prices
+
+
+def price_card(buckets: Sequence[HourBucket], currency: Optional[str]) -> Dict[str, Any]:
+    """Unit prices of a baseline window, frozen with its snapshot.
+
+    ``cpu_core_hour``/``memory_gib_hour`` are per requested unit (kept as they
+    were first frozen); ``cpu_charged_core_hour``/``memory_charged_gib_hour``
+    are per charged unit, the prices the request effect is valued at (MEA-02),
+    present only when every costed hour carries the charged quantities.
+    """
+    card: Dict[str, Any] = {"currency": currency}
+    for name, cost_attr, quantity_attr in (
+        ("cpu_core_hour", "cost_cpu", "core_hours"),
+        ("memory_gib_hour", "cost_ram", "gib_hours"),
+    ):
+        cost = quantity = 0.0
+        for bucket in buckets:
+            value = getattr(bucket, cost_attr)
+            amount = getattr(bucket, quantity_attr)
+            if value is None or amount is None or amount <= 0:
+                continue
+            cost += value
+            quantity += amount
+        card[name] = cost / quantity if quantity > 0 else None
+    if has_charged(buckets):
+        charged = unit_prices(buckets, charged=True)
+        card["cpu_charged_core_hour"] = charged["cpu"]
+        card["memory_charged_gib_hour"] = charged["memory"]
+    return card
 
 
 def has_embodied(buckets: Sequence[HourBucket]) -> bool:
