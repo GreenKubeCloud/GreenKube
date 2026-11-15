@@ -946,7 +946,10 @@ class WorkloadUsageRollup:
         """Previous restart counts of the hour's pods: the context rows, plus each pod's last
         stored count however old when the context has none for it (collection gap, missing hour)."""
         known = {(row.namespace, row.pod_name) for row in context if _restart_value(row) is not None}
-        missing = sorted({(row.namespace, row.pod_name) for row in pod_rows} - known)
+        # Only pods that carry a count need a previous one: a pod without restart counts
+        # (kube-state-metrics not scraped) never triggers the unbounded lookup.
+        counted = {(row.namespace, row.pod_name) for row in pod_rows if _restart_value(row) is not None}
+        missing = sorted(counted - known)
         if not missing:
             return list(context)
         return [*context, *await self.repository.read_last_restart_counts(hour, missing)]
@@ -995,8 +998,8 @@ class WorkloadUsageRollup:
             logger.info("Workload usage rollup: re-rolling %d hours that received late rows.", len(late))
         for hour in sorted(hours):
             pod_rows, container_rows, source = await self.repository.read_hour_inputs(hour)
-            if hour in legacy and not (pod_rows or container_rows):
-                # Inputs no longer stored: keep the rolled hour as it is.
+            if hour in legacy and not pod_rows:
+                # Pod rows (which carry the restart counts) no longer stored: keep the rolled hour.
                 continue
             context: List[Any] = []
             if pod_rows:
@@ -1023,7 +1026,12 @@ class WorkloadUsageRollup:
                 if pod_rows or container_rows
                 else []
             )
-            await self.repository.replace_hour(hour, rows)
+            if hour in legacy and source != "raw":
+                # A pre-0130 hour whose raw rows are gone: the compressed hourly rows would
+                # lower the stored percentiles, so only its restart increase is written.
+                await self.repository.set_restart_increase(hour, rows)
+            else:
+                await self.repository.replace_hour(hour, rows)
             result.hours += 1
             result.rows += len(rows)
         await self.repository.save_rollup_marks(marks)

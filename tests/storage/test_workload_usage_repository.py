@@ -651,12 +651,11 @@ async def test_refresh_rerolls_hours_rolled_before_the_per_pod_increase(db):
         ""
     ].restart_increase is None
 
-    result = await WorkloadUsageRollup(repository).refresh(now=start + timedelta(hours=3, minutes=30), refresh_hours=1)
+    await WorkloadUsageRollup(repository).refresh(now=start + timedelta(hours=3, minutes=30), refresh_hours=1)
 
-    assert result.legacy_hours == 1
     summary = (await repository.read_usage_snapshot(*window)).summaries[("shop", "Deployment", "api")][""]
     assert summary.restart_increase == 1
-    assert summary.restart_increase_legacy is False
+    assert getattr(summary, "restart_increase_legacy", None) is False
 
 
 async def test_pre_0130_hours_without_stored_rows_stay_unknown_and_are_flagged(db):
@@ -678,4 +677,88 @@ async def test_pre_0130_hours_without_stored_rows_stay_unknown_and_are_flagged(d
     summary = (await repository.read_usage_snapshot(*window)).summaries[("shop", "Deployment", "api")][""]
     reference = summarize(await repository.read_hours(*window)).summaries[("shop", "Deployment", "api")][""]
     assert summary.restart_increase is None and reference.restart_increase is None
-    assert summary.restart_increase_legacy is True and reference.restart_increase_legacy is True
+    assert getattr(summary, "restart_increase_legacy", None) is True
+    assert getattr(reference, "restart_increase_legacy", None) is True
+    # The rolled hour is kept, not deleted, when its inputs are gone.
+    assert [
+        item for item in await repository.read_hours(start, start + timedelta(hours=1)) if item.container_name == ""
+    ]
+
+
+async def test_legacy_reroll_from_hourly_tables_keeps_the_raw_usage(db, monkeypatch):
+    """REC-04 review 3: a pre-0130 hour rebuilt from compressed rows only gains its restart increase."""
+    now = datetime.now(timezone.utc)
+    start = floor_hour(now - timedelta(days=10))
+    rows = [
+        _row(
+            start + timedelta(hours=hour, minutes=minute),
+            pod_name="api-1",
+            restart_count=1 if hour < 1 else 3,
+            cpu_usage_millicores=500 if minute == 30 else 100,
+        )
+        for hour in range(3)
+        for minute in range(0, 60, 5)
+    ]
+    await _metrics_repo(db).write_combined_metrics(rows)
+    repository = create_workload_usage_repository(db, db.db_type)
+    await WorkloadUsageRollup(repository, backfill_hours=14 * 24).refresh(now=start + timedelta(hours=3, minutes=5))
+    # The middle hour: the next refresh re-rolls the latest rolled hour anyway.
+    target = start + timedelta(hours=1)
+
+    def _pod_hour(hours):
+        return next(item for item in hours if item.container_name == "" and item.hour_bucket == target)
+
+    before = _pod_hour(await repository.read_hours(start, start + timedelta(hours=3)))
+    assert before.source == "raw" and before.restart_increase == 2
+    await _null_increase(db, target)
+    monkeypatch.setenv("METRICS_RAW_RETENTION_DAYS", "1")
+    await MetricsCompressor(db, Config(), rollup_enabled=False).run(now=now)
+    assert (await repository.read_hour_inputs(target))[2] == "hourly"
+
+    await WorkloadUsageRollup(repository, backfill_hours=14 * 24).refresh(now=now)
+
+    after = _pod_hour(await repository.read_hours(start, start + timedelta(hours=3)))
+    assert after.restart_increase == 2
+    assert after.source == "raw"
+    assert after.cpu_usage_p50 == pytest.approx(before.cpu_usage_p50)
+    assert after.sample_count == before.sample_count
+
+
+async def test_previous_restart_counts_are_looked_up_in_bounded_chunks(db, monkeypatch):
+    """REC-04 review 3: pods without restart counts never trigger the lookup; pods are queried in chunks."""
+    start = _base_hour()
+    rows: list[CombinedMetric] = []
+    for index in range(40):
+        for hour in range(3):
+            # Pods without restart count (kube-state-metrics not scraped) for the whole window.
+            rows.append(_row(start + timedelta(hours=hour), pod_name=f"api-null-{index}", restart_count=None))
+        # Pods that appear in hour 2 with a count: their previous count must be looked up.
+        rows.append(_row(start + timedelta(hours=2), pod_name=f"api-new-{index}", restart_count=0))
+    await _metrics_repo(db).write_combined_metrics(rows)
+    repository = create_workload_usage_repository(db, db.db_type)
+
+    lookups: list[list[tuple[str, str]]] = []
+    original = repository.read_last_restart_counts
+
+    async def spy(hour, pods):
+        lookups.append(list(pods))
+        return await original(hour, pods)
+
+    queries: list[str] = []
+    fetch = getattr(repository, "_fetch")
+
+    async def counting_fetch(sql, params):
+        queries.append(sql)
+        return await fetch(sql, params)
+
+    monkeypatch.setattr(repository, "read_last_restart_counts", spy)
+    monkeypatch.setattr(repository, "_fetch", counting_fetch)
+    await WorkloadUsageRollup(repository).refresh(now=start + timedelta(hours=3, minutes=30))
+
+    looked_up = {pod for call in lookups for _namespace, pod in call}
+    assert not any(pod.startswith("api-null-") for pod in looked_up)
+    assert {f"api-new-{index}" for index in range(40)} <= looked_up
+    # One query per table and chunk of pods, never one per pod.
+    lookup_queries = [sql for sql in queries if "restart_count IS NOT NULL" in sql]
+    assert len([sql for sql in lookup_queries if "pod_name IN" in sql or "ANY(" in sql]) <= 2 * len(lookups)
+    assert len(lookup_queries) <= 2 * len(lookups) + 4

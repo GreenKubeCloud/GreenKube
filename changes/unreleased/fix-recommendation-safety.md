@@ -12,4 +12,4 @@
 
 ### Changed
 - Upgrade: on the first scan after the upgrade, an active native CPU or memory decrease whose container has no readable restart/OOM history is retired (marked stale) with the reason `reliability_signals_unknown`.
-- Upgrade: hours rolled before migration 0130 carry no per-pod restart increase. The rollup re-rolls those it can rebuild from stored raw or compressed hourly rows on its first run after the upgrade; an hour whose rows are gone keeps an unknown restart history, so a decrease whose scan signals are also unknown is withheld, and the `reliability_signals_unknown` diagnostic says how many are due to the upgrade.
+- Upgrade: hours rolled before migration 0130 carry no per-pod restart increase. The rollup re-rolls those whose raw rows are still stored on its first run after the upgrade, and for older hours writes only the restart increase computed from the compressed hourly rows (stored usage percentiles are kept); an hour whose rows are gone keeps an unknown restart history, so a decrease whose scan signals are also unknown is withheld, and the `reliability_signals_unknown` diagnostic says how many are due to the upgrade.

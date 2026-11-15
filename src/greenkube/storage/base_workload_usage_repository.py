@@ -164,6 +164,13 @@ class WorkloadUsageRepository(ABC):
         ``hourly`` or ``mixed``.
         """
 
+    async def set_restart_increase(self, hour: datetime, rows: Sequence[WorkloadUsageHour]) -> None:
+        """Write only ``restart_increase`` of the stored rollup rows of ``hour`` matching ``rows``.
+
+        Used for hours rolled before migration 0130 that can only be rebuilt from
+        the compressed hourly tables: their stored usage (raw precision) is kept.
+        """
+
     @abstractmethod
     async def replace_hour(self, hour: datetime, rows: Sequence[WorkloadUsageHour]) -> None:
         """Atomically replace every rollup row of ``hour`` with ``rows``."""

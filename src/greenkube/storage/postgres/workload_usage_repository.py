@@ -97,29 +97,29 @@ class PostgresWorkloadUsageRepository(WorkloadUsageRepository):
         ]
 
     async def read_last_restart_counts(self, hour: datetime, pods: Sequence[Tuple[str, str]]) -> List[UsageInputRow]:
-        hour = ensure_utc(hour)
-        found: List[UsageInputRow] = []
-        for namespace, pod_name in pods:
-            # Index-backed (namespace, pod_name, timestamp): one row per pod, however old.
-            raw = await self._fetch(
-                "SELECT timestamp AS ts, restart_count FROM combined_metrics WHERE namespace = $1 AND pod_name = $2 "
-                "AND timestamp < $3 AND restart_count IS NOT NULL ORDER BY timestamp DESC LIMIT 1",
-                (namespace, pod_name, hour),
-            )
-            hourly = await self._fetch(
-                "SELECT hour_bucket AS ts, restart_count FROM combined_metrics_hourly WHERE namespace = $1 "
-                "AND pod_name = $2 AND hour_bucket < $3 AND restart_count IS NOT NULL "
-                "ORDER BY hour_bucket DESC LIMIT 1",
-                (namespace, pod_name, hour),
-            )
-            candidates = [(_decode(row["ts"]), row["restart_count"]) for row in (*raw, *hourly)]
-            candidates = [item for item in candidates if item[0] is not None and item[1] is not None]
-            if candidates:
-                timestamp, count = max(candidates, key=lambda item: item[0])
-                found.append(
-                    UsageInputRow(namespace=namespace, pod_name=pod_name, timestamp=timestamp, restart_count=int(count))
+        from greenkube.storage.sqlite.workload_usage_repository import _pod_chunks
+
+        bound = ensure_utc(hour)
+        latest: Dict[Tuple[str, str], Tuple[datetime, int]] = {}
+        for namespace, names in _pod_chunks(pods):
+            for table, column in (("combined_metrics", "timestamp"), ("combined_metrics_hourly", "hour_bucket")):
+                rows = await self._fetch(
+                    f"SELECT DISTINCT ON (pod_name) pod_name, {column} AS ts, restart_count FROM {table} "
+                    f"WHERE namespace = $1 AND pod_name = ANY($2::text[]) AND {column} < $3 "
+                    f"AND restart_count IS NOT NULL ORDER BY pod_name, {column} DESC",
+                    (namespace, list(names), bound),
                 )
-        return found
+                for row in rows:
+                    timestamp = _decode(row["ts"])
+                    key = (namespace, row["pod_name"])
+                    if timestamp is None or row["restart_count"] is None:
+                        continue
+                    if key not in latest or timestamp > latest[key][0]:
+                        latest[key] = (timestamp, int(row["restart_count"]))
+        return [
+            UsageInputRow(namespace=namespace, pod_name=pod_name, timestamp=timestamp, restart_count=count)
+            for (namespace, pod_name), (timestamp, count) in latest.items()
+        ]
 
     async def legacy_restart_hours(self, start: datetime, end: datetime) -> List[datetime]:
         rows = await self._fetch(
@@ -165,6 +165,30 @@ class PostgresWorkloadUsageRepository(WorkloadUsageRepository):
                 sources.add("hourly")
         source = sources.pop() if len(sources) == 1 else ("mixed" if sources else "raw")
         return pods, containers, source
+
+    async def set_restart_increase(self, hour: datetime, rows: Sequence[WorkloadUsageHour]) -> None:
+        bucket = ensure_utc(hour)
+        values = [
+            (
+                row.restart_increase,
+                bucket,
+                row.namespace,
+                row.target_kind,
+                row.target_name,
+                row.container_name,
+                row.node,
+            )
+            for row in rows
+            if row.restart_increase is not None
+        ]
+        if not values:
+            return
+        async with self.db_manager.transaction() as conn:
+            await conn.executemany(
+                "UPDATE workload_usage_hourly SET restart_increase = $1 WHERE hour_bucket = $2 AND namespace = $3 "
+                "AND target_kind = $4 AND target_name = $5 AND container_name = $6 AND node = $7",
+                values,
+            )
 
     async def replace_hour(self, hour: datetime, rows: Sequence[WorkloadUsageHour]) -> None:
         sql = q.upsert_sql([f"${index}" for index in range(1, len(ROLLUP_COLUMNS) + 1)])

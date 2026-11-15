@@ -36,6 +36,22 @@ def _decode(value: Any) -> Optional[datetime]:
     return ensure_utc(value)
 
 
+#: Pods per ``IN (...)`` lookup of the last restart counts.
+POD_CHUNK = 500
+
+
+def _pod_chunks(pods: Sequence[Tuple[str, str]]) -> List[Tuple[str, List[str]]]:
+    """``(namespace, pod names)`` groups of at most :data:`POD_CHUNK` pods."""
+    by_namespace: Dict[str, List[str]] = {}
+    for namespace, pod_name in pods:
+        by_namespace.setdefault(namespace, []).append(pod_name)
+    return [
+        (namespace, names[index : index + POD_CHUNK])
+        for namespace, names in sorted(by_namespace.items())
+        for index in range(0, len(names), POD_CHUNK)
+    ]
+
+
 def _count(value: Any) -> Optional[int]:
     return None if value is None else int(value)
 
@@ -134,29 +150,29 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
         ]
 
     async def read_last_restart_counts(self, hour: datetime, pods: Sequence[Tuple[str, str]]) -> List[UsageInputRow]:
-        hour = ensure_utc(hour)
-        bound = _encode(hour)
-        found: List[UsageInputRow] = []
-        for namespace, pod_name in pods:
-            # Index-backed (namespace, pod_name, timestamp): one row per pod, however old.
-            raw = await self._fetch(
-                'SELECT "timestamp", restart_count FROM combined_metrics WHERE namespace = ? AND pod_name = ? '
-                'AND "timestamp" < ? AND restart_count IS NOT NULL ORDER BY "timestamp" DESC LIMIT 1',
-                (namespace, pod_name, bound),
-            )
-            hourly = await self._fetch(
-                "SELECT hour_bucket, restart_count FROM combined_metrics_hourly WHERE namespace = ? AND pod_name = ? "
-                "AND hour_bucket < ? AND restart_count IS NOT NULL ORDER BY hour_bucket DESC LIMIT 1",
-                (namespace, pod_name, bound),
-            )
-            candidates = [(_decode(row[0]), _count(row[1])) for row in (*raw, *hourly)]
-            candidates = [item for item in candidates if item[0] is not None and item[1] is not None]
-            if candidates:
-                timestamp, count = max(candidates, key=lambda item: item[0])
-                found.append(
-                    UsageInputRow(namespace=namespace, pod_name=pod_name, timestamp=timestamp, restart_count=count)
+        bound = _encode(ensure_utc(hour))
+        latest: Dict[Tuple[str, str], Tuple[datetime, int]] = {}
+        for namespace, names in _pod_chunks(pods):
+            marks = ", ".join("?" for _ in names)
+            # SQLite returns the bare column of the row holding MAX(): the count at the newest sample.
+            for table, column in (("combined_metrics", '"timestamp"'), ("combined_metrics_hourly", "hour_bucket")):
+                rows = await self._fetch(
+                    f"SELECT pod_name, MAX({column}), restart_count FROM {table} "
+                    f"WHERE namespace = ? AND pod_name IN ({marks}) AND {column} < ? AND restart_count IS NOT NULL "
+                    "GROUP BY pod_name",
+                    (namespace, *names, bound),
                 )
-        return found
+                for pod_name, stamp, count in rows:
+                    timestamp, value = _decode(stamp), _count(count)
+                    key = (namespace, pod_name)
+                    if timestamp is None or value is None:
+                        continue
+                    if key not in latest or timestamp > latest[key][0]:
+                        latest[key] = (timestamp, value)
+        return [
+            UsageInputRow(namespace=namespace, pod_name=pod_name, timestamp=timestamp, restart_count=count)
+            for (namespace, pod_name), (timestamp, count) in latest.items()
+        ]
 
     async def legacy_restart_hours(self, start: datetime, end: datetime) -> List[datetime]:
         rows = await self._fetch(
@@ -196,6 +212,30 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
                 sources.add("hourly")
         source = sources.pop() if len(sources) == 1 else ("mixed" if sources else "raw")
         return pods, containers, source
+
+    async def set_restart_increase(self, hour: datetime, rows: Sequence[WorkloadUsageHour]) -> None:
+        bucket = _encode(ensure_utc(hour))
+        values = [
+            (
+                row.restart_increase,
+                bucket,
+                row.namespace,
+                row.target_kind,
+                row.target_name,
+                row.container_name,
+                row.node,
+            )
+            for row in rows
+            if row.restart_increase is not None
+        ]
+        if not values:
+            return
+        async with self.db_manager.transaction() as conn:
+            await conn.executemany(
+                "UPDATE workload_usage_hourly SET restart_increase = ? WHERE hour_bucket = ? AND namespace = ? "
+                "AND target_kind = ? AND target_name = ? AND container_name = ? AND node = ?",
+                values,
+            )
 
     async def replace_hour(self, hour: datetime, rows: Sequence[WorkloadUsageHour]) -> None:
         sql = q.upsert_sql(["?"] * len(ROLLUP_COLUMNS))

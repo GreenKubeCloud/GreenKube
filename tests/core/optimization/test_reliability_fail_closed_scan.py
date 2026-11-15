@@ -37,6 +37,7 @@ from greenkube.signals.sdk import SourceDeps, SourceSettings
 from greenkube.storage.base_workload_usage_repository import create_workload_usage_repository
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
+from greenkube.utils.time import to_iso_z
 
 MIB = 1024 * 1024
 END = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -57,7 +58,7 @@ async def sqlite_db(tmp_path, monkeypatch):
         await manager.close()
 
 
-async def _sql_snapshot(db: DatabaseManager, restarts: Callable[[int], Optional[int]]):
+async def _sql_snapshot(db: DatabaseManager, restarts: Callable[[int], Optional[int]], legacy_hour: bool = False):
     """Eight days of a low-usage container, written, rolled up and summarized in SQL.
 
     ``restarts(step)`` is the pod's restart count at each 5-minute step (pod rows
@@ -84,6 +85,21 @@ async def _sql_snapshot(db: DatabaseManager, restarts: Callable[[int], Optional[
     await SQLiteCombinedMetricsRepository(db).write_combined_metrics(rows)
     repository = create_workload_usage_repository(db, db.db_type)
     await WorkloadUsageRollup(repository, warmup_seconds=600).refresh(now=END + timedelta(minutes=30))
+    if legacy_hour:
+        # One hour rolled before migration 0130 whose raw rows are gone (upgrade case).
+        hour = to_iso_z(t0 + timedelta(days=1))
+        async with db.connection_scope() as conn:
+            await conn.execute(
+                "UPDATE workload_usage_hourly SET restart_increase = NULL WHERE hour_bucket = ?", (hour,)
+            )
+            await conn.execute(
+                'DELETE FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ?',
+                (hour, to_iso_z(t0 + timedelta(days=1, hours=1))),
+            )
+            await conn.commit()
+        await WorkloadUsageRollup(repository, warmup_seconds=600).refresh(
+            now=END + timedelta(minutes=30), refresh_hours=1
+        )
     snapshot = await repository.read_usage_snapshot(t0, END + timedelta(hours=1))
     assert snapshot.source == "rollup"
     await attach_reliability_signals(
@@ -228,3 +244,17 @@ async def test_restarts_in_the_rollup_block_decreases_without_a_withheld_diagnos
     # The OOM kills are unknown (the restarts may be OOM kills): the increase is kept.
     active = await _active(repo)
     assert [rec for rec in active if rec.type == RecommendationType.RIGHTSIZING_MEMORY]
+
+
+async def test_the_withheld_diagnostic_names_the_upgrade_on_the_sql_path(sqlite_db):
+    """REC-04 review 3: history unknown only because of a pre-0130 hour says so (rollup + SQL summary)."""
+    snapshot = await _sql_snapshot(sqlite_db, lambda step: 0, legacy_hour=True)
+    assert snapshot.summaries[TARGET][""].restart_increase is None
+
+    result = await _engine(snapshot).run_scan(AsyncMock(), AsyncMock(), SQLiteRecommendationRepository(sqlite_db))
+
+    reports = {report.source_id: report for report in result.source_reports}
+    [diagnostic] = [
+        d for d in reports["greenkube.rightsizing_memory"].run.diagnostics if d.code == RELIABILITY_SIGNALS_UNKNOWN
+    ]
+    assert "because hours rolled before the upgrade (migration 0130)" in diagnostic.message
