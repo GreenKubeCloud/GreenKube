@@ -82,6 +82,18 @@ export function eligibilityOf(rec) {
 }
 
 /**
+ * The `oom_history_unknown` warning (a memory decrease whose OOM history could not be read), or null.
+ * The server names the cause in its message and what to check before merging in its fix.
+ */
+export function oomHistoryWarningOf(rec) {
+	const eligibility = eligibilityOf(rec);
+	if (!eligibility) return null;
+	return (
+		[...eligibility.warnings, ...eligibility.blockers].find((entry) => entry.code === 'oom_history_unknown') ?? null
+	);
+}
+
+/**
  * The change set a plan is created for, when the server says a PR can be opened.
  * Replaces the former client-side `safeActionFor` checks.
  * @returns {{recommendationIds: number[]} | null}

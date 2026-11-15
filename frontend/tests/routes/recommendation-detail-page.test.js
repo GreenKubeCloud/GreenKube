@@ -100,6 +100,30 @@ describe('recommendation detail page', () => {
 		]);
 	});
 
+	it('shows the unknown OOM history warning with its cause on an eligible recommendation', async () => {
+		api.getRecommendation.mockResolvedValue({
+			...record,
+			eligibility: {
+				can_open_pr: true,
+				delivery_modes: ['direct', 'manual'],
+				blockers: [],
+				warnings: [
+					{
+						code: 'oom_history_unknown',
+						message: 'No usage summary covers this container, so its OOM-kill and restart history could not be read.',
+						fix: 'Before merging, check the container: no recent restarts, no OOMKilled last state.'
+					}
+				]
+			}
+		});
+		render(DetailPage, { props: { data: { id: '12' } } });
+
+		const warning = await screen.findByTestId('oom-history-warning');
+		expect(warning).toHaveTextContent('OOM history unknown');
+		expect(warning).toHaveTextContent('No usage summary covers this container');
+		expect(warning).toHaveTextContent('Before merging');
+	});
+
 	it('loads the id from the route', () => {
 		expect(load({ params: { id: '12' } })).toEqual({ id: '12' });
 	});
