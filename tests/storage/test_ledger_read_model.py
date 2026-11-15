@@ -121,3 +121,25 @@ async def test_v1_ledger_is_append_only_except_supersession_and_reconciles(ledge
     await _projector(ledger).sync(full=True)
     assert await reconcile(ledger.repo, CLUSTER_UID, CLUSTER)
     assert LEDGER_RECONCILIATION_OK.labels(cluster_uid=CLUSTER_UID)._value.get() == 1.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_savings_counters_switch_to_ledger_v2_only_once_it_reconciles(ledger: LedgerDb):
+    # Review WP-09 point 3: the identity alone is not enough, the projector must have caught up first.
+    from greenkube.api import metrics_endpoint
+    from greenkube.verify.ledger.identity import ClusterIdentityResolver
+    from tests.storage.test_ledger_v2_contract import _uid  # pyrefly: ignore[missing-import]
+
+    metrics_endpoint._LEDGER_V2_COUNTERS.clear()
+    pending = _allocated_record(1, applied_hours_ago=5, realization=1.0)
+    attributor = SavingsAttributor(ledger.v1, CLUSTER, initial_backfill=timedelta(hours=6), max_slots_per_run=10)
+    await attributor.accrue([pending], now=_hour(-1))
+    await ClusterIdentityResolver(ledger.repo, CLUSTER, reader=_uid).resolve()
+    assert await metrics_endpoint.savings_counter_source(ledger.repo, CLUSTER) is None
+
+    await _projector(ledger, records=[pending]).sync(full=True)
+    assert await metrics_endpoint.savings_counter_source(ledger.repo, CLUSTER) == CLUSTER_UID
+    # Once switched it stays on v2 while the projector catches up a new row.
+    await attributor.accrue([pending], now=_hour(0) + timedelta(minutes=3))
+    assert await metrics_endpoint.savings_counter_source(ledger.repo, CLUSTER) == CLUSTER_UID

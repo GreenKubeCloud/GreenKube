@@ -16,7 +16,7 @@ import weakref
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from math import log2
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 from prometheus_client.core import CounterMetricFamily
@@ -493,6 +493,34 @@ class _SavingsLedgerCounterCollector:
                     max(0.0, float(getattr(counter, attribute))),
                 )
             yield family
+
+
+#: Ledger clusters whose savings metrics already read ledger v2 in this process (the switch is one-way).
+_LEDGER_V2_COUNTERS: dict[str, str] = {}
+
+
+async def savings_counter_source(ledger_repo, ledger_cluster: str) -> Optional[str]:
+    """The ledger v2 cluster uid the savings counters and gauges read, or None to keep the v1 ledger.
+
+    The counters switch to ledger v2 only once its accrued book reconciles
+    with the v1 rows (the projector caught up), so the switch never shows as a
+    drop; afterwards they stay on v2 in this process even while the projector
+    catches up a new row (review WP-09).
+    """
+    known = _LEDGER_V2_COUNTERS.get(ledger_cluster)
+    if known is not None:
+        return known
+    identity = await ledger_repo.get_identity(ledger_cluster)
+    if identity is None:
+        logger.info("Savings ledger v2 has no cluster identity yet: savings metrics read the v1 ledger.")
+        return None
+    from ..verify.ledger.reconciliation import reconcile
+
+    if not await reconcile(ledger_repo, identity[0], ledger_cluster):
+        logger.info("Savings ledger v2 does not reconcile with the v1 ledger yet: savings metrics read the v1 ledger.")
+        return None
+    _LEDGER_V2_COUNTERS[ledger_cluster] = identity[0]
+    return identity[0]
 
 
 SAVINGS_LEDGER_COUNTERS = _SavingsLedgerCounterCollector()
@@ -1330,18 +1358,17 @@ async def refresh_metrics_from_db(
                 from ..storage.ledger_repository import get_ledger_repository
 
                 ledger_repo = get_ledger_repository()
-                identity = await ledger_repo.get_identity(ledger_cluster)
-                if identity is not None:
-                    counters = await ledger_repo.lifetime_counters(identity[0])
+                ledger_uid = await savings_counter_source(ledger_repo, ledger_cluster)
+                if ledger_uid is not None:
+                    counters = await ledger_repo.lifetime_counters(ledger_uid)
                 else:
-                    logger.info("Savings ledger v2 has no cluster identity yet: savings metrics read the v1 ledger.")
                     counters = await savings_repo.get_lifetime_counters(ledger_cluster)
                 update_attributed_savings_metrics(counters, cluster=cluster)
                 clear_dashboard_savings_metrics()
                 savings_namespaces = await get_dashboard_namespaces("savings")
                 for window_slug, start_time, end_time in _dashboard_window_ranges(now):
-                    if identity is not None:
-                        breakdown = await ledger_repo.accrual_breakdown(identity[0], start_time, end_time)
+                    if ledger_uid is not None:
+                        breakdown = await ledger_repo.accrual_breakdown(ledger_uid, start_time, end_time)
                     else:
                         breakdown = await savings_repo.get_accrual_breakdown(ledger_cluster, start_time, end_time)
                     update_dashboard_savings_from_breakdown(
