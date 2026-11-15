@@ -354,3 +354,36 @@ async def test_a_legacy_change_reads_the_live_requests_before_closing(database):
     assert (await monitor.run(now=hour_now() + timedelta(minutes=45)))["closed"] == [change.change_id]
     event = (await scenario.changes.list_events(change.change_id))[-1]
     assert event.event_type == "spec_drift" and "live requests differ" in event.reason
+
+
+async def test_an_older_change_recorded_late_does_not_supersede_a_newer_realized_one(database):  # noqa: F811
+    """Review wp07-4 point 4: an adopted change that landed earlier never closes a later realized change."""
+    from greenkube.models.metrics import RecommendationRecord, RecommendationType
+
+    scenario, change, _, _ = await _realized(database, drift_days=0)
+    await scenario.reco_repo.save_recommendations(
+        [
+            RecommendationRecord(
+                type=RecommendationType.RIGHTSIZING_CPU,
+                pod_name="api",
+                namespace="prod",
+                scope="workload",
+                owner_kind="Deployment",
+                owner_name="api",
+                container_name="sidecar",
+                description="oversized",
+                current_cpu_request_millicores=500,
+                recommended_cpu_request_millicores=200,
+                potential_savings_cost=10.0,
+            )
+        ]
+    )
+    old = next(record for record in await scenario.records() if record.container_name == "sidecar")
+    assert old.id is not None
+    landed = change.rollout_completed_at - timedelta(days=3)
+    applied = await scenario.lifecycle.apply(
+        old.id, actual_cpu=200, application_method="manual", applied_at=landed, change_id="change-old"
+    )
+    await scenario.service.record_change("change-old", [applied], now=hour_now())
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.REALIZED

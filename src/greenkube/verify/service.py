@@ -639,8 +639,11 @@ class ChangeMeasurementService:
         except Exception as exc:
             logger.warning("Could not read earlier changes of %s: %s", "/".join(change.target.key), exc)
             return
+        completed = ensure_utc(change.rollout_completed_at)
         for other in earlier:
-            if other.change_id == change.change_id:
+            # Only changes that landed before this one: a change recorded late (adopted, manual)
+            # never closes a newer realized change.
+            if other.change_id == change.change_id or ensure_utc(other.rollout_completed_at) >= completed:
                 continue
             status = await self.changes.get_status(other.change_id)
             if status is None or status.state is not MeasurementState.REALIZED:
