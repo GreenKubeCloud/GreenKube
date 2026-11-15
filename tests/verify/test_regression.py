@@ -14,7 +14,7 @@ from typing import Callable, Dict
 import pytest
 
 from greenkube.verify.load_driver import ResolvedLoad
-from greenkube.verify.model import ChangeOutcome, LoadDriverInfo, TimeWindow
+from greenkube.verify.model import ChangeOutcome, HourBucket, LoadDriverInfo, TimeWindow
 from greenkube.verify.regression import (
     METHOD_OLS,
     SEASONALITY_DAY_TYPE,
@@ -129,6 +129,81 @@ def test_load_growth_is_not_credited_as_a_saving():
     assert cost.ci_low is not None and cost.ci_high is not None
     assert cost.ci_low <= 0.0 <= cost.ci_high or abs(cost.rate_per_hour or 0.0) < 0.001
     assert cost.outcome is not ChangeOutcome.REALIZED
+
+
+def _charged_scenario(*, post_request: float, seed: int, post_scale: float = 1.2):
+    """Request-priced buckets whose CPU usage follows the load and exceeds the request at peaks.
+
+    The allocator charges ``max(request, usage)`` at 0.03 per core-hour plus
+    1 GiB at 0.005: busier hours cost more without any change to the requests.
+    """
+    rng = random.Random(seed)
+    change = change_event(COMPLETED)
+    plan = STRATEGY.required_windows(change, SETTINGS)
+    pre_load = _load_series(plan.pre, rng)
+    post_load = _load_series(plan.post, rng, scale=post_scale)
+
+    def window(load: Dict[datetime, float], request: float, start: datetime, end: datetime) -> list:
+        out = []
+        for hour, value in load.items():
+            if not start <= hour < end:
+                continue
+            usage = 0.005 * value
+            charged = max(request, usage)
+            out.append(
+                HourBucket(
+                    hour=hour,
+                    coverage=1.0,
+                    replicas=1.0,
+                    core_hours=request,
+                    gib_hours=1.0,
+                    charged_core_hours=charged,
+                    charged_gib_hours=1.0,
+                    cpu_usage_cores=usage,
+                    cost=charged * 0.03 + 0.005,
+                    cost_cpu=charged * 0.03,
+                    cost_ram=0.005,
+                    cost_coverage=1.0,
+                    instance_types={"m5": 1.0},
+                )
+            )
+        return out
+
+    pre = window(pre_load, 1.0, plan.pre.start, plan.pre.end)
+    post = window(post_load, post_request, plan.post.start, plan.post.end)
+    load = ResolvedLoad(info=INFO, pre=pre_load, post=post_load)
+    result = STRATEGY.estimate(
+        change,
+        plan,
+        pre,
+        post,
+        load=load,
+        confounders=[],
+        projections={},
+        settings=SETTINGS,
+        seed_parts=(change.change_id, seed),
+    )
+    truth = math.fsum(
+        (max(1.0, 0.005 * value) - max(post_request, 0.005 * value)) * 0.03 for value in post_load.values()
+    ) / len(post_load)
+    return result, {item.quantity: item for item in result.estimates}, truth
+
+
+def test_load_growth_above_the_request_is_not_credited_on_the_claimed_cost():
+    """Usage above the request follows the load: a busier post-window with unchanged requests saves nothing."""
+    result, estimates, _ = _charged_scenario(post_request=1.0, seed=21)
+    claimed = estimates["allocated_cost"]
+    assert claimed.claimed and claimed.method == METHOD_OLS
+    assert claimed.ci_low is not None and claimed.ci_low <= 0.0
+    assert result.outcome is not ChangeOutcome.REALIZED
+
+
+def test_a_request_cut_under_load_growth_claims_the_charged_saving():
+    result, estimates, truth = _charged_scenario(post_request=0.5, seed=22)
+    claimed = estimates["allocated_cost"]
+    assert claimed.ci_low is not None and claimed.ci_high is not None
+    assert claimed.ci_low <= truth <= claimed.ci_high
+    assert result.outcome is ChangeOutcome.REALIZED
 
 
 def test_interval_covers_the_true_effect_at_about_its_nominal_rate():
