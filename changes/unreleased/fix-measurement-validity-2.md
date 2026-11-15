@@ -1,0 +1,7 @@
+### Changed
+- Change measurement: a baseline counts as deterministic (no between-week term) when the relative standard deviation of its hourly values is at most 1e-4, instead of a max-min spread of 1e-6; an exactly flat baseline and the same baseline with float jitter now get the same verdict.
+- Change measurement health gates: the restart test needs baseline replica-hours of at least a quarter of the post-window replica-hours, otherwise the absolute rule is kept and labelled `baseline_too_short` (a 1-hour baseline let 100 post-window restarts pass). The baseline snapshot freezes each container's OOM restarts, and when a memory increase leaves its OOM restarts out of the post-window restart count, the same restarts leave the baseline count (`baseline_oom_restarts_missing` labels snapshots without them).
+
+### Fixed
+- Methodology: a known limitation is now stated with its numbers. With the default 7-day baseline the between-week term is the 5% prior, and a zero saving is declared `realized` in 0%, 2.0%, 16.0% and 33.5% of simulated changes at a week-to-week variation of 2%, 5%, 10% and 20% (1.2%, 4.0%, 4.5% and 3.8% with a 28-day baseline). New Monte-Carlo tests cover 10% and 20% variation with a 28-day baseline and pin the 7-day limitation.
+- Methodology: removed the claim that `realized` verdicts of version 2.2 can be re-measured (only `not_realized` and `inconclusive` ones can); documented the interim verifier's point-estimate verdicts and which installs use it; the accelerated quickstart windows always give `inconclusive` (not "mostly").

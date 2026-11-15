@@ -44,8 +44,9 @@ CONFIDENCE = 0.90
 WEEK_HOURS = 168
 #: Share of a week's hours a baseline week needs to count for the between-week term.
 MIN_WEEK_SHARE = 0.5
-#: Relative spread below which a baseline series is deterministic (requests x a fixed price).
-DETERMINISTIC_SPREAD = 1e-6
+#: Relative standard deviation below which a baseline series is deterministic (requests x a fixed
+#: price): 1e-4 absorbs float noise and price-feed rounding, far below any real usage variation.
+DETERMINISTIC_RELATIVE_SD = 1e-4
 #: Name recorded in ``counterfactual_params.interval_method``.
 INTERVAL_METHOD = "circular_block_bootstrap_t_with_between_week"
 
@@ -292,6 +293,23 @@ class BetweenWeekTerm:
         }
 
 
+def is_deterministic(values: Sequence[float], tolerance: float = DETERMINISTIC_RELATIVE_SD) -> bool:
+    """Whether ``values`` are constant up to a relative standard deviation of ``tolerance``.
+
+    A relative (not absolute max-min) test makes the exemption continuous: an
+    exactly flat series and the same series with float jitter of 1e-6 are
+    treated alike. An empty series or one of zeros is deterministic.
+    """
+    data = [float(value) for value in values]
+    if len(data) < 2:
+        return True
+    mean = math.fsum(data) / len(data)
+    sd = math.sqrt(math.fsum((value - mean) ** 2 for value in data) / len(data))
+    if abs(mean) <= 1e-12:
+        return sd <= 1e-12
+    return sd / abs(mean) <= tolerance
+
+
 def between_week_term(
     residuals: Mapping[datetime, float],
     baseline_values: Sequence[float],
@@ -308,7 +326,8 @@ def between_week_term(
     With ``K >= 2`` complete baseline weeks, ``σ_w`` is the sample standard
     deviation of their mean residuals (``K - 1`` degrees of freedom). With
     fewer, ``σ_w = prior_cv × |counterfactual|`` (taken as known), except for
-    a deterministic baseline (every value equal within 1e-6 relative): its
+    a deterministic baseline (relative standard deviation at most
+    :data:`DETERMINISTIC_RELATIVE_SD`): its
     level is set by configuration (requests times a price card), whose changes
     the confounder checks report, so no week-level variation is added.
     """
@@ -322,8 +341,7 @@ def between_week_term(
         dof = float(weeks - 1)
         basis = "estimated"
     else:
-        spread = (max(baseline_values) - min(baseline_values)) if baseline_values else 0.0
-        if spread <= DETERMINISTIC_SPREAD * max(reference, 1e-12):
+        if is_deterministic(baseline_values):
             sigma, basis = 0.0, "deterministic_baseline"
         else:
             sigma, basis = prior_cv * reference, "prior"

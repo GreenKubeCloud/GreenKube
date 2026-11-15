@@ -85,6 +85,30 @@ def test_a_tiny_deterministic_saving_below_the_floor_is_not_realized():
     assert "negligible" in (fitted.estimate.reason or "")
 
 
+@pytest.mark.parametrize("jitter", [1e-7, 1e-6, 1e-5])
+def test_float_jitter_on_a_fixed_price_baseline_is_still_deterministic(jitter):
+    # Review: an exactly flat baseline was realized with a zero-width interval while a
+    # relative jitter of 1e-6 (float noise of a price refresh) made the same change inconclusive.
+    rng = random.Random(f"jitter-{jitter}")
+    values = [1.0 + rng.gauss(0, jitter) for _ in range(WEEK)] + [0.9 + rng.gauss(0, jitter) for _ in range(WEEK)]
+    pre, post = _windows(7, values)
+    fitted = _fit(pre, post, MeasurementSettings(), ("jitter", jitter))
+    assert fitted.interval_params is not None
+    assert fitted.interval_params["between_week_basis"] == "deterministic_baseline"
+    assert fitted.estimate.outcome is ChangeOutcome.REALIZED
+
+
+@pytest.mark.parametrize("noise", [1e-3, 1e-2])
+def test_a_baseline_with_real_relative_variation_uses_the_prior(noise):
+    rng = random.Random(f"noise-{noise}")
+    values = [1.0 + rng.gauss(0, noise) for _ in range(WEEK)] + [0.9 + rng.gauss(0, noise) for _ in range(WEEK)]
+    pre, post = _windows(7, values)
+    fitted = _fit(pre, post, MeasurementSettings(), ("noise", noise))
+    assert fitted.interval_params is not None
+    assert fitted.interval_params["between_week_basis"] == "prior"
+    assert fitted.estimate.outcome is ChangeOutcome.INCONCLUSIVE
+
+
 def test_a_deterministic_saving_is_realized_with_a_zero_width_interval():
     pre, post = _windows(7, [1.0] * WEEK + [0.7] * WEEK)
     estimate = _fit(pre, post, MeasurementSettings(), "det").estimate
@@ -113,12 +137,18 @@ def _ar1(rng: random.Random, weeks: int) -> List[float]:
     return out
 
 
-def _week_level(rng: random.Random, weeks: int) -> List[float]:
-    out: List[float] = []
-    for _ in range(weeks):
-        level = rng.gauss(0, 0.05)
-        out.extend(1.0 + level + rng.gauss(0, 0.02) for _ in range(WEEK))
-    return out
+def _week_level_cv(cv: float) -> Callable[[random.Random, int], List[float]]:
+    def generate(rng: random.Random, weeks: int) -> List[float]:
+        out: List[float] = []
+        for _ in range(weeks):
+            level = rng.gauss(0, cv)
+            out.extend(1.0 + level + rng.gauss(0, 0.02) for _ in range(WEEK))
+        return out
+
+    return generate
+
+
+_week_level = _week_level_cv(0.05)
 
 
 SCENARIOS: Dict[str, Callable[[random.Random, int], List[float]]] = {
@@ -126,6 +156,13 @@ SCENARIOS: Dict[str, Callable[[random.Random, int], List[float]]] = {
     "ar1_0.9": _ar1,
     "week_level_5pct": _week_level,
 }
+#: Week-to-week variation larger than the 5% prior: only an estimated term (K >= 2) covers it.
+WIDE_SCENARIOS: Dict[str, Callable[[random.Random, int], List[float]]] = {
+    "week_level_10pct": _week_level_cv(0.10),
+    "week_level_20pct": _week_level_cv(0.20),
+}
+SCENARIOS.update(WIDE_SCENARIOS)
+NARROW_SCENARIOS = ["iid", "ar1_0.9", "week_level_5pct"]
 
 
 def _rates(scenario: str, pre_days: int, settings: MeasurementSettings, saving: float = 0.0) -> Dict[str, float]:
@@ -146,12 +183,31 @@ NO_FLOOR = MeasurementSettings(bootstrap_samples=200, epsilon_ratio=0.0)
 
 
 @pytest.mark.parametrize("pre_days", [7, 28])
-@pytest.mark.parametrize("scenario", sorted(SCENARIOS))
+@pytest.mark.parametrize("scenario", NARROW_SCENARIOS)
 def test_a_zero_saving_is_rarely_declared_realized(scenario, pre_days):
     assert _rates(scenario, pre_days, FAST)["realized"] <= 0.07
 
 
-@pytest.mark.parametrize("scenario", sorted(SCENARIOS))
+@pytest.mark.parametrize("scenario", sorted(WIDE_SCENARIOS))
+def test_a_28_day_baseline_keeps_the_false_positive_rate_with_large_week_to_week_variation(scenario):
+    # The prior (5%) is not used with K = 4 baseline weeks: the estimated term covers 10% and 20%.
+    assert _rates(scenario, 28, FAST)["realized"] <= 0.055
+
+
+def test_known_limitation_one_baseline_week_understates_week_to_week_variation_above_the_prior():
+    """KNOWN LIMITATION (documented in docs/methodology/savings-measurement.md, section 6).
+
+    With the default 7-day baseline the between-week term is the 5% prior. A
+    quantity whose weekly level varies by 10% is declared ``realized`` with a
+    true saving of zero far more often than the nominal 5% (review simulation:
+    16%; 33.5% at 20%). This test pins the limitation so that a change of the
+    default baseline length, or of the prior, is a visible decision.
+    """
+    rate = _rates("week_level_10pct", 7, FAST)["realized"]
+    assert rate > 0.07
+
+
+@pytest.mark.parametrize("scenario", NARROW_SCENARIOS)
 def test_the_interval_alone_keeps_the_nominal_false_positive_rate(scenario):
     # Without the noise floor the one-sided false-realized rate of a 90% interval is 5%.
     rate = _rates(scenario, 28, NO_FLOOR)["realized"]
