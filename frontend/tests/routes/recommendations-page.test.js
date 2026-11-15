@@ -154,6 +154,25 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		expect(screen.queryByRole('button', { name: 'Open PR' })).not.toBeInTheDocument();
 	});
 
+	it('shows the allocated saving with the fixed-nodes note and the projected released capacity (IMP-03, WP-08.1)', async () => {
+		api.getActiveRecommendations.mockResolvedValue([
+			{
+				...actionReadyRecommendation(),
+				potential_savings_cost: 0,
+				potential_savings_co2e_grams: 0,
+				projected_allocated_cost_annual: 236.52,
+				projected_billable_cost_annual: 0,
+				projection_note: 'fixed nodes: frees capacity, bill unchanged until nodes are removed',
+				released_capacity: { method: 'projected', instantaneous: { cpu_cores: 0.9, replicas: 1 }, direction: 'release' }
+			}
+		]);
+		render(RecommendationsPage);
+		const allocated = await screen.findByTestId('row-allocated-saving');
+		expect(allocated).toHaveTextContent('allocated:');
+		expect(allocated).toHaveTextContent('fixed nodes: frees capacity, bill unchanged until nodes are removed');
+		expect(screen.getByTestId('row-released-capacity')).toHaveTextContent('Frees 0.90 cores (projected)');
+	});
+
 	it('shows readiness as pending instead of disabled while the status request is unresolved', async () => {
 		api.getActiveRecommendations.mockResolvedValue([actionReadyRecommendation()]);
 		let resolveStatus;

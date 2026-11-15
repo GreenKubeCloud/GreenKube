@@ -564,3 +564,13 @@ def test_increase_shows_released_capacity_as_a_negative_release():
     body = render_body(_context(fx.increase_plan(), [record]), SETTINGS)
     assert "| Memory requests | −1.00 GiB | −8760 GiB-hours |" in body
     assert "Negative values are increases" in body
+
+
+def test_fixed_nodes_body_shows_the_allocated_saving_with_the_fixed_nodes_note():
+    # IMP-03: realization 0 on fixed nodes; the allocated saving is shown, never hidden behind a 0.
+    impact = fx.impact(cost=0.0, co2e_g=0.0, realization=1.0)
+    impact.update({"allocated_cost_annual": 236.52, "realization_factor": 0.0})
+    record = fx.recommendation(41, impact=impact, potential_savings_cost=0.0)
+    body = render_body(_context(fx.rightsize_plan(), [record]), SETTINGS)
+    assert "| Allocated: capacity released (USD) | $19.71 | $236.52 |" in body
+    assert "Fixed nodes: frees capacity, bill unchanged until nodes are removed." in body

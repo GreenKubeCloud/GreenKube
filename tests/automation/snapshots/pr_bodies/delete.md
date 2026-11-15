@@ -7,6 +7,7 @@ GreenKube proposes to **delete** `payments/Deployment/api` (Deployment), from re
 | Projected saving (realization factor 0.80) | per month | per year |
 | --- | ---: | ---: |
 | Cost (USD) | $8.00 | $96.00 |
+| Allocated: capacity released (USD) | $10.00 | $120.00 |
 | CO₂e | 250 gCO₂e | 3.0 kgCO₂e |
 
 _Projected by the Impact Model; measured savings are reported on this pull request after the rollout._

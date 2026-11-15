@@ -612,6 +612,10 @@ config:
     # Cost of one engineer hour, used to weigh implementation effort. 0 ignores
     # effort, except in the quick_wins profile (at least 100 per hour).
     engineerHourCost: 0
+    # Weight of the allocated cost a change releases beyond its billable projection
+    # (allocated - expected billable) in the ranking value. On fixed nodes the billable
+    # projection is 0, so 1 ranks by the capacity freed; 0 ranks by billable savings only.
+    capacityValueWeight: 1
     # Minimum raw samples of evidence, used everywhere a sample count gates a
     # decision: recommendation confidence, the plan policy gate and verification
     # (one knob since 0.4; replaces automation.policy.minSamples and

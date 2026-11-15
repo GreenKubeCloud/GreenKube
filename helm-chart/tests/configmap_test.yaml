@@ -861,6 +861,20 @@ tests:
           path: data.RECOMMENDATION_ENGINEER_HOUR_COST
           value: "85.5"
 
+  - it: should render the released-capacity value weight (IMP-03), zero included
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_CAPACITY_VALUE_WEIGHT
+          value: "1"
+
+  - it: should render a custom released-capacity value weight
+    set:
+      config.recommendations.capacityValueWeight: 0
+    asserts:
+      - equal:
+          path: data.RECOMMENDATION_CAPACITY_VALUE_WEIGHT
+          value: "0"
+
   # --------------------------------------------------------------------------
   # Pull-request experience (roadmap J1-J5)
   # --------------------------------------------------------------------------

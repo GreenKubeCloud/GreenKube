@@ -378,6 +378,14 @@ def _totals_table(context: PullRequestContext) -> list[str]:
             f"| Cost ({totals.currency}) | {fmt.money(totals.cost_annual / 12, totals.currency)} "
             f"| {fmt.money(totals.cost_annual, totals.currency)} |"
         )
+    allocated = totals.allocated_cost_annual
+    fixed_nodes = bool(factors) and all(factor == 0 for factor in factors)
+    if allocated is not None and allocated > 0 and abs(allocated - totals.cost_annual) > 0.005:
+        # IMP-03: the allocated saving (chargeback/showback) is always shown, never hidden behind a 0.
+        lines.append(
+            f"| Allocated: capacity released ({totals.currency}) | {fmt.money(allocated / 12, totals.currency)} "
+            f"| {fmt.money(allocated, totals.currency)} |"
+        )
     if totals.has_co2e:
         lines.append(f"| CO₂e | {fmt.co2e(totals.co2e_annual_g / 12)} | {fmt.co2e(totals.co2e_annual_g)} |")
     projector = (
@@ -386,6 +394,8 @@ def _totals_table(context: PullRequestContext) -> list[str]:
         else "the recommendation sources"
     )
     notes = [f"Projected by {projector}; measured savings are reported on this pull request after the rollout."]
+    if fixed_nodes and allocated is not None and allocated > 0:
+        notes.append("Fixed nodes: frees capacity, bill unchanged until nodes are removed.")
     if len(totals.currencies) > 1:
         notes.append(
             f"Only {totals.currency} amounts are totalled; other currencies: {', '.join(totals.currencies[1:])}."

@@ -467,6 +467,10 @@ class Recommendation(BaseModel):
         return self
 
 
+#: Shown next to a 0 billable projection on fixed nodes (IMP-03).
+FIXED_NODES_NOTE = "fixed nodes: frees capacity, bill unchanged until nodes are removed"
+
+
 class RecommendationRecord(BaseModel):
     """A persisted recommendation snapshot for historical tracking."""
 
@@ -633,6 +637,60 @@ class RecommendationRecord(BaseModel):
         from greenkube.impact.capacity import projected_capacity
 
         return projected_capacity(self)
+
+    def _impact_number(self, key: str) -> Optional[float]:
+        impact = self.impact if isinstance(self.impact, dict) else None
+        value = impact.get(key) if impact is not None else None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value) if value == value and abs(value) != float("inf") else None
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Projected allocated annual cost saving (IMP-03): what the workload stops being charged under "
+            "chargeback/showback (label 'allocated: capacity released'). Shown whatever the realization factor."
+        )
+    )
+    @property
+    def projected_allocated_cost_annual(self) -> Optional[float]:
+        """``impact.allocated_cost_annual`` (``None`` without a projection)."""
+        return self._impact_number("allocated_cost_annual")
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Projected allocated annual CO2e saving in grams (IMP-03), before the realization factor."
+    )
+    @property
+    def projected_allocated_co2e_annual_g(self) -> Optional[float]:
+        """``impact.co2e_allocated_annual_g`` (``None`` without a projection)."""
+        return self._impact_number("co2e_allocated_annual_g")
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Projected billable annual cost saving (IMP-03): allocated x realization factor, the part expected to "
+            "leave the bill; read it with impact.realization_factor and its reasons."
+        )
+    )
+    @property
+    def projected_billable_cost_annual(self) -> Optional[float]:
+        """``impact.expected_billable_cost_annual`` (``None`` without a projection); ``-0.0`` reads as 0."""
+        value = self._impact_number("expected_billable_cost_annual")
+        return value + 0.0 if value is not None else None
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Why the billable projection is lower than the allocated one, for the UI and the pull request "
+            "(IMP-03): 'fixed nodes: frees capacity, bill unchanged until nodes are removed' when the realization "
+            "factor is 0 and the allocated saving is not."
+        )
+    )
+    @property
+    def projection_note(self) -> Optional[str]:
+        """Fixed-nodes note when the realization factor is 0 and the change releases allocated cost."""
+        factor = self._impact_number("realization_factor")
+        allocated = self._impact_number("allocated_cost_annual")
+        if factor == 0.0 and allocated is not None and allocated > 0:
+            return FIXED_NODES_NOTE
+        return None
 
     @field_validator("source", mode="before")
     @classmethod

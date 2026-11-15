@@ -508,6 +508,11 @@ class Config(BaseSettings):
     # Cost (currency) of one engineer hour. 0 ignores implementation effort
     # except in the quick_wins profile (I1).
     RECOMMENDATION_ENGINEER_HOUR_COST: float = 0.0
+    # Weight of the allocated cost a change releases beyond its billable projection
+    # (allocated - expected billable) in the ranking value (IMP-03). On fixed nodes the
+    # billable projection is 0, so 1.0 ranks by the capacity freed for other workloads;
+    # 0 ranks by the billable projection only.
+    RECOMMENDATION_CAPACITY_VALUE_WEIGHT: float = 1.0
     # Minimum number of raw samples expected for a high-confidence recommendation.
     RECOMMENDATION_MIN_SAMPLES: int = 36
 
@@ -928,7 +933,12 @@ class Config(BaseSettings):
             raise ValueError("CARBON_PRICE_PER_TONNE must not be negative.")
         return value
 
-    @field_validator("RECOMMENDATION_INCIDENT_COST", "RECOMMENDATION_ENGINEER_HOUR_COST", mode="after")
+    @field_validator(
+        "RECOMMENDATION_INCIDENT_COST",
+        "RECOMMENDATION_ENGINEER_HOUR_COST",
+        "RECOMMENDATION_CAPACITY_VALUE_WEIGHT",
+        mode="after",
+    )
     @classmethod
     def _validate_decision_costs(cls, value: float, info) -> float:
         if not math.isfinite(value) or value < 0:
