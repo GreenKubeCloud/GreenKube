@@ -762,3 +762,34 @@ async def test_previous_restart_counts_are_looked_up_in_bounded_chunks(db, monke
     lookup_queries = [sql for sql in queries if "restart_count IS NOT NULL" in sql]
     assert len([sql for sql in lookup_queries if "pod_name IN" in sql or "ANY(" in sql]) <= 2 * len(lookups)
     assert len(lookup_queries) <= 2 * len(lookups) + 4
+
+
+async def test_config_since_is_the_start_of_the_last_hour_with_other_requests_on_sql_and_python(db):
+    """REC-02: since when the container runs its current memory request and limit (and any request)."""
+    start = _base_hour()
+    rows = []
+    for hour in range(6):
+        for step in range(12):
+            ts = start + timedelta(hours=hour, minutes=5 * step)
+            memory_limit = 512 * MIB if hour < 2 else 1024 * MIB
+            cpu_request = 400 if hour < 4 else 300
+            rows.append(_row(ts, pod_name="api-7d9f8b6c5d-abcde", node="node-a"))
+            rows.append(
+                _row(
+                    ts,
+                    pod_name="api-7d9f8b6c5d-abcde",
+                    node=None,
+                    container_name="web",
+                    cpu_request=cpu_request,
+                    memory_limit=memory_limit,
+                )
+            )
+    repository, _ = await _rolled(db, rows, start, hours=6)
+
+    window = (start, start + timedelta(hours=6))
+    snapshot = await repository.read_usage_snapshot(*window)
+    reference = summarize(await repository.read_hours(*window))
+    for summaries in (snapshot.summaries, reference.summaries):
+        web = summaries[("shop", "Deployment", "api")]["web"]
+        assert web.memory_config_since == start + timedelta(hours=1)
+        assert web.resources_config_since == start + timedelta(hours=3)

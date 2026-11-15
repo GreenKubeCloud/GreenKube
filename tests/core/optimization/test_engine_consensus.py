@@ -239,10 +239,12 @@ class TestPerSourceReconciliation:
     async def test_safest_with_a_failed_supporter_follows_the_native_value_above_its_last_vote(self, repo):
         await _engine([_krr(250), FakeConnector("greenkube", [_cpu(300)])]).refresh(AsyncMock(), AsyncMock(), repo)
 
-        # safest(native 260m, KRR last known 250m) = 260m.
-        await _engine([_krr(fail=True), FakeConnector("greenkube", [_cpu(260)])]).refresh(
-            AsyncMock(), AsyncMock(), repo
-        )
+        # safest(native 260m, KRR last known 250m) = 260m. A lower request is a new revision
+        # once three consecutive scans proposed it (IMP-13).
+        for _ in range(3):
+            await _engine([_krr(fail=True), FakeConnector("greenkube", [_cpu(260)])]).refresh(
+                AsyncMock(), AsyncMock(), repo
+            )
 
         assert (await _only(repo)).recommended_cpu_request_millicores == 260
 

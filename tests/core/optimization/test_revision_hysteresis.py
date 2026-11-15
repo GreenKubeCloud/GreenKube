@@ -137,3 +137,73 @@ class TestWithinHysteresis:
 
         assert not within_hysteresis(increase, stored)
         assert apply_revision_hysteresis([increase], [stored]) == [increase]
+
+
+def _cpu_200(target: int) -> Recommendation:
+    rec = _recommendation(recommendation_id=0, container_name="api", cpu_request=200, cpu_target=target)
+    rec.id = None
+    rec.description = f"cpu {target}m"
+    rec.patch = RecommendationPatchV2.model_validate(build_patch(rec))
+    return rec
+
+
+async def _cpu_state(repo) -> tuple[int, int | None]:
+    [cpu] = await repo.get_active_recommendations()
+    return cpu.revision, cpu.recommended_cpu_request_millicores
+
+
+class TestDeadband:
+    """IMP-13: an absolute floor and a confirmation memory, so alternating proposals do not flip revisions."""
+
+    async def test_proposals_alternating_within_the_floor_settle_on_the_higher_value(self, repo):
+        engine = OptimizationEngine(sources=[])
+        states = []
+        for target in (56, 60, 56, 60, 56):
+            await engine.persist([_cpu_200(target)], repo)
+            states.append(await _cpu_state(repo))
+        # The higher (safer) request is taken at once; the lower one is then within the 10m floor.
+        assert states == [(1, 56), (2, 60), (2, 60), (2, 60), (2, 60)]
+
+    async def test_proposals_alternating_from_the_higher_value_make_one_revision(self, repo):
+        engine = OptimizationEngine(sources=[])
+        for target in (60, 56, 60, 56, 60):
+            await engine.persist([_cpu_200(target)], repo)
+        assert await _cpu_state(repo) == (1, 60)
+
+    async def test_a_lower_request_is_revised_at_the_third_consecutive_scan(self, repo):
+        engine = OptimizationEngine(sources=[])
+        states = []
+        for target in (80, 56, 56, 56):
+            await engine.persist([_cpu_200(target)], repo)
+            states.append(await _cpu_state(repo))
+        assert states == [(1, 80), (1, 80), (1, 80), (2, 56)]
+
+    async def test_an_interrupted_confirmation_starts_again(self, repo):
+        engine = OptimizationEngine(sources=[])
+        for target in (80, 56, 56, 80, 56, 56):
+            await engine.persist([_cpu_200(target)], repo)
+        assert await _cpu_state(repo) == (1, 80)
+
+    async def test_a_higher_request_is_accepted_at_once(self, repo):
+        engine = OptimizationEngine(sources=[])
+        for target in (56, 80):
+            await engine.persist([_cpu_200(target)], repo)
+        assert await _cpu_state(repo) == (2, 80)
+
+
+async def test_a_frozen_record_drops_its_pending_confirmation(repo):
+    """IMP-13 review: a confirmation count never survives a scan that kept a frozen record."""
+    engine = OptimizationEngine(sources=[])
+    await engine.persist([_cpu_200(80)], repo)
+    [cpu] = await repo.get_active_recommendations()
+    async with repo.db_manager.connection_scope() as conn:
+        await conn.execute(
+            "UPDATE recommendation_history SET pending_revision = ?, action_status = 'plan_ready' WHERE id = ?",
+            ('{"value": 56, "scans": 2}', cpu.id),
+        )
+        await conn.commit()
+
+    await repo.upsert_recommendations([RecommendationRecord.from_recommendation(_cpu_200(80))])
+
+    stored = await repo.get_recommendation_by_id(cpu.id)
+    assert stored is not None and stored.pending_revision is None

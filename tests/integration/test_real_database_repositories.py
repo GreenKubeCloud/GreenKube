@@ -723,7 +723,8 @@ async def test_recommendation_repository_lifecycle_round_trip(real_database: Rea
             "recommended_cpu_request_millicores": 250,
         }
     )
-    assert await repo.upsert_recommendations([regenerated]) == 1
+    # Absorbed by the applied change: nothing is written (REC-01).
+    assert await repo.upsert_recommendations([regenerated]) == 0
     assert await repo.get_active_recommendations(namespace="prod") == []
     assert applied.id is not None
     kept = await repo.get_recommendation_by_id(applied.id)

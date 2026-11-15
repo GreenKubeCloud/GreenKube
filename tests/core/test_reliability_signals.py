@@ -173,7 +173,7 @@ async def test_scan_signals_are_per_target_container_and_count_duplicates_once()
     assert all(f"[{14 * 86400}s" in q for q in signal_queries)
     # An OOM kill is a restart whose termination reason, at that restart's step, is OOMKilled:
     # never every restart of a lookback that saw one OOM kill.
-    (ksm,) = [q for q in signal_queries if "last_terminated_reason" in q]
+    (ksm,) = [q for q in signal_queries if "last_terminated_reason" in q and "timestamp(" not in q]
     assert "sum_over_time((" in ksm and f"[{14 * 86400}s:5m]" in ksm
     assert "increase(kube_pod_container_status_restarts_total[5m])" in ksm
     assert "max_over_time(" not in ksm
@@ -199,7 +199,11 @@ async def test_restarts_in_the_window_are_read_per_container():
     assert containers["web"].restarts_in_window == 3
     assert containers["proxy"].restarts_in_window == 0  # kube-state-metrics is scraped: a known zero
     assert containers[""].restarts_in_window == 3
-    (restarts,) = [q for q in query.queries if "round(increase(kube_pod_container_status_restarts_total{" in q]
+    (restarts,) = [
+        q
+        for q in query.queries
+        if "round(increase(kube_pod_container_status_restarts_total{" in q and "timestamp(" not in q
+    ]
     assert f"[{14 * 86400}s]" in restarts
 
 

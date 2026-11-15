@@ -486,57 +486,137 @@ _HELD_FIELDS = (
 )
 
 
-def within_hysteresis(rec: Any, before: Any, threshold: float = REVISION_HYSTERESIS) -> bool:
-    """True when ``rec`` restates ``before``'s request advice within ``threshold`` (relative).
+#: Absolute floor of the hysteresis band per resource (IMP-13): a percentile-based proposal of a
+#: small request moves by more than 5% from one sample to the next (56m and 60m differ by 7%).
+#: CPU uses ``RECOMMENDATION_MIN_CPU_MILLICORES`` (default 10m) when a config is given.
+HYSTERESIS_FLOOR = {"cpu_request_m": 10, "memory_request_bytes": 16 * 1024 * 1024}
 
-    Only a request change of the same kind, against the same observed current
-    request and in the same direction (both decreases or both increases) is
-    held; any other difference is new advice.
+#: Consecutive scans that must propose a lower request, beyond the band, before it becomes a new
+#: revision (IMP-13). A higher request (the safer direction) is accepted at once.
+REVISION_CONFIRMATION_SCANS = 3
+
+
+def _request_change(rec: Any, before: Any) -> Optional[Tuple[str, int, int, int]]:
+    """``(resource, current, proposed, previous)`` when ``rec`` and ``before`` are comparable request advice.
+
+    Comparable means: a request change of the same kind, against the same
+    observed current request and in the same direction (both decreases or
+    both increases). Anything else is new advice.
     """
     rec_type = _type_value(rec)
     resource = KIND_REQUEST_RESOURCES.get(rec_type)
     if resource is None or rec_type != source_text(getattr(before, "type", None)):
-        return False
+        return None
     current_field, proposed_field = RESOURCE_FIELDS[resource]
     current, previous_current = getattr(rec, current_field), getattr(before, current_field)
     proposed, previous = getattr(rec, proposed_field), getattr(before, proposed_field)
     if None in (current, previous_current, proposed, previous) or int(current) != int(previous_current):
-        return False
+        return None
     proposed, previous, current = int(proposed), int(previous), int(current)
-    if proposed == previous or previous <= 0 or (proposed > current) != (previous > current):
+    if previous <= 0 or (proposed > current) != (previous > current):
+        return None
+    return resource, current, proposed, previous
+
+
+def hysteresis_band(
+    resource: str, previous: int, threshold: float = REVISION_HYSTERESIS, floor: Optional[int] = None
+) -> float:
+    """Largest move from ``previous`` still held: ``max(threshold x previous, floor)`` (IMP-13)."""
+    return max(threshold * previous, HYSTERESIS_FLOOR[resource] if floor is None else floor)
+
+
+def within_hysteresis(
+    rec: Any, before: Any, threshold: float = REVISION_HYSTERESIS, floor: Optional[int] = None
+) -> bool:
+    """True when ``rec`` restates ``before``'s request advice within the hysteresis band.
+
+    Only a request change of the same kind, against the same observed current
+    request and in the same direction (both decreases or both increases) is
+    held; any other difference is new advice. The band is relative
+    (``threshold``) with an absolute floor per resource (:data:`HYSTERESIS_FLOOR`).
+    """
+    change = _request_change(rec, before)
+    if change is None:
         return False
-    return abs(proposed - previous) <= threshold * previous
+    resource, _current, proposed, previous = change
+    if proposed == previous:
+        return False
+    return abs(proposed - previous) <= hysteresis_band(resource, previous, threshold, floor)
+
+
+def _hold(rec: Recommendation, before: RecommendationRecord, pending: Optional[dict]) -> Recommendation:
+    update = {name: getattr(before, name) for name in _HELD_FIELDS if name in type(before).model_fields}
+    update["pending_revision"] = pending
+    return rec.model_copy(update=update)
 
 
 def apply_revision_hysteresis(
     recs: Sequence[Recommendation],
     previous: Sequence[RecommendationRecord],
     threshold: float = REVISION_HYSTERESIS,
+    config: Optional["Config"] = None,
 ) -> List[Recommendation]:
-    """Holds the stored advice of every recommendation whose new proposal moved by at most ``threshold``.
+    """Holds the stored advice of every recommendation whose new proposal is not a confirmed change.
 
     A held recommendation takes the stored proposal and what is derived from it
     (:data:`_HELD_FIELDS`), so persisting it refreshes the record without a new
     revision (E7), and the typed action built afterwards for its workload bundle
     is the same for every member: a CPU and a memory recommendation of one
     container never carry two different copies of their shared action.
+
+    IMP-13: a higher request (the safer direction) is held only within the
+    relative ``threshold`` and is otherwise a new revision at once. A lower
+    request is held within the band (``max(threshold x stored, floor)``, see
+    :func:`hysteresis_band`) and becomes a new revision only when
+    :data:`REVISION_CONFIRMATION_SCANS`
+    consecutive scans proposed it (each within the band of the previous one).
+    Until then the stored advice is held and ``pending_revision`` records the
+    candidate and its count, so proposals that alternate between two values
+    never flip the revision at every scan.
     """
+    cpu_floor = getattr(config, "RECOMMENDATION_MIN_CPU_MILLICORES", None) if config is not None else None
     by_fingerprint = {record.fingerprint: record for record in previous if record.fingerprint}
     held: List[Recommendation] = []
     for rec in recs:
         fingerprint = legacy_fingerprint(rec)
         before = by_fingerprint.get(fingerprint) if fingerprint else None
-        if before is None or not within_hysteresis(rec, before, threshold):
+        change = _request_change(rec, before) if before is not None else None
+        if before is None or change is None:
             held.append(rec)
             continue
-        update = {name: getattr(before, name) for name in _HELD_FIELDS if name in type(before).model_fields}
+        resource, _current, proposed, stored = change
+        floor = cpu_floor if resource == "cpu_request_m" else None
+        if proposed == stored:
+            held.append(rec)
+            continue
+        if proposed > stored:
+            # A higher request is the safer direction: held only within the relative band, where
+            # the stored value still clears the increase trigger (REC-03), otherwise taken at once.
+            held.append(_hold(rec, before, None) if proposed - stored <= threshold * stored else rec)
+            continue
+        if stored - proposed <= hysteresis_band(resource, stored, threshold, floor):
+            logger.debug("Holding %s %s: the new proposal is within the band.", _type_value(rec), before.fingerprint)
+            held.append(_hold(rec, before, None))
+            continue
+        pending = before.pending_revision or {}
+        candidate = pending.get("value")
+        scans = 1
+        if isinstance(candidate, int) and abs(proposed - candidate) <= hysteresis_band(
+            resource, candidate, threshold, floor
+        ):
+            scans = int(pending.get("scans") or 0) + 1
+        if scans >= REVISION_CONFIRMATION_SCANS:
+            held.append(rec)
+            continue
         logger.debug(
-            "Holding %s %s: the new proposal moved by at most %.0f%%.",
+            "Holding %s %s: a lower request (%d) is waiting for confirmation (%d/%d scans).",
             _type_value(rec),
             before.fingerprint,
-            threshold * 100,
+            proposed,
+            scans,
+            REVISION_CONFIRMATION_SCANS,
         )
-        held.append(rec.model_copy(update=update))
+        held.append(_hold(rec, before, {"value": proposed, "scans": scans}))
     return held
 
 
@@ -546,10 +626,13 @@ def legacy_fingerprint(rec: Recommendation) -> Optional[str]:
 
 
 __all__ = [
+    "HYSTERESIS_FLOOR",
+    "REVISION_CONFIRMATION_SCANS",
     "REVISION_HYSTERESIS",
     "RecommendationSource",
     "SignalEntry",
     "apply_revision_hysteresis",
+    "hysteresis_band",
     "consensus_policy",
     "consolidate_entries",
     "deduplicate",

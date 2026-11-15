@@ -2397,6 +2397,11 @@
 											<span class="text-dark-600 uppercase text-[10px] mr-1">Reason:</span>{rec.ignored_reason}
 										</div>
 									{/if}
+									{#if activeTab === 'ignored' && rec.changed_since_ignored}
+										<div class="mt-2 text-xs text-orange-300/90 bg-orange-600/5 border border-orange-600/20 rounded-lg px-3 py-2">
+											Advice changed since you ignored it{rec.changed_since_ignored.reason ? `: ${rec.changed_since_ignored.reason}` : '.'}
+										</div>
+									{/if}
 
 									<!-- Description / reason -->
 									<p class="text-sm text-dark-400 mt-2">{rec.reason}</p>

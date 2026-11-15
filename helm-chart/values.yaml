@@ -558,6 +558,9 @@ config:
     # Minutes after a container (re)start left out of usage percentiles (startup
     # spikes such as WAL replay, JIT or cache fill do not size requests). 0 disables.
     rightsizingWarmupMinutes: 10
+    # Hours after its last sample a target without a running pod is left out of
+    # rightsizing (deleted, renamed or scaled-to-zero workloads).
+    targetMaxStalenessHours: 2
     # Observed coverage (days) required before a request decrease is recommended.
     minDecreaseCoverageDays: 7
     # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.

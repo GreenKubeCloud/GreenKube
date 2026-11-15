@@ -150,7 +150,8 @@ class ContextBuilder:
         )
         # OOM kills, CPU throttling and JVM hints of the summaries (E9): rightsizing
         # sizes increases and judges decreases with them.
-        await self._attach_reliability_signals(snapshot, start, end)
+        signals = await self._attach_reliability_signals(snapshot, start, end)
+        liveness = await self._filter_live_targets(snapshot, end, signals)
 
         # Annualize over the span actually observed: a cluster with three days
         # of history is not extrapolated as if it had fourteen.
@@ -175,19 +176,40 @@ class ContextBuilder:
             window_start=observed_start,
             window_end=end,
             usage=snapshot,
+            gone_targets=liveness.gone,
+            not_running_targets=liveness.not_running,
             **side_inputs,
         )
 
-    async def _attach_reliability_signals(self, snapshot, start: datetime, end: datetime) -> None:
+    async def _attach_reliability_signals(self, snapshot, start: datetime, end: datetime):
         from greenkube.core.reliability_signals import SIGNAL_FAILED, SIGNAL_NAMES, attach_reliability_signals
 
         try:
-            await attach_reliability_signals(snapshot, self.config, start=start, end=end)
+            return await attach_reliability_signals(snapshot, self.config, start=start, end=end)
         except Exception as error:
             # Signals stay unknown and rightsizing fails closed on them (REC-04): no decrease
             # without a readable restart/OOM history, and the outcome is reported.
             logger.warning("Could not attach reliability signals to the usage summaries: %s", error)
             snapshot.reliability_signal_status = {name: SIGNAL_FAILED for name in SIGNAL_NAMES}
+            return None
+
+    async def _filter_live_targets(self, snapshot, end: datetime, signals):
+        """Leaves targets that no longer run out of the analyzers (REC-05, see ``liveness``)."""
+        from greenkube.core.optimization.liveness import (
+            filter_live_targets,
+            needs_controller_check,
+            read_scaled_to_zero,
+        )
+
+        live = getattr(signals, "live_containers", None)
+        hours = float(getattr(self.config, "RECOMMENDATION_TARGET_MAX_STALENESS_HOURS", 2.0) or 2.0)
+        staleness = timedelta(hours=hours)
+        scaled_to_zero: Optional[set] = set()
+        if needs_controller_check(snapshot, end=end, live_containers=live, max_staleness=staleness):
+            scaled_to_zero = await read_scaled_to_zero()
+        return filter_live_targets(
+            snapshot, end=end, live_containers=live, scaled_to_zero=scaled_to_zero, max_staleness=staleness
+        )
 
     async def _build_from_rows(
         self,

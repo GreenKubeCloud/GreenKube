@@ -62,7 +62,12 @@ from greenkube.signals.sdk import CollectContext, Source, SourceDeps
 if TYPE_CHECKING:
     from greenkube.core.config import Config
     from greenkube.storage.base_optimization_run_repository import OptimizationRunRepository
-    from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository, RecommendationRepository
+    from greenkube.storage.base_repository import (
+        CombinedMetricsRepository,
+        NodeRepository,
+        RecommendationRepository,
+        UpsertOutcome,
+    )
     from greenkube.storage.base_signal_repository import SignalRepository
 
 logger = logging.getLogger(__name__)
@@ -422,7 +427,10 @@ class OptimizationEngine:
         Returns the diff against the active set of the scanned scope and the
         recommendations actually written (a last known record is kept instead
         of a more aggressive proposal while one of its sources is incomplete,
-        see :meth:`_preserve_last_known`). Raises on
+        see :meth:`_preserve_last_known`). A record the repository did not
+        write as an active row (absorbed by an applied change, held behind an
+        open pull request, or ignored) is neither returned nor in the diff
+        (REC-01). Raises on
         repository errors so the run can be recorded as failed.
         """
         # Expire actives whose TTL elapsed before reconciling so they are not
@@ -438,10 +446,12 @@ class OptimizationEngine:
         previous = await self._active_snapshot(reco_repo, namespace)
         kept = self._preserve_last_known(recommendations, previous, incomplete_sources)
         # Usage jitter below the hysteresis keeps the stored advice (no new revision, one shared action).
-        kept = apply_revision_hysteresis(kept, previous)
+        kept = apply_revision_hysteresis(kept, previous, config=self.config)
         records = [self._record(r) for r in kept]
         if records:
-            await reco_repo.upsert_recommendations(records)
+            outcomes: List["UpsertOutcome"] = []
+            await reco_repo.upsert_recommendations(records, outcomes=outcomes)
+            kept, records = _written_only(kept, records, outcomes)
             await self._attach_persisted_actions(kept, reco_repo, namespace)
             action_records = [
                 self._record(recommendation) for recommendation in kept if recommendation.action is not None
@@ -452,6 +462,9 @@ class OptimizationEngine:
         if reliability is not None:
             retire, protected = reliability.split(previous, records)
             await self._retire_withheld_decreases(reco_repo, retire)
+            gone, not_running = reliability.split_targets(previous, records)
+            await self._retire_withheld_decreases(reco_repo, gone, reason="target_gone")
+            protected = [*protected, *not_running]
         await reco_repo.reconcile_active_recommendations(
             [*records, *protected],
             namespace=namespace,
@@ -469,9 +482,12 @@ class OptimizationEngine:
 
     @staticmethod
     async def _retire_withheld_decreases(
-        reco_repo: "RecommendationRepository", records: Sequence[RecommendationRecord]
+        reco_repo: "RecommendationRepository",
+        records: Sequence[RecommendationRecord],
+        reason: str = "reliability_signals_unknown",
     ) -> None:
-        """Marks stale, with the reason ``reliability_signals_unknown``, the decreases withheld this scan (REC-04)."""
+        """Marks stale, with ``reason``, the decreases withheld this scan (REC-04) or the records of
+        targets gone from the cluster (``target_gone``, REC-05)."""
         from greenkube.core.optimization.lifecycle import RecommendationLifecycle
 
         lifecycle = RecommendationLifecycle(reco_repo)
@@ -483,15 +499,12 @@ class OptimizationEngine:
                     record.id,
                     "stale",
                     event_type="stale",
-                    payload={"reason": "reliability_signals_unknown"},
+                    payload={"reason": reason},
                     expected_statuses=("active",),
                 )
-                logger.info(
-                    "Retired decrease %s: restart/OOM history could not be read (reliability_signals_unknown).",
-                    record.id,
-                )
+                logger.info("Retired recommendation %s (%s).", record.id, reason)
             except Exception as exc:
-                logger.warning("Could not retire withheld decrease %s: %s", record.id, exc)
+                logger.warning("Could not retire recommendation %s (%s): %s", record.id, reason, exc)
 
     def _record(self, recommendation: Recommendation) -> RecommendationRecord:
         """The persisted form of a recommendation, with its v2 identity, target and proposal (E4)."""
@@ -729,6 +742,10 @@ class ReliabilityGuard:
 
     withheld: FrozenSet[Tuple[ContainerKey, str]] = frozenset()
     oom_unknown: FrozenSet[ContainerKey] = frozenset()
+    #: Targets confirmed gone from the cluster (REC-05): their records are retired (``target_gone``).
+    gone: FrozenSet[Tuple[str, str, str]] = frozenset()
+    #: Targets not running (scaled to zero, or liveness unknown): their native records are kept.
+    not_running: FrozenSet[Tuple[str, str, str]] = frozenset()
 
     @classmethod
     def from_context(cls, context: OptimizationContext) -> "ReliabilityGuard":
@@ -752,7 +769,36 @@ class ReliabilityGuard:
                 for container, summary in containers.items():
                     if known_oom_events(summary, pod_summary) is None:
                         unknown.add((*target, container))
-        return cls(withheld=withheld, oom_unknown=frozenset(unknown))
+        return cls(
+            withheld=withheld,
+            oom_unknown=frozenset(unknown),
+            gone=frozenset(getattr(context, "gone_targets", None) or ()),
+            not_running=frozenset(getattr(context, "not_running_targets", None) or ()),
+        )
+
+    def split_targets(
+        self, previous: Sequence[RecommendationRecord], emitted: Sequence[RecommendationRecord]
+    ) -> Tuple[List[RecommendationRecord], List[RecommendationRecord]]:
+        """``(gone, kept)`` among the records this scan did not re-emit (REC-05).
+
+        * gone: any record of a target confirmed gone from the cluster;
+        * kept: native records of a target that is not running (scaled to zero)
+          or whose liveness could not be read.
+        """
+        if not self.gone and not self.not_running:
+            return [], []
+        fingerprints = {record.fingerprint for record in emitted if record.fingerprint}
+        gone: List[RecommendationRecord] = []
+        kept: List[RecommendationRecord] = []
+        for record in previous:
+            if not record.fingerprint or record.fingerprint in fingerprints:
+                continue
+            target = _record_container(record)[:3]
+            if target in self.gone:
+                gone.append(record)
+            elif target in self.not_running and _native(record):
+                kept.append(record)
+        return gone, kept
 
     def split(
         self, previous: Sequence[RecommendationRecord], emitted: Sequence[RecommendationRecord]
@@ -786,6 +832,32 @@ class ReliabilityGuard:
             elif proposed > current and resource == "memory" and key in self.oom_unknown:
                 protect.append(record)
         return retire, protect
+
+
+def _written_only(
+    kept: List[Recommendation], records: List[RecommendationRecord], outcomes: Sequence["UpsertOutcome"]
+) -> Tuple[List[Recommendation], List[RecommendationRecord]]:
+    """The recommendations and records the repository really wrote as active rows (REC-01).
+
+    A record absorbed by an applied change, held behind an open pull request
+    or ignored by the user is not written: it must not be reported as kept,
+    counted in the run, or shown as ``new`` by the run diff. A repository that
+    reports no outcome per record (an older implementation) keeps everything.
+    """
+    if len(outcomes) != len(records):
+        return kept, records
+    pairs = [(rec, record) for rec, record, outcome in zip(kept, records, outcomes) if outcome.written]
+    for record, outcome in zip(records, outcomes):
+        if not outcome.written:
+            logger.info(
+                "%s recommendation for %s/%s not written (%s): %s.",
+                record.type.value if hasattr(record.type, "value") else record.type,
+                record.namespace,
+                record.pod_name or record.owner_name,
+                outcome.action,
+                outcome.reason or "matched an existing row",
+            )
+    return [rec for rec, _ in pairs], [record for _, record in pairs]
 
 
 def _run_status(outcomes: List[SourceRunOutcome]) -> OptimizationRunStatus:

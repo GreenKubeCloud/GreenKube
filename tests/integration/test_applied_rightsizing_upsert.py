@@ -80,3 +80,51 @@ async def test_regenerated_pre_change_advice_is_absorbed_only_within_the_lag_win
 
     active = await repo.get_active_recommendations(namespace=namespace)
     assert len(active) == (0 if absorbed else 1)
+
+
+async def _record_change_member(real_database: RealDatabase, change_id: str, recommendation_id: int) -> None:  # noqa: F811
+    async with real_database.manager.connection_scope() as conn:
+        if real_database.backend == "postgres":
+            await conn.execute(
+                "INSERT INTO change_members (change_id, recommendation_id, added_at) VALUES ($1, $2, $3)",
+                change_id,
+                recommendation_id,
+                datetime.now(timezone.utc),
+            )
+        else:
+            await conn.execute(
+                "INSERT INTO change_members (change_id, recommendation_id, added_at) VALUES (?, ?, ?)",
+                (change_id, recommendation_id, datetime.now(timezone.utc).isoformat()),
+            )
+            await conn.commit()
+
+
+async def test_new_advice_after_an_applied_change_links_to_it(real_database: RealDatabase):  # noqa: F811
+    repo = real_database.recommendation_repository()
+    await _applied(repo, "link", 72)
+    [applied] = await repo.get_recommendations_by_statuses(["applied"])
+    assert applied.id is not None
+    await _record_change_member(real_database, "chg-link-1", applied.id)
+
+    await repo.upsert_recommendations([_memory(308, 616, "link", reason="Reliability: OOM-killed")])
+
+    [active] = await repo.get_active_recommendations(namespace="link")
+    assert active.previous_recommendation_id == applied.id
+    assert active.previous_change_id == "chg-link-1"
+
+
+async def test_upsert_reports_swallowed_records_as_not_written(real_database: RealDatabase):  # noqa: F811
+    from greenkube.storage.base_repository import UpsertOutcome
+
+    repo = real_database.recommendation_repository()
+    await _applied(repo, "report", 1)
+
+    outcomes: list[UpsertOutcome] = []
+    written = await repo.upsert_recommendations([_memory(1024, 308, "report")], outcomes=outcomes)
+    assert written == 0
+    assert [(outcome.action, outcome.written) for outcome in outcomes] == [("absorbed", False)]
+
+    outcomes = []
+    written = await repo.upsert_recommendations([_memory(308, 616, "report")], outcomes=outcomes)
+    assert written == 1
+    assert [(outcome.action, outcome.written) for outcome in outcomes] == [("inserted", True)]

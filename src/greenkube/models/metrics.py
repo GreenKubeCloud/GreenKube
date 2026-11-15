@@ -259,6 +259,8 @@ class RecommendationEventType(str, Enum):
     FAILED = "failed"
     #: A recommendation withdrawn because its evidence no longer holds (migration 0063).
     RETIRED = "retired"
+    #: The advice of an ignored recommendation changed materially in a later scan (REC-06).
+    CHANGED_WHILE_IGNORED = "changed_while_ignored"
 
 
 class RiskLevel(str, Enum):
@@ -425,6 +427,13 @@ class Recommendation(BaseModel):
             "effort_cost, ev and currency, with their components. A projection, never a measured value."
         ),
     )
+    pending_revision: Optional[dict] = Field(
+        None,
+        description=(
+            "A lower request proposal waiting for confirmation before it becomes a new revision (IMP-13): "
+            "{value, scans}, the latest proposed request and the number of consecutive scans that proposed it."
+        ),
+    )
     eligibility: Optional[dict] = Field(
         None,
         description=(
@@ -540,6 +549,13 @@ class RecommendationRecord(BaseModel):
             "effort_cost, ev and currency, with their components. A projection, never a measured value."
         ),
     )
+    pending_revision: Optional[dict] = Field(
+        None,
+        description=(
+            "A lower request proposal waiting for confirmation before it becomes a new revision (IMP-13): "
+            "{value, scans}, the latest proposed request and the number of consecutive scans that proposed it."
+        ),
+    )
     eligibility: Optional[dict] = Field(
         None,
         description=(
@@ -562,6 +578,24 @@ class RecommendationRecord(BaseModel):
     # Ignore lifecycle fields
     ignored_at: Optional[datetime] = Field(None, description="When the recommendation was ignored.")
     ignored_reason: Optional[str] = Field(None, description="Reason for ignoring the recommendation.")
+    changed_since_ignored: Optional[dict] = Field(
+        None,
+        description=(
+            "On an ignored recommendation: the latest advice a scan produced for it that differs materially "
+            "from the ignored proposal (REC-06), from its changed_while_ignored event. Never persisted."
+        ),
+    )
+    # Link to the applied change this advice follows (REC-01)
+    previous_recommendation_id: Optional[int] = Field(
+        None,
+        description=(
+            "The applied recommendation of the same target and type this advice follows, when it was "
+            "inserted after that change (for example an OOM-driven increase after a decrease)."
+        ),
+    )
+    previous_change_id: Optional[str] = Field(
+        None, description="The recorded change (change_id) of previous_recommendation_id, when one is recorded."
+    )
     # Apply / verification lifecycle fields (Phase 3)
     application_method: Optional[str] = Field(
         None, description="How the change landed: manual, detected, pr_merge, webhook, polling."
@@ -670,6 +704,7 @@ class RecommendationRecord(BaseModel):
             requires_restart=rec.requires_restart,
             impact=dict(rec.impact) if rec.impact is not None else None,
             value=dict(rec.value) if rec.value is not None else None,
+            pending_revision=dict(rec.pending_revision) if rec.pending_revision is not None else None,
             created_at=created_at or datetime.now(timezone.utc),
         )
 

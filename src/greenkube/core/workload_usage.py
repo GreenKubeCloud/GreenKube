@@ -833,6 +833,8 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             restart_count=_restart_max(ordered),
             restart_increase=_restart_increase(ordered),
             restart_increase_legacy=any(item.restart_increase_unknown for item in ordered),
+            memory_config_since=_config_since(ordered, ("memory_request", "memory_limit")),
+            resources_config_since=_config_since(ordered, _RESOURCE_FIELDS),
             total_cost=sum(item.total_cost for item in ordered),
             co2e_grams=sum(item.co2e_grams for item in ordered),
             embodied_co2e_grams=sum(item.embodied_co2e_grams for item in ordered),
@@ -865,6 +867,39 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             memory_request_avg=totals[5] / steps if steps else 0.0,
         )
     return snapshot
+
+
+#: Request and limit fields of an hour: any change is a new pod template (REC-02).
+_RESOURCE_FIELDS = ("cpu_request", "memory_request", "cpu_limit", "memory_limit")
+
+
+def _config_since(ordered: List[_HourTotals], fields: Sequence[str]) -> Optional[datetime]:
+    """Start of the last hour whose ``fields`` differ from the latest hour's, or None (REC-02).
+
+    Kills and restarts at or after it may have happened under the current
+    configuration: during a rollout the hour still shows the old values (the
+    rollup keeps the latest sample's), so a kill under the new limit in that
+    hour counts.
+    Hours without a known request (0) are skipped: they say nothing about it.
+    Same rule as ``memory_changed_hour`` / ``resources_changed_hour`` of the SQL summary.
+    """
+    if not ordered:
+        return None
+    latest = tuple(getattr(ordered[-1], name) for name in fields)
+    for item in reversed(ordered[:-1]):
+        if not item.memory_request and not item.cpu_request:
+            continue
+        if tuple(getattr(item, name) for name in fields) != latest and item.hour_bucket is not None:
+            return _hour_start(item.hour_bucket)
+    return None
+
+
+def _hour_start(bucket: Any) -> datetime:
+    """An hour bucket as an aware datetime (datetime or ISO string)."""
+    value = bucket if isinstance(bucket, datetime) else datetime.fromisoformat(str(bucket).replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _restart_increase(ordered: List[_HourTotals]) -> Optional[int]:

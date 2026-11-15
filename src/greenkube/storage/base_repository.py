@@ -17,6 +17,34 @@ from ..models.metrics import (
 from ..models.node import NodeInfo
 from ..utils.date_utils import to_iso_z
 
+#: Upsert outcomes whose record has an active row after the call (inserted, or
+#: matched an active row that was revised, refreshed, kept or given a queued revision).
+WRITTEN_UPSERT_ACTIONS: frozenset[str] = frozenset({"inserted", "revised", "refreshed", "queued", "kept", "conflict"})
+
+
+@dataclass(frozen=True)
+class UpsertOutcome:
+    """What ``upsert_recommendations`` did with one incoming record (REC-01).
+
+    ``action`` is one of ``inserted``, ``revised``, ``refreshed``, ``queued``
+    and ``kept`` (the record has an active row), ``conflict`` (a concurrent
+    upsert inserted the active row first), ``pr_open`` (held behind the open
+    pull request of the same target), ``absorbed`` (a restatement of a change
+    already applied or being measured), ``applied`` (refreshed an applied
+    non-rightsizing row) or ``ignored`` (the user ignored this advice).
+    ``recommendation_id`` is the row the record landed on, when known.
+    """
+
+    fingerprint: Optional[str]
+    action: str
+    recommendation_id: Optional[int] = None
+    reason: Optional[str] = None
+
+    @property
+    def written(self) -> bool:
+        """True when the record has an active recommendation row after the upsert."""
+        return self.action in WRITTEN_UPSERT_ACTIONS
+
 
 class NodeRepository(ABC):
     """
@@ -762,16 +790,22 @@ class RecommendationRepository(ABC):
         pass
 
     @abstractmethod
-    async def upsert_recommendations(self, records: List[RecommendationRecord]) -> int:
+    async def upsert_recommendations(
+        self, records: List[RecommendationRecord], outcomes: Optional[List[UpsertOutcome]] = None
+    ) -> int:
         """Inserts or updates active recommendations using their target identity.
 
         Active recommendations are refreshed in place; ignored recommendations are left untouched.
 
         Args:
             records: A list of RecommendationRecord objects to upsert.
+            outcomes: When given, one :class:`UpsertOutcome` per record is
+                appended to it, in the order of ``records``.
 
         Returns:
-            The number of records inserted or updated.
+            The number of records that have an active row after the call
+            (records absorbed by an applied, pull-request or ignored row are
+            not counted).
         """
         pass
 

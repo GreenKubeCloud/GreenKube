@@ -161,8 +161,10 @@ class TestLimitsPolicy:
         keep = memory_proposal(Config(), summary)
         equal = memory_proposal(_config(RECOMMENDATION_LIMITS_POLICY="memory_equals_request"), summary)
         assert keep is not None and equal is not None
-        # Under memory_equals_request the request becomes the limit: never below max x 1.1.
-        assert equal.proposed >= 500 * MIB * 1.1 > keep.proposed
+        # Memory is incompressible: never below max x 1.1 under any policy (REC-03). Under
+        # memory_equals_request the request becomes the limit: the peak stays below its 90% line.
+        assert keep.proposed >= 500 * MIB * 1.1
+        assert equal.proposed >= 500 * MIB / 0.9 > keep.proposed
         assert "equal to the request" in equal.limit_advice[0].text
         assert equal.limit_advice[0].minimum == equal.proposed
 

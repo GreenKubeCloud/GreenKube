@@ -21,6 +21,7 @@ from greenkube.core.db import DatabaseManager
 from greenkube.core.optimization.context_builder import ContextBuilder
 from greenkube.core.optimization.dedup import finalize_recommendations
 from greenkube.core.optimization.enrich import enrich_recommendations
+from greenkube.core.optimization.liveness import TargetLiveness
 from greenkube.core.optimization.providers.native import NativeSource
 from greenkube.models.metrics import CombinedMetric, RecommendationType
 from greenkube.models.workload_usage import BaselineMetric
@@ -76,6 +77,12 @@ def no_cluster():
             "greenkube.core.optimization.context_builder.get_active_k8s_namespaces",
             new=AsyncMock(return_value=None),
         ) as namespaces,
+        patch(
+            # The data ends hours before the scan and no pod list is readable: liveness (REC-05) would
+            # leave every target out; these tests are about bounded reads, not liveness.
+            "greenkube.core.optimization.context_builder.ContextBuilder._filter_live_targets",
+            new=AsyncMock(return_value=TargetLiveness()),
+        ),
         patch(
             "greenkube.core.optimization.context_builder.ContextBuilder._collect_side_inputs",
             new=AsyncMock(
