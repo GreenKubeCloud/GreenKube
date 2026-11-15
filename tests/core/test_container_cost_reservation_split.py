@@ -85,3 +85,30 @@ def test_equal_split_only_when_neither_request_nor_usage_is_known():
     )
     rows = MetricAssembler.assemble_container_metrics([_pod()], metrics, maps)
     assert [row.cost_cpu for row in rows] == pytest.approx([0.5, 0.5])
+
+
+def test_containers_of_one_pod_get_the_same_reserved_unit_price():
+    """(c) The unit price anchored to each container's cost is the pod's, whatever its usage share."""
+    from greenkube.impact.model import sample_prices
+    from greenkube.impact.projector import sample_from_metric
+    from greenkube.impact.types import NodeImpactProfile, UnitPrices, WorkloadRef
+    from greenkube.models.provenance import CostSource
+
+    rows = MetricAssembler.assemble_container_metrics([_pod()], _pod_metrics(), _maps())
+    node = NodeImpactProfile(
+        name="n1",
+        cpu_capacity_cores=4,
+        mem_capacity_gib=16,
+        idle_watts=10,
+        max_watts=50,
+        embodied_g_per_hour=0,
+        prices=UnitPrices(0.03, 0.004, "USD", CostSource.PRICING_CATALOG),
+        pue=1.2,
+        grid_intensity_g_per_kwh=100,
+    )
+    unit = {}
+    for row in rows:
+        ref = WorkloadRef("c", "shop", "Pod", "api-0", row.container_name)
+        sample = sample_from_metric(row.model_copy(update={"duration_seconds": 3600}), ref, 1.0)
+        unit[row.container_name] = sample_prices(sample, node, "USD").cpu_reserved_core_hour
+    assert unit["app"] == pytest.approx(unit["proxy"], rel=0.02)
