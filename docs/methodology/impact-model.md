@@ -300,6 +300,16 @@ A pool is recommended for consolidation when its average CPU request utilization
 
 The realization factor is 1, because the consolidation is the action itself.
 
+## Released capacity (WP-08.1)
+
+Next to cost and CO₂e every projection reports the reserved capacity the change releases, in its own units. It needs no price, no OpenCost and no autoscaler, and it is the honest result on a fixed-capacity cluster, where the bill does not move until a node is removed.
+
+- **Annual** (`impact.capacity_released`): `cpu_core_hours`, `mem_gib_hours`, `replica_hours` and `node_hours` per year, annualized like the cost over the target's observed coverage (so they inherit the coverage bias of the annualization above).
+- **Instantaneous** (`released_capacity.instantaneous` on every recommendation read through the API): `(current request − proposed request) × replicas` in cores and GiB, per replica and in total. The replica count is the mean over the observed coverage (`replica_hours / 8760`).
+- **Deletions**: `storage_gib` (orphaned PersistentVolume capacity) and `load_balancers` (count) for asset deletions only. A request change frees no storage. No network figure is reported.
+
+Rules: released capacity is never converted to money and never added to a cost saving; it is labelled *projected* (here) or *measured* (`docs/methodology/savings-measurement.md`, "Released capacity"). An increase is a negative release and is never shown as a saving. The API returns it as `released_capacity` on each recommendation (`method: projected`, `period: year`, `units`, `direction`); the pull-request summary has a "Released capacity (projected)" table; the recommendation list and detail pages show it in a separate block.
+
 ## Realization factor
 
 ```text

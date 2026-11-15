@@ -618,6 +618,22 @@ class RecommendationRecord(BaseModel):
     )
     updated_at: Optional[datetime] = Field(None, description="When the recommendation was last updated.")
 
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Projected released capacity (WP-08.1), derived from impact.capacity_released when read, never "
+            "persisted: annual core-hours, GiB-hours, replica-hours and node-hours (period 'year'), the "
+            "instantaneous (current - proposed request) x replicas in cores and GiB, storage GiB and LoadBalancer "
+            "count for deletions, with units. Never money and never added to cost savings; negative values are "
+            "increases."
+        )
+    )
+    @property
+    def released_capacity(self) -> Optional[dict]:
+        """Projected released capacity of this recommendation (``None`` without a projection)."""
+        from greenkube.impact.capacity import projected_capacity
+
+        return projected_capacity(self)
+
     @field_validator("source", mode="before")
     @classmethod
     def _coerce_source(cls, value: Any) -> Any:

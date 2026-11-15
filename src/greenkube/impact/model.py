@@ -526,7 +526,9 @@ class ReservationAwareImpactModel:
             kind=ChangeKind.ASSET_DELETION,
             allocated_cost_annual=cost.total,
             cost_breakdown_annual=cost,
-            capacity_released=CapacityDelta(),
+            capacity_released=CapacityDelta(
+                storage_gib=max(float(change.storage_gib), 0.0), load_balancers=max(int(change.load_balancers), 0)
+            ),
             expected_billable_cost_annual=cost.total,
             realization_factor=1.0,
             co2e_allocated_annual_g=0.0,

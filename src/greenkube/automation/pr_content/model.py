@@ -275,6 +275,58 @@ def savings_totals(recommendations: Sequence[RecommendationRecord]) -> SavingsTo
     )
 
 
+@dataclass(frozen=True, slots=True)
+class CapacityTotals:
+    """Projected released capacity of a plan (WP-08.1): reserved capacity, never money.
+
+    Negative values are increases. ``None`` means no recommendation reports the figure.
+    """
+
+    cpu_cores: float | None = None
+    mem_gib: float | None = None
+    cpu_core_hours: float | None = None
+    mem_gib_hours: float | None = None
+    storage_gib: float | None = None
+    load_balancers: float | None = None
+
+    @property
+    def empty(self) -> bool:
+        return all(
+            value is None or abs(value) < 1e-9
+            for value in (
+                self.cpu_cores,
+                self.mem_gib,
+                self.cpu_core_hours,
+                self.mem_gib_hours,
+                self.storage_gib,
+                self.load_balancers,
+            )
+        )
+
+
+def capacity_totals(recommendations: Sequence[RecommendationRecord]) -> CapacityTotals:
+    """Sum the projected released capacity of the plan's recommendations, unit by unit."""
+    sums: dict[str, float] = {}
+    for record in recommendations:
+        capacity = record.released_capacity
+        if not capacity:
+            continue
+        annual = capacity.get("annual") or {}
+        instantaneous = capacity.get("instantaneous") or {}
+        for key, value in (
+            ("cpu_cores", instantaneous.get("cpu_cores")),
+            ("mem_gib", instantaneous.get("mem_gib")),
+            ("cpu_core_hours", annual.get("cpu_core_hours")),
+            ("mem_gib_hours", annual.get("mem_gib_hours")),
+            ("storage_gib", instantaneous.get("storage_gib")),
+            ("load_balancers", instantaneous.get("load_balancers")),
+        ):
+            number = _finite(value)
+            if number is not None and abs(number) > 1e-9:
+                sums[key] = sums.get(key, 0.0) + number
+    return CapacityTotals(**sums)
+
+
 def _finite(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None

@@ -43,6 +43,7 @@
 		planTargetFor
 	} from '$lib/utils/decision.js';
 	import DataState from '$lib/components/DataState.svelte';
+	import { capacitySummary } from '$lib/releasedCapacity.js';
 	import { etaFrom } from '$lib/overview.js';
 	import { SAVINGS_TERMS, realizationText, savingsFigures } from '$lib/savingsVocabulary.js';
 
@@ -2343,6 +2344,11 @@
 														<p class="text-xs text-blue-400">-{formatCost(rec.potential_savings_cost)}</p>
 													{/if}
 												</div>
+											{/if}
+											{#if capacitySummary(rec.released_capacity)}
+												<p class="text-[11px] text-dark-400 text-right" data-testid="row-released-capacity" title="Reserved capacity, not money: never added to cost savings">
+													{capacitySummary(rec.released_capacity)}
+												</p>
 											{/if}
 											{#if activeTab === 'active'}
 												{#if canWrite && canPreviewRecommendation(rec)}

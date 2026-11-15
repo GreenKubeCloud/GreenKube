@@ -540,3 +540,27 @@ def test_limit_edits_are_reverted_by_reverting_the_pull_request():
 def test_increase_labels_mark_reliability():
     metadata = derive_metadata(SCENARIOS["increase"]())
     assert "reliability" in metadata.labels
+
+
+def test_body_shows_projected_released_capacity_with_units_apart_from_the_saving():
+    impact = fx.impact(cost=300.0, co2e_g=12_000.0)
+    impact["capacity_released"] = {
+        "cpu_core_hours": 0.3 * 2 * 8760,
+        "mem_gib_hours": 0.0,
+        "replica_hours": 2 * 8760,
+        "node_hours": 0.0,
+    }
+    record = fx.recommendation(41, impact=impact)
+    body = render_body(_context(fx.rightsize_plan(), [record]), SETTINGS)
+    assert "| Released capacity (projected) | now | per year |" in body
+    assert "| CPU requests | 0.60 cores | 5256 core-hours |" in body
+    assert "never added to the cost saving" in body
+
+
+def test_increase_shows_released_capacity_as_a_negative_release():
+    impact = fx.impact(cost=-150.0, co2e_g=-4_000.0)
+    impact["capacity_released"] = {"cpu_core_hours": 0.0, "mem_gib_hours": -8760.0, "replica_hours": 8760.0}
+    record = fx.increase_recommendation(43).model_copy(update={"impact": impact})
+    body = render_body(_context(fx.increase_plan(), [record]), SETTINGS)
+    assert "| Memory requests | −1.00 GiB | −8760 GiB-hours |" in body
+    assert "Negative values are increases" in body

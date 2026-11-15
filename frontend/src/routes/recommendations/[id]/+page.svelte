@@ -26,6 +26,7 @@
 		valueOf
 	} from '$lib/recommendationDetail.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
+	import ReleasedCapacity from '$lib/components/ReleasedCapacity.svelte';
 	import ManualApplyPanel from '$lib/components/ManualApplyPanel.svelte';
 
 	/** @type {{id: string}} */
@@ -322,6 +323,9 @@
 				{/if}
 			</section>
 		{/if}
+
+		<!-- Released capacity (WP-08.1): its own units, never money -->
+		<ReleasedCapacity capacity={rec?.released_capacity} />
 
 		<!-- Consensus across sources (Recommendation v2 only) -->
 		{#if consensus}

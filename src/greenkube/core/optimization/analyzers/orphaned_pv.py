@@ -81,6 +81,7 @@ class OrphanedPVAnalyzer(Analyzer):
                         component="storage",
                         cost_source=cost_source,
                         detail=cost_detail,
+                        storage_gib=capacity_gib,
                     )
                 )
 

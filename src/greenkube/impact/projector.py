@@ -564,8 +564,14 @@ class ImpactProjector:
         component: str,
         cost_source: CostSource,
         detail: str = "",
+        storage_gib: float = 0.0,
+        load_balancers: int = 0,
     ) -> ImpactDelta:
-        """Projects deleting a non-compute asset with a known allocated annual cost."""
+        """Projects deleting a non-compute asset with a known allocated annual cost.
+
+        ``storage_gib`` and ``load_balancers`` are the capacity the deletion
+        releases (WP-08.1), reported apart from its cost.
+        """
         ref = self.workload_ref(None, asset_kind, asset_kind)
         change = AssetDeletion(
             asset_kind=asset_kind,
@@ -573,6 +579,8 @@ class ImpactProjector:
             component=component,
             cost_source=cost_source,
             detail=detail,
+            storage_gib=storage_gib,
+            load_balancers=load_balancers,
         )
         return self.model.project(WorkloadBaseline(ref=ref, samples=(), window_hours=HOURS_PER_YEAR), change, self.pool)
 

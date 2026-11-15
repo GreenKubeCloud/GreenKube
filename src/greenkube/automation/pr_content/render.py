@@ -25,6 +25,7 @@ from greenkube.automation.pr_content.model import (
     PullRequestContext,
     PullRequestRenderSettings,
     ResourceChange,
+    capacity_totals,
     edits_limits,
     highest_risk,
     plan_verb,
@@ -340,6 +341,10 @@ def _summary(context: PullRequestContext, settings: PullRequestRenderSettings) -
         lines.extend(("", *_increase_totals_table(context), "", *_reliability_lines(context)))
     elif not context.is_rollback:
         lines.extend(("", *_totals_table(context)))
+    if not context.is_rollback:
+        capacity = _capacity_lines(context)
+        if capacity:
+            lines.extend(("", *capacity))
     if context.missing_recommendation_ids:
         missing = ", ".join(f"#{item}" for item in context.missing_recommendation_ids)
         lines.extend(
@@ -414,6 +419,36 @@ def _increase_totals_table(context: PullRequestContext) -> list[str]:
         "",
         "_Projected by the Impact Model; a request increase reserves more capacity, so it is reported as a cost, "
         "never as a saving._",
+    ]
+
+
+def _signed(value: float, digits: int = 2) -> str:
+    return f"{value:.{digits}f}" if value >= 0 else f"−{-value:.{digits}f}"
+
+
+def _capacity_lines(context: PullRequestContext) -> list[str]:
+    """Projected released capacity (WP-08.1): its own table, in its own units, never added to cost savings."""
+    totals = capacity_totals(context.recommendations)
+    if totals.empty:
+        return []
+    lines = ["| Released capacity (projected) | now | per year |", "| --- | ---: | ---: |"]
+    if totals.cpu_cores is not None or totals.cpu_core_hours is not None:
+        now = f"{_signed(totals.cpu_cores)} cores" if totals.cpu_cores is not None else "–"
+        year = f"{_signed(totals.cpu_core_hours, 0)} core-hours" if totals.cpu_core_hours is not None else "–"
+        lines.append(f"| CPU requests | {now} | {year} |")
+    if totals.mem_gib is not None or totals.mem_gib_hours is not None:
+        now = f"{_signed(totals.mem_gib)} GiB" if totals.mem_gib is not None else "–"
+        year = f"{_signed(totals.mem_gib_hours, 0)} GiB-hours" if totals.mem_gib_hours is not None else "–"
+        lines.append(f"| Memory requests | {now} | {year} |")
+    if totals.storage_gib is not None:
+        lines.append(f"| Storage | {_signed(totals.storage_gib, 1)} GiB | – |")
+    if totals.load_balancers is not None:
+        lines.append(f"| LoadBalancers | {_signed(totals.load_balancers, 0)} | – |")
+    return [
+        *lines,
+        "",
+        '_Reserved capacity, not money: never added to the cost saving. "now" is (current − proposed request) × '
+        'mean replicas; "per year" is annualized over the observed coverage. Negative values are increases._',
     ]
 
 

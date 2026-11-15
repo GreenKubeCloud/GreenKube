@@ -231,19 +231,28 @@ def co2e_components(breakdown: Co2eBreakdown) -> Dict[str, float]:
 
 @dataclass(frozen=True)
 class CapacityDelta:
-    """Capacity a change releases per year (negative values mean it consumes more)."""
+    """Capacity a change releases per year (negative values mean it consumes more).
+
+    ``storage_gib`` and ``load_balancers`` are not per year: they are the
+    provisioned storage and the LoadBalancer count a deletion releases (WP-08.1).
+    """
 
     cpu_core_hours: float = 0.0
     mem_gib_hours: float = 0.0
     replica_hours: float = 0.0
     node_hours: float = 0.0
+    storage_gib: float = 0.0
+    load_balancers: int = 0
 
     def to_dict(self) -> Dict[str, float]:
+        """JSON-safe representation stored as ``impact.capacity_released``."""
         return {
             "cpu_core_hours": self.cpu_core_hours,
             "mem_gib_hours": self.mem_gib_hours,
             "replica_hours": self.replica_hours,
             "node_hours": self.node_hours,
+            "storage_gib": self.storage_gib,
+            "load_balancers": self.load_balancers,
         }
 
 
@@ -430,6 +439,10 @@ class AssetDeletion:
     component: str
     cost_source: CostSource
     detail: str = ""
+    #: Provisioned storage the deletion releases (PersistentVolume), in GiB.
+    storage_gib: float = 0.0
+    #: LoadBalancers the deletion releases.
+    load_balancers: int = 0
 
     kind = ChangeKind.ASSET_DELETION
 
