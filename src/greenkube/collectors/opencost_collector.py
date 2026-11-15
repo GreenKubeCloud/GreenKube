@@ -36,6 +36,24 @@ OPENCOST_STATUS_EMPTY = "empty"
 OPENCOST_STATUS_NOT_CONFIGURED = "not_configured"
 
 
+def _of_other_cluster(item: Any) -> bool:
+    """Whether an allocation names a cluster other than ``OPENCOST_CLUSTER_ID`` (COST-10 review 4).
+
+    Older OpenCost and Kubecost releases ignore ``filter=``, so the filter is
+    enforced on the answer too. An item without ``properties.cluster`` is kept.
+    """
+    cluster_id = getattr(config, "OPENCOST_CLUSTER_ID", None)
+    if not cluster_id or not isinstance(item, dict):
+        return False
+    cluster = (item.get("properties") or {}).get("cluster")
+    return bool(cluster) and str(cluster) != str(cluster_id)
+
+
+def _own_cluster(allocation_set: Mapping[str, Any]) -> Dict[str, Any]:
+    """``allocation_set`` without the allocations of other clusters (see :func:`_of_other_cluster`)."""
+    return {key: item for key, item in allocation_set.items() if not _of_other_cluster(item)}
+
+
 def _cluster_params() -> Dict[str, str]:
     """OpenCost filter on ``OPENCOST_CLUSTER_ID`` (COST-10); empty when no id is configured."""
     cluster_id = getattr(config, "OPENCOST_CLUSTER_ID", None)
@@ -630,7 +648,9 @@ class OpenCostCollector(BaseCollector):
             return []
 
         now = timestamp if timestamp else datetime.now(timezone.utc)
-        allocation_sets = [allocation_set for allocation_set in response_data if isinstance(allocation_set, dict)]
+        allocation_sets = [
+            _own_cluster(allocation_set) for allocation_set in response_data if isinstance(allocation_set, dict)
+        ]
         clusters = {
             str((item.get("properties") or {}).get("cluster"))
             for allocation_set in allocation_sets
@@ -706,7 +726,7 @@ class OpenCostCollector(BaseCollector):
             return {}
         for allocation_set in data:
             if isinstance(allocation_set, dict):
-                prices.update(node_unit_prices(allocation_set))
+                prices.update(node_unit_prices(_own_cluster(allocation_set)))
         self._node_prices = (bucket, prices)
         return prices
 
@@ -748,7 +768,7 @@ class OpenCostCollector(BaseCollector):
             for allocation_set in data
             if isinstance(allocation_set, dict)
             for item in allocation_set.values()
-            if isinstance(item, dict)
+            if isinstance(item, dict) and not _of_other_cluster(item)
         ]
 
     async def collect_pv_cost_details(self, pv_names: Sequence[str], window_days: int = 7) -> Dict[str, AssetCost]:

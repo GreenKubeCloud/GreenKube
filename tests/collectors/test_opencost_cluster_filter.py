@@ -80,3 +80,50 @@ async def test_single_cluster_without_an_id_is_unchanged(monkeypatch):
     assert metric.total_cost == pytest.approx(0.01)
     assert "filter" not in seen[0].url.params
     assert OPENCOST_AMBIGUOUS_CLUSTER._value.get() == 0
+
+
+@pytest.mark.asyncio
+async def test_allocations_of_another_cluster_are_dropped_when_the_filter_is_ignored(monkeypatch):
+    """Review 4: an older OpenCost or Kubecost ignores filter=; GreenKube enforces the cluster itself."""
+    monkeypatch.setattr("greenkube.collectors.opencost_collector.config.OPENCOST_CLUSTER_ID", "a")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "a/monitoring/prometheus-k8s-0": _allocation("a", 0.01),
+            "b/monitoring/prometheus-k8s-0": _allocation("b", 0.02),
+        }
+        return httpx.Response(200, json={"code": 200, "data": [data]})
+
+    collector = OpenCostCollector()
+    collector._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    collector._resolved_url = "http://opencost:9003/allocation/compute"
+    try:
+        (metric,) = await collector.collect_range(START, START + timedelta(hours=1))
+    finally:
+        await collector.close()
+    assert metric.total_cost == pytest.approx(0.01)
+
+
+@pytest.mark.asyncio
+async def test_pv_and_lb_costs_of_another_cluster_are_dropped(monkeypatch):
+    monkeypatch.setattr("greenkube.collectors.opencost_collector.config.OPENCOST_CLUSTER_ID", "a")
+
+    def item(cluster: str, cost: float) -> dict:
+        return {
+            "properties": {"cluster": cluster, "namespace": "shop"},
+            "pvs": {f"cluster={cluster}:name=data": {"byteHours": 3600, "cost": cost, "adjustment": 0}},
+            "lbAllocations": {f"{cluster}/shop/web": {"service": "shop/web", "cost": cost, "hours": 1}},
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {"a/shop": item("a", 1.0), "b/shop": item("b", 5.0)}
+        return httpx.Response(200, json={"code": 200, "data": [data]})
+
+    collector = OpenCostCollector()
+    collector._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    collector._resolved_url = "http://opencost:9003/allocation/compute"
+    try:
+        assert await collector.collect_pv_costs(["data"]) == {"data": pytest.approx(1.0)}
+        assert await collector.collect_lb_costs(["shop/web"]) == {"shop/web": pytest.approx(1.0)}
+    finally:
+        await collector.close()
