@@ -78,6 +78,9 @@ def test_a_large_cut_ranks_above_a_tiny_cut_on_fixed_nodes():
     components = large["components"]
     assert components["allocated_cost_annual"] == pytest.approx(473.04)
     assert components["billable_cost_annual"] == pytest.approx(0.0)
+    # The money value of the allocated saving is named as such, never as released capacity.
+    assert "allocated_value" in large["factors"] and "released_capacity" not in large["factors"]
+    assert components["allocated_value_annual"] == pytest.approx(473.04)
     assert components["projection_confidence"] == pytest.approx(0.9)
 
 

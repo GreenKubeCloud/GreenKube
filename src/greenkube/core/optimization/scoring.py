@@ -339,7 +339,7 @@ def compute_value(
         "effort": round(-effort_cost, 2),
     }
     if released_value:
-        factors["released_capacity"] = round(p * released_value, 2)
+        factors["allocated_value"] = round(p * released_value, 2)
     if incident_cost_avoided:
         factors["reliability"] = round(p * incident_cost_avoided, 2)
 
@@ -361,7 +361,7 @@ def compute_value(
             "billable_cost_annual": round(cost, 4),
             "allocated_cost_annual": round(allocated, 4) if allocated is not None else None,
             "capacity_value_weight": params.capacity_value_weight,
-            "released_capacity_value_annual": round(released_value, 4),
+            "allocated_value_annual": round(released_value, 4),
             "co2e_annual_g": round(co2e_g, 4),
             "carbon_price_per_tonne": params.carbon_price_per_tonne,
             "carbon_value_annual": round(carbon_value, 4),

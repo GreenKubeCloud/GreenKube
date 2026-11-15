@@ -290,7 +290,7 @@
 					</div>
 				</dl>
 				{#if rec?.projection_note}
-					<p class="text-xs text-dark-400" data-testid="projection-note">Allocated cost: capacity released. {rec.projection_note}.</p>
+					<p class="text-xs text-dark-400" data-testid="projection-note">Allocated cost (chargeback, not billed): {formatMoney(impact.allocatedCostAnnual, impact.currency)}/yr. {rec.projection_note}.</p>
 				{/if}
 				<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
 					{#if impact.costComponents.length}

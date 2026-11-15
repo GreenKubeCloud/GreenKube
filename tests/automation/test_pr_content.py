@@ -572,5 +572,6 @@ def test_fixed_nodes_body_shows_the_allocated_saving_with_the_fixed_nodes_note()
     impact.update({"allocated_cost_annual": 236.52, "realization_factor": 0.0})
     record = fx.recommendation(41, impact=impact, potential_savings_cost=0.0)
     body = render_body(_context(fx.rightsize_plan(), [record]), SETTINGS)
-    assert "| Allocated: capacity released (USD) | $19.71 | $236.52 |" in body
+    assert "| Allocated cost (chargeback, not billed) (USD) | $19.71 | $236.52 |" in body
+    assert "Allocated: capacity released" not in body
     assert "Fixed nodes: frees capacity, bill unchanged until nodes are removed." in body

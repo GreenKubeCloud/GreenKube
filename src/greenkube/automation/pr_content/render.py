@@ -383,8 +383,8 @@ def _totals_table(context: PullRequestContext) -> list[str]:
     if allocated is not None and allocated > 0 and abs(allocated - totals.cost_annual) > 0.005:
         # IMP-03: the allocated saving (chargeback/showback) is always shown, never hidden behind a 0.
         lines.append(
-            f"| Allocated: capacity released ({totals.currency}) | {fmt.money(allocated / 12, totals.currency)} "
-            f"| {fmt.money(allocated, totals.currency)} |"
+            f"| Allocated cost (chargeback, not billed) ({totals.currency}) "
+            f"| {fmt.money(allocated / 12, totals.currency)} | {fmt.money(allocated, totals.currency)} |"
         )
     if totals.has_co2e:
         lines.append(f"| CO₂e | {fmt.co2e(totals.co2e_annual_g / 12)} | {fmt.co2e(totals.co2e_annual_g)} |")
