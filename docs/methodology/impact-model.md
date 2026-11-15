@@ -291,7 +291,7 @@ co2e_expected_annual_g        = factor × (idle + memory + embodied) + (dynamic 
 
 ### Asset deletion (orphaned PersistentVolumes and LoadBalancers)
 
-- Cost: the asset's current allocated rate. This is the OpenCost cost when reported, otherwise `STORAGE_COST_PER_GIB_MONTH` or `LOAD_BALANCER_COST_PER_MONTH` (recorded as `custom_rate`).
+- Cost: the asset's current allocated rate. This is the OpenCost cost when reported, otherwise `STORAGE_COST_PER_GIB_MONTH` or `LOAD_BALANCER_COST_PER_MONTH` (recorded as `custom_rate`). GreenKube reads it from one `/allocation/compute` query over the last 7 days (`aggregate=namespace`, `accumulate=true`): a volume's cost is the sum of `cost + adjustment` of its entry in each allocation's `pvs` map (key `cluster=<id>:name=<pv>`, `__unmounted__` included), a LoadBalancer's cost the same sum in `lbAllocations`, matched on its exact `namespace/name`. The cost is annualized over the hours the asset existed in the window (`byteHours / capacity` for a volume, `hours` for a load balancer), not over the 7 days. An asset OpenCost knows at cost 0 is an observed zero: no cost saving, `cost_source` `opencost`, never the flat default (COST-03). Recommendation texts print the configured currency code.
 - Realization factor: 1.
 - CO₂e: **not modeled** (`co2e_modeled: false`), so `potential_savings_co2e_grams` stays empty.
 

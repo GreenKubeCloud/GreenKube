@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from greenkube.collectors.k8s_object_reader import KubernetesObjectReader, ObjectList
 from greenkube.collectors.lb_collector import ORPHAN, ORPHAN_IN_USE, ORPHAN_UNKNOWN, OrphanCheck
-from greenkube.collectors.opencost_collector import OpenCostCollector
+from greenkube.collectors.opencost_collector import OpenCostCollector, annualize_asset_cost
 from greenkube.core.deletion_safety import opt_out_reason
 from greenkube.utils.k8s_utils import parse_storage_request
 
@@ -280,14 +280,16 @@ async def enrich_orphaned_pv_costs(
 
     collector = opencost or OpenCostCollector()
     try:
-        costs = await collector.collect_pv_costs([v.name for v in volumes], window_days=window_days)
+        details = await collector.collect_pv_cost_details([v.name for v in volumes], window_days=window_days)
         enriched_count = 0
-        if costs:
-            for volume in volumes:
-                window_cost = costs.get(volume.name)
-                if window_cost:
-                    volume.annual_cost = window_cost * (365.0 / window_days)
-                    enriched_count += 1
+        for volume in volumes:
+            detail = details.get(volume.name)
+            if detail is None:
+                continue
+            # Annualized over the hours the volume existed in the window (byteHours / capacity), COST-03.
+            hours = (detail.quantity_hours or 0.0) / volume.capacity_bytes if volume.capacity_bytes > 0 else None
+            volume.annual_cost = annualize_asset_cost(detail.cost, hours, window_days)
+            enriched_count += 1
         if enriched_count:
             logger.info(
                 "Attached real OpenCost costs to %d of %d unused PersistentVolumes.",

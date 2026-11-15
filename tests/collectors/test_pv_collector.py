@@ -155,21 +155,21 @@ class TestEnrichOrphanedPvCosts:
         """Window costs should be annualized against the observation window."""
         from unittest.mock import AsyncMock
 
-        from greenkube.collectors.opencost_collector import OpenCostCollector
+        from greenkube.collectors.opencost_collector import AssetCost, OpenCostCollector
 
         volumes = [
             OrphanedPV(name="pvc-aaa", phase="Released", capacity_bytes=10 * 1024**3),
             OrphanedPV(name="pvc-bbb", phase="Released", capacity_bytes=10 * 1024**3),
         ]
         mock_opencost = AsyncMock(spec=OpenCostCollector)
-        mock_opencost.collect_pv_costs = AsyncMock(return_value={"pvc-aaa": 2.5})
+        mock_opencost.collect_pv_cost_details = AsyncMock(return_value={"pvc-aaa": AssetCost(2.5)})
 
         result = await enrich_orphaned_pv_costs(volumes, window_days=7, opencost=mock_opencost)
 
         # 2.5 USD over 7 days → 2.5 * 365/7 per year
         assert result[0].annual_cost == pytest.approx(2.5 * 365 / 7)
         assert result[1].annual_cost is None
-        mock_opencost.collect_pv_costs.assert_awaited_once_with(["pvc-aaa", "pvc-bbb"], window_days=7)
+        mock_opencost.collect_pv_cost_details.assert_awaited_once_with(["pvc-aaa", "pvc-bbb"], window_days=7)
 
     @pytest.mark.asyncio
     async def test_keeps_volumes_unchanged_without_opencost_data(self):
@@ -180,7 +180,7 @@ class TestEnrichOrphanedPvCosts:
 
         volumes = [OrphanedPV(name="pvc-aaa", phase="Released", capacity_bytes=10 * 1024**3)]
         mock_opencost = AsyncMock(spec=OpenCostCollector)
-        mock_opencost.collect_pv_costs = AsyncMock(return_value={})
+        mock_opencost.collect_pv_cost_details = AsyncMock(return_value={})
 
         result = await enrich_orphaned_pv_costs(volumes, window_days=7, opencost=mock_opencost)
 
@@ -195,7 +195,7 @@ class TestEnrichOrphanedPvCosts:
 
         volumes = [OrphanedPV(name="pvc-aaa", phase="Released", capacity_bytes=10 * 1024**3)]
         mock_opencost = AsyncMock(spec=OpenCostCollector)
-        mock_opencost.collect_pv_costs = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_opencost.collect_pv_cost_details = AsyncMock(side_effect=RuntimeError("boom"))
 
         result = await enrich_orphaned_pv_costs(volumes, window_days=7, opencost=mock_opencost)
 
@@ -214,4 +214,4 @@ class TestEnrichOrphanedPvCosts:
         result = await enrich_orphaned_pv_costs([], opencost=mock_opencost)
 
         assert result == []
-        mock_opencost.collect_pv_costs.assert_not_awaited()
+        mock_opencost.collect_pv_cost_details.assert_not_awaited()

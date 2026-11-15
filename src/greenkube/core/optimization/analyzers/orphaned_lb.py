@@ -63,15 +63,19 @@ class OrphanedLBAnalyzer(Analyzer):
             # Deletion releases the asset's current allocated rate (realization 1).
             # CO2e is not projected: the energy model does not cover load balancers.
             annual_cost = getattr(lb, "annual_cost", None)
-            if not isinstance(annual_cost, (int, float)) or annual_cost <= 0:
+            if not isinstance(annual_cost, (int, float)) or annual_cost < 0:
                 annual_cost = None
+            currency = getattr(cfg, "IMPACT_PRICING_CURRENCY", None) or "USD"
             description_savings = ""
             cost_source = CostSource.OPENCOST
             cost_detail = "opencost_lb_cost"
             allocator = getattr(lb, "bare_metal_allocator", None)
             releases = "releases the LoadBalancer and stops its billing"
-            if annual_cost is not None:
-                description_savings = f" OpenCost-reported cost savings: ${annual_cost:.2f}/year."
+            if annual_cost == 0:
+                # OpenCost knows the load balancer at no cost: an observed zero (COST-03).
+                description_savings = " OpenCost reports no cost for this load balancer: no cost saving."
+            elif annual_cost is not None:
+                description_savings = f" OpenCost-reported cost savings: {annual_cost:.2f} {currency}/year."
             elif allocator:
                 # A bare-metal allocator hands out addresses from a local pool: deleting
                 # the Service frees an address, not a billed cloud load balancer.
@@ -98,8 +102,8 @@ class OrphanedLBAnalyzer(Analyzer):
                 cost_source = CostSource.CUSTOM_RATE
                 cost_detail = "LOAD_BALANCER_COST_PER_MONTH"
                 description_savings = (
-                    f" Estimated cost savings: ${annual_cost:.2f}/year "
-                    f"(at ${cfg.LOAD_BALANCER_COST_PER_MONTH:.2f}/month)."
+                    f" Estimated cost savings: {annual_cost:.2f} {currency}/year "
+                    f"(at {cfg.LOAD_BALANCER_COST_PER_MONTH:.2f} {currency}/month)."
                 )
             delta = ImpactProjector.for_context(context).asset_deletion(
                 asset_kind="load_balancer",

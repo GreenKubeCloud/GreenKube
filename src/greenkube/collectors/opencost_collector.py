@@ -431,6 +431,31 @@ def opencost_step_shares(cost: CostMetric, step_starts: Sequence[datetime], step
     return shares
 
 
+@dataclass(frozen=True)
+class AssetCost:
+    """OpenCost cost of a PersistentVolume or LoadBalancer over a window (COST-03).
+
+    ``quantity_hours`` is the volume's ``byteHours`` or the load balancer's
+    ``hours``: the caller annualizes over the time the asset existed.
+    """
+
+    cost: float
+    quantity_hours: Optional[float] = None
+
+
+#: Hours per year used to annualize an asset cost.
+HOURS_PER_YEAR = 8760.0
+
+
+def annualize_asset_cost(cost: float, hours: Optional[float], window_days: int) -> float:
+    """Annual cost of an asset from its cost over ``hours`` of existence (``window_days`` when unknown)."""
+    if cost == 0:
+        return 0.0
+    if hours is not None and hours > 0:
+        return cost / hours * HOURS_PER_YEAR
+    return cost * (365.0 / window_days)
+
+
 class OpenCostCollector(BaseCollector):
     """
     Collects cost allocation data from an OpenCost service via an Ingress.
@@ -619,179 +644,141 @@ class OpenCostCollector(BaseCollector):
         self._node_prices = (bucket, prices)
         return prices
 
-    async def collect_pv_costs(self, pv_names: Sequence[str], window_days: int = 7) -> Dict[str, float]:
-        """Fetch the storage cost of specific PersistentVolumes from OpenCost.
+    async def _asset_allocations(self, window_days: int, what: str) -> Optional[List[dict]]:
+        """Allocations of the last ``window_days`` with their ``pvs`` and ``lbAllocations`` maps (COST-03).
 
-        Queries the OpenCost allocation API aggregated by ``persistentvolume``
-        over the given window and extracts the per-volume storage cost.
+        One request to the allocation endpoint ``collect`` uses
+        (``/allocation/compute``) with ``aggregate=namespace``,
+        ``accumulate=true`` and ``includeIdle=false``. ``None`` when OpenCost is
+        not configured or the request fails.
+        """
+        client = await self._get_client(verify=config.OPENCOST_VERIFY_CERTS)
+        url = await self._resolve_url(client)
+        if not url:
+            logger.warning("OpenCost API URL is not configured and discovery failed; cannot fetch real %s costs.", what)
+            return None
+        base = url.rstrip("/")
+        endpoint = base if base.endswith("/allocation/compute") else base + "/allocation/compute"
+        end_ts = int(datetime.now(timezone.utc).timestamp()) // 60 * 60
+        params = {
+            "window": f"{end_ts - int(window_days) * 86400},{end_ts}",
+            "aggregate": "namespace",
+            "accumulate": "true",
+            "includeIdle": "false",
+        }
+        try:
+            resp = await client.get(endpoint, params=params)
+            resp.raise_for_status()
+            data = resp.json().get("data")
+        except Exception as exc:
+            logger.warning("Could not read %s costs from OpenCost at %s: %s", what, endpoint, exc)
+            return None
+        if not isinstance(data, list):
+            logger.warning("OpenCost returned no allocation data for %s costs.", what)
+            return None
+        return [
+            item
+            for allocation_set in data
+            if isinstance(allocation_set, dict)
+            for item in allocation_set.values()
+            if isinstance(item, dict)
+        ]
 
-        Args:
-            pv_names: Names of the PersistentVolumes to look up.
-            window_days: Observation window in days used for the allocation query.
+    async def collect_pv_cost_details(self, pv_names: Sequence[str], window_days: int = 7) -> Dict[str, AssetCost]:
+        """Cost and byte-hours of specific PersistentVolumes over the last ``window_days`` (COST-03).
 
-        Returns:
-            A mapping of ``{pv_name: window_cost_usd}`` for volumes OpenCost has
-            cost data for. Returns an empty dict when OpenCost is unreachable,
-            unconfigured, or has no cost data for the requested volumes.
+        OpenCost reports a volume's cost in each allocation's ``pvs`` map, keyed
+        ``cluster=<id>:name=<pv>`` with ``cost``, ``adjustment`` and
+        ``byteHours``; every allocation is read, ``__unmounted__`` included, and
+        a volume shared by several allocations is summed. A volume OpenCost
+        knows at cost 0 is returned with 0.0 (an observed zero); a volume it
+        does not know is absent.
         """
         if not pv_names:
             return {}
-
-        verify_certs = config.OPENCOST_VERIFY_CERTS
-        client = await self._get_client(verify=verify_certs)
-        url = await self._resolve_url(client)
-
-        if not url:
-            logger.warning("OpenCost API URL is not configured and discovery failed; cannot fetch real PV costs.")
-            return {}
-
-        base = url.rstrip("/")
-        if base.endswith("/allocation/compute"):
-            base = base[: -len("/allocation/compute")]
-        params = {"aggregateBy": "persistentvolume", "window": f"{window_days}d"}
-
-        async def _fetch(u: str) -> Optional[dict]:
-            try:
-                resp = await client.get(u, params=params)
-                resp.raise_for_status()
-            except httpx.HTTPError as exc:
-                logger.debug("OpenCost PV cost request to %s failed: %s", u, exc)
-                return None
-            try:
-                payload = resp.json()
-                data = payload.get("data")
-                if isinstance(data, list) and data and isinstance(data[0], dict):
-                    return data[0]
-            except Exception:
-                logger.debug("Failed to decode OpenCost PV cost response from %s", u)
-            return None
-
-        # OpenCost deployments expose the allocation endpoint under different
-        # paths; try each until one responds.
-        for candidate in (
-            base + "/api/v1/allocation/aggregate",
-            base + "/allocation/aggregate",
-            base + "/allocation",
-        ):
-            allocations = await _fetch(candidate)
-            if allocations is not None:
-                break
-        else:
-            allocations = None
-
+        allocations = await self._asset_allocations(window_days, "PersistentVolume")
         if not allocations:
             return {}
-
-        costs: Dict[str, float] = {}
-        for name in pv_names:
-            entry = allocations.get(name)
-            if entry is None:
-                entry = next(
-                    (a for a in allocations.values() if (a.get("properties") or {}).get("persistentVolume") == name),
-                    None,
-                )
-            if not entry:
+        wanted = set(pv_names)
+        costs: Dict[str, AssetCost] = {}
+        for item in allocations:
+            pvs = item.get("pvs")
+            if not isinstance(pvs, dict):
                 continue
-            window_cost = (entry.get("pvCosts") or {}).get(name)
-            if window_cost is None:
-                window_cost = entry.get("storageCost")
-            if window_cost:
-                costs[name] = float(window_cost)
-
+            for key, entry in pvs.items():
+                name = str(key).rpartition(":name=")[2] if ":name=" in str(key) else str(key)
+                if name not in wanted or not isinstance(entry, dict):
+                    continue
+                cost = _optional_number(entry.get("cost"))
+                if cost is None:
+                    continue
+                previous = costs.get(name, AssetCost(0.0, 0.0))
+                costs[name] = AssetCost(
+                    cost=previous.cost + cost + _number(entry.get("adjustment")),
+                    quantity_hours=(previous.quantity_hours or 0.0) + _number(entry.get("byteHours")),
+                )
         if costs:
-            logger.info("Retrieved real OpenCost storage costs for %d PersistentVolumes.", len(costs))
+            logger.info("Retrieved OpenCost storage costs for %d PersistentVolumes.", len(costs))
         return costs
 
-    async def collect_lb_costs(self, service_keys: Sequence[str], window_days: int = 7) -> Dict[str, float]:
-        """Fetch the LoadBalancer cost of specific Services from OpenCost.
+    async def collect_pv_costs(self, pv_names: Sequence[str], window_days: int = 7) -> Dict[str, float]:
+        """Cost of specific PersistentVolumes over the last ``window_days`` (see :meth:`collect_pv_cost_details`).
 
-        Queries the OpenCost allocation API aggregated by ``service`` over the
-        given window and extracts the per-service ``loadBalancerCosts`` map.
+        Returns ``{pv_name: window_cost}``; an observed zero is kept as 0.0, and
+        an empty dict means OpenCost is unreachable, unconfigured, or does not
+        know the volumes.
+        """
+        details = await self.collect_pv_cost_details(pv_names, window_days)
+        return {name: detail.cost for name, detail in details.items()}
 
-        Args:
-            service_keys: Keys of the Services to look up, formatted as
-                          ``namespace/name``.
-            window_days: Observation window in days used for the allocation query.
+    async def collect_lb_cost_details(self, service_keys: Sequence[str], window_days: int = 7) -> Dict[str, AssetCost]:
+        """Cost and hours of specific LoadBalancer Services over the last ``window_days`` (COST-03).
 
-        Returns:
-            A mapping of ``{service_key: window_cost_usd}`` for Services OpenCost
-            has LoadBalancer cost data for. Returns an empty dict when OpenCost
-            is unreachable, unconfigured, or has no cost data for the requested
-            Services.
+        OpenCost reports LoadBalancer cost in each allocation's
+        ``lbAllocations`` map, keyed ``<cluster>/<namespace>/<service>`` with
+        ``service`` (``namespace/name``), ``cost``, ``adjustment`` and
+        ``hours``. A Service matches on its exact ``namespace/name`` only, so
+        a same-named Service of another namespace is never attached. Its cost is
+        summed over the allocations that share it; its hours are the largest
+        reported. An observed zero is kept.
         """
         if not service_keys:
             return {}
-
-        verify_certs = config.OPENCOST_VERIFY_CERTS
-        client = await self._get_client(verify=verify_certs)
-        url = await self._resolve_url(client)
-
-        if not url:
-            logger.warning("OpenCost API URL is not configured and discovery failed; cannot fetch real LB costs.")
-            return {}
-
-        base = url.rstrip("/")
-        if base.endswith("/allocation/compute"):
-            base = base[: -len("/allocation/compute")]
-        params = {"aggregateBy": "service", "window": f"{window_days}d"}
-
-        async def _fetch(u: str) -> Optional[dict]:
-            try:
-                resp = await client.get(u, params=params)
-                resp.raise_for_status()
-            except httpx.HTTPError as exc:
-                logger.debug("OpenCost LB cost request to %s failed: %s", u, exc)
-                return None
-            try:
-                payload = resp.json()
-                data = payload.get("data")
-                if isinstance(data, list) and data and isinstance(data[0], dict):
-                    return data[0]
-            except Exception:
-                logger.debug("Failed to decode OpenCost LB cost response from %s", u)
-            return None
-
-        # OpenCost deployments expose the allocation endpoint under different
-        # paths; try each until one responds.
-        for candidate in (
-            base + "/api/v1/allocation/aggregate",
-            base + "/allocation/aggregate",
-            base + "/allocation",
-        ):
-            allocations = await _fetch(candidate)
-            if allocations is not None:
-                break
-        else:
-            allocations = None
-
+        allocations = await self._asset_allocations(window_days, "LoadBalancer")
         if not allocations:
             return {}
-
-        costs: Dict[str, float] = {}
         wanted = set(service_keys)
-        for entry in allocations.values():
-            if not isinstance(entry, dict):
+        costs: Dict[str, AssetCost] = {}
+        for item in allocations:
+            lbs = item.get("lbAllocations")
+            if not isinstance(lbs, dict):
                 continue
-            lb_costs = entry.get("loadBalancerCosts") or {}
-            if not isinstance(lb_costs, dict):
-                continue
-            for key, window_cost in lb_costs.items():
-                key = str(key)
-                if not window_cost:
+            for key, entry in lbs.items():
+                if not isinstance(entry, dict):
                     continue
-                # OpenCost keys LB costs by "namespace/service-name". Match
-                # requested keys directly or by the service name suffix.
-                if key in wanted:
-                    costs[key] = float(window_cost)
-                else:
-                    service_name = key.rsplit("/", 1)[-1]
-                    matches = [k for k in wanted if k.rsplit("/", 1)[-1] == service_name]
-                    for match in matches:
-                        costs[match] = float(window_cost)
-
+                service = entry.get("service")
+                if not isinstance(service, str) or not service:
+                    parts = str(key).split("/")
+                    service = "/".join(parts[-2:]) if len(parts) >= 2 else str(key)
+                cost = _optional_number(entry.get("cost"))
+                if service not in wanted or cost is None:
+                    continue
+                previous = costs.get(service, AssetCost(0.0, 0.0))
+                costs[service] = AssetCost(
+                    cost=previous.cost + cost + _number(entry.get("adjustment")),
+                    quantity_hours=max(previous.quantity_hours or 0.0, _number(entry.get("hours"))),
+                )
         if costs:
-            logger.info("Retrieved real OpenCost LoadBalancer costs for %d Services.", len(costs))
+            logger.info("Retrieved OpenCost LoadBalancer costs for %d Services.", len(costs))
         return costs
+
+    async def collect_lb_costs(self, service_keys: Sequence[str], window_days: int = 7) -> Dict[str, float]:
+        """Cost of specific LoadBalancer Services (``namespace/name``) over the last ``window_days``.
+
+        See :meth:`collect_lb_cost_details`; an observed zero is kept as 0.0.
+        """
+        details = await self.collect_lb_cost_details(service_keys, window_days)
+        return {key: detail.cost for key, detail in details.items()}
 
     async def collect_range(self, start: datetime, end: datetime) -> List[CostMetric]:
         """Collect the cost allocated to each pod over exactly ``[start, end)``.

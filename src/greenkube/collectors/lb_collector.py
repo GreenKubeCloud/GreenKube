@@ -39,7 +39,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from greenkube.collectors.k8s_object_reader import KubernetesObjectReader, ObjectList, label_selector
-from greenkube.collectors.opencost_collector import OpenCostCollector
+from greenkube.collectors.opencost_collector import OpenCostCollector, annualize_asset_cost
 from greenkube.core.deletion_safety import opt_out_reason
 
 logger = logging.getLogger(__name__)
@@ -537,14 +537,17 @@ async def enrich_orphaned_lb_costs(
 
     collector = opencost or OpenCostCollector()
     try:
-        costs = await collector.collect_lb_costs([f"{s.namespace}/{s.name}" for s in services], window_days=window_days)
+        details = await collector.collect_lb_cost_details(
+            [f"{s.namespace}/{s.name}" for s in services], window_days=window_days
+        )
         enriched_count = 0
-        if costs:
-            for service in services:
-                window_cost = costs.get(f"{service.namespace}/{service.name}")
-                if window_cost:
-                    service.annual_cost = window_cost * (365.0 / window_days)
-                    enriched_count += 1
+        for service in services:
+            detail = details.get(f"{service.namespace}/{service.name}")
+            if detail is None:
+                continue
+            # Annualized over the hours the load balancer existed in the window, COST-03.
+            service.annual_cost = annualize_asset_cost(detail.cost, detail.quantity_hours, window_days)
+            enriched_count += 1
         if enriched_count:
             logger.info(
                 "Attached real OpenCost costs to %d of %d unused LoadBalancer Services.",
