@@ -8,7 +8,8 @@
 		getRecommendationV2
 	} from '$lib/api.js';
 	import { formatCO2, formatDate } from '$lib/utils/format.js';
-	import { describeExpectedValue, eligibilityOf, formatMoney } from '$lib/utils/decision.js';
+	import { describeExpectedValue, eligibilityOf, formatMoney, oomHistoryWarningOf } from '$lib/utils/decision.js';
+	import OomHistoryWarning from '$lib/components/OomHistoryWarning.svelte';
 	import { groupConsecutiveEvents } from '$lib/utils/lifecycle.js';
 	import { etaFrom, targetName } from '$lib/overview.js';
 	import {
@@ -255,6 +256,7 @@
 						{/each}
 					</ul>
 				{/if}
+				<OomHistoryWarning warning={oomHistoryWarningOf(rec)} />
 				{#if eligibility?.warnings.length}
 					<ul class="space-y-1 text-xs text-yellow-300" aria-label="Warnings">
 						{#each eligibility.warnings as warning (warning.code + warning.message)}

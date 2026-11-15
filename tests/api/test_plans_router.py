@@ -929,6 +929,34 @@ def test_create_keeps_a_contested_preview_for_the_approval_click(plan_api, monke
     assert queue.operations == {}
 
 
+def test_create_never_auto_approves_a_memory_decrease_with_unknown_oom_history(plan_api, monkeypatch):
+    """A person may open such a PR; automation.autoApprove never does, even at maxRisk medium."""
+    from greenkube.api.dependencies import get_recommendation_repository
+    from greenkube.core.config import Config
+
+    client, app, _, _, queue = plan_api
+    monkeypatch.setattr(
+        "greenkube.api.routers.plans.get_config",
+        lambda: Config(AUTOMATION_AUTO_APPROVE_ENABLED=True, AUTOMATION_AUTO_APPROVE_MAX_RISK="medium"),
+    )
+    app.dependency_overrides[get_recommendation_repository] = lambda: _Recommendations(
+        type="RIGHTSIZING_MEMORY",
+        risk_level="medium",
+        current_memory_request_bytes=2048,
+        recommended_memory_request_bytes=1024,
+        risk_factors=["oom_history_unknown", "oom_unknown_signal_failed"],
+    )
+
+    response = client.post("/api/v1/automation/plans", json={"recommendation_ids": [42]})
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "validated"
+    assert body["auto_approved"] is False
+    assert body["auto_approve_blockers"] == ["oom_history_unknown"]
+    assert queue.operations == {}
+
+
 def test_create_does_not_read_recommendations_when_auto_approve_is_off(plan_api):
     client, _, _, _, queue = plan_api
 

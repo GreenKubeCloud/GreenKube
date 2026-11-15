@@ -345,12 +345,34 @@ def _summary(context: PullRequestContext, settings: PullRequestRenderSettings) -
         capacity = _capacity_lines(context)
         if capacity:
             lines.extend(("", *capacity))
+    lines.extend(_oom_history_unknown_lines(context, settings))
     if context.missing_recommendation_ids:
         missing = ", ".join(f"#{item}" for item in context.missing_recommendation_ids)
         lines.extend(
             ("", f"> Recommendation evidence is unavailable for {missing}; review those records before merging.")
         )
     return "\n".join(lines)
+
+
+def _oom_history_unknown_lines(context: PullRequestContext, settings: PullRequestRenderSettings) -> list[str]:
+    """A warning per recommendation whose OOM history is unknown (opened by a person, never automatically)."""
+    from greenkube.core.optimization.risks import oom_history_unknown_warning
+
+    lines: list[str] = []
+    for record in context.recommendations:
+        texts = oom_history_unknown_warning(record.risk_factors)
+        if texts is None:
+            continue
+        message, check = texts
+        ref = _recommendation_ref(record.id, settings) if record.id is not None else "this recommendation"
+        lines.extend(
+            (
+                "",
+                f"> [!WARNING]\n> **OOM history unknown ({ref}).** {fmt.inline(message, max_chars=600)}\n"
+                f"> {fmt.inline(check, max_chars=600)}",
+            )
+        )
+    return lines
 
 
 def _recommendation_ref(recommendation_id: int, settings: PullRequestRenderSettings) -> str:

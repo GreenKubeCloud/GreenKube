@@ -319,13 +319,15 @@ A preview is auto-approved only when:
   stop, whatever the settings (`contested` accepts only `false`);
 - every decrease of a request is backed by GreenKube's own usage evidence or by at least two independent consensus
   votes;
+- no recommendation is a memory decrease whose OOM history could not be read (risk factor or eligibility warning
+  `oom_history_unknown`): a person opens that pull request after checking restarts and OOM kills;
 - no recommendation raises a request, unless `increases: true`: an increase is a reliability fix that costs money,
   so a person approves it by default (roadmap H1); an increase is also approved automatically only when GreenKube's
   own analyzer sized it.
 
 Otherwise the plan waits for the click and the response lists `auto_approve_blockers`: `approve_scope_missing`,
 `rollback_plan`, `not_active`, `recommendation_missing`, `risk_above_auto_approve`, `confidence_below_auto_approve`,
-`consensus_contested`, `decrease_without_native_evidence`, `increase_requires_approval`,
+`consensus_contested`, `oom_history_unknown`, `decrease_without_native_evidence`, `increase_requires_approval`,
 `increase_without_native_evidence`, the approval's error code (for example `delivery_paused`), or
 `auto_approve_failed` when the approval failed unexpectedly (the preview is kept).
 

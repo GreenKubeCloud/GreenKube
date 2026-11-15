@@ -2,7 +2,7 @@
  * Tests for the recommendations route pull-request flow.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/svelte';
+import { act, fireEvent, render, screen, within } from '@testing-library/svelte';
 import RecommendationsPage from '../../src/routes/recommendations/+page.svelte';
 import * as api from '$lib/api.js';
 import { resetOptimizationRunsSupport } from '$lib/optimizationRuns.js';
@@ -731,6 +731,37 @@ describe('RecommendationsPage GitOps plan flow', () => {
 			'title',
 			'The proposed change does not target one named container of the workload. Rescan once the container metrics are collected.'
 		);
+	});
+
+	it('offers the PR on an unknown OOM history and warns with its cause and what to check', async () => {
+		const flagged = {
+			...actionReadyRecommendation(),
+			type: 'RIGHTSIZING_MEMORY',
+			reason: 'Memory p99 is far below the request',
+			eligibility: {
+				...eligible([101]),
+				warnings: [
+					{
+						code: 'oom_history_unknown',
+						message: 'The OOM-kill and restart queries to Prometheus failed (HTTP error, timeout or query limit).',
+						fix: 'Before merging, check the container: no recent restarts, no OOMKilled last state.'
+					}
+				]
+			}
+		};
+		api.getActiveRecommendations.mockResolvedValue([flagged]);
+		api.createAutomationPlan.mockResolvedValueOnce(validatedPlan);
+
+		render(RecommendationsPage);
+
+		const warning = await screen.findByTestId('oom-history-warning');
+		expect(warning).toHaveTextContent('OOM history unknown');
+		expect(warning).toHaveTextContent('queries to Prometheus failed');
+		expect(warning).toHaveTextContent('Before merging, check the container');
+		await fireEvent.click(screen.getByRole('button', { name: 'Open PR' }));
+		expect(api.createAutomationPlan).toHaveBeenCalledWith([101]);
+		const dialog = await screen.findByRole('dialog');
+		expect(within(dialog).getByTestId('oom-history-warning')).toHaveTextContent('queries to Prometheus failed');
 	});
 
 	it('trusts the server eligibility instead of re-checking the action client-side', async () => {

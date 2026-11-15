@@ -40,9 +40,11 @@
 		eligibilityOf,
 		formatMoney,
 		isReliabilityLane,
+		oomHistoryWarningOf,
 		planTargetFor
 	} from '$lib/utils/decision.js';
 	import DataState from '$lib/components/DataState.svelte';
+	import OomHistoryWarning from '$lib/components/OomHistoryWarning.svelte';
 	import { capacitySummary } from '$lib/releasedCapacity.js';
 	import { etaFrom } from '$lib/overview.js';
 	import { SAVINGS_TERMS, realizationText, savingsFigures } from '$lib/savingsVocabulary.js';
@@ -1423,6 +1425,8 @@
 				>✕</button>
 			</div>
 
+			<OomHistoryWarning warning={oomHistoryWarningOf(prModal.rec)} />
+
 			{#if prLoading && !prPlan}
 				<p class="text-xs text-dark-400 flex items-center gap-2"><span class="animate-spin">⟳</span> Preparing preview…</p>
 			{/if}
@@ -2434,13 +2438,14 @@
 													{#if blocker.fix}<span class="text-dark-500"> — {blocker.fix}</span>{/if}
 												</li>
 											{/each}
-											{#each eligibility.warnings as warning (warning.code + warning.message)}
+											{#each eligibility.warnings.filter((entry) => entry.code !== 'oom_history_unknown') as warning (warning.code + warning.message)}
 												<li class="text-dark-500">
 													<span class="text-yellow-500/80">⚠ {warning.message}</span>
 													{#if warning.fix}<span> — {warning.fix}</span>{/if}
 												</li>
 											{/each}
 										</ul>
+										<OomHistoryWarning warning={oomHistoryWarningOf(rec)} />
 									{/if}
 
 									<!-- CPU / Memory details -->
