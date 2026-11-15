@@ -1046,3 +1046,16 @@ tests:
       automation.autoApprove.contested: true
     asserts:
       - failedTemplate: {}
+
+  - it: leaves OPENCOST_CLUSTER_ID unset by default (COST-10)
+    asserts:
+      - notExists:
+          path: data.OPENCOST_CLUSTER_ID
+
+  - it: sets OPENCOST_CLUSTER_ID from config.opencost.clusterId (COST-10)
+    set:
+      config.opencost.clusterId: cluster-a
+    asserts:
+      - equal:
+          path: data.OPENCOST_CLUSTER_ID
+          value: cluster-a

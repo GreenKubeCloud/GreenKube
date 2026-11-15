@@ -56,9 +56,8 @@ async def test_collect_parses_data_dynamically():
     fixed_url = "http://opencost:9003"
 
     # Mock the API call
-    respx.get(f"{fixed_url}", params={"window": "1d", "aggregate": "namespace,pod", "includeIdle": "false"}).mock(
-        return_value=Response(200, json=MOCK_API_RESPONSE)
-    )
+    params = {"window": "1d", "aggregate": "cluster,namespace,pod", "includeIdle": "false"}
+    respx.get(f"{fixed_url}", params=params).mock(return_value=Response(200, json=MOCK_API_RESPONSE))
 
     # We need to mock _resolve_url.
     # Since we refactor the collector to be async, _resolve_url likely becomes async.

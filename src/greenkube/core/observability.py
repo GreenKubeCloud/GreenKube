@@ -241,6 +241,12 @@ COLLECTION_SOURCE_REQUESTS = Counter(
     ["source", "outcome"],
     registry=REGISTRY,
 )
+OPENCOST_AMBIGUOUS_CLUSTER = Gauge(
+    "greenkube_opencost_ambiguous_cluster",
+    "1 when the last OpenCost answer covered several clusters and OPENCOST_CLUSTER_ID is not set: no OpenCost "
+    "cost is stored for the window (COST-10).",
+    registry=REGISTRY,
+)
 OPENCOST_UNREBUILT_ALLOCATIONS = Counter(
     "greenkube_opencost_unrebuilt_allocations_total",
     "OpenCost allocations below its 5-decimal precision whose cost could not be rebuilt from node unit "

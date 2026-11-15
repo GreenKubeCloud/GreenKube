@@ -39,7 +39,7 @@ async def test_collect_range_queries_the_exact_window_by_namespace_and_pod():
     params = dict(route.calls[0].request.url.params)
     assert params == {
         "window": f"{int(START.timestamp())},{int(END.timestamp())}",
-        "aggregate": "namespace,pod",
+        "aggregate": "cluster,namespace,pod",
         "accumulate": "true",
         "includeIdle": "false",
     }

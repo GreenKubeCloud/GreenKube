@@ -13,7 +13,13 @@ from greenkube.collectors.discovery.base import BaseDiscovery
 from greenkube.collectors.discovery.opencost import OpenCostDiscovery
 
 from ..core.config import config
-from ..core.observability import OPENCOST_UNREBUILT_ALLOCATIONS, elapsed, record_collection_request, start_timer
+from ..core.observability import (
+    OPENCOST_AMBIGUOUS_CLUSTER,
+    OPENCOST_UNREBUILT_ALLOCATIONS,
+    elapsed,
+    record_collection_request,
+    start_timer,
+)
 from ..models.metrics import CostMetric
 from ..models.provenance import CostSource
 from ..utils.http_client import get_async_http_client
@@ -27,6 +33,12 @@ OPENCOST_STATUS_OK = "ok"
 OPENCOST_STATUS_EMPTY = "empty"
 #: No OpenCost URL is configured and none was discovered: the cluster has no OpenCost.
 OPENCOST_STATUS_NOT_CONFIGURED = "not_configured"
+
+
+def _cluster_params() -> Dict[str, str]:
+    """OpenCost filter on ``OPENCOST_CLUSTER_ID`` (COST-10); empty when no id is configured."""
+    cluster_id = getattr(config, "OPENCOST_CLUSTER_ID", None)
+    return {"filter": f'cluster:"{cluster_id}"'} if cluster_id else {}
 
 
 class OpenCostUnavailableError(RuntimeError):
@@ -313,7 +325,8 @@ def _allocation_to_cost_metric(
     namespace = properties.get("namespace")
     pod_name = properties.get("pod")
     if (not namespace or not pod_name) and "/" in resource_id:
-        namespace, _, pod_name = resource_id.partition("/")
+        # Keys are "<namespace>/<pod>", or "<cluster>/<namespace>/<pod>" with aggregate=cluster,namespace,pod.
+        namespace, pod_name = resource_id.split("/")[-2:]
     if not pod_name:
         pod_name = resource_id
     if not namespace:
@@ -533,7 +546,9 @@ class OpenCostCollector(BaseCollector):
         self.last_status = None
         logger.info("Collecting data from OpenCostCollector (using Ingress)...")
 
-        params = {"window": window, "aggregate": "namespace,pod"}
+        # Aggregated by cluster too, so a multi-cluster OpenCost or Kubecost never sums same-named
+        # pods of different clusters; OPENCOST_CLUSTER_ID filters the query (COST-10).
+        params = {"window": window, "aggregate": "cluster,namespace,pod", **_cluster_params()}
         if accumulate:
             params["accumulate"] = "true"
         params["includeIdle"] = "false"
@@ -601,6 +616,24 @@ class OpenCostCollector(BaseCollector):
 
         now = timestamp if timestamp else datetime.now(timezone.utc)
         allocation_sets = [allocation_set for allocation_set in response_data if isinstance(allocation_set, dict)]
+        clusters = {
+            str((item.get("properties") or {}).get("cluster"))
+            for allocation_set in allocation_sets
+            for item in allocation_set.values()
+            if isinstance(item, dict) and (item.get("properties") or {}).get("cluster")
+        }
+        if len(clusters) > 1 and not _cluster_params():
+            OPENCOST_AMBIGUOUS_CLUSTER.set(1)
+            record_collection_request("opencost", "error", elapsed(timer))
+            logger.error(
+                "OpenCost answered for several clusters (%s) and OPENCOST_CLUSTER_ID is not set; no OpenCost cost "
+                "is stored rather than merging same-named pods of different clusters.",
+                ", ".join(sorted(clusters)),
+            )
+            raise OpenCostUnavailableError(
+                "OpenCost serves several clusters; set OPENCOST_CLUSTER_ID (config.opencost.clusterId)"
+            )
+        OPENCOST_AMBIGUOUS_CLUSTER.set(0)
         node_prices: Dict[str, NodeUnitPrices] = {}
         nodes = {
             str(item["properties"]["node"])
@@ -643,6 +676,7 @@ class OpenCostCollector(BaseCollector):
             "aggregate": "node",
             "accumulate": "true",
             "includeIdle": "false",
+            **_cluster_params(),
         }
         prices: Dict[str, NodeUnitPrices] = {}
         try:
@@ -682,6 +716,7 @@ class OpenCostCollector(BaseCollector):
             "aggregate": "namespace",
             "accumulate": "true",
             "includeIdle": "false",
+            **_cluster_params(),
         }
         try:
             resp = await client.get(endpoint, params=params, **self._auth_kwargs())

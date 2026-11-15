@@ -474,6 +474,10 @@ config:
     # If empty, GreenKube will attempt in-cluster discovery.
     url: ''
     verifyCerts: true
+    # OpenCost cluster id (properties.cluster) to read when one OpenCost or Kubecost
+    # serves several clusters. Empty: an answer covering several clusters stores no
+    # OpenCost cost (the window stays opencost_pending).
+    clusterId: ''
     # Prometheus query step (e.g., "5m", "1h"). Must be a divisor of 24 hours.
     queryRangeStep: 5m
     # cAdvisor scrape interval; rate windows span max(queryRangeStep, 4 x scrapeInterval).

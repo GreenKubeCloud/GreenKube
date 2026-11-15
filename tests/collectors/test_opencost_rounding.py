@@ -249,7 +249,7 @@ def _client(responses):
 @pytest.mark.asyncio
 async def test_collect_range_queries_node_prices_once_per_hour_and_derives_small_pods() -> None:
     responses = {
-        "namespace,pod": {"greenkube-e2e-apps/prod-lb-backend": small_pod()},
+        "cluster,namespace,pod": {"greenkube-e2e-apps/prod-lb-backend": small_pod()},
         "node": {"minikube": NODE_ALLOCATION},
     }
     client, calls = _client(responses)
@@ -270,7 +270,7 @@ async def test_collect_range_queries_node_prices_once_per_hour_and_derives_small
 
 @pytest.mark.asyncio
 async def test_collect_skips_the_node_query_when_no_cost_is_below_precision() -> None:
-    responses = {"namespace,pod": {"prod/big": large_pod(cpuCost=0.00105, ramCost=0.00028, totalCost=0.00133)}}
+    responses = {"cluster,namespace,pod": {"prod/big": large_pod(cpuCost=0.00105, ramCost=0.00028, totalCost=0.00133)}}
     client, calls = _client(responses)
     with patch("greenkube.collectors.opencost_collector.get_async_http_client", return_value=client):
         collector = OpenCostCollector()

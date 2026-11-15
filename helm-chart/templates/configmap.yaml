@@ -123,6 +123,9 @@ data:
   # --- OpenCost Collector Config ---
   # OPENCOST_API_URL comes from a mounted Secret (see the Boavizta note above).
   OPENCOST_VERIFY_CERTS: {{ .Values.config.opencost.verifyCerts | quote }}
+  {{- with .Values.config.opencost.clusterId }}
+  OPENCOST_CLUSTER_ID: {{ . | quote }}
+  {{- end }}
 
   # --- API Config ---
   API_HOST: {{ .Values.config.api.host | quote }}
