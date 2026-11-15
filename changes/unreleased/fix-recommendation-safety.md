@@ -8,6 +8,8 @@
 - A failed OOM or restart query is no longer reported as zero kills or restarts, and one failing reliability query no longer drops the other signals.
 - The evidence of a recommendation records 0 OOM kills when the signal is unknown but the rollup restart history proves none, instead of an unknown value.
 
+- An applied CPU or memory rightsizing no longer swallows every later recommendation of the same type for its container (REC-01): only a restatement of the applied change within 6 hours of `applied_at` is absorbed; other advice, such as an OOM-driven increase after a decrease, is inserted as a new active recommendation (SQLite and PostgreSQL).
+
 ### Changed
 - Upgrade: on the first scan after the upgrade, an active native CPU or memory decrease whose container has no readable restart/OOM history is retired (marked stale) with the reason `reliability_signals_unknown`.
 - Upgrade: hours rolled before migration 0130 carry no per-pod restart increase: while the lookback still holds such an hour with a restart count, the rollup restart history is unknown, so a decrease whose scan signals are also unknown is withheld. The history becomes available as the lookback fills with newly rolled hours.

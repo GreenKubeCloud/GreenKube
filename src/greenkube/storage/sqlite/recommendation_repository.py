@@ -18,6 +18,7 @@ from greenkube.core.recommendation_realization import (
     RECORDED_CHANGE_STATUSES,
     absorbs_regenerated_recommendation,
     estimate_realized_savings,
+    is_rightsizing_type,
     refresh_applied_recommendation,
 )
 from greenkube.core.recommendation_reconciliation import may_mark_stale
@@ -357,6 +358,18 @@ class SQLiteRecommendationRepository(RecommendationRepository):
                     if recorded_row is not None and recorded_row["status"] == RecommendationStatus.APPLIED.value
                     else None
                 )
+                if applied_row is not None and is_rightsizing_type(applied_row["type"]):
+                    # REC-01: an applied rightsizing only absorbs a restatement of its change.
+                    if not absorbs_regenerated_recommendation(row_to_record(applied_row), r):
+                        logger.info(
+                            "New %s advice for %s/%s after applied recommendation %s: inserted.",
+                            applied_row["type"],
+                            r.namespace,
+                            r.pod_name,
+                            applied_row["id"],
+                        )
+                        applied_row = None
+                        recorded_row = None
                 if recorded_row is not None and applied_row is None:
                     if absorbs_regenerated_recommendation(row_to_record(recorded_row), r):
                         # The scan restates a change already recorded (lagging rollup):

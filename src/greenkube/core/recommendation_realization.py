@@ -88,8 +88,9 @@ def absorbs_regenerated_recommendation(
     """True when a regenerated rightsizing only restates a change already recorded.
 
     ``recorded`` is a recommendation of the same identity in a status of
-    :data:`RECORDED_CHANGE_STATUSES` (other than ``applied``, which always
-    absorbs its regeneration through :func:`refresh_applied_recommendation`).
+    :data:`RECORDED_CHANGE_STATUSES`, ``applied`` included (REC-01: an applied
+    row used to swallow every later recommendation of its container, even an
+    OOM-driven increase after the decrease it recorded).
     Within :data:`ROLLUP_LAG_WINDOW` after the change, a scan built from the
     lagging rollup regenerates the pre-change advice (same baseline, or the
     proposal that is already live). Inserting it as a new active
@@ -117,6 +118,9 @@ def absorbs_regenerated_recommendation(
         landed = (recorded.recommended_memory_request_bytes, recorded.actual_memory_request_bytes)
         regenerated_current = regenerated.current_memory_request_bytes
         regenerated_proposal = regenerated.recommended_memory_request_bytes
+    if regenerated_current is not None and regenerated_current in landed and regenerated_current != baseline:
+        # Advice computed from the landed request is new advice by definition (REC-01).
+        return False
     if baseline is not None and regenerated_current == baseline:
         return True
     return regenerated_proposal is not None and regenerated_proposal in landed
@@ -185,3 +189,8 @@ def _scaled_share(
     actual_delta = current_value - actual_value
     raw_share = actual_delta / recommended_delta
     return max(0.0, min(raw_share, 1.0))
+
+
+def is_rightsizing_type(value: object) -> bool:
+    """True for the CPU and memory rightsizing types (enum or stored string)."""
+    return any(value == kind or value == kind.value for kind in _RIGHTSIZING_TYPES)
