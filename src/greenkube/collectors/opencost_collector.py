@@ -13,7 +13,7 @@ from greenkube.collectors.discovery.base import BaseDiscovery
 from greenkube.collectors.discovery.opencost import OpenCostDiscovery
 
 from ..core.config import config
-from ..core.observability import elapsed, record_collection_request, start_timer
+from ..core.observability import OPENCOST_UNREBUILT_ALLOCATIONS, elapsed, record_collection_request, start_timer
 from ..models.metrics import CostMetric
 from ..models.provenance import CostSource
 from ..utils.http_client import get_async_http_client
@@ -167,6 +167,38 @@ def untrusted_cost_reason(item: dict) -> Optional[str]:
     return None
 
 
+def _ran_or_requested(item: dict) -> bool:
+    """Whether the allocation shows a positive request or usage average (the pod was there)."""
+    return any(
+        (_optional_number(item.get(key)) or 0.0) > 0
+        for key in ("cpuCoreRequestAverage", "ramByteRequestAverage", "cpuCoreUsageAverage", "ramByteUsageAverage")
+    )
+
+
+def unusable_cost_reason(item: dict) -> Optional[str]:
+    """Why an allocation that is not rebuilt carries no usable cost (``None`` when its figures can be used).
+
+    COST-05: an allocation with no running time (``minutes <= 0`` or a window
+    whose start equals its end, OpenCost's answer after a gap in its own data)
+    carries no cost whatever its requests. A non-zero figure below
+    ``PRECISION_FLOOR`` that :func:`rebuilt_cost` could not rebuild (node price
+    unknown, figures disagree) has a rounding error unbounded relative to its
+    value. A zero for a pod with a request or usage is a missing price. Only a
+    zero for a pod that ran without any request or usage is a usable zero.
+    """
+    minutes = _optional_number(item.get("minutes"))
+    window = item.get("window") if isinstance(item.get("window"), dict) else {}
+    start, end = _parse_time(window.get("start")), _parse_time(window.get("end"))
+    if (minutes is not None and minutes <= 0) or (start is not None and start == end):
+        return "OpenCost allocation has no running time (minutes = 0)"
+    total = _reported_total(item)
+    if 0 < total < PRECISION_FLOOR:
+        return f"OpenCost cost {total:g} is below its precision and could not be rebuilt from node prices"
+    if total == 0 and _ran_or_requested(item):
+        return "OpenCost reported a zero cost for a pod with requests or usage"
+    return None
+
+
 def _core_hours(item: dict, hours: float) -> Optional[float]:
     """The allocation's core-hours, refined within the rounding of ``cpuCoreHours``.
 
@@ -310,6 +342,10 @@ def _allocation_to_cost_metric(
         total = cpu + ram + storage + network + lb + gpu
     else:
         untrusted = untrusted_cost_reason(item)
+        if untrusted is None:
+            untrusted = unusable_cost_reason(item)
+            if untrusted is not None:
+                OPENCOST_UNREBUILT_ALLOCATIONS.inc()
         if untrusted is not None:
             logger.debug("Cost of %s/%s is not trusted: %s", namespace, pod_name, untrusted)
         source = CostSource.NONE.value if untrusted is not None else CostSource.OPENCOST.value

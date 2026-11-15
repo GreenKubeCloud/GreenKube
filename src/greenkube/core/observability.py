@@ -241,6 +241,12 @@ COLLECTION_SOURCE_REQUESTS = Counter(
     ["source", "outcome"],
     registry=REGISTRY,
 )
+OPENCOST_UNREBUILT_ALLOCATIONS = Counter(
+    "greenkube_opencost_unrebuilt_allocations_total",
+    "OpenCost allocations below its 5-decimal precision whose cost could not be rebuilt from node unit "
+    "prices, or with no running time: stored with cost_source none (untrusted), COST-05.",
+    registry=REGISTRY,
+)
 COLLECTION_SOURCE_DURATION = Histogram(
     "greenkube_collection_source_duration_seconds",
     "Duration of requests to measurement sources.",

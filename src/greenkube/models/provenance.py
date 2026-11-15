@@ -144,8 +144,9 @@ def is_cost_trusted(row: Any, *, allowed: Iterable[str] = TRUSTED_COST_SOURCES) 
     adjustments that must not be presented as savings). A zero total on a row
     that requested CPU or memory is not trusted either: OpenCost had no price
     for it (a missing cost read as zero), and a zero after a change would be
-    measured as the whole cost saved. A pod so small that OpenCost rounds its
-    cost to zero is stored with its rebuilt cost (``opencost_derived``), not 0.
+    measured as the whole cost saved; the same holds for a row with CPU or
+    memory usage (COST-05). A pod so small that OpenCost rounds its cost to
+    zero is stored with its rebuilt cost (``opencost_derived``), not 0.
     """
     source = _normalized(_value(row, "cost_source"))
     if source is None or source not in {str(item) for item in allowed}:
@@ -165,8 +166,12 @@ def is_cost_trusted(row: Any, *, allowed: Iterable[str] = TRUSTED_COST_SOURCES) 
 
 
 def _requested(row: Any) -> bool:
-    """Whether a row requested CPU or memory (``cpu_request`` millicores, ``memory_request`` bytes)."""
-    for field in ("cpu_request", "memory_request"):
+    """Whether a row requested or used CPU or memory (COST-05: a zero cost for it is a missing price).
+
+    ``cpu_request`` (millicores), ``memory_request`` (bytes), and the usage
+    columns ``cpu_usage_millicores`` and ``memory_usage_bytes``.
+    """
+    for field in ("cpu_request", "memory_request", "cpu_usage_millicores", "memory_usage_bytes"):
         try:
             value = float(_value(row, field) or 0.0)
         except (TypeError, ValueError):
