@@ -197,3 +197,15 @@ tests:
     asserts:
       - matchRegexRaw:
           pattern: "Create Secret my-creds \\(key GREENKUBE_API_KEY\\) in namespace monitoring"
+
+  - it: explains the auto-detected cluster name when config.clusterName is empty
+    asserts:
+      - matchRegexRaw:
+          pattern: "config.clusterName is empty"
+
+  - it: says nothing about the cluster name when it is set
+    set:
+      config.clusterName: prod-eu
+    asserts:
+      - notMatchRegexRaw:
+          pattern: "config.clusterName is empty"
