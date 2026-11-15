@@ -420,6 +420,11 @@ def _reservation(requests: Sequence[Optional[float]], usages: Sequence[Optional[
     return weights
 
 
+def _unknown(requests: Sequence[Optional[float]], usages: Sequence[Optional[float]]) -> bool:
+    """Whether some container has neither a positive request nor a known usage."""
+    return any(not (request or 0) > 0 and usage is None for request, usage in zip(requests, usages, strict=True))
+
+
 def container_cost_shares(
     cpu_requests: Sequence[Optional[float]],
     cpu_usages: Sequence[Optional[float]],
@@ -441,6 +446,12 @@ def container_cost_shares(
         return [], []
     cpu = _reservation(cpu_requests, cpu_usages)
     memory = _reservation(memory_requests, memory_usages)
+    # A container with no request and an unknown usage has an unknown reservation, not a zero one:
+    # the resource falls back to an equal split rather than giving it no cost (review 5).
+    if _unknown(cpu_requests, cpu_usages):
+        cpu = [1.0] * count
+    if _unknown(memory_requests, memory_usages):
+        memory = [1.0] * count
     if sum(cpu) <= 0:
         cpu = memory if sum(memory) > 0 else [1.0] * count
     if sum(memory) <= 0:

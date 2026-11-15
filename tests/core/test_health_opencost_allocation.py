@@ -49,3 +49,24 @@ async def test_a_working_allocation_call_is_healthy_and_carries_the_credentials(
     assert result.status == ServiceStatus.HEALTHY
     allocation = [request for request in seen if request.url.path.endswith("/allocation/compute")]
     assert allocation and allocation[0].headers.get("Authorization") == "Bearer abc"
+
+
+@pytest.mark.asyncio
+async def test_health_check_uses_the_given_config_and_the_cluster_filter(monkeypatch):
+    """Review 5: the probe reads the cfg it is given (TLS, cluster id), not the global config."""
+    from greenkube.core.config import Config
+
+    cfg = Config(OPENCOST_API_URL="http://opencost:9003", OPENCOST_VERIFY_CERTS=False, OPENCOST_CLUSTER_ID="a")
+    seen: list[httpx.Request] = []
+    calls: list[dict] = []
+
+    def factory(**kwargs):
+        calls.append(kwargs)
+        return _client(200, seen)
+
+    with patch("greenkube.core.health.get_async_http_client", side_effect=factory):
+        result = await check_opencost(cfg)
+    assert result.status == ServiceStatus.HEALTHY
+    assert calls and calls[0].get("verify") is False
+    allocation = [request for request in seen if request.url.path.endswith("/allocation/compute")]
+    assert allocation[0].url.params.get("filter") == 'cluster:"a"'

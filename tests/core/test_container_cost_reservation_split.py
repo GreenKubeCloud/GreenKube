@@ -112,3 +112,12 @@ def test_containers_of_one_pod_get_the_same_reserved_unit_price():
         sample = sample_from_metric(row.model_copy(update={"duration_seconds": 3600}), ref, 1.0)
         unit[row.container_name] = sample_prices(sample, node, "USD").cpu_reserved_core_hour
     assert unit["app"] == pytest.approx(unit["proxy"], rel=0.02)
+
+
+def test_container_without_request_and_unknown_usage_is_not_given_zero_cost():
+    """Review 5: an unknown reservation falls back to an equal share instead of 0."""
+    from greenkube.impact.rows import container_cost_shares
+
+    cpu, memory = container_cost_shares([1000, 0], [50, None], [0, 0], [None, None])
+    assert cpu == pytest.approx([0.5, 0.5])
+    assert memory == pytest.approx([0.5, 0.5])

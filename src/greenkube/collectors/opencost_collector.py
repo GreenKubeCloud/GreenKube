@@ -54,9 +54,12 @@ def _own_cluster(allocation_set: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: item for key, item in allocation_set.items() if not _of_other_cluster(item)}
 
 
-def _cluster_params() -> Dict[str, str]:
-    """OpenCost filter on ``OPENCOST_CLUSTER_ID`` (COST-10); empty when no id is configured."""
-    cluster_id = getattr(config, "OPENCOST_CLUSTER_ID", None)
+def _cluster_params(settings: Any = None) -> Dict[str, str]:
+    """OpenCost filter on ``OPENCOST_CLUSTER_ID`` (COST-10); empty when no id is configured.
+
+    ``settings`` defaults to the global configuration.
+    """
+    cluster_id = getattr(settings if settings is not None else config, "OPENCOST_CLUSTER_ID", None)
     return {"filter": f'cluster:"{cluster_id}"'} if cluster_id else {}
 
 
@@ -512,18 +515,19 @@ class OpenCostCollector(BaseCollector):
         return self._client
 
     @staticmethod
-    def _auth_kwargs() -> Dict[str, Any]:
+    def _auth_kwargs(settings: Any = None) -> Dict[str, Any]:
         """Credentials of every OpenCost request (COST-06): bearer token first, else basic auth, else none.
 
         Same precedence as the discovery probe. Read at each request, so a
         changed setting applies at once; ``SafeAsyncClient`` drops them on a
-        cross-host redirect.
+        cross-host redirect. ``settings`` defaults to the global configuration.
         """
-        token = getattr(config, "OPENCOST_BEARER_TOKEN", None)
+        source = settings if settings is not None else config
+        token = getattr(source, "OPENCOST_BEARER_TOKEN", None)
         if token:
             return {"headers": {"Authorization": f"Bearer {token}"}}
-        username = getattr(config, "OPENCOST_USERNAME", None)
-        password = getattr(config, "OPENCOST_PASSWORD", None)
+        username = getattr(source, "OPENCOST_USERNAME", None)
+        password = getattr(source, "OPENCOST_PASSWORD", None)
         if username and password:
             return {"auth": httpx.BasicAuth(username, password)}
         return {}
