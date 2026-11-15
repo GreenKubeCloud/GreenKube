@@ -49,6 +49,10 @@ class OptimizationContext:
     #: could not be read (REC-04), as ``(namespace, target_kind, target_name,
     #: container, resource)``; filled by the analyzers, read by the engine.
     withheld_decreases: Set[Tuple[str, str, str, str, str]] = field(default_factory=set)
+    #: Targets confirmed gone from the cluster (REC-05): their records are retired (``target_gone``).
+    gone_targets: Set[Tuple[str, str, str]] = field(default_factory=set)
+    #: Targets not running (scaled to zero, or liveness unknown): nothing is emitted, records are kept.
+    not_running_targets: Set[Tuple[str, str, str]] = field(default_factory=set)
     _target_series_cache: Optional[Dict[Tuple[str, str, str], List[CombinedMetric]]] = field(
         default=None, init=False, repr=False, compare=False
     )

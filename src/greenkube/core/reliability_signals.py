@@ -37,7 +37,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from greenkube.core.optimization.targeting import target_for_pod
 from greenkube.models.workload_usage import POD_LEVEL, TargetKey, UsageSnapshot
@@ -156,6 +156,8 @@ class ReliabilitySignals:
     #: (REC-02). Absent when the query failed: the kills and restarts then all count.
     last_oom_kill: Dict[Tuple[TargetKey, str], float] = field(default_factory=dict)
     last_restart: Dict[Tuple[TargetKey, str], float] = field(default_factory=dict)
+    #: ``(target, container)`` of the running pods' specs (REC-05); None when the pods could not be listed.
+    live_containers: Optional[Set[Tuple[TargetKey, str]]] = None
 
 
 def _value(item: Mapping[str, Any]) -> Optional[float]:
@@ -472,7 +474,7 @@ async def attach_reliability_signals(
     start: datetime,
     end: datetime,
     query: Optional[QueryFunction] = None,
-    list_pods: Optional[Callable[[], Awaitable[List[Any]]]] = None,
+    list_pods: Optional[Callable[[], Awaitable[Optional[List[Any]]]]] = None,
 ) -> ReliabilitySignals:
     """Reads and attaches OOM kills, CPU throttling and JVM hints; never raises.
 
@@ -497,8 +499,10 @@ async def attach_reliability_signals(
             signals = ReliabilitySignals(status={name: SIGNAL_FAILED for name in SIGNAL_NAMES})
     try:
         pods = await (list_pods or _list_pods)()
-        signals.jvm = jvm_hints_from_pods(pods, snapshot)
-        signals.container_kinds = container_kinds_from_pods(pods, snapshot)
+        if pods is not None:
+            signals.jvm = jvm_hints_from_pods(pods, snapshot)
+            signals.container_kinds = container_kinds_from_pods(pods, snapshot)
+            signals.live_containers = set(signals.container_kinds)
     except Exception as error:
         logger.warning("Could not read pod specs for JVM detection: %s", error)
     apply_signals(snapshot, signals)
@@ -512,13 +516,13 @@ async def attach_reliability_signals(
     return signals
 
 
-async def _list_pods() -> List[Any]:
+async def _list_pods() -> Optional[List[Any]]:
     from greenkube.core.config import config as global_config
     from greenkube.core.k8s_client import get_core_v1_api
 
     api = await get_core_v1_api()
     if api is None:
-        return []
+        return None  # no Kubernetes configuration: which pods run is unknown
     pods = await api.list_pod_for_all_namespaces(
         watch=False, _request_timeout=getattr(global_config, "K8S_REQUEST_TIMEOUT", 30) or None
     )

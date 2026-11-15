@@ -462,6 +462,9 @@ class OptimizationEngine:
         if reliability is not None:
             retire, protected = reliability.split(previous, records)
             await self._retire_withheld_decreases(reco_repo, retire)
+            gone, not_running = reliability.split_targets(previous, records)
+            await self._retire_withheld_decreases(reco_repo, gone, reason="target_gone")
+            protected = [*protected, *not_running]
         await reco_repo.reconcile_active_recommendations(
             [*records, *protected],
             namespace=namespace,
@@ -479,9 +482,12 @@ class OptimizationEngine:
 
     @staticmethod
     async def _retire_withheld_decreases(
-        reco_repo: "RecommendationRepository", records: Sequence[RecommendationRecord]
+        reco_repo: "RecommendationRepository",
+        records: Sequence[RecommendationRecord],
+        reason: str = "reliability_signals_unknown",
     ) -> None:
-        """Marks stale, with the reason ``reliability_signals_unknown``, the decreases withheld this scan (REC-04)."""
+        """Marks stale, with ``reason``, the decreases withheld this scan (REC-04) or the records of
+        targets gone from the cluster (``target_gone``, REC-05)."""
         from greenkube.core.optimization.lifecycle import RecommendationLifecycle
 
         lifecycle = RecommendationLifecycle(reco_repo)
@@ -493,15 +499,12 @@ class OptimizationEngine:
                     record.id,
                     "stale",
                     event_type="stale",
-                    payload={"reason": "reliability_signals_unknown"},
+                    payload={"reason": reason},
                     expected_statuses=("active",),
                 )
-                logger.info(
-                    "Retired decrease %s: restart/OOM history could not be read (reliability_signals_unknown).",
-                    record.id,
-                )
+                logger.info("Retired recommendation %s (%s).", record.id, reason)
             except Exception as exc:
-                logger.warning("Could not retire withheld decrease %s: %s", record.id, exc)
+                logger.warning("Could not retire recommendation %s (%s): %s", record.id, reason, exc)
 
     def _record(self, recommendation: Recommendation) -> RecommendationRecord:
         """The persisted form of a recommendation, with its v2 identity, target and proposal (E4)."""
@@ -739,6 +742,10 @@ class ReliabilityGuard:
 
     withheld: FrozenSet[Tuple[ContainerKey, str]] = frozenset()
     oom_unknown: FrozenSet[ContainerKey] = frozenset()
+    #: Targets confirmed gone from the cluster (REC-05): their records are retired (``target_gone``).
+    gone: FrozenSet[Tuple[str, str, str]] = frozenset()
+    #: Targets not running (scaled to zero, or liveness unknown): their native records are kept.
+    not_running: FrozenSet[Tuple[str, str, str]] = frozenset()
 
     @classmethod
     def from_context(cls, context: OptimizationContext) -> "ReliabilityGuard":
@@ -762,7 +769,36 @@ class ReliabilityGuard:
                 for container, summary in containers.items():
                     if known_oom_events(summary, pod_summary) is None:
                         unknown.add((*target, container))
-        return cls(withheld=withheld, oom_unknown=frozenset(unknown))
+        return cls(
+            withheld=withheld,
+            oom_unknown=frozenset(unknown),
+            gone=frozenset(getattr(context, "gone_targets", None) or ()),
+            not_running=frozenset(getattr(context, "not_running_targets", None) or ()),
+        )
+
+    def split_targets(
+        self, previous: Sequence[RecommendationRecord], emitted: Sequence[RecommendationRecord]
+    ) -> Tuple[List[RecommendationRecord], List[RecommendationRecord]]:
+        """``(gone, kept)`` among the records this scan did not re-emit (REC-05).
+
+        * gone: any record of a target confirmed gone from the cluster;
+        * kept: native records of a target that is not running (scaled to zero)
+          or whose liveness could not be read.
+        """
+        if not self.gone and not self.not_running:
+            return [], []
+        fingerprints = {record.fingerprint for record in emitted if record.fingerprint}
+        gone: List[RecommendationRecord] = []
+        kept: List[RecommendationRecord] = []
+        for record in previous:
+            if not record.fingerprint or record.fingerprint in fingerprints:
+                continue
+            target = _record_container(record)[:3]
+            if target in self.gone:
+                gone.append(record)
+            elif target in self.not_running and _native(record):
+                kept.append(record)
+        return gone, kept
 
     def split(
         self, previous: Sequence[RecommendationRecord], emitted: Sequence[RecommendationRecord]
