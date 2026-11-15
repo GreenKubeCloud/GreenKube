@@ -50,8 +50,8 @@ class PrometheusCollector:
         # Every PromQL expression comes from the catalog (A1): container-scoped
         # series exclude the pod cgroup and pause container, see promql.py.
         self.promql = PromQLCatalog.from_config(settings)
-        self.cpu_usage_query = self.promql.container_cpu_usage()
-        self.cpu_fallback_query = self.promql.pod_cgroup_cpu_usage()
+        # Containers and pod cgroups in one query; callers choose per pod (COL-09).
+        self.cpu_usage_query = self.promql.cpu_usage_by_level()
         # Use a BaseDiscovery instance to access in-cluster and DNS helpers
         # without duplicating logic.
         self._discovery = BaseDiscovery()
@@ -276,7 +276,6 @@ class PrometheusCollector:
         end,
         step: Optional[str] = None,
         query: Optional[str] = None,
-        allow_cpu_fallback: bool = True,
     ) -> List[Dict[str, Any]]:
         """Run a range query; evaluation points are ``start, start + step, ..., end``.
 
@@ -330,11 +329,6 @@ class PrometheusCollector:
                 last_error = f"{query_url}: {data.get('error') or data.get('status')}"
                 continue
 
-            results = data.get("data", {}).get("result", [])
-            if not results and allow_cpu_fallback and q == self.cpu_usage_query:
-                # No container series at all: use the pod cgroup series, counted once.
-                return await self.collect_range(
-                    start, end, step=step, query=self.cpu_fallback_query, allow_cpu_fallback=False
-                )
-            return results
+            # No empty-result fallback: the default query reads containers and pod cgroups together (COL-09).
+            return data.get("data", {}).get("result", [])
         raise PrometheusQueryError(f"Prometheus range query failed ({last_error}).")

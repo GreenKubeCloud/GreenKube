@@ -144,8 +144,9 @@ async def test_non_finite_samples_are_dropped_and_negative_rates_clamped(make_pr
     prom = FakePrometheus()
     values = {1: float("nan"), 2: float("inf"), 3: -0.5, 4: 0.3}
 
-    def cpu(ts: float) -> float:
-        return values[int((ts - BASE.timestamp()) // 300)]
+    def cpu(ts: float) -> float | None:
+        # The CPU counter query (COL-03 step 3) also evaluates the step before the window: no sample there.
+        return values.get(int((ts - BASE.timestamp()) // 300))
 
     prom.add("container_cpu_usage_seconds_total", {**POD_LABELS, "container": "app"}, cpu)
     prom.add("container_memory_working_set_bytes", {**POD_LABELS, "container": "app"}, float("nan"))

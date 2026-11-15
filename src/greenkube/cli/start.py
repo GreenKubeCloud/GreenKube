@@ -19,6 +19,7 @@ import typer
 from typing_extensions import Annotated
 
 from ..collectors.node_collector import NodeCollector
+from ..core.cluster_identity import identity_problem
 from ..core.config import get_config
 from ..core.factory import (
     get_combined_metrics_repository,
@@ -620,13 +621,18 @@ class _StartupHealth:
         self._started = True
 
     def ready(self) -> bool:
-        return self._started and bool(self._registry.ready())
+        # A database of another cluster stops collection (fail closed): say so in /readyz (COL-02 review).
+        return self._started and bool(self._registry.ready()) and identity_problem() is None
 
     def snapshot(self) -> dict[str, Any]:
         snapshot = dict(self._registry.snapshot())
         if not self._started:
             snapshot["ready"] = False
             snapshot["starting"] = True
+        problem = identity_problem()
+        if problem:
+            snapshot["ready"] = False
+            snapshot["identity_error"] = problem
         return snapshot
 
 

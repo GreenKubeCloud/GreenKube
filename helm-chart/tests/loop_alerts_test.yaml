@@ -37,9 +37,15 @@ tests:
       - equal:
           path: spec.groups[2].rules[6].alert
           value: GreenKubeCollectionDegraded
+      - equal:
+          path: spec.groups[2].rules[7].alert
+          value: GreenKubeClusterIdentityMismatch
+      - equal:
+          path: spec.groups[2].rules[7].labels.severity
+          value: critical
       - lengthEqual:
           path: spec.groups[2].rules
-          count: 7
+          count: 8
       - equal:
           path: spec.groups[3].name
           value: greenkube.ledger

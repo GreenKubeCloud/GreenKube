@@ -23,8 +23,12 @@ from ..models.provenance import (
     cost_source_for,
 )
 from ..storage.base_repository import CarbonIntensityRepository
+from ..storage.container_rows import CONTAINER_SAMPLE_INCOMPLETE as _CONTAINER_SAMPLE_INCOMPLETE
 
 logger = logging.getLogger(__name__)
+
+#: Re-exported: estimation reason of container rows of a pod where some containers had no sample (COL-17).
+CONTAINER_SAMPLE_INCOMPLETE = _CONTAINER_SAMPLE_INCOMPLETE
 
 
 #: Intensity provenance values that mean the figure is not a fresh provider value.
@@ -89,6 +93,27 @@ def provenance_estimation_reasons(intensity_source: Optional[str], power_source:
     if power_source == PowerSource.DEFAULT_PROFILE.value:
         reasons.append("Node power profile unknown; used the default instance profile")
     return reasons
+
+
+#: Estimation reason of a container row whose usage is a Metrics API point sample (about 15-30 s, read at
+#: collection time), not a step average (COL-05).
+METRICS_API_POINT_SAMPLE = "metrics_api_point_sample"
+
+
+def _container_usage_source(resource_maps: PodResourceMaps, container_key: tuple, aggregate: CombinedMetric) -> str:
+    """Usage source of a container row: its own when it differs from the pod row's (COL-05)."""
+    source = resource_maps.container_usage_source_map.get(container_key)
+    if source:
+        return source
+    if container_key in resource_maps.container_timestamp_map:
+        return UsageSource.METRICS_SERVER.value
+    return aggregate.usage_source or UsageSource.PROMETHEUS.value
+
+
+def _container_reasons(reasons: List[str], usage_source: str) -> List[str]:
+    if usage_source == UsageSource.METRICS_SERVER.value:
+        return list(dict.fromkeys([*reasons, METRICS_API_POINT_SAMPLE]))
+    return list(reasons)
 
 
 def _weights(values: Sequence[Optional[float]]) -> Optional[List[float]]:
@@ -211,14 +236,25 @@ class MetricAssembler:
             if not containers:
                 continue
 
-            container_keys = [(aggregate.namespace, aggregate.pod_name, item.container_name) for item in containers]
-            has_container_usage = all(
-                container_key in resource_maps.container_cpu_usage_map
-                or container_key in resource_maps.container_memory_usage_map
-                for container_key in container_keys
-            )
-            if not has_container_usage:
+            # A container without a sample at the step (waiting, finished, just restarted) gets no
+            # row, and no longer drops the rows of its siblings (COL-17): the sampled containers carry
+            # the whole pod so container rows still sum to the pod row, flagged as incomplete.
+            sampled = [
+                item
+                for item in containers
+                if (aggregate.namespace, aggregate.pod_name, item.container_name)
+                in resource_maps.container_cpu_usage_map
+                or (aggregate.namespace, aggregate.pod_name, item.container_name)
+                in resource_maps.container_memory_usage_map
+            ]
+            if not sampled:
                 continue
+            incomplete = len(sampled) < len(containers)
+            containers = sampled
+            container_keys = [(aggregate.namespace, aggregate.pod_name, item.container_name) for item in containers]
+            estimation_reasons = list(aggregate.estimation_reasons)
+            if incomplete:
+                estimation_reasons = list(dict.fromkeys([*estimation_reasons, CONTAINER_SAMPLE_INCOMPLETE]))
 
             cpu_weights = (
                 [max(resource_maps.container_cpu_usage_map[key], 0) for key in container_keys]
@@ -254,6 +290,7 @@ class MetricAssembler:
             ):
                 share = weight / total_weight
                 memory_share = memory_weight / total_memory_weight
+                usage_source = _container_usage_source(resource_maps, container_key, aggregate)
                 if has_components:
                     cost_cpu = (aggregate.cost_cpu or 0.0) * share
                     cost_ram = (aggregate.cost_ram or 0.0) * memory_share
@@ -272,11 +309,7 @@ class MetricAssembler:
                             "cost_storage": None if aggregate.cost_storage is None else aggregate.cost_storage * share,
                             "cost_network": None if aggregate.cost_network is None else aggregate.cost_network * share,
                             "cost_lb": None if aggregate.cost_lb is None else aggregate.cost_lb * share,
-                            "usage_source": (
-                                UsageSource.METRICS_SERVER.value
-                                if container_key in resource_maps.container_timestamp_map
-                                else (aggregate.usage_source or UsageSource.PROMETHEUS.value)
-                            ),
+                            "usage_source": usage_source,
                             **gpu_fields,
                             "cpu_limit": pod_metric.cpu_limit,
                             "memory_limit": pod_metric.memory_limit,
@@ -307,8 +340,10 @@ class MetricAssembler:
                             "sample_count": resource_maps.container_sample_count_map.get(
                                 container_key, aggregate.sample_count
                             ),
-                            "is_estimated": aggregate.is_estimated,
-                            "estimation_reasons": list(aggregate.estimation_reasons),
+                            "is_estimated": aggregate.is_estimated
+                            or incomplete
+                            or usage_source == UsageSource.METRICS_SERVER.value,
+                            "estimation_reasons": _container_reasons(estimation_reasons, usage_source),
                         }
                     )
                 )

@@ -17,8 +17,16 @@ DROP_REASON_NON_FINITE = "non_finite"
 DROP_REASON_NEGATIVE = "negative_clamped"
 DROP_REASON_MALFORMED = "malformed"
 DROP_REASON_OUT_OF_WINDOW = "out_of_window"
+#: A value the node cannot produce (counter-start CPU above the node's cores, review 1).
+DROP_REASON_IMPLAUSIBLE = "implausible"
 _DROP_REASONS = frozenset(
-    {DROP_REASON_NON_FINITE, DROP_REASON_NEGATIVE, DROP_REASON_MALFORMED, DROP_REASON_OUT_OF_WINDOW}
+    {
+        DROP_REASON_NON_FINITE,
+        DROP_REASON_NEGATIVE,
+        DROP_REASON_MALFORMED,
+        DROP_REASON_OUT_OF_WINDOW,
+        DROP_REASON_IMPLAUSIBLE,
+    }
 )
 _ERROR_REASONS = frozenset({"collection_failed", "leadership_lost"})
 
@@ -93,6 +101,72 @@ for _list in ("pods", "nodes", "other"):
 def record_degraded_window(resource: str) -> None:
     """Count a window stored without a working Kubernetes pod or node list (review 5)."""
     DEGRADED_WINDOWS.labels(list=resource if resource in {"pods", "nodes"} else "other").inc()
+
+
+COVERAGE_RATIO = Gauge(
+    "greenkube_collection_coverage_ratio",
+    "Share of the steps of the backfill horizon whose data is known (collected, or confirmed empty), "
+    "read from the collection_windows table after each run (COL-04).",
+    ["source"],
+    registry=REGISTRY,
+)
+STEPS_RECORDED = Counter(
+    "greenkube_collection_steps_total",
+    "Collection steps recorded in collection_windows, by status (collected, empty, failed, gap).",
+    ["source", "status"],
+    registry=REGISTRY,
+)
+_STEP_STATUSES = frozenset({"collected", "empty", "failed", "gap"})
+COST_UNATTRIBUTED_RATIO = Gauge(
+    "greenkube_collection_cost_unattributed_ratio",
+    "Share of the OpenCost allocation total of the last collected window that no stored pod row carries "
+    "(pods without any CPU, memory or Running sample), COL-03.",
+    ["source"],
+    registry=REGISTRY,
+)
+
+
+IDENTITY_MISMATCH = Gauge(
+    "greenkube_collection_identity_mismatch",
+    "1 when the database belongs to another cluster (installation kube-system UID differs) and collection "
+    "refuses to start; 0 once the identity is accepted.",
+    registry=REGISTRY,
+)
+
+
+def set_identity_mismatch(mismatch: bool) -> None:
+    """Publish whether collection is refused for a cluster identity mismatch (COL-02 review)."""
+    IDENTITY_MISMATCH.set(1 if mismatch else 0)
+
+
+RATE_WINDOW_SCRAPES = Gauge(
+    "greenkube_collection_rate_window_scrapes",
+    "Most scrapes any cAdvisor CPU series holds inside the rate window, measured hourly (COL-04). "
+    "Below 2, rate() returns nothing: PROMETHEUS_SCRAPE_INTERVAL is shorter than the real scrape interval.",
+    ["source"],
+    registry=REGISTRY,
+)
+
+
+def set_rate_window_scrapes(source: str, scrapes: float) -> None:
+    """Publish the measured scrapes per rate window (COL-04 step 3)."""
+    RATE_WINDOW_SCRAPES.labels(source=source).set(max(scrapes, 0.0))
+
+
+def set_cost_unattributed_ratio(source: str, ratio: float) -> None:
+    """Publish the unattributed share of the OpenCost window total (COL-03 step 4)."""
+    COST_UNATTRIBUTED_RATIO.labels(source=source).set(min(max(ratio, 0.0), 1.0))
+
+
+def record_steps(source: str, status: str, count: int) -> None:
+    """Count steps recorded with ``status`` (COL-04)."""
+    if count > 0:
+        STEPS_RECORDED.labels(source=source, status=status if status in _STEP_STATUSES else "failed").inc(count)
+
+
+def set_coverage_ratio(source: str, ratio: float) -> None:
+    """Publish the coverage of the backfill horizon (COL-04)."""
+    COVERAGE_RATIO.labels(source=source).set(min(max(ratio, 0.0), 1.0))
 
 
 def record_dropped_sample(reason: str, count: int = 1) -> None:

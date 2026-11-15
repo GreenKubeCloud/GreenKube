@@ -128,6 +128,20 @@ async def test_metrics_api_usage_consistent_with_the_pod_is_kept_as_measured(pro
 
 
 @pytest.mark.asyncio
+async def test_container_usage_from_the_metrics_api_says_so(processor):
+    """COL-05 (S7): the container row is a Metrics API sample, the pod row a Prometheus measurement."""
+    processor._metrics_server_collector = _MetricsApi(cpu=150, memory=500 * MIB)
+
+    rows = await processor.run_range(*_current_window())
+
+    [container] = [row for row in rows if row.container_name]
+    pod = next(row for row in rows if not row.container_name and row.timestamp == container.timestamp)
+    assert container.usage_source == "metrics_server"
+    assert container.is_estimated and "metrics_api_point_sample" in container.estimation_reasons
+    assert pod.usage_source == "prometheus"
+
+
+@pytest.mark.asyncio
 async def test_a_pod_cgroup_working_set_below_one_page_is_a_gap_not_a_measurement(tmp_path):
     cfg = Config(
         DB_TYPE="sqlite",

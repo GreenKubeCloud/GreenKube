@@ -5,10 +5,18 @@ from typing import Optional
 
 import typer
 
-from ..core.collection import CollectionReport, MetricsCollectionJob
+from ..core.cluster_identity import (
+    InstallationIdentityError,
+    adopt_legacy_collection_keys,
+    cached_installation_identity,
+    resolve_installation_identity,
+)
+from ..core.collection import METRICS_WATERMARK_SOURCE, CollectionReport, MetricsCollectionJob
 from ..core.config import get_config
 from ..core.factory import get_combined_metrics_repository, get_processor
 from ..storage.base_collection_watermark_repository import create_collection_watermark_repository
+from ..storage.base_collection_window_repository import create_collection_window_repository
+from ..storage.installation_repository import create_installation_repository
 from ..utils.date_utils import parse_duration
 
 try:
@@ -38,6 +46,37 @@ def get_collection_watermark_repository():
     return create_collection_watermark_repository(get_db_manager(), get_config().DB_TYPE)
 
 
+def get_collection_window_repository():
+    """Return the per-step collection record repository for the configured database (COL-04)."""
+    from ..core.db import get_db_manager
+
+    return create_collection_window_repository(get_db_manager(), get_config().DB_TYPE)
+
+
+async def resolve_collection_cluster_uid() -> str:
+    """Installation identity keying the collection watermark and records (COL-02, STO-09).
+
+    Resolved once per process: the stored identity is checked against the live
+    kube-system UID (a mismatch raises unless ``ALLOW_CLUSTER_UID_CHANGE``), and
+    watermarks and records written under a cluster or node name are adopted.
+
+    Raises:
+        InstallationIdentityError: the identity cannot be read or belongs to another cluster.
+    """
+    cached = cached_installation_identity()
+    if cached is not None:
+        return cached.cluster_uid
+    from ..core.db import get_db_manager
+
+    cfg = get_config()
+    repo = create_installation_repository(get_db_manager(), cfg.DB_TYPE)
+    identity = await resolve_installation_identity(
+        repo, cfg.CLUSTER_NAME or None, allow_change=bool(getattr(cfg, "ALLOW_CLUSTER_UID_CHANGE", False))
+    )
+    await adopt_legacy_collection_keys(repo, identity.cluster_uid, METRICS_WATERMARK_SOURCE)
+    return identity.cluster_uid
+
+
 async def write_combined_metrics_to_database(last: Optional[str] = None) -> Optional[CollectionReport]:
     """Collect every missing window since the watermark (or the explicit ``--last`` range) and store it.
 
@@ -48,12 +87,19 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> Opti
     logger.info("--- Starting combined metrics collection task ---")
     lookback = parse_last_duration(last) if last else None
     try:
+        cluster_uid = await resolve_collection_cluster_uid()
+    except InstallationIdentityError as e:
+        logger.error("Metrics collection does not start: %s", e)
+        return None
+    try:
         processor = get_processor()
         job = MetricsCollectionJob(
             processor=processor,
             metrics_repository=get_combined_metrics_repository(),
             watermark_repository=get_collection_watermark_repository(),
             config=get_config(),
+            cluster_uid=cluster_uid,
+            window_repository=get_collection_window_repository(),
         )
     except Exception as e:
         logger.error("Failed to initialize components for combined metrics collection: %s", e)

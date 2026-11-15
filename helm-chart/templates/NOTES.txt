@@ -185,6 +185,11 @@ Welcome to
 * changeMeasurement.postWindowDays={{ $cm.postWindowDays }} is below 5 days: a verdict needs 5 complete days
   of aligned hours, so GreenKube raises it to 5 days at startup (warning in the logs).
 {{- end }}
+{{- if not .Values.config.clusterName }}
+* config.clusterName is empty: the display name is auto-detected (the node name on a single-node
+  cluster, a cluster-name node label, else "default"). Set config.clusterName for a readable name on
+  multi-node clusters. Collection is keyed by the kube-system namespace UID, so renaming is safe.
+{{- end }}
 
 * Back up the database before every upgrade: migrations only move forward and a helm rollback
   does not undo them (docs/operations/backup-restore.md).

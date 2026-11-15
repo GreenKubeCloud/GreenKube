@@ -268,3 +268,32 @@ tests:
             exp_annotations:
               summary: GreenKube stores collection windows without a working Kubernetes list
               description: "The Kubernetes nodes list failed COLLECTION_K8S_LIST_MAX_FAILURES times in a row for collection windows stored in the last hour: their rows carry the reason k8s_list_failed (missing owner and requests, or default node attributes). Check the controller RBAC (list pods and nodes) and the API server latency."
+
+  # ---------------------------------------------------------------------------
+  # Cluster identity mismatch (review 2): collection stopped, fail closed.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_collection_identity_mismatch{job="c",instance="leader:9102"}'
+        values: '0 0 1x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GreenKubeClusterIdentityMismatch
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: GreenKubeClusterIdentityMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: GreenKube refuses to collect into a database of another cluster
+              description: "The database installation row holds another cluster's kube-system UID (cluster rebuilt, or a backup restored into a new cluster), so no metric is collected and every figure is stale. If this database is meant for this cluster, set config.collection.allowClusterUidChange=true for one controller start, then back to false; otherwise give this install its own database schema. See docs/operations/backup-restore.md."
+
+  - interval: 1m
+    input_series:
+      - series: 'greenkube_collection_identity_mismatch{job="c",instance="leader:9102"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GreenKubeClusterIdentityMismatch
+        exp_alerts: []

@@ -33,6 +33,8 @@ from typing import Iterable, Sequence
 
 CONTAINER_FILTER = 'container!="",container!="POD"'
 POD_CGROUP_FILTER = 'container="",pod!=""'
+#: Containers and pod cgroups of pods (pause containers and node-level cgroups excluded), COL-09.
+POD_LEVEL_OR_CONTAINER_FILTER = 'pod!="",container!="POD"'
 
 DEFAULT_SCRAPE_INTERVAL_SECONDS = 30
 _DURATION_RE = re.compile(r"^(\d+)([smhd])$")
@@ -129,6 +131,42 @@ class PromQLCatalog:
         selector = _selector(POD_CGROUP_FILTER, *self.extra_matchers)
         return f"max(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) by (namespace,pod,node)"
 
+    def cpu_usage_by_level(self) -> str:
+        """CPU cores of every container and of every pod cgroup, in one query (COL-09).
+
+        ``container=""`` series are pod cgroups, the others containers.  The
+        caller chooses per pod: its containers when it has any, else its pod
+        cgroup (counted once), so a cluster mixing runtimes (cri-dockerd
+        exporting pod-level series next to containerd) keeps every pod.
+        """
+        selector = _selector(POD_LEVEL_OR_CONTAINER_FILTER, *self.extra_matchers)
+        return (
+            f"max(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) "
+            "by (namespace,pod,container,node)"
+        )
+
+    def memory_working_set_by_level(self) -> str:
+        """Working-set bytes of every container and every pod cgroup, chosen per pod by the caller (COL-09)."""
+        selector = _selector(POD_LEVEL_OR_CONTAINER_FILTER, *self.extra_matchers)
+        return f"max(container_memory_working_set_bytes{selector}) by (namespace,pod,container,node)"
+
+    def container_cpu_counter_max(self) -> str:
+        """Largest CPU counter value of each container within the step (COL-03 step 3).
+
+        ``rate()`` needs two scrapes of one series, so a container that lived
+        less than about two scrape intervals has no rate sample.  Its counter
+        starts at 0 with the container: when the series first appears inside a
+        step, its value over the step length is the container's core usage.
+        """
+        return (
+            f"max(max_over_time({self._container('container_cpu_usage_seconds_total')}[{self.step}])) "
+            "by (namespace,pod,container,node)"
+        )
+
+    def container_start_time(self) -> str:
+        """cAdvisor start time (Unix seconds) of each container: proves a counter really started (review 1)."""
+        return f"max({self._container('container_start_time_seconds')}) by (namespace,pod,container,node)"
+
     def container_memory_working_set(self) -> str:
         """Working-set bytes per container (duplicate series counted once)."""
         return f"max({self._container('container_memory_working_set_bytes')}) by (namespace,pod,container,node)"
@@ -222,6 +260,24 @@ class PromQLCatalog:
         """kube-state-metrics controller owner of each pod (WP-01.1 step 2)."""
         selector = self._ksm_selector(pods, 'owner_is_controller="true"')
         return f"max(kube_pod_owner{selector}) by (namespace,pod,owner_kind,owner_name)"
+
+    def scrape_probe(self) -> str:
+        """Number of cAdvisor CPU series, pod or not (COL-04).
+
+        The kubelet exports the root and system cgroups even on a node without
+        pods, so a step where this is absent had no cAdvisor scrape at all:
+        Prometheus has no data, which is a hole, not an empty cluster.
+        """
+        return f"count({self._pod('container_cpu_usage_seconds_total')})"
+
+    def rate_window_scrapes(self) -> str:
+        """Most scrapes any cAdvisor CPU series holds inside the rate window (COL-04 step 3).
+
+        ``rate()`` needs at least two samples of a series in its window: fewer
+        means ``PROMETHEUS_SCRAPE_INTERVAL`` is set shorter than the real
+        scrape interval and every window comes back empty.
+        """
+        return f"max(count_over_time({self._pod('container_cpu_usage_seconds_total')}[{self.rate_window}]))"
 
     def pod_running(self) -> str:
         """Pods in phase Running (value 1), so a running pod without a CPU sample still gets its row (COL-03)."""

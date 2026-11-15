@@ -268,8 +268,8 @@ All collectors are fully asynchronous and implement a common pattern.
   - Auto-discovery of Prometheus endpoints (multiple URL candidates)
   - Every PromQL expression comes from `PromQLCatalog` (`collectors/promql.py`); container-scoped series exclude the pod cgroup (`container=""`) and pause (`container="POD"`) series
   - CPU and memory usage are aggregated with `max` per container, so duplicate series of one container (kubelet `/metrics/resource` next to `/metrics/cadvisor`, two scrape jobs, two cgroup paths) are counted once
-  - Fallback to the pod cgroup series (counted once, CPU and memory) when container-level metrics are unavailable; that usage stays pod-level and is never attributed to a container
-  - Kubernetes Metrics API container samples that fill the latest step of a pod measured only at pod level are scaled down to the pod cgroup value when they add up to more than it (cri-dockerd counts page cache in a container's working set); the rows are flagged `container_usage_exceeds_pod`
+  - Container and pod cgroup series are read in one query; a pod without container series uses its pod cgroup (counted once, CPU and memory), per pod (COL-09); that usage stays pod-level and is never attributed to a container. Collected steps of a cluster without any container series are recorded with the reason `pod_level_usage_only`
+  - Kubernetes Metrics API container samples that fill the latest step of a pod measured only at pod level are stored with `usage_source = metrics_server` and the reason `metrics_api_point_sample` (COL-05), and scaled down to the pod cgroup value when they add up to more than it (cri-dockerd counts page cache in a container's working set); the rows are flagged `container_usage_exceeds_pod`
   - Range queries raise `PrometheusQueryError` when Prometheus is unreachable, so an outage is never stored as an empty window
   - TLS/authentication support (basic auth, bearer token)
   - Concurrent query execution (8 queries via `asyncio.gather`)
@@ -530,7 +530,8 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
   - Error handling with appropriate HTTP status codes
 
 **Endpoints:**
-- `GET /api/v1/health` — Health check and version
+- `GET /api/v1/health` — Health check and version, plus `collection` (watermark, lag, last gap) when the database answers within one second
+- `GET /api/v1/collection/coverage?start=&end=` — Steps of the period collected, empty, failed, abandoned or unknown, the coverage ratio and the holes (COL-04)
 - `GET /api/v1/health/services` — Health status for all data sources (Prometheus, OpenCost, Electricity Maps, Wattnet, Boavizta, Kubernetes)
 - `GET /api/v1/health/services/{name}` — Health status for a single data source
 - `POST /api/v1/auth/login`, `/auth/logout`, `GET /api/v1/auth/me` — Account sign-in with server-side sessions (see [Authentication](authentication.md))
@@ -620,16 +621,23 @@ The controller's `collect_metrics` job is the only production writer of usage, e
 
 1. **Catch-up planning** (`core/collection.py`, `MetricsCollectionJob`):
    ```
+   cluster   = installation.cluster_uid   # kube-system namespace UID, resolved before the loop (COL-02)
    watermark = collection_watermarks[(cluster, "combined_metrics")].last_complete_end
+               └─ none: resume after the newest stored row inside the horizon, else backfill the horizon
    windows   = [watermark, align(now - COLLECTION_SAFETY_LAG))   # half-open, step-aligned
                └─ bounded by COLLECTION_MAX_BACKFILL (older windows counted as gaps)
                └─ split into ~1h chunks, oldest first
    For each chunk:
      rows = run_range(chunk.start, chunk.end)   # raises on Prometheus errors
-     LeaderFence.check(); upsert rows
+     classify every step: collected | empty | failed   # cAdvisor probe for steps without rows
+     LeaderFence.check(); upsert rows, idle rows, then collection_windows records
      LeaderFence.check(); advance watermark to chunk.end
+   Then: retry at most one chunk of failed steps still inside the horizon,
+         turn failed steps older than the horizon into gaps, publish the coverage gauge.
    ```
    The job is scheduled on wall-clock step boundaries plus the safety lag, so a window is collected right after it closes. A failed chunk leaves the watermark in place; the next run retries it. Re-collecting a window is an idempotent upsert.
+
+   **Holes are recorded (COL-04).** Every step has a row in `collection_windows` (migration 0122): `collected` (pod rows written), `empty` (no pod row while Prometheus holds cAdvisor series for the step, so the kubelet was scraped and no pod ran), `failed` with reason `no_scrape_data` (no cAdvisor series at all: Prometheus down, TSDB lost, remote-write lag), or `gap` (abandoned: reason `beyond_backfill_horizon` for the range skipped before the horizon, or `no_scrape_data` for a failed step that left the horizon without data). A failed step does not hold the watermark back; later runs retry it, least recently attempted first, one chunk per run. Steps without a record (data collected before 0122 that has no stored row, or never planned) are `unknown`; on the first run the steps of rows already stored are seeded as `collected` (reason `seeded_from_stored_rows`). `GET /api/v1/collection/coverage?start=&end=` returns the counts per status, `coverage_ratio = (collected + empty) / expected` and the holes; `GET /api/v1/health` adds `collection.watermark`, `collection.lag_seconds` and `collection.last_gap`; `greenkube_collection_coverage_ratio{source}` is the coverage of the backfill horizon. A total over a period whose coverage is not complete misses the uncovered steps.
 
 2. **Row semantics:** a row with `timestamp = T` and `duration_seconds = step` describes `[T, T + step)`. Prometheus evaluates `rate(x[rate_window])` at `T + step`, with `rate_window = max(step, 4 × PROMETHEUS_SCRAPE_INTERVAL)`. Every repository range read uses `timestamp >= start AND timestamp < end`.
 
@@ -644,7 +652,9 @@ The controller's `collect_metrics` job is the only production writer of usage, e
    ```
    For each chunk (1 day):
      ├─ Prometheus range queries from PromQLCatalog (concurrent):
-     │   ├─ CPU and memory per container (container!="", container!="POD")
+     │   ├─ CPU and memory per container and per pod cgroup in one query
+     │   │  (pod!="", container!="POD"): a pod's containers when it has any, else its
+     │   │  pod cgroup counted once, per pod (mixed runtimes keep every pod, COL-09)
      │   ├─ Network I/O per pod, disk I/O and ephemeral usage per container
      │   ├─ Restart counts and kube_pod_info (pod → node placement)
      │   ├─ kube_pod_status_phase{phase="Running"} (pods without a CPU sample)
@@ -654,6 +664,10 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      │   ├─ NaN/Inf dropped, negative rates clamped to 0
      │   ├─ pod set = CPU ∪ memory ∪ Running pods; rows without CPU sample keep
      │   │  cpu_usage_millicores NULL with reason no_cpu_sample
+     │   ├─ containers too short-lived for rate(): when the CPU counter first appears
+     │   │  inside a step (absent at the previous evaluation), counter / step is the
+     │   │  usage (reason cpu_from_counter_start), only for pods without a rate sample,
+     │   │  when container_start_time_seconds is within one step and below node cores
      │   └─ greenkube_collection_dropped_samples_total{reason}
      │
      ├─ Energy estimation per sample:
@@ -666,7 +680,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      └─ Generate CombinedMetrics (+ container rows) for chunk
    ```
 
-5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}`, `greenkube_collection_k8s_list_errors_total{resource}`, `greenkube_collection_degraded_windows_total{list}` and `greenkube_unknown_power_profile_nodes`.
+5. **Telemetry** (control-loop registry): `greenkube_collection_watermark_lag_seconds{source}`, `greenkube_collection_gap_windows_total{source}`, `greenkube_collection_windows_total{source}`, `greenkube_collection_window_errors_total{source,reason}`, `greenkube_collection_window_duration_seconds{source}`, `greenkube_collection_dropped_samples_total{reason}`, `greenkube_collection_k8s_list_errors_total{resource}`, `greenkube_collection_degraded_windows_total{list}`, `greenkube_collection_steps_total{source,status}`, `greenkube_collection_coverage_ratio{source}` and `greenkube_unknown_power_profile_nodes`.
 
 ### Recommendation Flow
 

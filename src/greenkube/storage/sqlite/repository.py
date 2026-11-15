@@ -10,6 +10,7 @@ import aiosqlite
 from greenkube.core.observability import record_metric_provenance
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
+from greenkube.storage.container_rows import complete_container_rows, container_rows_of
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ...core.exceptions import QueryError
@@ -335,7 +336,9 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         try:
             async with self.db_manager.connection_scope() as conn:
                 if replace_containers:
-                    metrics = await self._without_rows_over_stored_containers(conn, metrics, container_metrics)
+                    complete = complete_container_rows(container_metrics)
+                    metrics = await self._without_rows_over_stored_containers(conn, metrics, complete)
+                    container_metrics = container_rows_of(metrics, container_metrics)
                 for metric in metrics:
                     try:
                         timestamp_iso = to_iso_z(metric.timestamp) if metric.timestamp else None

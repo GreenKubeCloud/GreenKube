@@ -15,6 +15,7 @@ The targets below are example operational objectives, not service guarantees or 
 | Fresh collection data | < 15 minutes old | `time() - greenkube_last_collection_timestamp_seconds` |
 | Collection watermark lag | < 2 collection steps | `greenkube_collection_watermark_lag_seconds{source="combined_metrics"}` |
 | No abandoned collection windows | 0 per day | `increase(greenkube_collection_gap_windows_total[1d])` |
+| Collection coverage of the backfill horizon | 1.0 | `greenkube_collection_coverage_ratio{source="combined_metrics"}` (steps collected or confirmed empty, from `collection_windows`; holes in `GET /api/v1/collection/coverage`) |
 | Fresh GitOps discovery | < 15 minutes old | `time() - greenkube_gitops_discovery_last_success_timestamp_seconds` |
 | Supported-layout binding coverage | >= 95% | `greenkube_gitops_coverage_ratio` |
 | Plan creation p95 | < 30 seconds | `histogram_quantile(0.95, sum by (le, renderer) (rate(greenkube_automation_plan_duration_seconds_bucket[15m])))` |
@@ -192,6 +193,11 @@ The metric collection job publishes, on the control-loop registry:
 | `greenkube_collection_k8s_list_errors_total{resource}` | Kubernetes pod or node lists that failed during collection (`pods`, `nodes`). Without a pod snapshot newer than one step (pods) or any node snapshot (nodes) the window fails and is retried, up to `COLLECTION_K8S_LIST_MAX_FAILURES` attempts. |
 | `greenkube_collection_degraded_windows_total{list}` | Windows stored in degraded mode after `COLLECTION_K8S_LIST_MAX_FAILURES` consecutive failed pod or node lists (`pods`, `nodes`): their rows without history carry the reason `k8s_list_failed`. Any increase means the controller cannot list pods or nodes (RBAC, API timeouts). Alert `GreenKubeCollectionDegraded` fires when one was stored in the last hour (for 10 minutes). |
 | `greenkube_collection_window_duration_seconds{source}` | Time to collect and write one chunk. |
+| `greenkube_collection_steps_total{source,status}` | Steps recorded in `collection_windows`: `collected`, `empty` (Prometheus scraped, no pod ran), `failed` (no scrape data, retried while inside `COLLECTION_MAX_BACKFILL`) and `gap` (abandoned). Any `failed` or `gap` increase is a hole in the stored history. |
+| `greenkube_collection_identity_mismatch` | 1 while collection refuses the database because its `installation` row holds another cluster's kube-system UID (cluster rebuilt, backup restored into a new cluster); the controller `/readyz` is then not ready with `identity_error`. Alert `GreenKubeClusterIdentityMismatch` (critical, 5 minutes). See [Backup and restore](operations/backup-restore.md#restoring-into-a-new-or-rebuilt-cluster). |
+| `greenkube_collection_rate_window_scrapes{source}` | Most scrapes any cAdvisor CPU series holds inside the rate window, measured hourly. Below 2, `rate()` returns nothing and every window is a hole: set `config.prometheus.scrapeInterval` to the real scrape interval (an ERROR is logged). |
+| `greenkube_collection_cost_unattributed_ratio{source}` | Share of the OpenCost allocation total of the last collected window that no stored pod row carries (pods without any CPU, memory or Running sample); a warning is logged above 1%. |
+| `greenkube_collection_coverage_ratio{source}` | Share of the steps of the backfill horizon that were collected or confirmed empty, read from `collection_windows` after each run (it survives restarts). |
 | `greenkube_collection_gap_windows_total{source}` | Windows abandoned because they were older than `COLLECTION_MAX_BACKFILL`. |
 | `greenkube_collection_dropped_samples_total{reason}` | Prometheus samples dropped (`non_finite`, `malformed`, `out_of_window`) or clamped (`negative_clamped`). |
 | `greenkube_unknown_power_profile_nodes` | Nodes that fell back to `DEFAULT_INSTANCE_PROFILE` in the latest collection. |

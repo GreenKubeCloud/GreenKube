@@ -68,6 +68,7 @@ METRIC_TABLES = frozenset(
         "workload_usage_rollup_marks",
         "metrics_compression_watermarks",
         "collection_watermarks",
+        "collection_windows",
         "instance_carbon_profiles",
     }
 )

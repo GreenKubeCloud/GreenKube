@@ -36,7 +36,7 @@ from ..impact.realization import refresh_realization_context
 from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour
 from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
-from ..models.provenance import MetadataSource, NodeSource, UsageSource
+from ..models.provenance import CostSource, MetadataSource, NodeSource, UsageSource
 from ..storage.base_pod_snapshot_repository import PodSnapshotRepository, snapshot_at, snapshot_uncertain
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
@@ -55,7 +55,12 @@ logger = logging.getLogger(__name__)
 #: history per observation interval and pod UID, unbounded history lookup for
 #: pods of the window, stored-row metadata on re-collection, degraded rows after
 #: repeated Kubernetes list failures.  ``+range.4`` rows are not rewritten.
-CALCULATION_VERSION = f"{__version__}+range.5"
+#: range.6 (COL-03 step 3): CPU of containers too short-lived for rate() comes from their counter
+#: (reason cpu_from_counter_start); such pods had no row or a NULL CPU before.  COL-17: a container
+#: without sample no longer drops the container rows of its siblings.  COL-09: pods with pod-level series
+#: only are kept when other pods have container series.  ``+range.5`` rows are
+#: not rewritten: re-collect a window inside Prometheus retention to apply it.
+CALCULATION_VERSION = f"{__version__}+range.6"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
@@ -83,6 +88,9 @@ KSM_UNAVAILABLE = "kube_state_metrics_unavailable"
 _MAX_TRACKED_LIST_FAILURES = 256
 #: Estimation reason of a pod row without CPU sample at its step (memory or Running phase only, COL-03).
 NO_CPU_SAMPLE = "no_cpu_sample"
+#: Estimation reason of CPU usage read from the counter of a container that started inside the step and had
+#: no rate() sample (counter value / step, COL-03 step 3).
+CPU_FROM_COUNTER_START = "cpu_from_counter_start"
 #: Pod history versions read around the range: a pod of the range was observed at most this far outside it.
 _POD_SNAPSHOT_MARGIN = timedelta(hours=1)
 
@@ -165,6 +173,12 @@ class HistoricalRangeProcessor:
         self._gpu_model = GpuPowerModel()
         #: Idle rows (``__idle__`` per node and step) of the last ``run_range`` call.
         self.last_idle_metrics: List[NodeIdleMetric] = []
+        #: Per step of the last ``run_range`` call: (OpenCost window total spread evenly over the steps,
+        #: OpenCost cost stored in the step's rows), so allocations without a row are visible (COL-03 step 4).
+        self.last_cost_reconciliation: dict[datetime, tuple[float, float]] = {}
+        #: Whether the last ``run_range`` call saw any container-level CPU series; False on runtimes whose
+        #: cAdvisor exports pod cgroups only (cri-dockerd), where past windows get no container rows (COL-05).
+        self.last_container_series_present = False
 
     # ------------------------------------------------------------------
     # Helpers
@@ -339,31 +353,140 @@ class HistoricalRangeProcessor:
         )
 
     async def _collect_cpu(self, chunk: CollectionWindow):
-        """Container CPU series, or the pod cgroup series (counted once) when no container series exist.
+        """Container and pod cgroup CPU series in one query (COL-09).
 
-        A query error fails the window instead of degrading to the fallback, so a
-        transient outage never stores a window without its container breakdown.
+        The parser uses a pod's containers when it has any, else its pod cgroup
+        (counted once), per pod and step: a pod with pod-level series only is
+        kept even when other pods export container series.  A query error fails
+        the window.
         """
         try:
-            results = await self._query_range(chunk, self._promql.container_cpu_usage())
-            if results:
-                return results
-            return await self._query_range(chunk, self._promql.pod_cgroup_cpu_usage())
+            return await self._query_range(chunk, self._promql.cpu_usage_by_level())
         except Exception as error:
             raise RangeCollectionError(
                 f"Prometheus CPU usage is unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
             ) from error
 
-    async def _collect_memory(self, chunk: CollectionWindow):
-        """Container working-set series, or the pod cgroup series when no container series exist.
+    async def _recover_short_lived_cpu(
+        self, chunk: CollectionWindow
+    ) -> tuple[dict[int, dict[tuple[str, str, str], float]], dict[int, dict[tuple[str, str], str]]]:
+        """Core usage of containers whose CPU counter first appears inside a step (COL-03 step 3).
 
-        The pod cgroup fallback gives the pod-level working set only: it never
+        Evaluated from ``chunk.start`` so the step before the first one is
+        seen.  A step is a start only when the series is absent at the
+        previous evaluation AND cAdvisor's ``container_start_time_seconds``
+        lies in ``(s - step, s + step]``: a long-running container whose
+        series reappears after a scrape gap (Prometheus restart, node outage)
+        has an old start time and is never read as its whole counter (review
+        1).  Returns per sample start the cores per ``(namespace, pod,
+        container)`` and the node of each pod.
+        """
+        step = chunk.step_seconds
+        try:
+            results, start_results = await asyncio.gather(
+                self.prometheus_collector.collect_range(
+                    start=chunk.start,
+                    end=chunk.end,
+                    step=self._promql.step,
+                    query=self._promql.container_cpu_counter_max(),
+                ),
+                self.prometheus_collector.collect_range(
+                    start=chunk.start, end=chunk.end, step=self._promql.step, query=self._promql.container_start_time()
+                ),
+            )
+        except Exception as error:
+            raise RangeCollectionError(
+                f"Prometheus CPU counter query failed for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
+            ) from error
+        start = chunk.start.timestamp()
+        end = chunk.end.timestamp()
+        started_at: dict[tuple[str, str, str], dict[int, float]] = defaultdict(dict)
+        for series in start_results or []:
+            namespace, pod, container, _node = self._series_identity(series)
+            if namespace and pod and container:
+                started_at[(namespace, pod, container)].update(self._raw_by_sample(series, step))
+        cores: dict[int, dict[tuple[str, str, str], float]] = defaultdict(dict)
+        nodes: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
+        for series in results or []:
+            namespace, pod, container, node = self._series_identity(series)
+            if not namespace or not pod or not container:
+                continue
+            present = self._raw_by_sample(series, step)
+            for sample_start, value in present.items():
+                if not start <= sample_start < end or (sample_start - step) in present:
+                    continue
+                container_start = started_at.get((namespace, pod, container), {}).get(sample_start)
+                if container_start is None or not sample_start - step < container_start <= sample_start + step:
+                    continue
+                cores[sample_start][(namespace, pod, container)] = value / step
+                if node:
+                    nodes[sample_start].setdefault((namespace, pod), node)
+        return cores, nodes
+
+    @staticmethod
+    def _raw_by_sample(series: dict, step: int) -> dict[int, float]:
+        """Finite non-negative values of a series by sample start, without drop telemetry.
+
+        The rate queries of the same series already count dropped samples.
+        """
+        values: dict[int, float] = {}
+        for raw_ts, raw_value in series.get("values", []) or []:
+            try:
+                evaluated_at = float(raw_ts)
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value) and value >= 0:
+                values[int(math.ceil((evaluated_at - _TIMESTAMP_TOLERANCE) / step) * step - step)] = value
+        return values
+
+    async def measure_rate_window_scrapes(self, at: datetime) -> float | None:
+        """Most samples any cAdvisor CPU series holds in the rate window ending at ``at`` (COL-04 step 3).
+
+        ``None`` when Prometheus holds no such series at ``at``.  Query errors raise.
+        """
+        results = await self.prometheus_collector.collect_range(
+            start=at, end=at, step=self._promql.step, query=self._promql.rate_window_scrapes()
+        )
+        best: float | None = None
+        for series in results or []:
+            for _ts, raw in series.get("values", []) or []:
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    best = value if best is None else max(best, value)
+        return best
+
+    async def probe_scrape_data(self, start: datetime, end: datetime) -> set[datetime]:
+        """Sample starts of ``[start, end)`` at which Prometheus holds cAdvisor scrape data (COL-04).
+
+        A step without any cAdvisor series had no scrape (Prometheus down, TSDB
+        lost, wrong data source): its lack of rows is a hole, not an empty
+        cluster.  A query error raises :class:`RangeCollectionError` so the
+        window is retried instead of being classified.
+        """
+        chunk = CollectionWindow.covering(start, end, timedelta(seconds=self._promql.step_seconds))
+        try:
+            results = await self._query_range(chunk, self._promql.scrape_probe())
+        except Exception as error:
+            raise RangeCollectionError(
+                f"Prometheus scrape probe failed for {chunk.start.isoformat()} -> {chunk.end.isoformat()}"
+            ) from error
+        starts: set[datetime] = set()
+        for series in results or []:
+            for sample_start, _value in self._iter_window_samples(series, chunk):
+                starts.add(datetime.fromtimestamp(sample_start, tz=timezone.utc))
+        return starts
+
+    async def _collect_memory(self, chunk: CollectionWindow):
+        """Container and pod cgroup working-set series in one query; the parser chooses per pod (COL-09).
+
+        A pod cgroup value gives the pod-level working set only: it never
         becomes container usage (rightsizing reports ``pod_level_usage_only``).
         """
-        results = await self._query_range(chunk, self._promql.container_memory_working_set())
-        if results:
-            return results
-        return await self._query_range(chunk, self._promql.pod_cgroup_memory_working_set())
+        return await self._query_range(chunk, self._promql.memory_working_set_by_level())
 
     async def _collect_gpu(self, chunk: CollectionWindow) -> dict[int, list[dcgm_collector.GpuSample]]:
         """DCGM GPU power and utilization per step; empty when DCGM is absent or unreachable (B5)."""
@@ -829,6 +952,8 @@ class HistoricalRangeProcessor:
         if end_dt <= start_dt:
             raise ValueError("Historical range end must be after start")
         self.last_idle_metrics = []
+        self.last_cost_reconciliation = {}
+        self.last_container_series_present = False
 
         chosen_step_sec = self._promql.step_seconds
         window = CollectionWindow.covering(start_dt, end_dt, timedelta(seconds=chosen_step_sec))
@@ -1050,8 +1175,15 @@ class HistoricalRangeProcessor:
             # Exact-window allocation keyed by (namespace, pod) (A4, BUG-04, BUG-41).
             cost_metrics = await self.opencost_collector.collect_range(start=start_dt, end=end_dt)
             cost_map = {(c.namespace, c.pod_name): c for c in cost_metrics}
-        except Exception:
+        except Exception as error:
+            logger.warning("OpenCost allocation is unavailable for %s -> %s: %s", start_dt, end_dt, error)
             cost_map = {}
+        # Reconciliation against the OpenCost total of the window (COL-03 step 4): an allocation
+        # of a pod that gets no row (no sample of any kind) is not stored, so it must be counted.
+        opencost_window_total = sum(
+            cost.total_cost for cost in cost_map.values() if cost.source != CostSource.NONE.value
+        )
+        attributed_cost_by_step: dict[int, float] = defaultdict(float)
 
         # Per-pod persistent storage (PVC) request/usage — best-effort.
         try:
@@ -1147,6 +1279,8 @@ class HistoricalRangeProcessor:
             pod_node_map_by_ts: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
             # Duplicate series of one container are merged with max (USER BUG 2).
             cpu_values, cpu_nodes = self._deduplicated_samples(results, chunk)
+            if any(container for by_key in cpu_values.values() for _ns, _pod, container in by_key):
+                self.last_container_series_present = True
             for sample_start, by_key in cpu_values.items():
                 named_pods = {(series_ns, pod) for series_ns, pod, container in by_key if container}
                 for (series_ns, pod, container), usage in by_key.items():
@@ -1164,6 +1298,44 @@ class HistoricalRangeProcessor:
                     if resolved_node:
                         pod_node_map_by_ts[sample_start][key] = resolved_node
             del cpu_values, cpu_nodes
+
+            # Containers too short-lived for rate(): counter / step, only for pods without any rate sample.
+            counter_cpu_pods: dict[int, set[tuple[str, str]]] = defaultdict(set)
+            recovered_cores, recovered_nodes = await self._recover_short_lived_cpu(chunk)
+            for sample_start, by_container in recovered_cores.items():
+                for (series_ns, pod, container), usage in by_container.items():
+                    key = (series_ns, pod)
+                    if key in samples.get(sample_start, {}) and key not in counter_cpu_pods[sample_start]:
+                        continue
+                    resolved_node = (
+                        recovered_nodes.get(sample_start, {}).get(key)
+                        or pod_info_node_by_sample.get(sample_start, {}).get(key)
+                        or pod_info_node_latest.get(key)
+                    )
+                    # Never more cores than the node has (review 1): such a value is not a start.
+                    node_info, _source = node_at(
+                        resolved_node or "", datetime.fromtimestamp(sample_start, tz=timezone.utc)
+                    )
+                    capacity = node_info.cpu_capacity_cores if node_info else None
+                    if capacity and usage > capacity:
+                        logger.warning(
+                            "Counter-start CPU of %s/%s/%s at %s (%.1f cores) exceeds node %s capacity (%s); dropped.",
+                            series_ns,
+                            pod,
+                            container,
+                            datetime.fromtimestamp(sample_start, tz=timezone.utc).isoformat(),
+                            usage,
+                            resolved_node,
+                            capacity,
+                        )
+                        collection_telemetry.record_dropped_sample(collection_telemetry.DROP_REASON_IMPLAUSIBLE)
+                        continue
+                    counter_cpu_pods[sample_start].add(key)
+                    samples[sample_start][key] += usage
+                    normalized_container_samples[sample_start][(series_ns, pod, container)] = usage
+                    if resolved_node:
+                        pod_node_map_by_ts[sample_start].setdefault(key, resolved_node)
+            del recovered_cores, recovered_nodes
 
             del results
 
@@ -1309,6 +1481,8 @@ class HistoricalRangeProcessor:
                         opencost_step_share(cost_metric, chosen_step_sec, range_seconds) if cost_metric else 1.0,
                         self._config.DEFAULT_COST,
                     )
+                    if cost_metric is not None and cost_metric.source != CostSource.NONE.value:
+                        attributed_cost_by_step[sample_start] += costs["total_cost"] or 0.0
                     is_estimated, estimation_reasons = self.assembler.build_estimation_flags(
                         energy_metric=energy_metric,
                         node_context=node_context,
@@ -1322,6 +1496,9 @@ class HistoricalRangeProcessor:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, *fallback_reasons]))
                     has_cpu = pod_key in range_cpu_usage_map
+                    if pod_key in counter_cpu_pods.get(sample_key, ()):
+                        is_estimated = True
+                        estimation_reasons = list(dict.fromkeys([*estimation_reasons, CPU_FROM_COUNTER_START]))
                     if not has_cpu:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, NO_CPU_SAMPLE]))
@@ -1432,6 +1609,8 @@ class HistoricalRangeProcessor:
                     key: int(round(value)) for key, value in container_memory_samples.get(sample_key, {}).items()
                 }
                 container_sample_count_map = {}
+                #: Containers filled from the Metrics API carry their own usage source (COL-05).
+                container_usage_source_map: dict[tuple[str, str, str], str] = {}
                 refitted_containers: set[tuple[str, str, str]] = set()
                 # Point-in-time metrics-server usage only fills gaps of the latest
                 # sample of a current window, and only when it was measured during
@@ -1462,6 +1641,7 @@ class HistoricalRangeProcessor:
                             usage_added = True
                         if usage_added:
                             container_sample_count_map[container_key] = 1
+                            container_usage_source_map[container_key] = UsageSource.METRICS_SERVER.value
                     # The pod cgroup bounds its containers (USER BUG 2): refit what contradicts it.
                     refitted_containers = self._fit_to_pod_cgroup(
                         container_cpu_usage, cpu_filled, range_cpu_usage_map, cpu_measured_pods
@@ -1473,6 +1653,7 @@ class HistoricalRangeProcessor:
                         container_cpu_usage_map=container_cpu_usage,
                         container_memory_usage_map=container_memory_usage,
                         container_sample_count_map=container_sample_count_map,
+                        container_usage_source_map=container_usage_source_map,
                     )
                     if container_cpu_usage or container_memory_usage
                     else None
@@ -1492,7 +1673,7 @@ class HistoricalRangeProcessor:
                             ]
                         combined.extend(container_rows)
 
-            del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group
+            del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group, counter_cpu_pods
             del net_rx_by_sample, net_tx_by_sample, disk_read_by_sample, disk_write_by_sample
             del restart_by_sample, ephemeral_usage_by_sample
             del container_memory_samples, normalized_container_samples
@@ -1508,6 +1689,12 @@ class HistoricalRangeProcessor:
         # pod rows after its leader-fence check (roadmap A14), so a replica that
         # lost the Lease during the Prometheus queries writes nothing.
         self.last_idle_metrics = idle_rows
+        if cost_map:
+            per_step_total = opencost_window_total / window.steps
+            self.last_cost_reconciliation = {
+                step_start: (per_step_total, attributed_cost_by_step.get(int(step_start.timestamp()), 0.0))
+                for step_start in window.sample_starts()
+            }
         if namespace:
             combined = [c for c in combined if c.namespace == namespace]
 

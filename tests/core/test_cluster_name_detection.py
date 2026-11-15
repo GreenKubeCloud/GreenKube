@@ -45,8 +45,9 @@ def test_cluster_name_label_wins():
     assert _detect((nodes, False)) == "prod-eu"
 
 
-def test_without_api_access_falls_back_to_the_node_name():
-    assert _detect(None) == "kind-worker2"
+def test_failing_node_list_never_returns_the_pod_node():
+    """COL-02 acceptance a): a failed or slow node list at start must not fork the cluster key."""
+    assert _detect(None) == "default"
 
 
 def test_without_api_access_or_node_name_is_default(monkeypatch):

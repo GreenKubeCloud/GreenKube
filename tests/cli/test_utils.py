@@ -37,6 +37,16 @@ class _MemoryWatermarks:
         return []
 
 
+@pytest.fixture(autouse=True)
+def _no_window_records():
+    """These tests use in-memory doubles; the collection window record has its own tests (COL-04)."""
+    with (
+        patch("greenkube.cli.utils.get_collection_window_repository", return_value=None),
+        patch("greenkube.cli.utils.resolve_collection_cluster_uid", AsyncMock(return_value="test-uid")),
+    ):
+        yield
+
+
 def _recent_watermark() -> datetime:
     # One pending 5-minute window: watermark two steps behind now.
     now = datetime.now(timezone.utc)
@@ -147,3 +157,18 @@ def test_watermark_repository_follows_database_type():
     from greenkube.storage.sqlite.collection_watermark_repository import SQLiteCollectionWatermarkRepository
 
     assert isinstance(utils.get_collection_watermark_repository(), SQLiteCollectionWatermarkRepository)
+
+
+@pytest.mark.asyncio
+async def test_collection_does_not_start_on_a_database_of_another_cluster():
+    """STO-09: a cluster UID mismatch stops before any processor or write."""
+    from greenkube.core.cluster_identity import ClusterIdentityMismatch
+
+    processor_factory = MagicMock()
+    with patch(
+        "greenkube.cli.utils.resolve_collection_cluster_uid",
+        AsyncMock(side_effect=ClusterIdentityMismatch("This database belongs to cluster a")),
+    ):
+        with patch("greenkube.cli.utils.get_processor", processor_factory):
+            assert await utils.write_combined_metrics_to_database() is None
+    processor_factory.assert_not_called()
