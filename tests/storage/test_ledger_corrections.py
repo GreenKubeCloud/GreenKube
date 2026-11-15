@@ -137,3 +137,27 @@ async def test_a_dismissed_rollback_review_reinstates_the_accruals_before_it(led
     assert await _net_of(ledger, 6, METHOD_PROJECTED) == pytest.approx(0.10, rel=1e-9)
     assert (await projector.sync(full=True)).written == 0
     assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_reversal_with_the_wrong_sign_fails_verification_and_the_head_is_published(ledger: LedgerDb):
+    # LED-05 acceptance 4 and fix 2a.
+    from dataclasses import replace
+
+    from greenkube.verify.ledger.projector import reversal_of
+    from greenkube.verify.ledger.verification import CHAIN_HEAD_SEQ, verify_ledger
+    from tests.storage.test_ledger_v2_contract import _draft  # pyrefly: ignore[missing-import]
+
+    [entry] = await ledger.repo.append(CLUSTER_UID, CLUSTER, [_draft("target", 2.0)])
+    good = reversal_of(entry, "supersession", created_by="test")
+    await ledger.repo.append(CLUSTER_UID, CLUSTER, [good])
+    result = await verify_ledger(ledger.repo, checkpoints={})
+    assert result[CLUSTER_UID].ok
+    assert CHAIN_HEAD_SEQ.labels(cluster_uid=CLUSTER_UID)._value.get() == 2.0
+
+    [other] = await ledger.repo.append(CLUSTER_UID, CLUSTER, [_draft("target-2", 3.0)])
+    wrong = replace(reversal_of(other, "supersession", created_by="test"), value=3.0)
+    await ledger.repo.append(CLUSTER_UID, CLUSTER, [wrong])
+    failed = await verify_chain(ledger.repo, CLUSTER_UID)
+    assert not failed.ok and failed.reason == "reversal_mismatch"

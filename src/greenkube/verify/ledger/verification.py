@@ -8,7 +8,15 @@ Each cluster's chain is walked in ``seq`` order. An entry passes when:
   breaks the link);
 * its ``hash`` equals ``sha256(prev_hash || canonical_json(entry))`` (a
   modified column changes it);
-* its ``entry_id`` derives from its cluster and ``entry_key``.
+* its ``entry_id`` derives from its cluster and ``entry_key``, and it
+  belongs to the chain's cluster;
+* a reversal cancels its target exactly (opposite value, same quantity and
+  unit; ``reversal_mismatch``), drift reversals excepted (LED-05).
+
+The verified head is published as ``greenkube_ledger_chain_head_seq`` and
+``greenkube_ledger_chain_head_info`` (hash label), so Prometheus retention is a
+witness outside the database. The chain uses no secret: anyone who can write
+to the database can still recompute it (see the methodology's limits).
 
 The head verified last is stored in ``ledger_chain_status``: a chain that is
 shorter than that head, or whose entry at that position has another hash,
@@ -55,12 +63,43 @@ CHAIN_VERIFIED_ENTRIES = Gauge(
     "Entries of the savings ledger hash chain verified by the last pass (all clusters).",
     registry=OBSERVABILITY_REGISTRY,
 )
+CHAIN_HEAD_SEQ = Gauge(
+    "greenkube_ledger_chain_head_seq",
+    "Position of the last verified entry of the cluster's savings ledger chain. Prometheus retention keeps "
+    "an independent record of the head: a later value below an earlier one means the tail was removed.",
+    ["cluster_uid"],
+    registry=OBSERVABILITY_REGISTRY,
+)
+CHAIN_HEAD = Gauge(
+    "greenkube_ledger_chain_head_info",
+    "Hash of the last verified entry of the cluster's savings ledger chain (value 1; the hash is a label).",
+    ["cluster_uid", "head_seq", "head_hash"],
+    registry=OBSERVABILITY_REGISTRY,
+)
 CHAIN_OK = Gauge(
     "greenkube_ledger_chain_ok",
     "1 when the last verification of the cluster's savings ledger hash chain passed, 0 when it failed.",
     ["cluster_uid"],
     registry=OBSERVABILITY_REGISTRY,
 )
+
+#: cluster uid -> labels of its published head info series (one series per cluster).
+_HEAD_LABELS: Dict[str, Tuple[str, str, str]] = {}
+
+
+def _publish_head(cluster_uid: str, head_seq: int, head_hash: Optional[str]) -> None:
+    """Publish the verified head outside the database (LED-05): Prometheus keeps its history."""
+    CHAIN_HEAD_SEQ.labels(cluster_uid=cluster_uid).set(head_seq)
+    labels = (cluster_uid, str(head_seq), head_hash or "")
+    previous = _HEAD_LABELS.get(cluster_uid)
+    if previous is not None and previous != labels:
+        try:
+            CHAIN_HEAD.remove(*previous)
+        except KeyError:
+            pass
+    CHAIN_HEAD.labels(*labels).set(1)
+    _HEAD_LABELS[cluster_uid] = labels
+
 
 #: cluster uid -> (verified head seq, head hash, time of the last full verification), per process.
 _CHECKPOINTS: Dict[str, Tuple[int, Optional[str], datetime]] = {}
@@ -90,6 +129,8 @@ async def verify_chain(
     expected_seq = after_seq + 1
     prev_hash = after_hash
     verified = after_seq
+    #: entry id -> (value, quantity, unit) of the entries walked, for the reversal checks.
+    seen: Dict[str, Tuple[float, str, str]] = {}
     while True:
         page = await repo.chain_page(cluster_uid, expected_seq - 1, page_size)
         if not page:
@@ -104,6 +145,10 @@ async def verify_chain(
                 failure = ("hash_mismatch", f"seq {entry.seq} ({entry.entry_id}) was modified")
             elif entry.entry_id != entry_id_for(cluster_uid, entry.entry_key):
                 failure = ("identity_mismatch", f"seq {entry.seq} has an entry id that does not match its key")
+            elif entry.cluster_uid != cluster_uid:
+                failure = ("identity_mismatch", f"seq {entry.seq} belongs to cluster {entry.cluster_uid}")
+            else:
+                failure = await _reversal_mismatch(repo, entry, seen)
             if failure is not None:
                 return ChainVerification(
                     cluster_uid,
@@ -116,11 +161,34 @@ async def verify_chain(
                     detail=failure[1],
                 )
             prev_hash = entry.hash
+            seen[entry.entry_id] = (entry.value, entry.quantity, entry.unit)
             verified = entry.seq
             expected_seq += 1
         if len(page) < page_size:
             break
     return ChainVerification(cluster_uid, True, verified, verified or None, prev_hash)
+
+
+async def _reversal_mismatch(
+    repo: LedgerRepository, entry, seen: Dict[str, Tuple[float, str, str]]
+) -> Optional[Tuple[str, str]]:
+    """A reversal must cancel its target exactly: opposite value, same quantity and unit (LED-05).
+
+    Drift reversals are left out: they cancel the measured accruals of a
+    period and name only the first one.
+    """
+    if entry.entry_kind != "reversal" or not entry.reverses_entry_id or entry.reason == "drift":
+        return None
+    target = seen.get(entry.reverses_entry_id)
+    if target is None:
+        stored = await repo.get_entry(entry.reverses_entry_id)
+        if stored is None:
+            return ("reversal_mismatch", f"seq {entry.seq} reverses an entry that does not exist")
+        target = (stored.value, stored.quantity, stored.unit)
+    value, quantity, unit = target
+    if entry.value != -value or entry.quantity != quantity or entry.unit != unit:
+        return ("reversal_mismatch", f"seq {entry.seq} does not cancel the entry it reverses")
+    return None
 
 
 async def _tail_lost(
@@ -203,6 +271,8 @@ async def verify_ledger(
                 result.detail,
             )
         CHAIN_OK.labels(cluster_uid=cluster_uid).set(1 if result.ok else 0)
+        if result.ok:
+            _publish_head(cluster_uid, result.head_seq or 0, result.head_hash)
         total += result.entries
         # A failure keeps the last head that passed as the anchor of the next verification.
         if result.ok:
