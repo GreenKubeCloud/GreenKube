@@ -530,7 +530,8 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
   - Error handling with appropriate HTTP status codes
 
 **Endpoints:**
-- `GET /api/v1/health` — Health check and version
+- `GET /api/v1/health` — Health check and version, plus `collection` (watermark, lag, last gap) when the database answers within one second
+- `GET /api/v1/collection/coverage?start=&end=` — Steps of the period collected, empty, failed, abandoned or unknown, the coverage ratio and the holes (COL-04)
 - `GET /api/v1/health/services` — Health status for all data sources (Prometheus, OpenCost, Electricity Maps, Wattnet, Boavizta, Kubernetes)
 - `GET /api/v1/health/services/{name}` — Health status for a single data source
 - `POST /api/v1/auth/login`, `/auth/logout`, `GET /api/v1/auth/me` — Account sign-in with server-side sessions (see [Authentication](authentication.md))
