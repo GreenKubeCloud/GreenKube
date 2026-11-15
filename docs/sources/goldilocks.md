@@ -1,25 +1,21 @@
-# VPA and Goldilocks (`vpa`, `goldilocks`)
+# Goldilocks (`goldilocks`)
 
-The `vpa` source reads VerticalPodAutoscalers in recommendation mode (`updateMode: Off`). [Goldilocks](https://github.com/FairwindsOps/goldilocks) creates exactly such VPAs, so GreenKube reads them in the same pass and labels their advice `goldilocks` (roadmap G1).
+[Goldilocks](https://github.com/FairwindsOps/goldilocks) creates one VerticalPodAutoscaler in recommendation mode (`updateMode: Off`) per workload of the namespaces you opt in. Its advice *is* the VPA recommender's advice, so GreenKube reads those VPAs through the [VPA source](vpa.md), in the same pass, and labels their signals `goldilocks` (roadmap G1). There is no separate connector to enable.
 
 ## What it reads
 
-- VPAs of every namespace (`autoscaling.k8s.io/v1`), their `targetRef`, labels and `status.recommendation.containerRecommendations[]`: `target`, `lowerBound`, `upperBound` and `uncappedTarget`. VPAs in `Auto`, `Recreate`, `Initial` or other active modes are skipped and counted (diagnostic `skipped_vpas`).
+- The VPAs, as described in [Vertical Pod Autoscaler](vpa.md). A VPA labelled `creator=Fairwinds` and `source=goldilocks` is a Goldilocks VPA.
 - Namespaces labelled `goldilocks.fairwinds.com/enabled=true`, for diagnostics only.
 
 ## Signals
 
-- One signal per VPA object, container and resource (`RIGHTSIZING_CPU`/`RIGHTSIZING_MEMORY`), increases included.
-- VPAs labelled `creator=Fairwinds` and `source=goldilocks` produce signals with `source_id: goldilocks`, every other VPA with `source_id: vpa`. Both carry `algorithm.name: vpa-recommender`, `source_ref: <namespace>/<vpa>` and **`engine_family: vpa`**: a Goldilocks VPA and a user VPA on the same container are two signals of the same engine, and consensus counts them as one vote.
-- `raw` keeps the target, `lowerBound`, `upperBound`, `uncappedTarget` and the provenance (`goldilocks` or `user`).
-- A target at 90% or more of its `upperBound` is flagged as volatile: `evidence.data.risk_hints.volatility = {"target_to_upper": 0.94, "volatile": true}`.
-- The v1 recommendations are unchanged: decreases only, one per container and resource, none when two VPAs disagree.
+- Goldilocks VPAs produce signals with `source_id: goldilocks`, every other VPA with `source_id: vpa`. Both carry `algorithm.name: vpa-recommender`, `source_ref: <namespace>/<vpa>` and **`engine_family: vpa`**: a Goldilocks VPA and a user VPA on the same container are two signals of the same engine, and consensus counts them as one vote.
+- Everything else (increases in signals, volatility hint, v1 decreases only) is the [VPA source's behaviour](vpa.md#signals).
 
-Goldilocks signals are stored under `goldilocks` (`GET /api/v1/sources/goldilocks/signals`); the run is recorded under `vpa` (`GET /api/v1/sources/vpa/runs`), with the diagnostics:
+Goldilocks signals are stored under `goldilocks` (`GET /api/v1/sources/goldilocks/signals`); the run is recorded under `vpa` (`GET /api/v1/sources/vpa/runs`), with these Goldilocks diagnostics:
 
 | Code | Meaning |
 |---|---|
-| `skipped_vpas` | VPAs not in recommendation mode, by `updateMode`. |
 | `goldilocks_vpas` | VPAs created by Goldilocks. |
 | `goldilocks_namespaces` | Namespaces opted into Goldilocks. |
 | `goldilocks_namespace_without_vpas` (warning) | Opted-in namespaces without any Goldilocks VPA in recommendation mode: check that the Goldilocks controller runs. |

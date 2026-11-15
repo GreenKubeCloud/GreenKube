@@ -5,7 +5,7 @@ GreenKube is a neutral aggregator: its own analyzers are one source of advice am
 - Code: `src/greenkube/signals/` (model, SDK, adapters, runner, registry, contract checks).
 - Example package: [`examples/greenkube-source-example`](../examples/greenkube-source-example).
 - API: `GET /api/v1/sources`, `GET /api/v1/sources/{id}/runs`, `GET /api/v1/sources/{id}/signals`, and the push endpoints `POST /api/v1/signals` and `POST /api/v1/sources/krr/reports` ([API reference](api.md)).
-- Connectors: [VPA and Goldilocks](sources/goldilocks.md), [Robusta KRR](sources/krr.md), [Kubecost](sources/kubecost.md), [Push API](sources/push.md), [NodePools and autoscalers](sources/nodepool.md), [Fairwinds Polaris](sources/polaris.md), [GKE recommender](sources/gke.md), [Azure Advisor (AKS)](sources/azure-advisor.md).
+- Connectors: [Vertical Pod Autoscaler](sources/vpa.md), [Goldilocks](sources/goldilocks.md), [Robusta KRR](sources/krr.md), [Kubecost](sources/kubecost.md), [Push API](sources/push.md), [Karpenter and the Cluster Autoscaler](sources/nodepool.md), [Fairwinds Polaris](sources/polaris.md), [GKE recommender](sources/gke.md), [Azure Advisor (AKS)](sources/azure-advisor.md).
 - Public signal schema: [`schemas/signal.v1alpha1.json`](../schemas/signal.v1alpha1.json) and [`schemas/signal-batch.v1alpha1.json`](../schemas/signal-batch.v1alpha1.json).
 - UI: the **Sources** page lists every source with its status, last run, counts, track record and recent runs ([Web UI](ui.md#sources)).
 - Configuration: `sources.pluginsEnabled`, `sources.settings` ([configuration](configuration.md#recommendation-sources-sources)).
@@ -135,7 +135,7 @@ Run statuses: `succeeded` (authoritative), `incomplete`, `failed`, `unavailable`
 | `greenkube.nodes` | native | node_pool | `greenkube` | Over-provisioned nodes. |
 | `greenkube.orphaned_pv`, `greenkube.orphaned_lb` | native | cleanup | `greenkube` | Review only. |
 | `greenkube.nodepool` | native | node_pool | `karpenter` | GreenKube heuristic over Karpenter NodePools (not Karpenter's advice), plus high-risk advisory NodePool policy signals ([details](sources/nodepool.md)). |
-| `vpa` | oss | container_requests | `vpa` | VPAs in recommendation mode; signals of Goldilocks-created VPAs carry `source_id: goldilocks` ([details](sources/goldilocks.md)). |
+| `vpa` | oss | container_requests | `vpa` | VPAs in recommendation mode; signals of Goldilocks-created VPAs carry `source_id: goldilocks` ([VPA](sources/vpa.md), [Goldilocks](sources/goldilocks.md)). |
 | `krr` | oss | container_requests | — | Robusta KRR reports pushed to `POST /api/v1/sources/krr/reports` ([details](sources/krr.md)). |
 | `kubecost` | commercial | container_requests, cleanup, node_pool | — | Kubecost savings APIs ([details](sources/kubecost.md)). |
 | `push` | custom | all | — | Batches pushed to `POST /api/v1/signals` by `push:<client>` ([details](sources/push.md)). |
