@@ -212,10 +212,16 @@ class RequestRightsizingStrategy:
     post week is reported by the ``intensity_shift`` confounder, not booked. Without a post
     carbon factor (no energy) the raw difference is measured
     (``co2e_basis = raw_delta``).
+
+    **Template changes (2.5, MEA-08).** A pod-template change during the
+    measurement with the change's requests and limits (same resources digest:
+    an image deployment, an env change, a rollout restart) is a mild or
+    moderate ``template_change`` confounder instead of a severe
+    ``spec_change``, so it no longer contaminates the outcome.
     """
 
     key = "request_rightsizing"
-    version = "2.4"
+    version = "2.5"
     primary = "allocated_cost"
 
     QUANTITIES = (

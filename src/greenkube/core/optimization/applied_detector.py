@@ -40,7 +40,7 @@ from greenkube.models.metrics import (
     RecommendationStatus,
     RecommendationType,
 )
-from greenkube.verify.digest import hpa_digest, pod_template_digest
+from greenkube.verify.digest import hpa_digest, image_digest, pod_template_digest, resources_digest
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -85,6 +85,9 @@ class WorkloadSnapshot:
     # Change measurement (C1): pod-template and HPA digests, custom load-driver PromQL.
     spec_digest: str | None = None
     hpa_digest: str | None = None
+    # MEA-08: digests of the containers' requests/limits and of their images (what a saving depends on).
+    resources_digest: str | None = None
+    image_digest: str | None = None
     # False when HPAs could not be listed: ``hpa_digest`` is then unknown, not "no HPA".
     hpa_observed: bool = True
     load_metric: str | None = None
@@ -474,6 +477,8 @@ class K8sWorkloadReader:
                     container_request_values=request_values,
                     container_request_values_valid=request_values_valid,
                     spec_digest=pod_template_digest(template),
+                    resources_digest=resources_digest(template),
+                    image_digest=image_digest(template),
                     hpa_digest=hpas.get((namespace, kind, name)) if hpas is not None else None,
                     hpa_observed=hpas is not None,
                     load_metric=_load_metric_annotation(metadata),

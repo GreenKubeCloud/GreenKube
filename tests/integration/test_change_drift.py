@@ -26,8 +26,11 @@ def _savings_repo(manager):
     return SQLiteSavingsLedgerRepository(manager)
 
 
-async def _realized(manager, *, drift_days: int):
-    """A change realized 9 days ago whose CPU request creeps back for the last ``drift_days`` days."""
+async def _realized(manager, *, drift_days: int, digests: bool = False):
+    """A change realized 9 days ago whose CPU request creeps back for the last ``drift_days`` days.
+
+    ``digests``: the change records resources and image digests (``res-1``, ``img-1``, MEA-08).
+    """
     scenario = Scenario(manager)
     today = hour_now().replace(hour=0)
     scenario.completed = today - timedelta(days=16)
@@ -39,7 +42,9 @@ async def _realized(manager, *, drift_days: int):
     scenario.add_rows(
         TimeWindow(start=drift_start, end=hour_now() + timedelta(hours=1)), cpu_request=1000, memory_request=1024**3
     )
-    change, applied = await scenario.apply()
+    change, applied = await scenario.apply(
+        resources_digest="res-1" if digests else None, image_digest="img-1" if digests else None
+    )
     await scenario.service.run_due(now=completed + timedelta(hours=2))
     status = await scenario.changes.get_status(change.change_id)
     assert status is not None and status.post_window_end is not None
@@ -282,3 +287,70 @@ async def test_a_fresh_template_change_waits_for_its_grace(database):  # noqa: F
     status = await scenario.changes.get_status(change.change_id)
     assert status is not None and status.state is MeasurementState.REALIZED
     assert all(record_status(record) == "verified" for record in await scenario.records())
+
+
+async def _observe_template(scenario: Scenario, observed_at: datetime, resources: str, image: str) -> None:
+    await scenario.changes.insert_spec_observations(
+        [
+            WorkloadSpecObservation(
+                namespace="prod",
+                kind="Deployment",
+                name="api",
+                workload_uid="uid-api",
+                generation=8,
+                spec_digest=f"digest-{resources}-{image}",
+                resources_digest=resources,
+                image_digest=image,
+                observed_at=observed_at,
+            )
+        ]
+    )
+
+
+async def test_an_image_deployment_after_the_verdict_keeps_the_change_realized(database):  # noqa: F811
+    """sim_specdrift day 12 (MEA-08): same requests, new image -> informational event, still accruing."""
+    scenario, change, _, _ = await _realized(database, drift_days=0, digests=True)
+    await _observe_template(scenario, hour_now() - timedelta(days=1), "res-1", "img-2")
+    monitor = _monitor(scenario, _savings_repo(database))
+    now = hour_now() + timedelta(minutes=30)
+    assert (await monitor.run(now=now))["closed"] == []
+    assert (await monitor.run(now=now + timedelta(hours=1)))["closed"] == []
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.REALIZED
+    assert all(record_status(record) == "verified" for record in await scenario.records())
+    notes = [e for e in await scenario.changes.list_events(change.change_id) if e.event_type == "template_change"]
+    assert len(notes) == 1 and notes[0].payload["image_changed"] is True
+
+
+async def test_restoring_the_old_request_closes_the_change(database):  # noqa: F811
+    scenario, change, _, _ = await _realized(database, drift_days=0, digests=True)
+    await _observe_template(scenario, hour_now() - timedelta(days=1), "res-0", "img-2")
+    result = await _monitor(scenario, _savings_repo(database)).run(now=hour_now() + timedelta(minutes=30))
+    assert result["closed"] == [change.change_id]
+    assert (await scenario.changes.list_events(change.change_id))[-1].event_type == "spec_drift"
+    assert all(record_status(record) == "regressed" for record in await scenario.records())
+
+
+def _live(requests):
+    async def read(namespace, kind, name):
+        return requests
+
+    return read
+
+
+async def test_a_legacy_change_reads_the_live_requests_before_closing(database):  # noqa: F811
+    """No resources digest: the applied requests still running (300m, 1 GiB) keep the change realized."""
+    scenario, change, _, _ = await _realized(database, drift_days=0)
+    await _observe(scenario, "digest-image-bump", hour_now() - timedelta(days=1))
+    monitor = _monitor(scenario, _savings_repo(database))
+    monitor.live_requests = _live({"api": (300, 1024**3)})
+    assert (await monitor.run(now=hour_now() + timedelta(minutes=30)))["closed"] == []
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.state is MeasurementState.REALIZED
+    notes = [e for e in await scenario.changes.list_events(change.change_id) if e.event_type == "template_change"]
+    assert notes and notes[0].payload["resources_source"] == "live_requests"
+
+    monitor.live_requests = _live({"api": (1000, 1024**3)})
+    assert (await monitor.run(now=hour_now() + timedelta(minutes=45)))["closed"] == [change.change_id]
+    event = (await scenario.changes.list_events(change.change_id))[-1]
+    assert event.event_type == "spec_drift" and "live requests differ" in event.reason

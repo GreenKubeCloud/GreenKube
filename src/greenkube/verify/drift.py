@@ -81,6 +81,8 @@ from greenkube.verify.model import (
     MeasurementState,
     TimeWindow,
     WorkloadSpecObservation,
+    same_images,
+    same_resources,
 )
 from greenkube.verify.series import hourly_buckets
 
@@ -117,8 +119,14 @@ WORKLOAD_ABSENT = "workload_absent"
 WORKLOAD_PRESENT = "workload_present"
 WORKLOAD_DELETED = "workload_deleted"
 
+#: Informational event: the pod template changed after the measurement with the same requests and limits.
+TEMPLATE_CHANGE = "template_change"
+
 #: ``(namespace, kind, name) -> True`` (exists), ``False`` (deleted) or ``None`` (unknown).
 WorkloadProbe = Callable[[str, str, str], Awaitable[Optional[bool]]]
+#: ``(namespace, kind, name) -> {container: (cpu millicores, memory bytes)}`` of the live workload,
+#: ``None`` when unknown: the requests of a change recorded before resources digests existed (MEA-08).
+LiveRequests = Callable[[str, str, str], Awaitable[Optional[Dict[str, tuple]]]]
 
 
 @dataclass(frozen=True)
@@ -275,16 +283,26 @@ def _assess_drift(
 
 @dataclass(frozen=True)
 class SpecDrift:
-    """A pod template (or workload UID) that no longer matches a realized change."""
+    """A pod template (or workload UID) whose requests no longer match a realized change (MEA-08)."""
 
     event_type: str
     reason: str
     #: First observation of the trailing run that differs: the measured saving ends there.
     accrual_end: datetime
     latest: WorkloadSpecObservation
+    #: False when the latest observation or the change has no resources digest (recorded before it
+    #: existed): the template differs, but whether the requests moved is not known from the digests.
+    resources_known: bool = True
 
 
 def _differs(change: ChangeEvent, observation: WorkloadSpecObservation) -> Optional[str]:
+    """The kind of drift of ``observation``, ``None`` when it runs the change's requests and limits.
+
+    A template change (or a recreated workload) with the same requests and limits
+    as the change is not a drift: the measured saving depends on the requests only.
+    """
+    if same_resources(change, observation) is True:
+        return None
     if change.workload_uid and observation.workload_uid and observation.workload_uid != change.workload_uid:
         return "workload_recreated"
     if change.spec_digest_after and observation.spec_digest and observation.spec_digest != change.spec_digest_after:
@@ -292,13 +310,24 @@ def _differs(change: ChangeEvent, observation: WorkloadSpecObservation) -> Optio
     return None
 
 
-def detect_spec_drift(change: ChangeEvent, observations: Sequence[WorkloadSpecObservation]) -> Optional[SpecDrift]:
-    """The spec drift of ``change`` in its observations, or ``None`` while its latest one still matches."""
+def _later(change: ChangeEvent, observations: Sequence[WorkloadSpecObservation]) -> List[WorkloadSpecObservation]:
     completed = ensure_utc(change.rollout_completed_at)
-    later = sorted(
+    return sorted(
         (item for item in observations if ensure_utc(item.observed_at) > completed),
         key=lambda item: ensure_utc(item.observed_at),
     )
+
+
+def detect_spec_drift(change: ChangeEvent, observations: Sequence[WorkloadSpecObservation]) -> Optional[SpecDrift]:
+    """The spec drift of ``change`` in its observations, or ``None`` while its latest one runs its requests.
+
+    Only a template whose requests or limits differ from the change's (resources
+    digest), or a recreated workload whose resources differ, is a drift; an image
+    deployment, an env change or a rollout restart is not (MEA-08). Without a
+    resources digest on either side the drift is returned with
+    ``resources_known=False`` for the caller to check the live requests.
+    """
+    later = _later(change, observations)
     if not later:
         return None
     latest = later[-1]
@@ -315,7 +344,33 @@ def detect_spec_drift(change: ChangeEvent, observations: Sequence[WorkloadSpecOb
         if kind == "workload_recreated"
         else "the pod template no longer matches the measured change"
     )
-    return SpecDrift(event_type=kind, reason=reason, accrual_end=ensure_utc(first.observed_at), latest=latest)
+    resources = same_resources(change, latest)
+    if resources is False:
+        reason += " (its requests or limits differ)"
+    return SpecDrift(
+        event_type=kind,
+        reason=reason,
+        accrual_end=ensure_utc(first.observed_at),
+        latest=latest,
+        resources_known=resources is not None,
+    )
+
+
+def detect_template_change(
+    change: ChangeEvent, observations: Sequence[WorkloadSpecObservation]
+) -> Optional[WorkloadSpecObservation]:
+    """The latest observation when its template (or UID) differs from the change's with the same resources."""
+    later = _later(change, observations)
+    if not later:
+        return None
+    latest = later[-1]
+    if same_resources(change, latest) is not True:
+        return None
+    moved_uid = bool(change.workload_uid and latest.workload_uid and latest.workload_uid != change.workload_uid)
+    moved_spec = bool(
+        change.spec_digest_after and latest.spec_digest and latest.spec_digest != change.spec_digest_after
+    )
+    return latest if moved_uid or moved_spec else None
 
 
 class DriftMonitor:
@@ -331,8 +386,11 @@ class DriftMonitor:
         assessed: Optional[Dict[tuple, datetime]] = None,
         workload_probe: Optional[WorkloadProbe] = None,
         ledger: Any = None,
+        live_requests: Optional[LiveRequests] = None,
     ):
         self.service = service
+        #: Live container requests, read before closing a legacy change on a template change (MEA-08).
+        self.live_requests = live_requests
         #: Existence check of a realized change's workload (deletion closes its accrual).
         self.workload_probe = workload_probe
         #: Optional savings ledger v2 projector, run after reversal rows are written (C6).
@@ -399,13 +457,93 @@ class DriftMonitor:
             return "closed"
         if drift is None or now - ensure_utc(drift.latest.observed_at) < SPEC_DRIFT_GRACE:
             return None
+        drift = await self._confirm(change, drift)
+        if drift is None:
+            return None
         return await self._close_on_spec_drift(change, status, drift, now)
 
     async def _spec_drift(self, change: ChangeEvent) -> Optional[SpecDrift]:
         observations = await self.changes.spec_observations(
             *change.target.key, since=ensure_utc(change.rollout_completed_at)
         )
+        template = detect_template_change(change, observations)
+        if template is not None:
+            await self._note_template_change(change, template, same_images(change, template))
         return detect_spec_drift(change, observations)
+
+    async def _note_template_change(
+        self, change: ChangeEvent, observation: WorkloadSpecObservation, images: Optional[bool], *, source: str = ""
+    ) -> None:
+        """Record once per template revision that the template changed with the change's requests (informational)."""
+        digest = observation.spec_digest
+        events = await self.changes.list_events(change.change_id)
+        if any(event.event_type == TEMPLATE_CHANGE and event.payload.get("spec_digest") == digest for event in events):
+            return
+        await self.changes.record_event(
+            change.change_id,
+            TEMPLATE_CHANGE,
+            actor="drift-monitor",
+            reason="the pod template changed with the measured containers' requests and limits unchanged: "
+            "the measured saving still holds",
+            payload={
+                "spec_digest": digest,
+                "workload_uid": observation.workload_uid,
+                "observed_at": ensure_utc(observation.observed_at).isoformat(),
+                "image_changed": None if images is None else not images,
+                "resources_source": source or "resources_digest",
+            },
+        )
+
+    async def _confirm(self, change: ChangeEvent, drift: SpecDrift) -> Optional[SpecDrift]:
+        """The drift to act on: a legacy drift (no resources digest) is checked against the live requests.
+
+        Live requests equal to the applied ones: the template changed without its
+        requests, nothing closes (an informational event is recorded). Different
+        requests, or requests that cannot be read: the change closes, as before
+        resources digests existed, with the reason saying which.
+        """
+        if drift.resources_known:
+            return drift
+        applied = await self._requests_still_applied(change)
+        if applied is True:
+            await self._note_template_change(change, drift.latest, None, source="live_requests")
+            return None
+        suffix = (
+            " (its live requests differ from the applied ones)"
+            if applied is False
+            else " (recorded before resources digests and its live requests could not be read)"
+        )
+        return replace(drift, reason=drift.reason + suffix)
+
+    async def _requests_still_applied(self, change: ChangeEvent) -> Optional[bool]:
+        """Whether the live workload still runs every member's applied request (``None`` when unknown)."""
+        if self.live_requests is None:
+            return None
+        try:
+            live = await self.live_requests(*change.target.key)
+        except Exception as exc:
+            logger.debug("Live requests of %s could not be read: %s", "/".join(change.target.key), exc)
+            return None
+        if live is None:
+            return None
+        compared = False
+        for record in await self.service._records(change.recommendation_ids):
+            kind = str(getattr(record.type, "value", record.type))
+            if kind == "RIGHTSIZING_CPU":
+                expected = record.actual_cpu_request_millicores or record.recommended_cpu_request_millicores
+                index = 0
+            elif kind == "RIGHTSIZING_MEMORY":
+                expected = record.actual_memory_request_bytes or record.recommended_memory_request_bytes
+                index = 1
+            else:
+                return None
+            if not record.container_name or expected is None:
+                return None
+            values = live.get(record.container_name)
+            if values is None or values[index] != expected:
+                return False
+            compared = True
+        return True if compared else None
 
     async def _assess(self, change: ChangeEvent, status: ChangeStatus, now: datetime) -> bool:
         """Assess the usage drift once per complete day; regress the change when it is sustained."""
@@ -645,6 +783,9 @@ class DriftMonitor:
         drift = detect_spec_drift(head, observations)
         if drift is None or now - ensure_utc(drift.latest.observed_at) < SPEC_DRIFT_GRACE:
             return False
+        drift = await self._confirm(head, drift)
+        if drift is None:
+            return False
         reason = (
             f"{drift.reason} (newest change {head.change_id}): the measured saving of this superseded change "
             f"no longer describes what runs and stops accruing from {drift.accrual_end.isoformat()}"
@@ -825,6 +966,46 @@ def _status_of(record: Any) -> str:
     return str(getattr(record.status, "value", record.status))
 
 
+async def kubernetes_live_requests(namespace: str, kind: str, name: str) -> Optional[Dict[str, tuple]]:
+    """Live ``{container: (cpu millicores, memory bytes)}`` of a workload's pod template, ``None`` when unknown.
+
+    Regular, init and native sidecar containers are read; an unreadable
+    workload or an unparsable quantity returns ``None`` (MEA-08).
+    """
+    try:
+        from greenkube.core.k8s_client import get_apps_v1_api
+        from greenkube.core.optimization.applied_detector import _read_container_request_values, _resource_field
+
+        api = await get_apps_v1_api()
+    except Exception as exc:  # pragma: no cover - configuration errors depend on the host
+        logger.debug("No Kubernetes client for the live request check: %s", exc)
+        return None
+    if api is None:
+        return None
+    readers = {
+        "Deployment": api.read_namespaced_deployment,
+        "StatefulSet": api.read_namespaced_stateful_set,
+        "DaemonSet": api.read_namespaced_daemon_set,
+    }
+    reader = readers.get(kind)
+    if reader is None:
+        return None
+    try:
+        workload = await reader(name, namespace)
+    except Exception as exc:
+        logger.debug("Workload %s/%s/%s could not be read: %s", namespace, kind, name, exc)
+        return None
+    spec = _resource_field(workload, "spec")
+    template = _resource_field(spec, "template") if spec else None
+    pod_spec = _resource_field(template, "spec") if template else None
+    if not pod_spec:
+        return None
+    containers = list(_resource_field(pod_spec, "containers") or [])
+    init_containers = list(_resource_field(pod_spec, "init_containers", "initContainers") or [])
+    values, valid = _read_container_request_values([*containers, *init_containers])
+    return dict(values) if valid else None
+
+
 async def kubernetes_workload_probe(namespace: str, kind: str, name: str) -> Optional[bool]:
     """Whether a Deployment, StatefulSet or DaemonSet exists: ``False`` only on HTTP 404, ``None`` when unknown."""
     try:
@@ -905,6 +1086,7 @@ async def run_drift_monitor() -> None:
         cluster_name=savings_cluster_name(),
         workload_probe=kubernetes_workload_probe,
         ledger=build_projector(),
+        live_requests=kubernetes_live_requests,
     )
     result = await monitor.run()
     if any(result.values()):
@@ -923,6 +1105,8 @@ __all__ = [
     "SpecDrift",
     "assess_drift",
     "detect_spec_drift",
+    "detect_template_change",
+    "kubernetes_live_requests",
     "kubernetes_workload_probe",
     "run_drift_monitor",
 ]

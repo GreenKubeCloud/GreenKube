@@ -196,8 +196,13 @@ class Scenario:
         completed: Optional[datetime] = None,
         generation: int = 2,
         fields: Optional[Dict[RecommendationType, Dict[str, Any]]] = None,
+        resources_digest: Optional[str] = None,
+        image_digest: Optional[str] = None,
     ):
-        """``fields`` adds or overrides fields of the CPU or memory recommendation."""
+        """``fields`` adds or overrides fields of the CPU or memory recommendation.
+
+        ``resources_digest``/``image_digest`` are the rolled-out template's digests (``None``: a legacy change).
+        """
         completed = completed or self.completed
         fields = fields or {}
         common = dict(
@@ -256,6 +261,8 @@ class Scenario:
             generation=generation,
             observed_generation=generation,
             spec_digest=f"digest-{generation}",
+            resources_digest=resources_digest,
+            image_digest=image_digest,
         )
         change = await self.service.record_change(change_id, applied, snapshot=snapshot, now=completed)
         assert change is not None

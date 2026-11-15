@@ -90,7 +90,11 @@ class ChangeEvent(_Frozen):
 
     ``spec_digest_*`` are SHA-256 digests of the normalized pod template;
     ``spec_digest_before`` and ``generation_before`` are ``None`` when the
-    detector never observed the workload before the change. ``baseline_window_end``
+    detector never observed the workload before the change.
+    ``resources_digest_after`` and ``image_digest_after`` are the digests of
+    the rolled-out containers' requests and limits and of their images
+    (:mod:`greenkube.verify.digest`, MEA-08); ``None`` for changes recorded
+    before they existed. ``baseline_window_end``
     is the PR merge (or plan approval) time; the baseline never extends past it.
     ``recommendation_ids`` lists the members known when the change was read
     (members detected in a later pass are appended, never removed).
@@ -110,6 +114,8 @@ class ChangeEvent(_Frozen):
     generation_after: Optional[int] = None
     spec_digest_before: Optional[str] = None
     spec_digest_after: Optional[str] = None
+    resources_digest_after: Optional[str] = None
+    image_digest_after: Optional[str] = None
     rollout_started_at: datetime
     rollout_started_source: str = "unknown"
     rollout_completed_at: datetime
@@ -432,7 +438,11 @@ class ChangeStateEvent(BaseModel):
 
 
 class WorkloadSpecObservation(BaseModel):
-    """A pod-template revision of a workload, as first seen by the applied detector."""
+    """A pod-template revision of a workload, as first seen by the applied detector.
+
+    ``resources_digest`` and ``image_digest`` (MEA-08) are ``None`` on
+    observations stored before they were recorded.
+    """
 
     namespace: str
     kind: str
@@ -441,6 +451,8 @@ class WorkloadSpecObservation(BaseModel):
     generation: Optional[int] = None
     spec_digest: Optional[str] = None
     hpa_digest: Optional[str] = None
+    resources_digest: Optional[str] = None
+    image_digest: Optional[str] = None
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
@@ -453,4 +465,23 @@ class WorkloadSpecObservation(BaseModel):
             and self.generation == other.generation
             and self.spec_digest == other.spec_digest
             and self.hpa_digest == other.hpa_digest
+            and self.resources_digest == other.resources_digest
+            and self.image_digest == other.image_digest
         )
+
+
+def same_resources(change: ChangeEvent, observation: WorkloadSpecObservation) -> Optional[bool]:
+    """Whether ``observation`` runs the change's container requests and limits (MEA-08).
+
+    ``None`` when either side has no resources digest (recorded before it existed).
+    """
+    if not change.resources_digest_after or not observation.resources_digest:
+        return None
+    return observation.resources_digest == change.resources_digest_after
+
+
+def same_images(change: ChangeEvent, observation: WorkloadSpecObservation) -> Optional[bool]:
+    """Whether ``observation`` runs the change's container images (``None`` when unknown)."""
+    if not change.image_digest_after or not observation.image_digest:
+        return None
+    return observation.image_digest == change.image_digest_after

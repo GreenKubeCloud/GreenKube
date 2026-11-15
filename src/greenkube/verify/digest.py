@@ -12,6 +12,15 @@ SHA-256 of the canonical JSON of the *normalized* pod template:
 
 Every other field counts: an image bump, an environment change or a
 ``kubectl rollout restart`` annotation is a different spec.
+
+A measured saving depends on the resource requests only (allocated cost is
+requests x unit price), so two narrower digests are kept next to it (MEA-08):
+
+* :func:`resources_digest` — the requests and limits of every container,
+  init container and native sidecar (and pod-level resources): a different
+  value means the requests were reverted or changed;
+* :func:`image_digest` — the images of those containers: an image change
+  with identical resources may move usage, not the requests.
 """
 
 from __future__ import annotations
@@ -76,6 +85,52 @@ def pod_template_digest(template: Any) -> Optional[str]:
     """SHA-256 of the normalized pod template (``None`` without a template)."""
     normalized = normalize_pod_template(template)
     return sha256_hex(normalized) if normalized is not None else None
+
+
+#: Container lists of a pod spec, in snake_case (Kubernetes client objects) and camelCase (raw mappings).
+_CONTAINER_LISTS = (("containers", "containers"), ("init_containers", "initContainers"))
+
+
+def _containers(template: Any) -> Optional[list[tuple[str, dict[str, Any]]]]:
+    """``(group/name, container)`` of every container of the normalized template, ``None`` without one."""
+    normalized = normalize_pod_template(template)
+    if normalized is None:
+        return None
+    spec = normalized.get("spec")
+    if not isinstance(spec, dict):
+        return None
+    out: list[tuple[str, dict[str, Any]]] = []
+    for snake, camel in _CONTAINER_LISTS:
+        for index, container in enumerate(spec.get(snake) or spec.get(camel) or []):
+            if not isinstance(container, dict):
+                continue
+            out.append((f"{snake}/{container.get('name') or index}", container))
+    return out
+
+
+def resources_digest(template: Any) -> Optional[str]:
+    """SHA-256 of the requests and limits of every container of the pod template (MEA-08).
+
+    Init containers and native sidecars count, and so does pod-level
+    ``resources``. ``None`` without a template.
+    """
+    containers = _containers(template)
+    if containers is None:
+        return None
+    resources = {key: container.get("resources") or {} for key, container in containers}
+    normalized = normalize_pod_template(template) or {}
+    pod_level = (normalized.get("spec") or {}).get("resources")
+    if pod_level:
+        resources["pod"] = pod_level
+    return sha256_hex(resources)
+
+
+def image_digest(template: Any) -> Optional[str]:
+    """SHA-256 of the image of every container of the pod template (``None`` without a template)."""
+    containers = _containers(template)
+    if containers is None:
+        return None
+    return sha256_hex({key: container.get("image") for key, container in containers})
 
 
 def hpa_digest(spec: Any) -> Optional[str]:

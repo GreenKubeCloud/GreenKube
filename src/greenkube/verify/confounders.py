@@ -6,8 +6,9 @@ of the observed delta. Each finding has a severity:
 
 * ``severe`` — the measurement cannot be attributed to the change; the outcome
   becomes ``contaminated`` (another change on the same workload between the
-  merge and the end of the post-window, a pod-template change that is not
-  this change, the workload recreated, an HPA edit during the measurement,
+  merge and the end of the post-window, a pod-template change that moved the
+  containers' requests or limits (or whose resources are unknown), the
+  workload recreated, an HPA edit during the measurement,
   the node pool's hardware replaced or its capacity reshaped, a unit price or
   instance-type shift large enough to explain a typical rightsizing effect on
   its own);
@@ -15,9 +16,11 @@ of the observed delta. Each finding has a severity:
   HPA edit in the baseline, replica counts beyond what the load explains, a
   price-card change seen on a resource whose requests the change did not
   touch, a node instance-type change, the node pool's capacity scaled by the
-  cluster autoscaler, a change to another workload running in the same pool);
+  cluster autoscaler, a change to another workload running in the same pool,
+  a pod-template change with the same requests and limits but a new image);
 * ``mild`` — lowers confidence slightly (nodes added or removed in the pool
-  without a capacity shift).
+  without a capacity shift, a pod-template change with the same requests,
+  limits and images, such as an env change or a rollout restart: MEA-08).
 
 Pool-level checks (C4) read the workload's node pools from the node
 snapshots (:class:`PoolContext`, sampled every few hours over both windows):
@@ -51,6 +54,8 @@ from greenkube.verify.model import (
     HourBucket,
     WindowPlan,
     WorkloadSpecObservation,
+    same_images,
+    same_resources,
 )
 from greenkube.verify.series import quantity_series
 
@@ -313,7 +318,7 @@ class ConfounderDetector:
         post_end = ensure_utc(plan.post.end)
         pre_start = ensure_utc(plan.pre.start)
         ordered = sorted(observations, key=lambda item: ensure_utc(item.observed_at))
-        flagged_spec = flagged_uid = False
+        flagged_spec = flagged_uid = flagged_template = False
         previous_hpa: Optional[str] = None
         seen_hpa = False
         for observation in ordered:
@@ -337,24 +342,49 @@ class ConfounderDetector:
                         )
                     )
                 if (
-                    not flagged_spec
-                    and change.spec_digest_after
+                    change.spec_digest_after
                     and observation.spec_digest
                     and observation.spec_digest != change.spec_digest_after
                 ):
-                    flagged_spec = True
-                    findings.append(
-                        Confounder(
-                            kind="spec_change",
-                            severity="severe",
-                            detail="the pod template changed again (image or spec) during the measurement",
-                            evidence={
-                                "spec_digest": observation.spec_digest,
-                                "generation": observation.generation,
-                                "observed_at": moment.isoformat(),
-                            },
+                    resources = same_resources(change, observation)
+                    evidence = {
+                        "spec_digest": observation.spec_digest,
+                        "generation": observation.generation,
+                        "observed_at": moment.isoformat(),
+                        "resources_digest_known": resources is not None,
+                    }
+                    if resources is True:
+                        if not flagged_template:
+                            flagged_template = True
+                            images = same_images(change, observation)
+                            # Same requests and limits: the allocated cost is untouched; a new image
+                            # (or an unknown one) may move usage, so CO2e and charged usage.
+                            findings.append(
+                                Confounder(
+                                    kind="template_change",
+                                    severity="mild" if images is True else "moderate",
+                                    detail="the pod template changed during the measurement with the measured "
+                                    "containers' requests and limits unchanged"
+                                    + (" (new image: usage may move)" if images is False else "")
+                                    + (" (image unknown)" if images is None else ""),
+                                    evidence={**evidence, "image_changed": None if images is None else not images},
+                                )
+                            )
+                    elif not flagged_spec:
+                        flagged_spec = True
+                        findings.append(
+                            Confounder(
+                                kind="spec_change",
+                                severity="severe",
+                                detail="the pod template changed again during the measurement"
+                                + (
+                                    " with different requests or limits"
+                                    if resources is False
+                                    else " and its resources digest is unknown (recorded before it existed)"
+                                ),
+                                evidence=evidence,
+                            )
                         )
-                    )
             if seen_hpa and observation.hpa_digest != previous_hpa:
                 during = moment > completed
                 findings.append(

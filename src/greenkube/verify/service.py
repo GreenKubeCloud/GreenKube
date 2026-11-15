@@ -454,6 +454,8 @@ class ChangeMeasurementService:
                     generation=getattr(snapshot, "generation", None),
                     spec_digest=getattr(snapshot, "spec_digest", None),
                     hpa_digest=hpa,
+                    resources_digest=getattr(snapshot, "resources_digest", None),
+                    image_digest=getattr(snapshot, "image_digest", None),
                     observed_at=moment,
                 )
                 if previous is None or not previous.same_revision(observation):
@@ -601,6 +603,8 @@ class ChangeMeasurementService:
             generation_after=generation_after,
             spec_digest_before=digest_before,
             spec_digest_after=digest_after,
+            resources_digest_after=getattr(snapshot, "resources_digest", None),
+            image_digest_after=getattr(snapshot, "image_digest", None),
             rollout_started_at=min(started, completed),
             rollout_started_source=started_source,
             rollout_completed_at=completed,
