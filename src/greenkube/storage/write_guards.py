@@ -9,6 +9,9 @@ provenance for that dimension is strictly worse.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -29,6 +32,25 @@ COST_COLUMNS: tuple[str, ...] = (
 IDLE_COST_COLUMNS: tuple[str, ...] = ("total_cost", "cost_cpu", "cost_ram", "cost_source")
 
 
+#: Set while an operator-forced re-collection writes: stored costs are replaced whatever their source.
+_FORCE_REPLACE: ContextVar[bool] = ContextVar("greenkube_force_replace", default=False)
+
+
+@contextmanager
+def forced_replace(force: bool = True) -> Iterator[None]:
+    """Within the block (same task), :func:`cost_guard_assignments` replaces stored costs unconditionally.
+
+    Used by an explicit ``--last ... --force`` re-collection, the only way to
+    correct stored rows whose cost source ranks higher than the correction
+    (for example list prices replaced by configured rates).
+    """
+    token = _FORCE_REPLACE.set(force)
+    try:
+        yield
+    finally:
+        _FORCE_REPLACE.reset(token)
+
+
 def produced_pod_keys(pod_rows: Iterable[Any]) -> set[tuple[str, str, datetime]]:
     """``(namespace, pod_name, timestamp)`` of the pod rows of a collection pass, timestamps in UTC."""
     return {(row.namespace, row.pod_name, ensure_utc(row.timestamp)) for row in pod_rows if row.timestamp is not None}
@@ -40,7 +62,12 @@ def produced_idle_keys(idle_rows: Iterable[Any]) -> set[tuple[str, datetime]]:
 
 
 def cost_guard_assignments(table: str, columns: tuple[str, ...] = COST_COLUMNS, excluded: str = "EXCLUDED") -> str:
-    """``SET`` assignments that keep the stored cost columns when the incoming cost source ranks lower."""
+    """``SET`` assignments that keep the stored cost columns when the incoming cost source ranks lower.
+
+    Inside :func:`forced_replace` the incoming costs always replace the stored ones.
+    """
+    if _FORCE_REPLACE.get():
+        return ",\n".join(f"{column} = {excluded}.{column}" for column in columns)
     keep_stored = f"{cost_source_rank_sql(f'{excluded}.cost_source')} < {cost_source_rank_sql(f'{table}.cost_source')}"
     return ",\n".join(
         f"{column} = CASE WHEN {keep_stored} THEN {table}.{column} ELSE {excluded}.{column} END" for column in columns

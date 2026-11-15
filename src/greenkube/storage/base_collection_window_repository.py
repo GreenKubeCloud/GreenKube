@@ -39,6 +39,8 @@ REASON_POD_LEVEL_ONLY = "pod_level_usage_only"
 REASON_NOT_PROBED = "not_probed"
 #: Reason of a collected step of a window that left invalid rows out (partial window, STO-03).
 REASON_ROWS_REJECTED = "rows_rejected"
+#: Reason of a stored step a re-collection left as it was because the new pass was worse (STO-01).
+REASON_RECOLLECT_SKIPPED = "recollect_skipped"
 
 
 @dataclass(frozen=True)

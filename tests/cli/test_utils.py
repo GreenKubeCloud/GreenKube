@@ -46,7 +46,7 @@ class _MemoryMetrics:
     async def stored_window_profile(self, start, end):
         return {}
 
-    async def write_window(self, rows, idle_rows, *, window, run_id, on_commit=None):
+    async def write_window(self, rows, idle_rows, *, window, run_id, on_commit=None, force=False):
         if rows:
             self.windows.append(list(rows))
         if on_commit is not None:

@@ -250,3 +250,41 @@ async def test_sqlite_and_postgres_writers_reject_the_whole_batch_on_a_bad_row(d
         await repo.write_combined_metrics([_row("a"), _row("b", restart_count=2**64), _row("c")])
     assert await repo.read_combined_metrics(BASE, BASE + timedelta(minutes=5)) == []
     assert await repo.write_combined_metrics([_row("a"), _row("b"), _row("c")]) == 3
+
+
+async def test_forced_window_write_replaces_a_higher_ranked_stored_cost(database):
+    """Review 2: custom rates correcting list prices replace them only through an explicit force."""
+    backend, manager = database
+    repo = _repo(backend, manager)
+    window = (BASE, BASE + timedelta(minutes=5))
+    catalog = {"total_cost": 1.0, "cost_source": "pricing_catalog"}
+    custom = {"total_cost": 0.4, "cost_source": "custom_rate"}
+    await repo.write_window(
+        [_row(**catalog), _row(container_name="app", **catalog)],
+        [_idle(1.0, "pricing_catalog")],
+        window=window,
+        run_id="r1",
+    )
+
+    await repo.write_window(
+        [_row(**custom), _row(container_name="app", **custom)], [_idle(0.4, "custom_rate")], window=window, run_id="r2"
+    )
+    (pod,) = await repo.read_combined_metrics(*window)
+    assert (pod.total_cost, pod.cost_source) == (1.0, "pricing_catalog")
+
+    await repo.write_window(
+        [_row(**custom), _row(container_name="app", **custom)],
+        [_idle(0.4, "custom_rate")],
+        window=window,
+        run_id="r3",
+        force=True,
+    )
+    (pod,) = await repo.read_combined_metrics(*window)
+    (container,) = await repo.read_container_metrics(*window)
+    (idle,) = await repo.read_idle_metrics(*window)
+    assert (pod.total_cost, pod.cost_source) == (0.4, "custom_rate")
+    assert (container.total_cost, idle.total_cost, idle.cost_source) == (0.4, 0.4, "custom_rate")
+    # The force ends with the call: the guard applies again afterwards.
+    await repo.write_combined_metrics([_row(total_cost=0.1, cost_source="none")])
+    (pod,) = await repo.read_combined_metrics(*window)
+    assert pod.total_cost == 0.4

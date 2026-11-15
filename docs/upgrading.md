@@ -70,6 +70,10 @@ longer drift. Changing the type rewrites the table under an exclusive lock:
   transaction that waits at most 5 s for its lock (otherwise it retries at the next controller start).
   Collection and the API keep working during the backfill; sums keep the float4 drift until the swap.
   `SELECT * FROM online_column_upgrades` is empty once every table is converted.
+  The backfill rewrites every row once: table and index size roughly double until autovacuum reclaims the
+  old row versions, so keep at least the size of the table free on the database volume. The upgrade lifts the
+  session `statement_timeout` (the concurrent index build and constraint validation of a large table take longer
+  than `DB_STATEMENT_TIMEOUT_MS`), and a swap that missed its lock is retried every 10 minutes until it succeeds.
 
 Stored values keep their 7 significant digits. SQLite is not affected (its `REAL` is already 8 bytes).
 

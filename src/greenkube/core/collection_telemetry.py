@@ -199,7 +199,7 @@ def set_unknown_power_profile_nodes(count: int) -> None:
 
 
 #: Reasons a re-collected window was left as stored (STO-01).
-RECOLLECT_REASON_FEWER_PODS = "fewer_pods"
+RECOLLECT_REASON_FEWER_PODS = "missing_pods"
 RECOLLECT_REASON_COST_UNAVAILABLE = "cost_unavailable"
 RECOLLECT_SKIPPED = Counter(
     "greenkube_collection_recollect_skipped_total",

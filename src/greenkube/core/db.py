@@ -116,6 +116,8 @@ class DatabaseManager:
         self._schema_current = False
         #: Background backfill of large-table column upgrades started by the migrating process (NRG-06).
         self._online_upgrade_task: asyncio.Task | None = None
+        #: Seconds between two attempts of a pending online upgrade (a swap that missed its lock).
+        self.online_upgrade_retry_seconds: float = 600.0
 
     @property
     def config(self) -> Config:
@@ -297,14 +299,22 @@ class DatabaseManager:
                 self._online_upgrade_task = asyncio.create_task(self._complete_online_upgrades())
 
     async def _complete_online_upgrades(self) -> None:
-        """Backfill and swap the large-table column upgrades left by migrations, in the background (NRG-06)."""
-        try:
-            async with self.connection_scope() as connection:
-                await complete_online_column_upgrades(connection)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Online column upgrade failed; it resumes on the next controller start.")
+        """Backfill and swap the large-table column upgrades left by migrations, in the background (NRG-06).
+
+        A swap that missed its lock (or a failed attempt) is retried every
+        ``online_upgrade_retry_seconds`` until nothing is pending.
+        """
+        while True:
+            try:
+                async with self.connection_scope() as connection:
+                    await complete_online_column_upgrades(connection)
+                    if not await pending_online_upgrades(connection):
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Online column upgrade failed; it is retried.")
+            await asyncio.sleep(self.online_upgrade_retry_seconds)
 
     async def schema_status(self) -> "SchemaStatus":
         """Whether every shipped migration is applied (F11 API readiness).

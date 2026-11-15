@@ -89,6 +89,10 @@ async def complete_online_column_upgrades(
         logger.info("Another process is running the online column upgrades.")
         return []
     completed: list[str] = []
+    # The pool's statement_timeout (DB_STATEMENT_TIMEOUT_MS) would cancel the concurrent index
+    # build and the constraint validation of a large table at every start: lift it for this session.
+    previous_timeout = await connection.fetchval("SHOW statement_timeout")
+    await connection.execute("SET statement_timeout = 0")
     try:
         for table, columns in pending.items():
             await _backfill(connection, table, columns, batch_rows)
@@ -107,6 +111,7 @@ async def complete_online_column_upgrades(
             completed.append(table)
             logger.info("Online upgrade of %s complete: %s.", table, ", ".join(f"{c} {t}" for c, t in columns.items()))
     finally:
+        await connection.execute("SELECT set_config('statement_timeout', $1, false)", previous_timeout)
         await connection.execute("SELECT pg_advisory_unlock($1)", _ADVISORY_KEY)
     return completed
 
@@ -169,6 +174,7 @@ async def _swap(connection: Any, table: str, columns: dict[str, str], lock_timeo
     quoted = _ident(table)
     async with connection.transaction():
         await connection.execute(f"SET LOCAL lock_timeout = {int(lock_timeout_ms)}")
+        await connection.execute("SET LOCAL statement_timeout = 0")
         await connection.execute(f"LOCK TABLE {quoted} IN ACCESS EXCLUSIVE MODE")
         defaults = {
             row["column_name"]: row["column_default"]

@@ -9,11 +9,13 @@ import aiosqlite
 
 from greenkube.core.observability import record_metric_provenance
 from greenkube.models.metrics import CombinedMetric
-from greenkube.models.provenance import ALLOCATED_COST_SOURCES, INTENSITY_FALLBACK_REASON_PREFIX
+from greenkube.models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
+from greenkube.storage.base_repository import WindowStepProfile, window_step_profiles
 from greenkube.storage.container_rows import complete_container_rows, container_rows_of
 from greenkube.storage.write_guards import (
     IDLE_COST_COLUMNS,
     cost_guard_assignments,
+    forced_replace,
     produced_idle_keys,
     produced_pod_keys,
 )
@@ -484,8 +486,21 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         window: tuple[datetime, datetime],
         run_id: str,
         on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+        force: bool = False,
     ) -> int:
         """See :meth:`CombinedMetricsRepository.write_window`."""
+        with forced_replace(force):
+            return await self._write_window(rows, idle_rows, window=window, run_id=run_id, on_commit=on_commit)
+
+    async def _write_window(
+        self,
+        rows: List[CombinedMetric],
+        idle_rows: List[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ) -> int:
         async with self.db_manager.transaction(immediate=True) as conn:
             written = (
                 await self.write_combined_metrics(rows, replace_containers=True, window=window, run_id=run_id)
@@ -597,21 +612,19 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 (*key, *keep),
             )
 
-    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, tuple[int, int]]:
+    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, WindowStepProfile]:
         """See :meth:`CombinedMetricsRepository.stored_window_profile`."""
-        allocated = ", ".join(f"'{source}'" for source in sorted(ALLOCATED_COST_SOURCES))
         try:
             async with self.db_manager.connection_scope() as conn:
                 async with conn.execute(
-                    f"""SELECT "timestamp", COUNT(*),
-                        SUM(CASE WHEN cost_source IN ({allocated}) THEN 1 ELSE 0 END)
-                    FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ? GROUP BY 1""",
+                    """SELECT namespace, pod_name, "timestamp", cost_source FROM combined_metrics
+                    WHERE "timestamp" >= ? AND "timestamp" < ?""",
                     (to_iso_z(start), to_iso_z(end)),
                 ) as cursor:
                     rows = await cursor.fetchall()
         except sqlite3.Error as e:
             raise QueryError(f"Could not read the stored rows of a window: {e}") from e
-        return {ensure_utc(row[0]): (row[1], row[2] or 0) for row in rows}
+        return window_step_profiles((row[0], row[1], ensure_utc(row[2]), row[3]) for row in rows)
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         try:

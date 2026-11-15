@@ -31,6 +31,7 @@ from ..storage.base_collection_window_repository import (
     REASON_NO_SCRAPE_DATA,
     REASON_NOT_PROBED,
     REASON_POD_LEVEL_ONLY,
+    REASON_RECOLLECT_SKIPPED,
     REASON_ROWS_REJECTED,
     REASON_SEEDED,
     STATUS_COLLECTED,
@@ -232,6 +233,7 @@ class MetricsWriter(Protocol):
         window: tuple[datetime, datetime],
         run_id: str,
         on_commit: Callable[[Any], Awaitable[Any]] | None = None,
+        force: bool = False,
     ) -> int:
         """Write pod, container and idle rows of a window and run ``on_commit`` in one transaction (STO-03)."""
         ...
@@ -307,8 +309,15 @@ class MetricsCollectionJob:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._fence_provider = fence_provider or current_leader_fence
 
-    async def run(self, last: timedelta | None = None) -> CollectionReport:
-        """Collect missing windows (or the explicit ``last`` range) oldest first."""
+    async def run(self, last: timedelta | None = None, *, force: bool = False) -> CollectionReport:
+        """Collect missing windows (or the explicit ``last`` range) oldest first.
+
+        ``force`` (only with ``last``) replaces the stored rows of the range
+        even when the new pass looks worse and whatever the stored cost source:
+        the operator's way to repair wrong stored rows (STO-01).
+        """
+        if force and last is None:
+            raise ValueError("force applies to an explicit --last re-collection only")
         report = CollectionReport()
         now = ensure_utc(self._clock())
         fence = self._fence_provider()
@@ -332,7 +341,9 @@ class MetricsCollectionJob:
                 if watermark is not None and plan.horizon_start is not None:
                     await self._record_gap(watermark.last_complete_end, plan.horizon_start, plan.gap_windows, fence)
             for window in plan.windows:
-                watermark = await self._collect_window(window, watermark, fence, report, forced=last is not None)
+                watermark = await self._collect_window(
+                    window, watermark, fence, report, forced=last is not None, force_replace=force
+                )
             if last is None:
                 await self._retry_failed_steps(now, fence, report)
                 await self._check_scrape_interval(now, report)
@@ -381,6 +392,7 @@ class MetricsCollectionJob:
         fence: LeaderFence,
         *,
         advance: bool,
+        force: bool = False,
     ) -> tuple[int, CollectionWatermark | None]:
         """Commit a collected window in one transaction (STO-01, STO-03).
 
@@ -406,7 +418,12 @@ class MetricsCollectionJob:
 
         fence.check("write metrics")
         written = await self.metrics_repository.write_window(
-            rows, idle_rows, window=(window.start, window.end), run_id=uuid4().hex, on_commit=on_commit
+            rows,
+            idle_rows,
+            window=(window.start, window.end),
+            run_id=uuid4().hex,
+            on_commit=on_commit,
+            force=force,
         )
         return written or 0, watermark
 
@@ -427,34 +444,67 @@ class MetricsCollectionJob:
             )
         return kept, rejected
 
-    async def _recollection_degradation(self, window: CollectionWindow, rows: list[CombinedMetric]) -> str | None:
+    async def _recollection_degradation(
+        self, window: CollectionWindow, rows: list[CombinedMetric]
+    ) -> tuple[str | None, dict[datetime, Any]]:
         """Why a re-collection of ``window`` must not replace its stored rows, or ``None`` (STO-01).
 
-        A step of the new pass with fewer pod rows than stored (pods gone from
-        Prometheus or from the cluster), or without any allocated cost where the
-        stored rows had one (OpenCost unavailable), is worse than what is
-        stored: the window is then left as stored. Steps the pass has no row
-        for are never replaced and are not compared.
+        A step of the new pass that misses a stored pod (gone from Prometheus
+        or from the cluster), or has no allocated cost where the stored rows
+        had one (OpenCost unavailable), is worse than what is stored: the
+        window is then left as stored. Steps the pass has no row for are never
+        replaced and are not compared. Returns the reason and the stored
+        profile per step.
         """
         profile = getattr(self.metrics_repository, "stored_window_profile", None)
         if profile is None:
-            return None
-        stored: dict[datetime, tuple[int, int]] = await profile(window.start, window.end)
+            return None, {}
+        stored = await profile(window.start, window.end)
         if not stored:
-            return None
+            return None, {}
         produced: dict[datetime, list[CombinedMetric]] = {}
         for row in rows:
             if row.timestamp is not None and not getattr(row, "container_name", None):
                 produced.setdefault(ensure_utc(row.timestamp), []).append(row)
-        for step, (pods, allocated) in stored.items():
+        for step, step_profile in stored.items():
             step_rows = produced.get(step)
             if not step_rows:
                 continue
-            if len(step_rows) < pods:
-                return collection_telemetry.RECOLLECT_REASON_FEWER_PODS
-            if allocated and not any(row.cost_source in ALLOCATED_COST_SOURCES for row in step_rows):
-                return collection_telemetry.RECOLLECT_REASON_COST_UNAVAILABLE
-        return None
+            if step_profile.pods - {(row.namespace, row.pod_name) for row in step_rows}:
+                return collection_telemetry.RECOLLECT_REASON_FEWER_PODS, stored
+            if step_profile.allocated_cost_rows and not any(
+                row.cost_source in ALLOCATED_COST_SOURCES for row in step_rows
+            ):
+                return collection_telemetry.RECOLLECT_REASON_COST_UNAVAILABLE, stored
+        return None, stored
+
+    async def _record_skipped(
+        self, window: CollectionWindow, rows: list[CombinedMetric], stored: dict[datetime, Any], reason: str
+    ) -> None:
+        """Log, count and record a re-collection left as stored (step reason ``recollect_skipped``)."""
+        logger.warning(
+            "Re-collection of %s -> %s is worse than the stored rows (%s); the window is left as stored. "
+            "Use --last with --force to replace it anyway.",
+            window.start.isoformat(),
+            window.end.isoformat(),
+            reason,
+        )
+        collection_telemetry.record_recollect_skipped(self.source, reason)
+        if self.window_repository is None:
+            return
+        records = [
+            replace(
+                record,
+                status=STATUS_COLLECTED,
+                reason=REASON_RECOLLECT_SKIPPED,
+                steps_with_data=1,
+                pod_rows=len(stored[record.window_start].pods),
+            )
+            for record in await self._window_records(window, rows)
+            if record.window_start in stored
+        ]
+        if records:
+            await self.window_repository.record(records)
 
     def _plan(self, now: datetime, watermark: CollectionWatermark | None, last: timedelta | None) -> CollectionPlan:
         if last is None:
@@ -479,6 +529,7 @@ class MetricsCollectionJob:
         report: CollectionReport,
         *,
         forced: bool,
+        force_replace: bool = False,
     ) -> CollectionWatermark | None:
         started = monotonic()
         fence.check("collect metrics")
@@ -487,19 +538,17 @@ class MetricsCollectionJob:
         # An explicit --last range that does not touch the watermark must not
         # hide the windows between the watermark and this range.
         advance = not (forced and not contiguous)
-        degraded = await self._recollection_degradation(window, rows) if rows else None
+        degraded, stored = (
+            (None, {}) if force_replace or not rows else await self._recollection_degradation(window, rows)
+        )
         if degraded is not None:
             # The stored rows of this window come from a better pass: keep them as they are.
-            logger.warning(
-                "Re-collection of %s -> %s is worse than the stored rows (%s); the window is left as stored.",
-                window.start.isoformat(),
-                window.end.isoformat(),
-                degraded,
-            )
-            collection_telemetry.record_recollect_skipped(self.source, degraded)
+            await self._record_skipped(window, rows, stored, degraded)
         else:
             records = self._flag_rejected(await self._window_records(window, rows), rejected)
-            written, advanced = await self._write_window(window, rows, records, fence, advance=advance)
+            written, advanced = await self._write_window(
+                window, rows, records, fence, advance=advance, force=force_replace
+            )
             self._account_records(records, report)
             report.rows_written += written
             if advanced is not None:
@@ -690,6 +739,11 @@ class MetricsCollectionJob:
             try:
                 fence.check("retry failed window")
                 rows, rejected = self._quarantine(await self.processor.run_range(start=window.start, end=window.end))
+                degraded, stored = await self._recollection_degradation(window, rows) if rows else (None, {})
+                if degraded is not None:
+                    # A partial retry pass must not delete stored pods it does not see.
+                    await self._record_skipped(window, rows, stored, degraded)
+                    continue
                 records = self._flag_rejected(await self._window_records(window, rows), rejected)
                 fence.check("write retried window")
                 written, _ = await self._write_window(window, rows, records, fence, advance=False)

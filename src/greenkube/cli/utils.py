@@ -77,13 +77,20 @@ async def resolve_collection_cluster_uid() -> str:
     return identity.cluster_uid
 
 
-async def write_combined_metrics_to_database(last: Optional[str] = None) -> Optional[CollectionReport]:
+async def write_combined_metrics_to_database(
+    last: Optional[str] = None, force: bool = False
+) -> Optional[CollectionReport]:
     """Collect every missing window since the watermark (or the explicit ``--last`` range) and store it.
 
     Scheduled runs (``last=None``) catch up from the collection watermark,
     oldest window first, and advance it only after each window is written
-    (A2).  ``--last`` re-collects the given range with an idempotent upsert.
+    (A2).  ``--last`` re-collects the given range with an idempotent upsert;
+    with ``force`` it replaces the stored rows even when the new pass looks
+    worse or prices them with a lower-ranked cost source (STO-01).
     """
+    if force and not last:
+        logger.error("--force applies to an explicit --last re-collection only.")
+        return None
     logger.info("--- Starting combined metrics collection task ---")
     lookback = parse_last_duration(last) if last else None
     try:
@@ -106,7 +113,7 @@ async def write_combined_metrics_to_database(last: Optional[str] = None) -> Opti
         return None
 
     try:
-        report = await job.run(last=lookback)
+        report = await job.run(last=lookback, force=force)
         if report.windows_collected == 0 and report.succeeded:
             logger.info("No complete collection window is pending.")
         else:

@@ -580,3 +580,86 @@ async def test_recollection_without_opencost_leaves_the_stored_window(stack):
         (r.pod_name, r.cost_source, r.total_cost, r.cpu_request) for r in first
     ]
     assert _skipped("cost_unavailable") == skipped + 1
+
+
+def _windows(stack) -> SQLiteCollectionWindowRepository:
+    return SQLiteCollectionWindowRepository(stack["metrics_repo"].db_manager)
+
+
+@pytest.mark.asyncio
+async def test_skipped_recollection_is_recorded_and_force_replaces_the_window(stack):
+    """Review 2: a skipped re-collection is a step record; --last --force replaces the stored rows anyway."""
+    windows = _windows(stack)
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+    await stack["job"](window_repository=windows).run()
+
+    stack["opencost"].pods = []
+    skipped = await stack["job"](window_repository=windows).run(last=timedelta(minutes=10))
+    assert skipped.succeeded and skipped.rows_written == 0
+    records = await windows.list_overlapping("test-cluster", METRICS_WATERMARK_SOURCE, BASE, BASE + 2 * STEP)
+    assert {(r.status, r.reason, r.pod_rows) for r in records} == {("collected", "recollect_skipped", len(PODS))}
+
+    forced = await stack["job"](window_repository=windows).run(last=timedelta(minutes=10), force=True)
+    assert forced.succeeded and forced.rows_written > 0
+    rows = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    assert rows and {r.cost_source for r in rows} != {"opencost"}
+    with pytest.raises(ValueError):
+        await stack["job"]().run(force=True)
+
+
+@pytest.mark.asyncio
+async def test_recollection_missing_a_stored_pod_is_skipped_even_with_the_same_pod_count(stack):
+    """Review 4: pod sets are compared, not counts."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    await _run_scheduled(stack, BASE + 2 * STEP + timedelta(minutes=1))
+    processor = stack["processor"]
+    collect = processor.run_range
+
+    async def renamed(*args, **kwargs):
+        return [
+            row.model_copy(update={"pod_name": "r"}) if row.pod_name == "q" else row
+            for row in await collect(*args, **kwargs)
+        ]
+
+    skipped = _skipped("missing_pods")
+    processor.run_range = renamed
+    try:
+        stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+        report = await stack["job"]().run(last=timedelta(minutes=10))
+    finally:
+        processor.run_range = collect
+    assert report.succeeded and report.rows_written == 0
+    assert {r.pod_name for r in await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)} == {"p", "q"}
+    assert _skipped("missing_pods") == skipped + 1
+
+
+@pytest.mark.asyncio
+async def test_retry_of_a_failed_step_never_deletes_stored_pods_a_partial_pass_misses(stack):
+    """Review 3: the retry path applies the same degradation check as a re-collection."""
+    windows = _windows(stack)
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+    await stack["job"](window_repository=windows).run()
+    # The first step is recorded as failed although it holds rows (for example a record lost in a crash).
+    await windows.db_manager.connection.execute(
+        "UPDATE collection_windows SET status = 'failed', reason = 'no_scrape_data' WHERE window_start = ?",
+        (BASE.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),),
+    )
+    await windows.db_manager.connection.commit()
+    processor = stack["processor"]
+    collect = processor.run_range
+
+    async def without_q(*args, **kwargs):
+        return [row for row in await collect(*args, **kwargs) if row.pod_name != "q"]
+
+    processor.run_range = without_q
+    try:
+        stack["clock"].current = BASE + 3 * STEP + timedelta(minutes=1)
+        report = await stack["job"](window_repository=windows).run()
+    finally:
+        processor.run_range = collect
+    assert report.succeeded, report.error
+    assert {r.pod_name for r in await _pod_rows(stack["metrics_repo"], BASE, BASE + STEP)} == {"p", "q"}
+    (record,) = await windows.list_overlapping("test-cluster", METRICS_WATERMARK_SOURCE, BASE, BASE + STEP)
+    assert record.reason == "recollect_skipped"

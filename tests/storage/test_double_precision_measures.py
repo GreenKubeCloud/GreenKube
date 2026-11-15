@@ -153,3 +153,63 @@ async def test_large_tables_are_upgraded_online_in_batches_with_a_bounded_swap_l
         await reader.close()
         await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await connection.close()
+
+
+async def test_online_upgrade_lifts_the_pool_statement_timeout_and_restores_it(monkeypatch):
+    """Review 1: the concurrent index build and validation of a large table must not hit DB_STATEMENT_TIMEOUT_MS."""
+    from greenkube.core.migrations import online
+
+    connection = await asyncpg.connect(_dsn())
+    schema = await _schema(connection, "gk_nrg06_timeout")
+    try:
+        await _migrate(connection, up_to=144)
+        await connection.execute(
+            "INSERT INTO combined_metrics (pod_name, namespace, timestamp, joules) VALUES ('p', 'ns', $1, 1.0)", T0
+        )
+        await connection.execute("SET greenkube.online_upgrade_min_bytes = '0'")
+        await _migrate(connection, after=144)
+        await connection.execute("RESET greenkube.online_upgrade_min_bytes")
+        await connection.execute("SET statement_timeout = '50ms'")
+        seen: list[str] = []
+        backfill = online._backfill
+
+        async def spy(conn, *args, **kwargs):
+            seen.append(await conn.fetchval("SHOW statement_timeout"))
+            await backfill(conn, *args, **kwargs)
+
+        monkeypatch.setattr(online, "_backfill", spy)
+        completed = await complete_online_column_upgrades(connection)
+        assert "combined_metrics" in completed
+        assert seen and set(seen) == {"0"}
+        assert await connection.fetchval("SHOW statement_timeout") == "50ms"
+    finally:
+        await connection.execute("RESET statement_timeout")
+        await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await connection.close()
+
+
+async def test_a_pending_online_upgrade_is_retried_until_done(monkeypatch, tmp_path):
+    """Review 5: a swap that missed its lock is retried periodically, not only at the next start."""
+    import greenkube.core.db as db_module
+    from greenkube.core.config import Config
+
+    calls: list[int] = []
+
+    async def complete(_connection):
+        calls.append(1)
+        return []
+
+    async def pending(_connection):
+        return {"combined_metrics": ["joules"]} if len(calls) < 3 else {}
+
+    monkeypatch.setattr(db_module, "complete_online_column_upgrades", complete)
+    monkeypatch.setattr(db_module, "pending_online_upgrades", pending)
+    monkeypatch.setenv("DB_TYPE", "sqlite")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "retry.db"))
+    manager = db_module.DatabaseManager(Config())
+    manager.online_upgrade_retry_seconds = 0
+    try:
+        await manager._complete_online_upgrades()
+    finally:
+        await manager.close()
+    assert len(calls) == 3

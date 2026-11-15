@@ -191,13 +191,13 @@ async def analyze_nodes() -> None:
     logger.info("--- Finished node analysis task ---")
 
 
-async def async_write_combined_metrics_to_database(last: Optional[str] = None):
+async def async_write_combined_metrics_to_database(last: Optional[str] = None, force: bool = False):
     """Wrapper to make write_combined_metrics_to_database suitable for scheduler."""
     from ..core.observability import elapsed, record_collection_run, start_timer
 
     timer = start_timer()
     try:
-        await write_combined_metrics_to_database(last=last)
+        await write_combined_metrics_to_database(last=last, force=force)
     finally:
         record_collection_run(elapsed(timer))
 
@@ -895,7 +895,7 @@ def _register_controller_loops(
         registry.register(spec)
 
 
-async def _async_start(last: Optional[str]):
+async def _async_start(last: Optional[str], force: bool = False):
     cfg = get_config()
     from ..utils.log import configure_logging
 
@@ -1016,7 +1016,7 @@ async def _async_start(last: Optional[str]):
         initial_tasks = (
             (collect_carbon_intensity_for_all_zones, (), {}),
             (analyze_nodes, (), {}),
-            (async_write_combined_metrics_to_database, (), {"last": last}),
+            (async_write_combined_metrics_to_database, (), {"last": last, "force": force}),
             (attribute_recommendation_savings, (), {}),
             (run_recommendation_lifecycle, (), {}),
             (compress_metrics, (), {}),
@@ -1088,6 +1088,14 @@ def start(
         Optional[str],
         typer.Option("--last", help="Time range to collect (e.g., '10min', '2h', '7d', '3w', '1m' for month)."),
     ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="With --last: replace the stored rows of the range even when the new pass looks worse "
+            "(fewer pods, no OpenCost cost) or prices them with a lower-ranked cost source.",
+        ),
+    ] = False,
 ) -> None:
     """
     Initialize the database (if needed) and start the scheduler loop.
@@ -1096,7 +1104,9 @@ def start(
         return
 
     try:
-        asyncio.run(_async_start(last))
+        if force and not last:
+            raise typer.BadParameter("--force requires --last")
+        asyncio.run(_async_start(last, force))
     except KeyboardInterrupt:
         pass
     except Exception as e:

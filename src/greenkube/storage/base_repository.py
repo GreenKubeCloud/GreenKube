@@ -264,6 +264,27 @@ class ContainerMetricsRepository(ABC):
         return hourly + raw
 
 
+@dataclass(frozen=True)
+class WindowStepProfile:
+    """Stored pod rows of one step: their ``(namespace, pod_name)`` and the count with an allocated cost."""
+
+    pods: frozenset[tuple[str, str]]
+    allocated_cost_rows: int
+
+
+def window_step_profiles(rows: Any) -> dict[datetime, WindowStepProfile]:
+    """Build :class:`WindowStepProfile` per step from ``(namespace, pod_name, timestamp, cost_source)`` rows."""
+    from ..models.provenance import ALLOCATED_COST_SOURCES
+
+    pods: dict[datetime, set[tuple[str, str]]] = {}
+    allocated: dict[datetime, int] = {}
+    for namespace, pod_name, timestamp, cost_source in rows:
+        step = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+        pods.setdefault(step, set()).add((namespace, pod_name))
+        allocated[step] = allocated.get(step, 0) + (1 if cost_source in ALLOCATED_COST_SOURCES else 0)
+    return {step: WindowStepProfile(frozenset(names), allocated[step]) for step, names in pods.items()}
+
+
 class CombinedMetricsRepository(ABC):
     """
     Abstract base class for combined metrics data repositories.
@@ -312,8 +333,12 @@ class CombinedMetricsRepository(ABC):
         window: tuple[datetime, datetime],
         run_id: str,
         on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+        force: bool = False,
     ) -> int:
         """Write one collected window atomically (STO-03).
+
+        ``force`` (an operator's ``--last ... --force`` re-collection) replaces
+        stored costs whatever their source rank.
 
         Pod and container ``rows`` (as :meth:`write_combined_metrics` with
         ``replace_containers``, ``window`` and ``run_id``) and ``idle_rows`` are
@@ -324,8 +349,8 @@ class CombinedMetricsRepository(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} cannot write a collection window atomically")
 
-    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, tuple[int, int]]:
-        """Per step of ``[start, end)``: stored pod rows and pod rows with an allocated cost (STO-01).
+    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, "WindowStepProfile"]:
+        """Per step of ``[start, end)``: the stored pods and how many rows carry an allocated cost (STO-01).
 
         The collection job compares a re-collection with it before replacing a
         window. Backends without stored rows return an empty mapping.

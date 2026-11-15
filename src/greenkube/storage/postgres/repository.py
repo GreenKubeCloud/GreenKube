@@ -9,18 +9,26 @@ from typing import Any, Awaitable, Callable, List, Mapping, Optional
 from ...core.exceptions import QueryError
 from ...core.observability import record_metric_provenance
 from ...models.metrics import CombinedMetric
-from ...models.provenance import ALLOCATED_COST_SOURCES, INTENSITY_FALLBACK_REASON_PREFIX
+from ...models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
 from ...utils.time import ensure_utc
 from ..base_repository import (
     CarbonIntensityRepository,
     CombinedMetricsRepository,
     ContainerMetricsRepository,
     IntensityPoint,
+    WindowStepProfile,
     is_persistable_intensity_record,
     measured_intensity_sql,
+    window_step_profiles,
 )
 from ..container_rows import complete_container_rows, container_rows_of
-from ..write_guards import IDLE_COST_COLUMNS, cost_guard_assignments, produced_idle_keys, produced_pod_keys
+from ..write_guards import (
+    IDLE_COST_COLUMNS,
+    cost_guard_assignments,
+    forced_replace,
+    produced_idle_keys,
+    produced_pod_keys,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -292,8 +300,21 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         window: tuple[datetime, datetime],
         run_id: str,
         on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+        force: bool = False,
     ) -> int:
         """See :meth:`CombinedMetricsRepository.write_window`."""
+        with forced_replace(force):
+            return await self._write_window(rows, idle_rows, window=window, run_id=run_id, on_commit=on_commit)
+
+    async def _write_window(
+        self,
+        rows: List[CombinedMetric],
+        idle_rows: List[Any],
+        *,
+        window: tuple[datetime, datetime],
+        run_id: str,
+        on_commit: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ) -> int:
         async with self.db_manager.connection_scope() as conn:
             async with conn.transaction():
                 written = (
@@ -582,21 +603,19 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 targets,
             )
 
-    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, tuple[int, int]]:
+    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, WindowStepProfile]:
         """See :meth:`CombinedMetricsRepository.stored_window_profile`."""
-        allocated = ", ".join(f"'{source}'" for source in sorted(ALLOCATED_COST_SOURCES))
         try:
             async with self.db_manager.connection_scope() as conn:
                 rows = await conn.fetch(
-                    f"""SELECT timestamp, COUNT(*) AS pods,
-                        COUNT(*) FILTER (WHERE cost_source IN ({allocated})) AS allocated
-                    FROM combined_metrics WHERE timestamp >= $1 AND timestamp < $2 GROUP BY timestamp""",
+                    """SELECT namespace, pod_name, timestamp, cost_source FROM combined_metrics
+                    WHERE timestamp >= $1 AND timestamp < $2""",
                     ensure_utc(start),
                     ensure_utc(end),
                 )
         except Exception as e:
             raise QueryError(f"Error reading the stored rows of a window: {e}") from e
-        return {ensure_utc(row["timestamp"]): (row["pods"], row["allocated"]) for row in rows}
+        return window_step_profiles((r["namespace"], r["pod_name"], r["timestamp"], r["cost_source"]) for r in rows)
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         """
