@@ -383,6 +383,9 @@ class HealthResponse(BaseModel):
     collection: Optional[CollectionStatusResponse] = Field(
         None, description="Collection watermark, lag and last hole; absent when the database cannot be read."
     )
+    demo: bool = Field(
+        False, description="True when the API runs `greenkube demo` (synthetic data, pull requests disabled)."
+    )
 
 
 class VersionResponse(BaseModel):

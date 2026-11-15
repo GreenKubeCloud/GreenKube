@@ -398,6 +398,9 @@ class Config(BaseSettings):
     OIDC_REDIRECT_URL: str = ""
     OIDC_PROVIDER_NAME: str = "SSO"
     API_RATE_LIMIT: str = "60/minute"
+    # Set by `greenkube demo` only (synthetic data, no cluster, no automation): the UI shows one demo
+    # notice instead of per-recommendation automation diagnostics. Never set it on a real install.
+    GREENKUBE_DEMO_MODE: bool = False
     ROOT_PATH: str = ""
     METRICS_LIST_MAX_RANGE_DAYS: int = 30
 

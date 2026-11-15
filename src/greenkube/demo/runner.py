@@ -106,6 +106,7 @@ def _configure_demo_environment(db_path: str, port: int, no_browser: bool = Fals
     os.environ["CORS_ORIGINS"] = "*"
     os.environ["LOG_LEVEL"] = "INFO"
     os.environ["DEFAULT_ZONE"] = DEMO_ZONE
+    os.environ["GREENKUBE_DEMO_MODE"] = "true"
 
     get_config().reload()
 

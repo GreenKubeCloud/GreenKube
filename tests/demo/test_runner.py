@@ -62,6 +62,21 @@ class TestConfigureDemoEnvironment:
         assert os.environ["API_HOST"] == "0.0.0.0"
 
 
+def test_demo_environment_sets_demo_mode(monkeypatch):
+    """The demo flags itself so the UI can replace automation diagnostics with one demo notice."""
+    from greenkube.core.config import get_config
+
+    # setenv first so monkeypatch restores the variable the runner overwrites.
+    monkeypatch.setenv("GREENKUBE_DEMO_MODE", "false")
+    try:
+        _configure_demo_environment("/tmp/test.db", port=9000)
+        assert os.environ["GREENKUBE_DEMO_MODE"] == "true"
+        assert get_config().GREENKUBE_DEMO_MODE is True
+    finally:
+        os.environ["GREENKUBE_DEMO_MODE"] = "false"
+        get_config().reload()
+
+
 class TestPopulateDatabase:
     """Tests for _populate_database."""
 
