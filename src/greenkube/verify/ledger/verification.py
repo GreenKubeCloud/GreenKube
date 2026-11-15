@@ -11,7 +11,8 @@ Each cluster's chain is walked in ``seq`` order. An entry passes when:
 * its ``entry_id`` derives from its cluster and ``entry_key``, and it
   belongs to the chain's cluster;
 * a reversal cancels its target exactly (opposite value, same quantity and
-  unit; ``reversal_mismatch``), drift reversals excepted (LED-05).
+  unit; ``reversal_mismatch``) and only once per book (``double_reversal``), drift
+  reversals excepted (LED-05).
 
 The verified head is published as ``greenkube_ledger_chain_head_seq`` and
 ``greenkube_ledger_chain_head_info`` (hash label), so Prometheus retention is a
@@ -38,7 +39,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 from prometheus_client import Counter, Gauge
 
@@ -131,6 +132,8 @@ async def verify_chain(
     verified = after_seq
     #: entry id -> (value, quantity, unit) of the entries walked, for the reversal checks.
     seen: Dict[str, Tuple[float, str, str]] = {}
+    #: ids reversed (non-drift) by the entries walked.
+    reversed_ids: Set[Tuple[str, str]] = set()
     while True:
         page = await repo.chain_page(cluster_uid, expected_seq - 1, page_size)
         if not page:
@@ -148,7 +151,7 @@ async def verify_chain(
             elif entry.cluster_uid != cluster_uid:
                 failure = ("identity_mismatch", f"seq {entry.seq} belongs to cluster {entry.cluster_uid}")
             else:
-                failure = await _reversal_mismatch(repo, entry, seen)
+                failure = await _reversal_mismatch(repo, entry, seen, reversed_ids)
             if failure is not None:
                 return ChainVerification(
                     cluster_uid,
@@ -170,7 +173,7 @@ async def verify_chain(
 
 
 async def _reversal_mismatch(
-    repo: LedgerRepository, entry, seen: Dict[str, Tuple[float, str, str]]
+    repo: LedgerRepository, entry, seen: Dict[str, Tuple[float, str, str]], reversed_ids: Set[Tuple[str, str]]
 ) -> Optional[Tuple[str, str]]:
     """A reversal must cancel its target exactly: opposite value, same quantity and unit (LED-05).
 
@@ -179,6 +182,17 @@ async def _reversal_mismatch(
     """
     if entry.entry_kind != "reversal" or not entry.reverses_entry_id or entry.reason == "drift":
         return None
+    # An entry is cancelled once per book: a projection is cancelled in the accrued book by a supersession and
+    # in the restatement book by its restatement, but a second non-drift reversal in the same book would count
+    # the cancellation twice.
+    key = (entry.reverses_entry_id, entry.book)
+    if key in reversed_ids:
+        return ("double_reversal", f"seq {entry.seq} reverses an entry already reversed in the {entry.book} book")
+    if entry.reverses_entry_id not in seen and await repo.reversal_count(
+        entry.cluster_uid, entry.reverses_entry_id, entry.book, entry.seq
+    ):
+        return ("double_reversal", f"seq {entry.seq} reverses an entry already reversed in the {entry.book} book")
+    reversed_ids.add(key)
     target = seen.get(entry.reverses_entry_id)
     if target is None:
         stored = await repo.get_entry(entry.reverses_entry_id)

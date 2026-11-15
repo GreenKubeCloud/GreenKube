@@ -433,6 +433,12 @@ class LedgerRepository:
             "NOT EXISTS (SELECT 1 FROM savings_ledger_entries r WHERE r.reverses_entry_id = e.entry_id "
             f"AND r.reason = '{REASON_SUPERSESSION}')"
         )
+        # A restatement-book entry is already cancelled by a supersession reversal or by the reversal of a
+        # re-measurement (reason restatement): never reverse it twice (review WP-09).
+        cancelled = (
+            "NOT EXISTS (SELECT 1 FROM savings_ledger_entries r WHERE r.reverses_entry_id = e.entry_id "
+            f"AND r.reason IN ('{REASON_SUPERSESSION}', '{REASON_RESTATEMENT}'))"
+        )
         entries: Dict[str, LedgerEntry] = {}
         for table in V1_TABLES:
             superseded = self._true("l.superseded")
@@ -449,7 +455,7 @@ class LedgerRepository:
                     f"ON p.source_table = '{table}' AND p.source_id = l.id "
                     f"JOIN savings_ledger_entries e ON e.{link} = p.entry_id "
                     f"WHERE {superseded} AND e.cluster_uid = ? AND e.book = '{BOOK_RESTATEMENT}' "
-                    f"AND e.reason IN ('{REASON_RESTATEMENT}', 'not_realized') AND {not_reversed} "
+                    f"AND e.reason IN ('{REASON_RESTATEMENT}', 'not_realized') AND {cancelled} "
                     "ORDER BY e.seq LIMIT ?",
                     [cluster_uid, limit],
                 )
@@ -458,6 +464,15 @@ class LedgerRepository:
                 entry = self._entry(row)
                 entries[entry.entry_id] = entry
         return sorted(entries.values(), key=lambda item: item.seq)
+
+    async def reversal_count(self, cluster_uid: str, entry_id: str, book: str, before_seq: int) -> int:
+        """Non-drift reversals of ``entry_id`` in ``book`` placed before position ``before_seq``."""
+        rows = await self._select(
+            "SELECT COUNT(*) AS n FROM savings_ledger_entries WHERE cluster_uid = ? AND reverses_entry_id = ? "
+            "AND book = ? AND entry_kind = 'reversal' AND reason <> 'drift' AND seq < ?",
+            [cluster_uid, entry_id, book, int(before_seq)],
+        )
+        return int(rows[0]["n"]) if rows else 0
 
     async def live_v1_recommendations(self, recommendation_ids: Iterable[int]) -> set[int]:
         """Those of ``recommendation_ids`` that still have v1 rows not flagged superseded."""
@@ -511,7 +526,7 @@ class LedgerRepository:
                 "AND (e.entry_key LIKE 'restatement:slot:%' OR e.reason IN ('reinstatement', 'cost_of_fix', "
                 "'released_capacity')) "
                 "AND NOT EXISTS (SELECT 1 FROM savings_ledger_entries r WHERE r.reverses_entry_id = e.entry_id "
-                f"AND r.reason = '{REASON_SUPERSESSION}') ORDER BY e.seq",
+                f"AND r.reason IN ('{REASON_SUPERSESSION}', '{REASON_RESTATEMENT}')) ORDER BY e.seq",
                 [cluster_uid, *chunk],
             )
             result.extend(self._entry(row) for row in rows)

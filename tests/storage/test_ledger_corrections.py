@@ -227,3 +227,77 @@ async def test_a_refuted_projection_verified_by_a_re_measurement_gets_its_measur
     assert await _net_of(ledger, 10, METHOD_MEASURED_ALLOCATED) == pytest.approx(0.08, rel=1e-9)
     assert await _net_of(ledger, 10, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
     assert (await projector.sync(full=True)).written == 0
+
+
+async def _remeasured(ledger: LedgerDb, monkeypatch, rec_id: int, *, applied_hours_ago: int):
+    """Verified by m1 at 0.01/h, re-measured by m2 at 0.004/h (review WP-09 point 1)."""
+    from greenkube.storage.ledger_repository import Provenance
+
+    pending = _allocated_record(rec_id, applied_hours_ago=applied_hours_ago, realization=1.0)
+    await _attributor(ledger, hours=20).accrue([pending], now=_hour(0) + timedelta(minutes=3))
+    current = {"measurement": "m1"}
+    original = ledger.repo.provenance
+
+    async def provenance(ids):
+        found = await original(ids)
+        return {item: Provenance(measurement_id=current["measurement"]) for item in found}
+
+    monkeypatch.setattr(ledger.repo, "provenance", provenance)
+    first = pending.model_copy(
+        update={
+            "status": RecommendationStatus.VERIFIED,
+            "verified_at": _hour(0),
+            "verification_status": "passed",
+            "measured_cost_saved": 0.01 * HOURS_PER_YEAR,
+        }
+    )
+    await _projector(ledger, records=[first]).sync(full=True)
+    current["measurement"] = "m2"
+    second = first.model_copy(update={"measured_cost_saved": 0.004 * HOURS_PER_YEAR})
+    await _projector(ledger, records=[second]).sync(full=True)
+    return second
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_rollback_after_a_re_measurement_reverses_each_restatement_once(ledger: LedgerDb, monkeypatch):
+    remeasured = await _remeasured(ledger, monkeypatch, 11, applied_hours_ago=10)
+    review = remeasured.model_copy(update={"status": RecommendationStatus.ROLLBACK_REVIEW})
+    projector = _projector(ledger, records=[review])
+    await projector.sync(full=True)
+    await projector.sync(full=True)
+    assert await _net_of(ledger, 11, METHOD_MEASURED_ALLOCATED) == pytest.approx(0.0, abs=1e-12)
+    assert await _net_of(ledger, 11, METHOD_PROJECTED) == pytest.approx(0.0, abs=1e-12)
+    assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_rollback_after_a_re_measurement_reverses_slot_restatements_once(ledger: LedgerDb, monkeypatch):
+    # Applied 30 h ago but the attribution backfills 20 h only: 10 slots are covered by slot restatements.
+    remeasured = await _remeasured(ledger, monkeypatch, 12, applied_hours_ago=30)
+    assert await _net_of(ledger, 12, METHOD_MEASURED_ALLOCATED) == pytest.approx(0.004 * 30, rel=1e-9)
+    review = remeasured.model_copy(update={"status": RecommendationStatus.ROLLBACK_REVIEW})
+    projector = _projector(ledger, records=[review])
+    await projector.sync(full=True)
+    await projector.sync(full=True)
+    assert await _net_of(ledger, 12, METHOD_MEASURED_ALLOCATED) == pytest.approx(0.0, abs=1e-12)
+    assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_an_entry_reversed_twice_fails_verification(ledger: LedgerDb):
+    from greenkube.verify.ledger.projector import reversal_of
+    from tests.storage.test_ledger_v2_contract import _draft  # pyrefly: ignore[missing-import]
+
+    [entry] = await ledger.repo.append(CLUSTER_UID, CLUSTER, [_draft("twice", 2.0)])
+    await ledger.repo.append(CLUSTER_UID, CLUSTER, [reversal_of(entry, "restatement", created_by="test")])
+    assert (await verify_chain(ledger.repo, CLUSTER_UID)).ok
+    await ledger.repo.append(CLUSTER_UID, CLUSTER, [reversal_of(entry, "supersession", created_by="test")])
+    failed = await verify_chain(ledger.repo, CLUSTER_UID)
+    assert not failed.ok and failed.reason == "double_reversal"
+    # An incremental walk that starts after the first reversal sees it too.
+    [second] = await ledger.repo.chain_page(CLUSTER_UID, 1, 1)
+    later = await verify_chain(ledger.repo, CLUSTER_UID, after_seq=2, after_hash=second.hash)
+    assert not later.ok and later.reason == "double_reversal"
