@@ -188,3 +188,8 @@ class PromQLCatalog:
         """Pod → node placement, used when cAdvisor series lack a ``node`` label."""
         selector = _selector('node!=""', *self.extra_matchers)
         return f"max(kube_pod_info{selector}) by (namespace,pod,node)"
+
+    def pod_running(self) -> str:
+        """Pods in phase Running (value 1), so a running pod without a CPU sample still gets its row (COL-03)."""
+        selector = _selector('phase="Running"', *self.extra_matchers)
+        return f"max(kube_pod_status_phase{selector}) by (namespace,pod)"

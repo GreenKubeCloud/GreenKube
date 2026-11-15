@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 #: A10: capacity-derived power profiles; B2: energy, CO2e and modeled cost
 #: allocated by the Impact Model, see ``model_version``; range.4, WP-01.1: node
 #: attributes and pod metadata as of the sample time, from node and pod
-#: snapshots).  Rows written before carry the bare package version and
+#: snapshots; rows for pods without CPU sample, COL-03).  Rows written before carry the bare package version and
 #: over-state CPU, memory and energy; ``+range.3`` rows keep the node and pod
 #: state of their collection time (``node_source``/``metadata_source`` NULL).
 CALCULATION_VERSION = f"{__version__}+range.4"
@@ -64,6 +64,8 @@ POD_CGROUP_TOLERANCE = 0.05
 CONTAINER_USAGE_EXCEEDS_POD = "container_usage_exceeds_pod"
 #: Estimation reason of a pod row without any pod metadata (no history, not in the live pod list).
 POD_METADATA_MISSING = "pod_metadata_missing"
+#: Estimation reason of a pod row without CPU sample at its step (memory or Running phase only, COL-03).
+NO_CPU_SAMPLE = "no_cpu_sample"
 #: Pod history versions read around the range: a pod of the range was observed at most this far outside it.
 _POD_SNAPSHOT_MARGIN = timedelta(hours=1)
 
@@ -229,8 +231,12 @@ class HistoricalRangeProcessor:
     @classmethod
     def _container_series_by_sample(
         cls, results, chunk: CollectionWindow
-    ) -> tuple[dict[int, dict[tuple[str, str], float]], dict[int, dict[tuple[str, str, str], float]]]:
-        """Return pod sums and per-container values for every sample of the chunk.
+    ) -> tuple[
+        dict[int, dict[tuple[str, str], float]],
+        dict[int, dict[tuple[str, str, str], float]],
+        dict[int, dict[tuple[str, str], str]],
+    ]:
+        """Return pod sums, per-container values and pod nodes for every sample of the chunk.
 
         A pod's value is the sum of its (deduplicated) containers, or its pod
         cgroup value when only pod-level series exist. A pod cgroup working set
@@ -238,7 +244,7 @@ class HistoricalRangeProcessor:
         always holds pages; Minikube reported 0 or 8 bytes for hours), not a
         measurement: it is left out.
         """
-        values, _nodes = cls._deduplicated_samples(results, chunk)
+        values, nodes = cls._deduplicated_samples(results, chunk)
         pods: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
         containers: dict[int, dict[tuple[str, str, str], float]] = defaultdict(lambda: defaultdict(float))
         for sample_start, by_key in values.items():
@@ -249,7 +255,7 @@ class HistoricalRangeProcessor:
                     pods[sample_start][(namespace, pod)] += value
                 elif (namespace, pod) not in named_pods and value >= _MEMORY_PAGE_BYTES:
                     pods[sample_start][(namespace, pod)] = value
-        return pods, containers
+        return pods, containers, nodes
 
     @staticmethod
     def _fit_to_pod_cgroup(
@@ -758,6 +764,7 @@ class HistoricalRangeProcessor:
                     memory_results,
                     ephemeral_usage_results,
                     pod_node_results,
+                    pod_running_results,
                 ) = await asyncio.gather(
                     self._query_range(chunk, promql.pod_network_receive()),
                     self._query_range(chunk, promql.pod_network_transmit()),
@@ -767,6 +774,7 @@ class HistoricalRangeProcessor:
                     self._collect_memory(chunk),
                     self._query_range(chunk, promql.pod_ephemeral_storage_usage()),
                     self._query_range(chunk, promql.pod_node()),
+                    self._query_range(chunk, promql.pod_running()),
                 )
             except Exception as error:
                 raise RangeCollectionError(
@@ -779,7 +787,9 @@ class HistoricalRangeProcessor:
             disk_write_by_sample = self._pod_series_by_sample(disk_write_results, chunk)
             restart_by_sample = self._pod_series_by_sample(restart_results, chunk)
             ephemeral_usage_by_sample = self._pod_series_by_sample(ephemeral_usage_results, chunk)
-            memory_by_sample, container_memory_samples = self._container_series_by_sample(memory_results, chunk)
+            memory_by_sample, container_memory_samples, memory_nodes = self._container_series_by_sample(
+                memory_results, chunk
+            )
 
             # Pod -> node placement from kube-state-metrics, for cAdvisor series without `node` (A10).
             pod_info_node_by_sample: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
@@ -793,7 +803,12 @@ class HistoricalRangeProcessor:
                 pod_info_node_latest[(series_ns, pod)] = node
 
             del net_rx_results, net_tx_results, disk_read_results, disk_write_results, restart_results
-            del memory_results, ephemeral_usage_results, pod_node_results
+            # Running pods (kube-state-metrics): a pod without CPU or memory sample still has a row (COL-03).
+            running_by_sample: dict[int, set[tuple[str, str]]] = defaultdict(set)
+            for sample_start, by_pod in self._pod_series_by_sample(pod_running_results, chunk).items():
+                running_by_sample[sample_start].update(key for key, value in by_pod.items() if value >= 1)
+
+            del memory_results, ephemeral_usage_results, pod_node_results, pod_running_results
 
             # Parse CPU results into per-sample pod and container usage (cores).
             samples: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
@@ -829,11 +844,26 @@ class HistoricalRangeProcessor:
             }
 
             # Pods of every (sample, node): the allocation unit of the Impact Model (B2).
+            # The pod set of a sample is every pod with a CPU sample, a memory
+            # sample or the Running phase (COL-03); rows without CPU say so.
+            pods_by_sample: dict[int, set[tuple[str, str]]] = defaultdict(set)
+            for by_sample in (samples, memory_by_sample, running_by_sample):
+                for sample_start, sample_pods in by_sample.items():
+                    pods_by_sample[sample_start].update(sample_pods)
             groups: dict[tuple[int, str], list[tuple[str, str]]] = defaultdict(list)
-            for sample_start, pod_map in sorted(samples.items()):
-                for pod_key in pod_map:
-                    node = pod_node_map_by_ts.get(sample_start, {}).get(pod_key) or ""
+            for sample_start in sorted(pods_by_sample):
+                for pod_key in sorted(pods_by_sample[sample_start]):
+                    node = (
+                        pod_node_map_by_ts.get(sample_start, {}).get(pod_key)
+                        or memory_nodes.get(sample_start, {}).get(pod_key)
+                        or pod_info_node_by_sample.get(sample_start, {}).get(pod_key)
+                        or pod_info_node_latest.get(pod_key)
+                        or ""
+                    )
+                    if node:
+                        pod_node_map_by_ts[sample_start][pod_key] = node
                     groups[(sample_start, node)].append(pod_key)
+            del pods_by_sample, running_by_sample, memory_nodes
             latest_sample_ts = max(samples) if samples else None
             current_chunk = current_window and chunk_end == end_dt
             gpu_power_by_group = self._gpu_power_by_group(
@@ -953,6 +983,10 @@ class HistoricalRangeProcessor:
                     if fallback_reasons:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, *fallback_reasons]))
+                    has_cpu = pod_key in range_cpu_usage_map
+                    if not has_cpu:
+                        is_estimated = True
+                        estimation_reasons = list(dict.fromkeys([*estimation_reasons, NO_CPU_SAMPLE]))
                     if metadata_source is MetadataSource.MISSING:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, POD_METADATA_MISSING]))
@@ -964,7 +998,11 @@ class HistoricalRangeProcessor:
                             owner_name=owner[1] if owner else None,
                             period=None,
                             **costs,
-                            usage_source=UsageSource.PROMETHEUS.value,
+                            usage_source=(
+                                UsageSource.PROMETHEUS.value
+                                if has_cpu or pod_key in range_memory_map
+                                else UsageSource.NONE.value
+                            ),
                             power_source=power.source,
                             intensity_source=intensity_source,
                             timestamp=ts,

@@ -647,10 +647,13 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      │   ├─ CPU and memory per container (container!="", container!="POD")
      │   ├─ Network I/O per pod, disk I/O and ephemeral usage per container
      │   ├─ Restart counts and kube_pod_info (pod → node placement)
+     │   ├─ kube_pod_status_phase{phase="Running"} (pods without a CPU sample)
      │   └─ any query error fails the window (never stored as "empty")
      │
      ├─ Parse time-series data per sample:
      │   ├─ NaN/Inf dropped, negative rates clamped to 0
+     │   ├─ pod set = CPU ∪ memory ∪ Running pods; rows without CPU sample keep
+     │   │  cpu_usage_millicores NULL with reason no_cpu_sample
      │   └─ greenkube_collection_dropped_samples_total{reason}
      │
      ├─ Energy estimation per sample:
@@ -658,7 +661,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      │      coefficients → DEFAULT_INSTANCE_PROFILE (flagged, counted)
      │
      ├─ Carbon calculation:
-     │   └─ Historical intensity lookup
+     │   └─ Historical intensity lookup (a lookup error fails the window)
      │
      └─ Generate CombinedMetrics (+ container rows) for chunk
    ```
