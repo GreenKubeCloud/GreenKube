@@ -143,6 +143,27 @@ async def test_window_without_pods_while_cadvisor_is_scraped_is_empty(stack):
 
 
 @pytest.mark.asyncio
+async def test_rate_window_with_fewer_than_two_scrapes_is_reported(stack, caplog):
+    """COL-04 step 3: a scrape interval longer than half the rate window empties every rate()."""
+    from greenkube.core import collection as collection_module
+
+    collection_module._SCRAPE_CHECKS.clear()
+    await stack["watermarks"].advance(CLUSTER, METRICS_WATERMARK_SOURCE, BASE)
+    # The fake evaluates count_over_time as the raw value: one sample per rate window.
+    stack["prom"].add("container_cpu_usage_seconds_total", {"id": "/", "node": "n1"}, 1.0)
+
+    with caplog.at_level("ERROR"):
+        report = await _run(stack, BASE + STEP + timedelta(minutes=1))
+        again = await _run(stack, BASE + 2 * STEP + timedelta(minutes=1))
+
+    assert report.rate_window_scrapes == 1.0
+    assert again.rate_window_scrapes is None  # measured at most hourly
+    assert collection_telemetry.RATE_WINDOW_SCRAPES.labels(source=METRICS_WATERMARK_SOURCE)._value.get() == 1.0
+    assert any("PROMETHEUS_SCRAPE_INTERVAL" in record.message for record in caplog.records)
+    collection_module._SCRAPE_CHECKS.clear()
+
+
+@pytest.mark.asyncio
 async def test_steps_of_a_pod_level_only_cluster_say_why_they_have_no_container_rows(stack):
     """COL-05 step 5: on cri-dockerd, catch-up windows have pod rows but no container rows."""
     await stack["watermarks"].advance(CLUSTER, METRICS_WATERMARK_SOURCE, BASE)

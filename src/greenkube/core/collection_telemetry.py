@@ -118,6 +118,20 @@ COST_UNATTRIBUTED_RATIO = Gauge(
 )
 
 
+RATE_WINDOW_SCRAPES = Gauge(
+    "greenkube_collection_rate_window_scrapes",
+    "Most scrapes any cAdvisor CPU series holds inside the rate window, measured hourly (COL-04). "
+    "Below 2, rate() returns nothing: PROMETHEUS_SCRAPE_INTERVAL is shorter than the real scrape interval.",
+    ["source"],
+    registry=REGISTRY,
+)
+
+
+def set_rate_window_scrapes(source: str, scrapes: float) -> None:
+    """Publish the measured scrapes per rate window (COL-04 step 3)."""
+    RATE_WINDOW_SCRAPES.labels(source=source).set(max(scrapes, 0.0))
+
+
 def set_cost_unattributed_ratio(source: str, ratio: float) -> None:
     """Publish the unattributed share of the OpenCost window total (COL-03 step 4)."""
     COST_UNATTRIBUTED_RATIO.labels(source=source).set(min(max(ratio, 0.0), 1.0))

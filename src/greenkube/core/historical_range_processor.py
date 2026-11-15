@@ -414,6 +414,25 @@ class HistoricalRangeProcessor:
                     nodes[sample_start].setdefault((namespace, pod), node)
         return cores, nodes
 
+    async def measure_rate_window_scrapes(self, at: datetime) -> float | None:
+        """Most samples any cAdvisor CPU series holds in the rate window ending at ``at`` (COL-04 step 3).
+
+        ``None`` when Prometheus holds no such series at ``at``.  Query errors raise.
+        """
+        results = await self.prometheus_collector.collect_range(
+            start=at, end=at, step=self._promql.step, query=self._promql.rate_window_scrapes()
+        )
+        best: float | None = None
+        for series in results or []:
+            for _ts, raw in series.get("values", []) or []:
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    best = value if best is None else max(best, value)
+        return best
+
     async def probe_scrape_data(self, start: datetime, end: datetime) -> set[datetime]:
         """Sample starts of ``[start, end)`` at which Prometheus holds cAdvisor scrape data (COL-04).
 

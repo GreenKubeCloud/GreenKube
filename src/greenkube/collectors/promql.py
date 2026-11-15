@@ -266,6 +266,15 @@ class PromQLCatalog:
         """
         return f"count({self._pod('container_cpu_usage_seconds_total')})"
 
+    def rate_window_scrapes(self) -> str:
+        """Most scrapes any cAdvisor CPU series holds inside the rate window (COL-04 step 3).
+
+        ``rate()`` needs at least two samples of a series in its window: fewer
+        means ``PROMETHEUS_SCRAPE_INTERVAL`` is set shorter than the real
+        scrape interval and every window comes back empty.
+        """
+        return f"max(count_over_time({self._pod('container_cpu_usage_seconds_total')}[{self.rate_window}]))"
+
     def pod_running(self) -> str:
         """Pods in phase Running (value 1), so a running pod without a CPU sample still gets its row (COL-03)."""
         selector = _selector('phase="Running"', *self.extra_matchers)

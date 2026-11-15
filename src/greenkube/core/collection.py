@@ -50,6 +50,10 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _TARGET_CHUNK_SECONDS = 3600
 #: Unattributed share of the OpenCost window total above which a warning is logged (COL-03 step 4).
 _UNATTRIBUTED_COST_WARNING = 0.01
+#: The scrapes per rate window are measured at most this often (COL-04 step 3).
+_SCRAPE_CHECK_INTERVAL = timedelta(hours=1)
+#: (cluster, source) -> time of the last scrape interval check, per process (jobs are rebuilt every tick).
+_SCRAPE_CHECKS: dict[tuple[str, str], datetime] = {}
 
 
 def align_down(value: datetime, step: timedelta) -> datetime:
@@ -229,6 +233,8 @@ class CollectionReport:
     coverage_ratio: float | None = None
     #: Share of the OpenCost total of the last written window that no stored row carries (COL-03 step 4).
     cost_unattributed_ratio: float | None = None
+    #: Most scrapes of a cAdvisor series inside the rate window, when measured in this run (COL-04 step 3).
+    rate_window_scrapes: float | None = None
     watermark: datetime | None = None
     error: str | None = None
     #: Rows of the most recent collected sample (pod and container rows).
@@ -307,6 +313,7 @@ class MetricsCollectionJob:
                 watermark = await self._collect_window(window, watermark, fence, report, forced=last is not None)
             if last is None:
                 await self._retry_failed_steps(now, fence, report)
+                await self._check_scrape_interval(now, report)
             await self._publish_coverage(now, report)
         except LeadershipLostError as error:
             report.error = str(error)
@@ -620,6 +627,34 @@ class MetricsCollectionJob:
             ]
         )
         logger.info("Recorded %d stored collection step(s) in collection_windows (COL-04).", len(aligned))
+
+    async def _check_scrape_interval(self, now: datetime, report: CollectionReport) -> None:
+        """Hourly: does the rate window hold at least two scrapes of a cAdvisor series? (COL-04 step 3)."""
+        measure: Callable[[datetime], Awaitable[float | None]] | None = getattr(
+            self.processor, "measure_rate_window_scrapes", None
+        )
+        key = (self.cluster_uid, self.source)
+        last_check = _SCRAPE_CHECKS.get(key)
+        if not callable(measure) or (last_check is not None and now - last_check < _SCRAPE_CHECK_INTERVAL):
+            return
+        _SCRAPE_CHECKS[key] = now
+        at = align_down(now - self.safety_lag, self.step)
+        try:
+            scrapes = await measure(at)
+        except Exception as error:  # a diagnostic: never fails the collection
+            logger.warning("Could not measure the scrapes per rate window: %s", error)
+            return
+        if scrapes is None:
+            return
+        report.rate_window_scrapes = scrapes
+        collection_telemetry.set_rate_window_scrapes(self.source, scrapes)
+        if scrapes < 2:
+            logger.error(
+                "The rate window holds %.0f scrape(s) of the cAdvisor series: rate() needs 2, so CPU usage is "
+                "missing. Set PROMETHEUS_SCRAPE_INTERVAL (config.prometheus.scrapeInterval) to the real scrape "
+                "interval.",
+                scrapes,
+            )
 
     async def _publish_coverage(self, now: datetime, report: CollectionReport) -> None:
         """Coverage of the backfill horizon, read from the table (it survives restarts)."""
