@@ -45,12 +45,20 @@ from greenkube.storage.change_repository import ChangeConflictError, ChangeRepos
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.attribution import allocate, allocated_projection
 from greenkube.verify.confounders import (
+    SCOPE_WORKLOAD_NODES,
     ConfounderDetector,
     PoolContext,
     PoolNode,
     PoolSample,
     confidence_score,
     pool_unit_prices,
+)
+from greenkube.verify.health_baseline import (
+    CONTAINERS_KEY,
+    OOM_RESTARTS_KEY,
+    compare_with_baseline,
+    container_key,
+    freeze_health,
 )
 from greenkube.verify.load_driver import CollectedLoad, LoadDriverResolver, PrometheusRangeReader
 from greenkube.verify.model import (
@@ -69,13 +77,13 @@ from greenkube.verify.model import (
     WorkloadRef,
     WorkloadSpecObservation,
 )
-from greenkube.verify.series import floor_hour, hourly_buckets, utc_hour
+from greenkube.verify.series import floor_hour, hourly_buckets, price_card, utc_hour
 from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
     MeasurementSettings,
     ReliabilityOutcome,
     SavingsMeasurementStrategy,
-    increase_reliability,
+    increase_reliability_detail,
     strategy_for,
 )
 
@@ -275,8 +283,10 @@ class ChangeMeasurementService:
         """The workload's node pools over both windows and the changes that landed in them (C4).
 
         The pools are those of the nodes the workload's pods ran on during the
-        post-window; nodes without a pool label are not grouped (no pool check).
-        A failed read raises :class:`MeasurementReadError`, so the decision waits.
+        post-window. When none of those nodes carries a pool label, only the
+        price control runs, over every other pod of those nodes (scope
+        ``workload_nodes``, MEA-02). A failed read raises
+        :class:`MeasurementReadError`, so the decision waits.
         """
         workload_nodes = {getattr(row, "node", None) for row in post_rows} - {None}
         if self.node_repo is None or not workload_nodes:
@@ -292,7 +302,20 @@ class ChangeMeasurementService:
             }
         )
         if not pools:
-            return None
+            nodes = {str(node) for node in workload_nodes}
+            return PoolContext(
+                pools=(),
+                pre=(),
+                post=(),
+                prices_pre=pool_unit_prices(
+                    await self._pool_rows(plan.pre), nodes, self._step(), exclude=change.target.key
+                ),
+                prices_post=pool_unit_prices(
+                    await self._pool_rows(plan.post), nodes, self._step(), exclude=change.target.key
+                ),
+                scope=SCOPE_WORKLOAD_NODES,
+                nodes=tuple(sorted(str(node) for node in nodes)),
+            )
 
         def in_pools(samples: List[Tuple[datetime, List[Any]]]) -> Tuple[PoolSample, ...]:
             # A sample without any node of the pools predates the node snapshots: it is no data.
@@ -646,6 +669,12 @@ class ChangeMeasurementService:
         collectors: Dict[str, Any] = {"greenkube": __version__, "query_step_seconds": self._step()}
         if collected.unavailable:
             collectors[UNAVAILABLE_DRIVERS_KEY] = sorted(collected.unavailable)
+        try:
+            members = await self._members(change)
+        except Exception as exc:
+            logger.warning("Members of change %s could not be read for its baseline health: %s", change.change_id, exc)
+            members = []
+        health = await self._baseline_health(members, plan.pre, buckets)
         sources: Dict[str, int] = {}
         for row in rows:
             source = getattr(row, "intensity_source", None)
@@ -660,12 +689,48 @@ class ChangeMeasurementService:
                 key: {floor_hour(hour).isoformat(): value for hour, value in sorted(series.items())}
                 for key, series in load.items()
             },
-            price_card=_price_card(buckets, getattr(self.config, "CURRENCY", None)),
+            price_card=price_card(buckets, getattr(self.config, "CURRENCY", None)),
+            health=health,
             intensity_source=max(sources, key=lambda key: sources[key]) if sources else None,
             impact_model_version=IMPACT_MODEL_VERSION,
             collector_versions=collectors,
             created_at=now,
         ).with_digest()
+
+    async def _baseline_health(
+        self, members: Sequence[RecommendationRecord], window: TimeWindow, buckets: Sequence[Any]
+    ) -> Dict[str, Any]:
+        """Health signals of each container over the baseline window, frozen with the snapshot (MEA-07).
+
+        A container whose gates cannot be read is left out (its decision gates
+        are then judged on absolute levels, labelled ``baseline_missing``); an
+        empty dict means no baseline health at all.
+        """
+        by_container: Dict[Optional[str], List[RecommendationRecord]] = {}
+        for member in members:
+            by_container.setdefault(member.container_name, []).append(member)
+        gates: Dict[Optional[str], List[HealthGateResult]] = {}
+        oom_restarts: Dict[Optional[str], Optional[int]] = {}
+        for container, group in sorted(by_container.items(), key=lambda item: item[0] or ""):
+            try:
+                read, observation = await self.verifier.health_check_for(
+                    group, ensure_utc(window.start), ensure_utc(window.end), strict=True
+                )
+            except Exception as exc:
+                logger.warning("Baseline health of %s could not be read: %s", container or "workload", exc)
+                continue
+            gates[container] = list(read)
+            oom_restarts[container] = observation.oom_restart_count if observation is not None else None
+        if not gates:
+            return {}
+        replica_values = [bucket.replicas for bucket in buckets if getattr(bucket, "replicas", None) is not None]
+        hours = (ensure_utc(window.end) - ensure_utc(window.start)).total_seconds() / 3600.0
+        return freeze_health(
+            gates,
+            replica_hours=math.fsum(replica_values) if replica_values else None,
+            hours=hours,
+            oom_restarts=oom_restarts,
+        )
 
     # ------------------------------------------------------------------
     # C2: lifecycle
@@ -841,20 +906,36 @@ class ChangeMeasurementService:
         return updated
 
     async def _health(
-        self, members: Sequence[RecommendationRecord], start: datetime, end: datetime
+        self,
+        members: Sequence[RecommendationRecord],
+        start: datetime,
+        end: datetime,
+        *,
+        baseline: Optional[Mapping[str, Any]] = None,
     ) -> List[HealthGateResult]:
         """Health gates per container of the change (one failure flags the whole change).
 
         Raises :class:`MeasurementReadError` when the gates cannot be read, so
         no health check or decision is recorded from missing metrics.
         """
-        gates, _ = await self._health_and_reliability(members, start, end)
+        gates, _ = await self._health_and_reliability(members, start, end, baseline=baseline)
         return gates
 
     async def _health_and_reliability(
-        self, members: Sequence[RecommendationRecord], start: datetime, end: datetime
+        self,
+        members: Sequence[RecommendationRecord],
+        start: datetime,
+        end: datetime,
+        *,
+        baseline: Optional[Mapping[str, Any]] = None,
+        post_replica_hours: Optional[float] = None,
     ) -> Tuple[List[HealthGateResult], Optional[ReliabilityOutcome]]:
-        """Health gates per container and the reliability outcome of memory increases (H1)."""
+        """Health gates per container and the reliability outcome of memory increases (H1).
+
+        With ``baseline`` (``BaselineSnapshot.health``; empty for snapshots frozen
+        before MEA-07) the restart, throttling and readiness gates are judged
+        against the baseline window (:func:`compare_with_baseline`).
+        """
         by_container: Dict[Optional[str], List[RecommendationRecord]] = {}
         for member in members:
             by_container.setdefault(member.container_name, []).append(member)
@@ -872,7 +953,24 @@ class ChangeMeasurementService:
         # A memory-request increase made because of OOM kills is judged on that container's kill
         # rate (counted like its evidence), not on "any kill"; its OOM restarts leave the restart
         # gate. Every other container keeps the strict gates (H1).
-        judged, reliability = increase_reliability(members, raw, start, end, oom_restarts)
+        judged, reliability, relaxed = increase_reliability_detail(members, raw, start, end, oom_restarts)
+        if baseline is not None:
+            post_hours = (ensure_utc(end) - ensure_utc(start)).total_seconds() / 3600.0
+            excused_baseline = _excused_baseline_restarts(baseline, relaxed)
+            judged = {
+                container: compare_with_baseline(
+                    container_gates,
+                    container,
+                    baseline,
+                    post_hours=post_hours,
+                    post_replica_hours=post_replica_hours,
+                    max_restart_delta=float(getattr(self.config, "VERIFICATION_MAX_RESTART_DELTA", 0)),
+                    max_throttle_ratio=float(getattr(self.config, "VERIFICATION_MAX_THROTTLE_RATIO", 0.05)),
+                    min_readiness=float(getattr(self.config, "VERIFICATION_MIN_READINESS", 0.99)),
+                    excused_baseline_restarts=excused_baseline,
+                )
+                for container, container_gates in judged.items()
+            }
         gates: List[HealthGateResult] = []
         for container in raw:
             for gate in judged[container]:
@@ -887,7 +985,17 @@ class ChangeMeasurementService:
         """Evaluate health gates once the interim window elapsed, so a harmful change is flagged early."""
         members = [member for member in await self._members(change) if _awaiting(member)]
         try:
-            gates = await self._health(members, ensure_utc(plan.post.start), health_end) if members else []
+            snapshot = await self.changes.get_snapshot_for_change(change.change_id) if members else None
+            gates = (
+                await self._health(
+                    members,
+                    ensure_utc(plan.post.start),
+                    health_end,
+                    baseline=snapshot.health if snapshot is not None else {},
+                )
+                if members
+                else []
+            )
         except MeasurementReadError as exc:
             logger.warning("Interim health check of change %s is retried next pass: %s", change.change_id, exc)
             return status, []
@@ -998,6 +1106,7 @@ class ChangeMeasurementService:
             post=post_buckets,
             load=load,
             pool=pool,
+            price_card=snapshot.price_card,
         )
         in_effect = [member for member in members if _value(member.status) in _IN_EFFECT]
         # Measured rows are allocated (projected != allocated != realized): compare with the allocated projection.
@@ -1018,10 +1127,17 @@ class ChangeMeasurementService:
             settings=self.settings,
             seed_parts=(change.change_id, status.sequence),
             rate_sources=[_rate_source(member) for member in in_effect],
+            price_card=snapshot.price_card,
         )
         awaiting = [member for member in in_effect if _awaiting(member)]
         gates, reliability = (
-            await self._health_and_reliability(awaiting, ensure_utc(plan.post.start), ensure_utc(plan.post.end))
+            await self._health_and_reliability(
+                awaiting,
+                ensure_utc(plan.post.start),
+                ensure_utc(plan.post.end),
+                baseline=snapshot.health,
+                post_replica_hours=_replica_hours(post_buckets),
+            )
             if awaiting
             else ([], None)
         )
@@ -1419,23 +1535,28 @@ def _sum(values: Iterable[Optional[float]]) -> Optional[float]:
     return math.fsum(items) if items else None
 
 
-def _price_card(buckets: Sequence[Any], currency: Optional[str]) -> dict:
-    """Unit prices observed in the baseline (allocated cost per requested core-hour and GiB-hour)."""
-    card: dict = {"currency": currency}
-    for name, cost_attr, quantity_attr in (
-        ("cpu_core_hour", "cost_cpu", "core_hours"),
-        ("memory_gib_hour", "cost_ram", "gib_hours"),
-    ):
-        cost = quantity = 0.0
-        for bucket in buckets:
-            value = getattr(bucket, cost_attr)
-            amount = getattr(bucket, quantity_attr)
-            if value is None or amount is None or amount <= 0:
-                continue
-            cost += value
-            quantity += amount
-        card[name] = cost / quantity if quantity > 0 else None
-    return card
+def _excused_baseline_restarts(baseline: Mapping[str, Any], relaxed: Iterable[Optional[str]]) -> Optional[float]:
+    """Baseline OOM restarts of the containers whose post-window OOM restarts left the restart gates.
+
+    The post-window restart gates of a memory increase judged on its OOM-kill
+    rate leave out the OOM restarts of the relaxed containers; the baseline count
+    must leave out the same restarts (MEA-07 review). ``None`` when one of them
+    was not frozen (the comparison then keeps the absolute rule, labelled).
+    """
+    containers = baseline.get(CONTAINERS_KEY) or {}
+    total = 0.0
+    for container in relaxed:
+        value = (containers.get(container_key(container)) or {}).get(OOM_RESTARTS_KEY)
+        if value is None:
+            return None
+        total += float(value)
+    return total
+
+
+def _replica_hours(buckets: Sequence[Any]) -> Optional[float]:
+    """Sum of the hourly replica counts of ``buckets`` (``None`` without any)."""
+    values = [bucket.replicas for bucket in buckets if getattr(bucket, "replicas", None) is not None]
+    return math.fsum(values) if values else None
 
 
 def _quantity_estimate(

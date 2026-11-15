@@ -153,6 +153,15 @@ class HourBucket(_Frozen):
     embodied_co2e_g: Optional[float] = None
     embodied_coverage: Optional[float] = None
     instance_types: dict[str, float] = Field(default_factory=dict)
+    #: Charged CPU cores and memory GiB summed over pods (per hour): ``max(request, usage)`` per
+    #: sample, the quantity an allocator such as OpenCost charges (MEA-02). ``None`` in snapshots
+    #: frozen before it was measured.
+    charged_core_hours: Optional[float] = None
+    charged_gib_hours: Optional[float] = None
+    #: Grid intensity x PUE (gCO2e per kWh) of the hour's trusted-carbon rows, time-weighted (MEA-03).
+    #: Independent of energy, so an hour with zero energy keeps its factor. ``None`` in snapshots
+    #: frozen before it was recorded and when no row carried an intensity.
+    carbon_factor: Optional[float] = None
 
     @property
     def hour_of_week(self) -> int:
@@ -160,7 +169,13 @@ class HourBucket(_Frozen):
 
 
 #: HourBucket fields added after snapshots were first frozen (omitted from the digest while unset).
-_OPTIONAL_BUCKET_FIELDS = ("embodied_co2e_g", "embodied_coverage")
+_OPTIONAL_BUCKET_FIELDS = (
+    "embodied_co2e_g",
+    "embodied_coverage",
+    "charged_core_hours",
+    "charged_gib_hours",
+    "carbon_factor",
+)
 
 
 def hour_of_week(moment: datetime) -> int:
@@ -185,6 +200,8 @@ class BaselineSnapshot(_Frozen):
     hours: List[HourBucket] = Field(default_factory=list)
     load_series: dict[str, dict[str, float]] = Field(default_factory=dict)
     price_card: dict[str, Any] = Field(default_factory=dict)
+    #: Health signals over the window, per container (MEA-07, :mod:`greenkube.verify.health_baseline`).
+    health: dict[str, Any] = Field(default_factory=dict)
     intensity_source: Optional[str] = None
     impact_model_version: Optional[str] = None
     collector_versions: dict[str, Any] = Field(default_factory=dict)
@@ -192,6 +209,9 @@ class BaselineSnapshot(_Frozen):
 
     def digest_payload(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"content_sha256", "created_at"})
+        if not payload.get("health"):
+            # Snapshots frozen before the baseline health (MEA-07) have none.
+            payload.pop("health", None)
         for bucket in payload.get("hours") or []:
             # Fields added after the first snapshots were frozen are left out while unset,
             # so the digest of an older snapshot still verifies.

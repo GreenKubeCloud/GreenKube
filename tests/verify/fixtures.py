@@ -110,7 +110,7 @@ def workload_rows(
     function of the row time), split 70/30 between CPU and RAM with
     ``components``. Without ``cost`` the allocation is request-based like
     OpenCost: requested cores x ``cpu_price`` plus requested GiB x
-    ``ram_price`` per hour.
+    ``ram_price`` per hour, CPU charged on ``max(request, usage)``.
     """
     rng = random.Random(seed)
     rows: List[CombinedMetric] = []
@@ -119,7 +119,8 @@ def workload_rows(
         hours = step.total_seconds() / 3600
         for pod in pods:
             if cost is None:
-                cpu_cost = cpu_request / 1000 * cpu_price * hours
+                # OpenCost charges max(request, usage) (MEA-02).
+                cpu_cost = max(cpu_request, cpu_usage) / 1000 * cpu_price * hours
                 ram_cost = memory_request / 1024**3 * ram_price * hours
             else:
                 value = cost(moment) if callable(cost) else cost
@@ -140,7 +141,9 @@ def workload_rows(
                     cost_ram=ram_cost if components else None,
                     co2e_grams=co2e * step.total_seconds() / 3600,
                     embodied_co2e_grams=embodied * step.total_seconds() / 3600,
-                    joules=3600.0,
+                    # Energy consistent with the CO2e at 300 gCO2e/kWh (PUE 1): CO2e = kWh x intensity (MEA-03).
+                    joules=co2e * step.total_seconds() / 3600 / 300.0 * 3_600_000.0,
+                    grid_intensity=300.0,
                     cpu_request=cpu_request,
                     memory_request=memory_request,
                     cpu_usage_millicores=cpu_usage,

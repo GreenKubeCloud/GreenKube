@@ -331,7 +331,8 @@
                 "accelerated": {"type": "boolean"},
                 "preWindowDays": {"type": "number", "exclusiveMinimum": 0},
                 "postWindowDays": {"type": "number", "exclusiveMinimum": 0},
-                "warmupHours": {"type": "number", "minimum": 0}
+                "warmupHours": {"type": "number", "minimum": 0},
+                "priorWeekCv": {"type": "number", "minimum": 0, "maximum": 1}
               },
               "if": {"not": {"properties": {"accelerated": {"const": true}}, "required": ["accelerated"]}},
               "then": {"properties": {"preWindowDays": {"minimum": 7}}},

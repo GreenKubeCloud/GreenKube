@@ -14,7 +14,7 @@ from typing import Callable, Dict
 import pytest
 
 from greenkube.verify.load_driver import ResolvedLoad
-from greenkube.verify.model import ChangeOutcome, LoadDriverInfo, TimeWindow
+from greenkube.verify.model import ChangeOutcome, HourBucket, LoadDriverInfo, TimeWindow
 from greenkube.verify.regression import (
     METHOD_OLS,
     SEASONALITY_DAY_TYPE,
@@ -33,6 +33,9 @@ INFO = LoadDriverInfo(key="istio_rps", label="Istio requests/s", coverage_pre=1.
 #: Fixed rollout time (a Monday noon): the seasonal alignment of every scenario, and with it the
 #: stochastic outcome of each seed, must not depend on when the suite runs. The estimator reads no clock.
 COMPLETED = datetime(2026, 1, 5, 12, tzinfo=timezone.utc)
+#: The synthetic cost is load-driven, not requests x a price: at constant prices (2.4, MEA-02) it has no
+#: load signal left, so the regression is checked on the observed cost, fitted by the same code.
+COST = "allocated_cost_observed"
 
 
 def _seasonal(moment: datetime) -> float:
@@ -61,10 +64,11 @@ def _scenario(
     post_scale: float = 1.1,
     ar: float = 0.0,
     pre_days: float = 7.0,
+    prior_week_cv: float = 0.05,
 ):
     """Per-pod hourly cost = 0.02 + slope x load + AR(1) noise, minus ``effect`` per pod after the change."""
     rng = random.Random(seed)
-    settings = MeasurementSettings(bootstrap_samples=400, pre_window_days=pre_days)
+    settings = MeasurementSettings(bootstrap_samples=400, pre_window_days=pre_days, prior_week_cv=prior_week_cv)
     change = change_event(COMPLETED)
     plan = STRATEGY.required_windows(change, settings)
     pre_load = _load_series(plan.pre, rng)
@@ -101,28 +105,114 @@ def _scenario(
 
 
 def test_load_regression_recovers_a_known_saving_within_its_interval():
-    result, estimates = _scenario(effect=0.004, seed=3)
-    cost = estimates["allocated_cost"]
+    # The synthetic weeks share one level: no prior week-to-week variation (MEA-01) is assumed,
+    # so the interval is the regression's own.
+    result, estimates = _scenario(effect=0.004, seed=3, prior_week_cv=0.0)
+    cost = estimates[COST]
     assert cost.method == METHOD_OLS
-    assert result.counterfactual_params["model"] == METHOD_OLS
-    diagnostics = result.counterfactual_params["diagnostics"]["allocated_cost"]
+    assert result.counterfactual_params["methods"][COST] == METHOD_OLS
+    diagnostics = result.counterfactual_params["diagnostics"][COST]
     assert diagnostics["passed"] is True
     assert diagnostics["seasonality"] == SEASONALITY_DAY_TYPE
     assert diagnostics["load_coefficient"] == pytest.approx(0.0002, rel=0.15)
     assert cost.ci_low is not None and cost.ci_high is not None
     assert cost.ci_low <= 0.004 <= cost.ci_high
     assert cost.ci_low > 0
-    assert result.outcome is ChangeOutcome.REALIZED
+    assert cost.outcome is ChangeOutcome.REALIZED
 
 
 def test_load_growth_is_not_credited_as_a_saving():
     """A busier post-window raises the counterfactual instead of hiding the saving or inventing one."""
     _, estimates = _scenario(effect=0.0, seed=5, post_scale=1.2)
-    cost = estimates["allocated_cost"]
+    cost = estimates[COST]
     assert cost.method == METHOD_OLS
     assert cost.ci_low is not None and cost.ci_high is not None
     assert cost.ci_low <= 0.0 <= cost.ci_high or abs(cost.rate_per_hour or 0.0) < 0.001
     assert cost.outcome is not ChangeOutcome.REALIZED
+
+
+def _charged_scenario(*, post_request: float, seed: int, post_scale: float = 1.2, usage_per_load: float = 0.008):
+    """Request-priced buckets whose CPU usage follows the load and exceeds the request at peaks.
+
+    The allocator charges ``max(request, usage)`` at 0.03 per core-hour plus
+    1 GiB at 0.005: busier hours cost more without any change to the requests.
+    """
+    rng = random.Random(seed)
+    change = change_event(COMPLETED)
+    plan = STRATEGY.required_windows(change, SETTINGS)
+    pre_load = _load_series(plan.pre, rng)
+    post_load = _load_series(plan.post, rng, scale=post_scale)
+
+    def window(load: Dict[datetime, float], request: float, start: datetime, end: datetime) -> list:
+        out = []
+        for hour, value in load.items():
+            if not start <= hour < end:
+                continue
+            usage = usage_per_load * value
+            charged = max(request, usage)
+            out.append(
+                HourBucket(
+                    hour=hour,
+                    coverage=1.0,
+                    replicas=1.0,
+                    core_hours=request,
+                    gib_hours=1.0,
+                    charged_core_hours=charged,
+                    charged_gib_hours=1.0,
+                    cpu_usage_cores=usage,
+                    cost=charged * 0.03 + 0.005,
+                    cost_cpu=charged * 0.03,
+                    cost_ram=0.005,
+                    cost_coverage=1.0,
+                    instance_types={"m5": 1.0},
+                )
+            )
+        return out
+
+    pre = window(pre_load, 1.0, plan.pre.start, plan.pre.end)
+    post = window(post_load, post_request, plan.post.start, plan.post.end)
+    load = ResolvedLoad(info=INFO, pre=pre_load, post=post_load)
+    result = STRATEGY.estimate(
+        change,
+        plan,
+        pre,
+        post,
+        load=load,
+        confounders=[],
+        projections={},
+        settings=SETTINGS,
+        seed_parts=(change.change_id, seed),
+    )
+    truth = math.fsum(
+        (max(1.0, usage_per_load * value) - max(post_request, usage_per_load * value)) * 0.03
+        for value in post_load.values()
+    ) / len(post_load)
+    # Share of baseline and post hours whose usage is above the 1-core baseline request (charged branch).
+    above = (
+        sum(usage_per_load * value > 1.0 for value in pre_load.values()) / len(pre_load),
+        sum(usage_per_load * value > 1.0 for value in post_load.values()) / len(post_load),
+    )
+    return result, {item.quantity: item for item in result.estimates}, truth, above
+
+
+def test_load_growth_above_the_request_is_not_credited_on_the_claimed_cost():
+    """Usage above the request follows the load: a busier post-window with unchanged requests saves nothing."""
+    result, estimates, _, above = _charged_scenario(post_request=1.0, seed=21)
+    # The charged branch is exercised (review wp07-3 F2): usage above the request in a real share of hours.
+    assert above[0] >= 0.2 and above[1] >= 0.3
+    claimed = estimates["allocated_cost"]
+    assert claimed.claimed and claimed.method == METHOD_OLS
+    assert claimed.ci_low is not None and claimed.ci_low <= 0.0
+    assert result.outcome is not ChangeOutcome.REALIZED
+
+
+def test_a_request_cut_under_load_growth_claims_the_charged_saving():
+    result, estimates, truth, above = _charged_scenario(post_request=0.5, seed=23)
+    assert above[1] >= 0.3
+    claimed = estimates["allocated_cost"]
+    assert claimed.ci_low is not None and claimed.ci_high is not None
+    assert claimed.ci_low <= truth <= claimed.ci_high
+    assert result.outcome is ChangeOutcome.REALIZED
 
 
 def test_interval_covers_the_true_effect_at_about_its_nominal_rate():
@@ -130,7 +220,7 @@ def test_interval_covers_the_true_effect_at_about_its_nominal_rate():
     covered = 0
     for seed in range(20):
         _, estimates = _scenario(effect=0.003, seed=100 + seed, noise=0.003, ar=0.5)
-        cost = estimates["allocated_cost"]
+        cost = estimates[COST]
         assert cost.method == METHOD_OLS
         assert cost.ci_low is not None and cost.ci_high is not None
         covered += cost.ci_low <= 0.003 <= cost.ci_high
@@ -139,23 +229,23 @@ def test_interval_covers_the_true_effect_at_about_its_nominal_rate():
 
 def test_two_week_baseline_uses_hour_of_week_seasonality():
     result, estimates = _scenario(effect=0.004, seed=8, pre_days=14)
-    assert estimates["allocated_cost"].method == METHOD_OLS
-    assert result.counterfactual_params["diagnostics"]["allocated_cost"]["seasonality"] == SEASONALITY_HOUR_OF_WEEK
+    assert estimates[COST].method == METHOD_OLS
+    assert result.counterfactual_params["diagnostics"][COST]["seasonality"] == SEASONALITY_HOUR_OF_WEEK
 
 
 def test_extrapolated_load_falls_back_to_the_hour_of_week_mean():
     result, estimates = _scenario(effect=0.004, seed=9, post_scale=3.0)
-    cost = estimates["allocated_cost"]
+    cost = estimates[COST]
     assert cost.method == MVP_METHOD
-    diagnostics = result.counterfactual_params["diagnostics"]["allocated_cost"]
+    diagnostics = result.counterfactual_params["diagnostics"][COST]
     assert diagnostics["passed"] is False and diagnostics["fallback"] == MVP_METHOD
     assert any("outside the baseline range" in failure for failure in diagnostics["failures"])
 
 
 def test_negative_load_slope_falls_back():
     result, estimates = _scenario(effect=0.004, seed=10, slope=-0.0002)
-    assert estimates["allocated_cost"].method == MVP_METHOD
-    failures = result.counterfactual_params["diagnostics"]["allocated_cost"]["failures"]
+    assert estimates[COST].method == MVP_METHOD
+    failures = result.counterfactual_params["diagnostics"][COST]["failures"]
     assert any("falls as the load grows" in failure for failure in failures)
 
 

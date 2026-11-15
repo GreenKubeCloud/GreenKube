@@ -62,6 +62,10 @@ PRICE_CHANGE_TOLERANCE = 0.05
 INSTANCE_MIX_TOLERANCE = 0.25
 #: Unit price changes beyond this share can explain a typical rightsizing effect on their own (severe).
 PRICE_CHANGE_SEVERE = 0.20
+#: The energy-weighted carbon factor (intensity x PUE) moved by more than this between the windows (MEA-03).
+INTENSITY_SHIFT_TOLERANCE = 0.10
+#: Share of the baseline energy valued at the fallback carbon factor above which it is reported (mild).
+CARBON_FACTOR_FALLBACK_TOLERANCE = 0.05
 #: The workload's instance-type mix moved by more than this share of its pod-hours (severe).
 INSTANCE_MIX_SEVERE = 0.5
 #: The node pool's capacity-weighted instance-type mix moved by more than this (severe: new hardware).
@@ -72,6 +76,9 @@ POOL_CAPACITY_TOLERANCE = 0.25
 POOL_CAPACITY_SEVERE = 0.5
 
 _PENALTY = {"mild": 0.05, "moderate": 0.15}
+#: Confounders reported without a confidence penalty: the CO2e saving is valued at the post-window
+#: carbon factors hour by hour, so an intensity shift biases neither it nor the cost verdict (MEA-03).
+INFORMATIVE_KINDS = frozenset({"intensity_shift"})
 #: Confidence penalty when the counterfactual has no load driver or only the weak CPU-usage driver.
 WEAK_LOAD_PENALTY = 0.10
 
@@ -148,6 +155,11 @@ class PoolContext:
     #: Pool-wide unit prices (``cpu`` per core-hour, ``memory`` per GiB-hour) in each window (price-card control).
     prices_pre: Mapping[str, float] = field(default_factory=dict)
     prices_post: Mapping[str, float] = field(default_factory=dict)
+    #: ``pool`` (labelled node pools) or ``workload_nodes``: the nodes carry no pool label, so only the
+    #: price control runs, over the pods of the nodes the workload ran on (MEA-02).
+    scope: str = "pool"
+    #: The nodes of a ``workload_nodes`` context.
+    nodes: Tuple[str, ...] = ()
 
 
 _GIB = 1024.0**3
@@ -236,12 +248,17 @@ class ConfounderDetector:
         post: Sequence[HourBucket] = (),
         load: Optional[ResolvedLoad] = None,
         pool: Optional[PoolContext] = None,
+        price_card: Optional[Mapping[str, Any]] = None,
     ) -> List[Confounder]:
+        """Every confounder of ``change``; ``price_card`` is the frozen baseline snapshot's price card."""
         findings: List[Confounder] = []
         findings.extend(self._other_changes(change, plan, other_changes))
         findings.extend(self._spec_changes(change, plan, observations))
         findings.extend(self._replica_shift(pre, post, load))
         findings.extend(self._price_change(pre, post))
+        findings.extend(self._constant_prices(pre, post, price_card))
+        findings.extend(self._intensity_shift(pre, post))
+        findings.extend(self._carbon_factor_fallback(pre, post))
         findings.extend(self._instance_types(pre, post))
         if pool is not None:
             findings.extend(self._pool(change, pool))
@@ -382,37 +399,145 @@ class ConfounderDetector:
 
     @staticmethod
     def _price_change(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:
-        """Unit price of a resource whose requests the change did not touch (it acts as a control)."""
-        findings: List[Confounder] = []
+        """Unit price of each resource on the workload's own rows, before and after (MEA-02).
+
+        With the charged quantities (``max(request, usage)`` per sample) in both
+        windows, the price per charged unit is a price even for a resource the
+        change resized, so every resource is checked. Windows without them
+        (snapshots frozen earlier) use the price per requested unit, which is a
+        price too unless the allocator charged usage above the request: CPU is
+        then checked only when its mean usage stays at or below the request in
+        both windows (or the change did not resize it). Memory usage is not in
+        those buckets, so a resized memory request is checked as it is.
+        """
+        from greenkube.verify.series import has_charged, unit_prices
+
+        if has_charged(pre) and has_charged(post):
+            findings: List[Confounder] = []
+            before_prices = unit_prices(pre, charged=True)
+            after_prices = unit_prices(post, charged=True)
+            for resource in ("cpu", "memory"):
+                finding = _price_finding(resource, before_prices.get(resource), after_prices.get(resource), "charged")
+                if finding is not None:
+                    findings.append(finding)
+            return findings
+        findings = []
         for resource, cost_attr, quantity_attr in (
             ("cpu", "cost_cpu", "core_hours"),
             ("memory", "cost_ram", "gib_hours"),
         ):
             requested_before = _per_replica(pre, quantity_attr)
             requested_after = _per_replica(post, quantity_attr)
-            if (
+            resized = (
                 requested_before is None
                 or requested_after is None
                 or requested_before <= 0
                 or abs(requested_after / requested_before - 1.0) > PRICE_CHANGE_TOLERANCE
-            ):
-                # The change moved this resource's per-replica requests: its unit price is no control.
+            )
+            if resized and resource == "cpu" and not (_usage_within_request(pre) and _usage_within_request(post)):
+                # Usage above (or unknown against) a resized request: the cost-per-request ratio is no price.
                 continue
-            before = _unit_price(pre, cost_attr, quantity_attr)
-            after = _unit_price(post, cost_attr, quantity_attr)
-            if before is None or after is None or before <= 0:
-                continue
-            deviation = after / before - 1.0
-            if abs(deviation) > PRICE_CHANGE_TOLERANCE:
-                findings.append(
-                    Confounder(
-                        kind="price_card_change",
-                        severity="severe" if abs(deviation) > PRICE_CHANGE_SEVERE else "moderate",
-                        detail=f"{resource} unit price changed {deviation:+.0%} between the windows",
-                        evidence={"resource": resource, "before": before, "after": after},
-                    )
-                )
+            finding = _price_finding(
+                resource,
+                _unit_price(pre, cost_attr, quantity_attr),
+                _unit_price(post, cost_attr, quantity_attr),
+                "requested",
+            )
+            if finding is not None:
+                findings.append(finding)
         return findings
+
+    @staticmethod
+    def _constant_prices(
+        pre: Sequence[HourBucket], post: Sequence[HourBucket], price_card: Optional[Mapping[str, Any]]
+    ) -> List[Confounder]:
+        """``constant_prices_unavailable`` (moderate) when the cost cannot be revalued at baseline prices.
+
+        Without CPU/RAM cost components and without a priced card the strategy
+        measures the observed cost (``constant_price_basis = observed``), so a
+        price move between the windows is booked as saving and no
+        ``price_card_change`` can see it (review wp07-2, MEA-02).
+        """
+        from greenkube.verify.strategy import CONSTANT_PRICE_OBSERVED, constant_price_windows
+
+        if not quantity_series(pre, "allocated_cost") or not quantity_series(post, "allocated_cost"):
+            return []
+        if constant_price_windows(pre, post, price_card).basis != CONSTANT_PRICE_OBSERVED:
+            return []
+        return [
+            Confounder(
+                kind="constant_prices_unavailable",
+                severity="moderate",
+                detail="no CPU/RAM cost components or baseline unit prices: the cost saving is measured at "
+                "observed prices, so a price move between the windows cannot be told apart from the change",
+                evidence={"constant_price_basis": CONSTANT_PRICE_OBSERVED},
+            )
+        ]
+
+    @staticmethod
+    def _carbon_factor_fallback(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:
+        """``co2e_factor_fallback`` (mild) when over 5% of the baseline energy has no post factor at its hour of week.
+
+        Such hours (the workload scaled to zero, post hours missing) are valued
+        at the time-averaged post factor, not at the intensity of their hour.
+        """
+        from greenkube.verify.strategy import PostCarbonFactors
+
+        factors = PostCarbonFactors.of(post)
+        if factors is None:
+            return []
+        share = factors.fallback_share(pre)
+        if share is None or share <= CARBON_FACTOR_FALLBACK_TOLERANCE:
+            return []
+        return [
+            Confounder(
+                kind="co2e_factor_fallback",
+                severity="mild",
+                detail=f"{share:.0%} of the baseline energy has no post-window carbon factor at its hour of week "
+                f"and is valued at the time-averaged post factor ({factors.fallback:.4g} gCO2e/kWh)",
+                evidence={"share": round(share, 6), "fallback": round(factors.fallback, 6)},
+            )
+        ]
+
+    @staticmethod
+    def _intensity_shift(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:
+        """Carbon factor (grid intensity x PUE per kWh) of the two windows (MEA-03).
+
+        The CO2e saving is valued at the post-window factors, so a move does not
+        bias it; it is reported (moderate above 10%) because the baseline CO2e
+        the change is compared with was emitted at another factor, and costs no
+        confidence (:data:`INFORMATIVE_KINDS`). Without a
+        post-window factor the raw CO2e difference is measured: moderate.
+        """
+        from greenkube.verify.series import carbon_factor, quantity_series
+
+        before, after = carbon_factor(pre), carbon_factor(post)
+        if after is None:
+            if quantity_series(post, "co2e_g"):
+                return [
+                    Confounder(
+                        kind="co2e_raw_delta",
+                        severity="moderate",
+                        detail="no energy behind the post-window CO2e: the CO2e saving is the raw difference of "
+                        "the two windows' emissions, not normalised for grid intensity",
+                        evidence={},
+                    )
+                ]
+            return []
+        if before is None or before <= 0:
+            return []
+        deviation = after / before - 1.0
+        if abs(deviation) <= INTENSITY_SHIFT_TOLERANCE:
+            return []
+        return [
+            Confounder(
+                kind="intensity_shift",
+                severity="moderate",
+                detail=f"grid carbon intensity x PUE per kWh changed {deviation:+.0%} between the windows "
+                f"({before:.4g} -> {after:.4g} gCO2e/kWh); the CO2e saving is valued at the post-window factor",
+                evidence={"before": round(before, 6), "after": round(after, 6)},
+            )
+        ]
 
     @staticmethod
     def _instance_types(pre: Sequence[HourBucket], post: Sequence[HourBucket]) -> List[Confounder]:
@@ -434,6 +559,8 @@ class ConfounderDetector:
 
     @staticmethod
     def _pool(change: ChangeEvent, pool: PoolContext) -> List[Confounder]:
+        if pool.scope == SCOPE_WORKLOAD_NODES:
+            return _node_prices(pool)
         findings: List[Confounder] = []
         pools = ", ".join(pool.pools)
         before, after = _pool_mix(pool.pre), _pool_mix(pool.post)
@@ -510,6 +637,32 @@ class ConfounderDetector:
         return findings
 
 
+def _usage_within_request(buckets: Sequence[HourBucket]) -> bool:
+    """Whether the mean CPU usage stays at or below the CPU request in every costed hour that has both."""
+    known = [
+        bucket
+        for bucket in buckets
+        if bucket.cpu_usage_cores is not None and bucket.core_hours is not None and bucket.cost is not None
+    ]
+    return bool(known) and all((bucket.cpu_usage_cores or 0.0) <= (bucket.core_hours or 0.0) for bucket in known)
+
+
+def _price_finding(resource: str, before: Optional[float], after: Optional[float], basis: str) -> Optional[Confounder]:
+    """``price_card_change`` when a unit price moved more than 5% (severe above 20%)."""
+    if before is None or after is None or before <= 0:
+        return None
+    deviation = after / before - 1.0
+    if abs(deviation) <= PRICE_CHANGE_TOLERANCE:
+        return None
+    return Confounder(
+        kind="price_card_change",
+        severity="severe" if abs(deviation) > PRICE_CHANGE_SEVERE else "moderate",
+        detail=f"{resource} unit price changed {deviation:+.0%} between the windows (the saving is measured at "
+        "the baseline prices; the observed difference is reported as allocated_cost_observed)",
+        evidence={"resource": resource, "before": before, "after": after, "basis": basis},
+    )
+
+
 def _pool_prices(pool: PoolContext, pools: str) -> List[Confounder]:
     findings: List[Confounder] = []
     for resource, unit in (("cpu", "core-hour"), ("memory", "GiB-hour")):
@@ -531,16 +684,53 @@ def _pool_prices(pool: PoolContext, pools: str) -> List[Confounder]:
     return findings
 
 
+#: :attr:`PoolContext.scope` of a price control built from the workload's nodes (no pool label).
+SCOPE_WORKLOAD_NODES = "workload_nodes"
+
+
+def _node_prices(pool: PoolContext) -> List[Confounder]:
+    """Price control over every pod of the workload's nodes, for clusters without pool labels (MEA-02)."""
+    findings: List[Confounder] = []
+    nodes = ", ".join(pool.nodes)
+    for resource, unit in (("cpu", "core-hour"), ("memory", "GiB-hour")):
+        before, after = pool.prices_pre.get(resource), pool.prices_post.get(resource)
+        if before is None or after is None or before <= 0:
+            continue
+        deviation = after / before - 1.0
+        if abs(deviation) <= PRICE_CHANGE_TOLERANCE:
+            continue
+        findings.append(
+            Confounder(
+                kind="pool_price_card_change",
+                severity="severe" if abs(deviation) > PRICE_CHANGE_SEVERE else "moderate",
+                detail=f"{resource} unit price per {unit} on the nodes the workload ran on ({nodes}; no node-pool "
+                f"label) changed {deviation:+.0%} between the windows (all workloads of those nodes)",
+                evidence={
+                    "resource": resource,
+                    "scope": SCOPE_WORKLOAD_NODES,
+                    "nodes": list(pool.nodes),
+                    "before": before,
+                    "after": after,
+                },
+            )
+        )
+    return findings
+
+
 def is_contaminated(confounders: Sequence[Confounder]) -> bool:
     return any(item.severity == "severe" for item in confounders)
 
 
 def confidence_score(confounders: Sequence[Confounder], coverage: float, load: Optional[ResolvedLoad]) -> float:
-    """Confidence in a measurement: coverage, minus penalties for confounders and a weak load driver."""
+    """Confidence in a measurement: coverage, minus penalties for confounders and a weak load driver.
+
+    Kinds of :data:`INFORMATIVE_KINDS` are reported but cost no confidence:
+    the verdict is the cost verdict, which they do not touch.
+    """
     if is_contaminated(confounders):
         return 0.0
     score = max(0.0, min(coverage, 1.0))
-    score -= math.fsum(_PENALTY.get(item.severity, 0.0) for item in confounders)
+    score -= math.fsum(_PENALTY.get(item.severity, 0.0) for item in confounders if item.kind not in INFORMATIVE_KINDS)
     if load is None or load.info.weak:
         score -= WEAK_LOAD_PENALTY
     return round(max(0.0, min(score, 1.0)), 4)

@@ -42,7 +42,15 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.verify.counterfactual import AlignedHour
 from greenkube.verify.model import hour_of_week
-from greenkube.verify.statistics import CONFIDENCE, DAY_BLOCK, BootstrapInterval, percentile
+from greenkube.verify.statistics import (
+    CONFIDENCE,
+    DAY_BLOCK,
+    BootstrapInterval,
+    block_size,
+    bootstrap_se,
+    circular_resample,
+    student_t_quantile,
+)
 
 METHOD_OLS = "ols_load_seasonal"
 SEASONALITY_HOUR_OF_WEEK = "hour_of_week"
@@ -301,16 +309,6 @@ class OlsCounterfactual:
         return {"model": METHOD_OLS, **self.diagnostics.as_dict(), "matched_slots": len(self.slot_means)}
 
 
-def _block_resample(data: Sequence[float], rng: random.Random, size: int) -> List[float]:
-    n = len(data)
-    starts = n - size + 1
-    resampled: List[float] = []
-    while len(resampled) < n:
-        begin = rng.randrange(starts)
-        resampled.extend(data[begin : begin + size])
-    return resampled[:n]
-
-
 def residual_bootstrap(
     savings: Sequence[float],
     residuals: Sequence[float],
@@ -322,7 +320,12 @@ def residual_bootstrap(
     block: int = DAY_BLOCK,
     confidence: float = CONFIDENCE,
 ) -> BootstrapInterval:
-    """Mean saving and its interval: post-window block bootstrap plus baseline residual bootstrap."""
+    """Mean saving and its within-window interval: post-window plus baseline residual bootstrap.
+
+    Both series are resampled with circular day blocks; the standard error of
+    the replicates is corrected for the number of post-window blocks and the
+    interval uses Student's t (see :mod:`greenkube.verify.statistics`).
+    """
     data = [float(value) for value in savings]
     n = len(data)
     if n == 0:
@@ -332,25 +335,29 @@ def residual_bootstrap(
         return BootstrapInterval(mean=mean, low=None, high=None, samples=0, block=block)
     inflation = math.sqrt(len(residuals) / dof) if dof > 0 else 1.0
     pre = [float(value) * inflation for value in residuals]
-    post_size = max(1, min(block, n - 1))
-    pre_size = max(1, min(block, len(pre) - 1)) if pre else 1
+    post_size = block_size(n, block)
+    pre_size = block_size(len(pre), block) if pre else 1
     rng = random.Random(seed)
     means = []
     for _ in range(samples):
-        post_mean = math.fsum(_block_resample(data, rng, post_size)) / n
+        post_mean = math.fsum(circular_resample(data, rng, post_size)) / n
         shift = 0.0
         if pre:
-            shift = math.fsum(w * e for w, e in zip(weights, _block_resample(pre, rng, pre_size)))
+            shift = math.fsum(w * e for w, e in zip(weights, circular_resample(pre, rng, pre_size)))
         # The counterfactual moves up by ``shift``, so the saving does too.
         means.append(post_mean + shift)
-    means.sort()
-    tail = (1.0 - confidence) / 2.0
+    se, se_dof = bootstrap_se(means, n, post_size)
+    if se <= 1e-12 * max(abs(mean), 1.0):
+        se = 0.0
+    half = student_t_quantile(1.0 - (1.0 - confidence) / 2.0, se_dof) * se
     return BootstrapInterval(
         mean=mean,
-        low=percentile(means, tail),
-        high=percentile(means, 1.0 - tail),
+        low=mean - half,
+        high=mean + half,
         samples=samples,
         block=post_size,
+        se=se,
+        dof=se_dof,
     )
 
 

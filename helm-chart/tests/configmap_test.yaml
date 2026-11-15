@@ -545,6 +545,9 @@ tests:
       - equal:
           path: data.CHANGE_MEASUREMENT_EPSILON_RATIO
           value: "0.02"
+      - equal:
+          path: data.CHANGE_MEASUREMENT_PRIOR_WEEK_CV
+          value: "0.05"
 
   - it: should reflect custom change measurement settings
     set:
@@ -552,7 +555,11 @@ tests:
       config.recommendations.changeMeasurement.postWindowDays: 14
       config.recommendations.changeMeasurement.warmupHours: 0
       config.recommendations.changeMeasurement.epsilonRatio: 0
+      config.recommendations.changeMeasurement.priorWeekCv: 0
     asserts:
+      - equal:
+          path: data.CHANGE_MEASUREMENT_PRIOR_WEEK_CV
+          value: "0"
       - equal:
           path: data.CHANGE_MEASUREMENT_ENABLED
           value: "false"

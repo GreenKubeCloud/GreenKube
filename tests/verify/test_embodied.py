@@ -22,8 +22,19 @@ PROJECTIONS = {"allocated_cost": 100.0, "co2e_g": 40_000.0, CO2E_WITH_EMBODIED: 
 
 
 def _without_embodied(buckets):
-    """Buckets of a snapshot frozen before embodied CO2e was measured."""
-    return [bucket.model_copy(update={"embodied_co2e_g": None, "embodied_coverage": None}) for bucket in buckets]
+    """Buckets of a snapshot frozen before embodied CO2e, charged quantities and carbon factors were measured."""
+    return [
+        bucket.model_copy(
+            update={
+                "embodied_co2e_g": None,
+                "embodied_coverage": None,
+                "charged_core_hours": None,
+                "charged_gib_hours": None,
+                "carbon_factor": None,
+            }
+        )
+        for bucket in buckets
+    ]
 
 
 def _measure(*, pre_embodied: bool):
@@ -94,9 +105,13 @@ def test_digest_of_a_snapshot_frozen_before_embodied_co2e_still_verifies():
     snapshot = BaselineSnapshot(snapshot_id="s", change_id=change.change_id, window=plan.pre, hours=hours)
     # The payload an older release hashed: the bucket fields as they were, without the embodied ones.
     legacy = snapshot.model_dump(mode="json", exclude={"content_sha256", "created_at"})
+    legacy.pop("health")  # added later (MEA-07), absent from older payloads
     for bucket in legacy["hours"]:
         bucket.pop("embodied_co2e_g")
         bucket.pop("embodied_coverage")
+        bucket.pop("charged_core_hours")
+        bucket.pop("charged_gib_hours")
+        bucket.pop("carbon_factor")
     assert snapshot.with_digest().content_sha256 == sha256_hex(legacy)
 
 
