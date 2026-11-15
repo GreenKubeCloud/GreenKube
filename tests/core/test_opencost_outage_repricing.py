@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
+import asyncpg
 import httpx
 import pytest
 
@@ -20,9 +24,9 @@ from greenkube.core.config import Config
 from greenkube.core.db import DatabaseManager
 from greenkube.models.metrics import CostMetric
 from greenkube.models.provenance import CostSource, is_cost_trusted
-from greenkube.storage.base_collection_window_repository import COST_STATUS_PENDING
-from greenkube.storage.sqlite.collection_watermark_repository import SQLiteCollectionWatermarkRepository
-from greenkube.storage.sqlite.collection_window_repository import SQLiteCollectionWindowRepository
+from greenkube.storage.base_collection_watermark_repository import create_collection_watermark_repository
+from greenkube.storage.base_collection_window_repository import COST_STATUS_PENDING, create_collection_window_repository
+from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 from tests.core.fake_prometheus import FakePrometheus  # pyrefly: ignore[missing-import]
 from tests.core.range_harness import build_range_processor  # pyrefly: ignore[missing-import]
@@ -147,11 +151,26 @@ class _Clock:
         return self.current
 
 
-@pytest.fixture
-async def stack(tmp_path):
+@pytest.fixture(params=["sqlite", "postgres"])
+async def stack(request, tmp_path):
+    backend = request.param
+    dsn = schema = None
+    if backend == "postgres":
+        dsn = os.getenv("GREENKUBE_TEST_POSTGRES_DSN")
+        if not dsn:
+            pytest.skip("Set GREENKUBE_TEST_POSTGRES_DSN to run the PostgreSQL outage test.")
+        schema = f"gk_oc_{uuid4().hex}"
+        db_settings: dict[str, Any] = {
+            "DB_TYPE": "postgres",
+            "DB_CONNECTION_STRING": dsn,
+            "DB_SCHEMA": schema,
+            "DB_POOL_MIN_SIZE": 1,
+            "DB_POOL_MAX_SIZE": 2,
+        }
+    else:
+        db_settings: dict[str, Any] = {"DB_TYPE": "sqlite", "DB_PATH": str(tmp_path / "outage.db")}
     cfg = Config(
-        DB_TYPE="sqlite",
-        DB_PATH=str(tmp_path / "outage.db"),
+        **db_settings,
         PROMETHEUS_QUERY_RANGE_STEP="5m",
         COLLECTION_SAFETY_LAG="1m",
         COLLECTION_MAX_BACKFILL="24h",
@@ -165,9 +184,11 @@ async def stack(tmp_path):
     prom.add(
         "container_cpu_usage_seconds_total", {"namespace": "ns", "pod": "p", "container": "app", "node": "n1"}, 0.1
     )
-    metrics_repo = SQLiteCombinedMetricsRepository(dbm)
-    watermarks = SQLiteCollectionWatermarkRepository(dbm)
-    windows = SQLiteCollectionWindowRepository(dbm)
+    metrics_repo = (
+        PostgresCombinedMetricsRepository(dbm) if backend == "postgres" else SQLiteCombinedMetricsRepository(dbm)
+    )
+    watermarks = create_collection_watermark_repository(dbm, backend)
+    windows = create_collection_window_repository(dbm, backend)
     opencost = _ToggleOpenCost()
     processor = build_range_processor(cfg, metrics_repo, prom, opencost, pods=[("ns", "p", "app")])
     clock = _Clock(BASE)
@@ -187,6 +208,12 @@ async def stack(tmp_path):
         yield {"job": job, "clock": clock, "opencost": opencost, "windows": windows, "metrics": metrics_repo}
     finally:
         await dbm.close()
+        if dsn and schema:
+            conn = await asyncpg.connect(dsn)
+            try:
+                await conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+            finally:
+                await conn.close()
 
 
 async def _collect_until(stack, window_end: datetime, **kwargs):
