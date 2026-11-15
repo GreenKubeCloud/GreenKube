@@ -164,7 +164,7 @@ class TestRiskModelV2:
         assert "jvm_suspected" not in cpu.confidence_factors
 
     def test_in_place_resize_constraints(self):
-        memory = _risk(_memory_rec(), _memory_evidence(), replicas=3)
+        memory = _risk(_memory_rec(), _memory_evidence(), replicas=3, oom_events=0)
         static = _risk(_cpu_rec(), _cpu_evidence(), replicas=3, static_cpu_manager=True)
         assert "memory_decrease_best_effort" in memory.risk_factors
         assert memory.risk_level == RiskLevel.LOW
@@ -222,6 +222,7 @@ class TestBindingEvidenceProfile:
 
 def _metric(pod, ts, cpu):
     return CombinedMetric(
+        restart_count=0,
         pod_name=pod,
         namespace="prod",
         owner_kind="Deployment",

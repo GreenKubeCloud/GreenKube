@@ -42,6 +42,9 @@ class NativeSource(RecommendationSource):
             analyzer_name = analyzer.__class__.__name__
             try:
                 recs.extend(analyzer.analyze(context))
+                if not analyzer.scan_complete():
+                    # The analyzer withheld advice it could not judge (REC-04): keep the previous one.
+                    self.last_collect_complete = False
             except Exception:
                 self.last_collect_complete = False
                 logger.exception("Native analyzer '%s' failed; continuing with remaining analyzers.", analyzer_name)

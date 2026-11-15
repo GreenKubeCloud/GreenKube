@@ -297,6 +297,7 @@ class OptimizationEngine:
                 reco_repo,
                 namespace=namespace,
                 incomplete_sources=generation.incomplete_sources,
+                withheld_sources=withheld_decrease_sources(reports),
             )
         except BaseException as exc:
             error = _error_text(exc)
@@ -405,8 +406,14 @@ class OptimizationEngine:
         reco_repo: "RecommendationRepository",
         namespace: Optional[str] = None,
         incomplete_sources: FrozenSet[str] = frozenset(),
+        withheld_sources: FrozenSet[str] = frozenset(),
     ) -> Tuple[RecommendationDiff, List[Recommendation]]:
         """Upserts generated recommendations, expires overdue actives and reconciles stale ones.
+
+        ``withheld_sources`` are incomplete sources that withheld decreases for
+        unknown reliability signals (REC-04): their missing increases are kept,
+        but a missing rightsizing decrease is retired (:meth:`_retire_withheld_decreases`),
+        never kept alive as last-known advice.
 
         Returns the diff against the active set of the scanned scope and the
         recommendations actually written (a last known record is kept instead
@@ -442,10 +449,62 @@ class OptimizationEngine:
             namespace=namespace,
             incomplete_sources=sorted(incomplete_sources),
         )
+        if withheld_sources:
+            await self._retire_withheld_decreases(reco_repo, previous, records, incomplete_sources, withheld_sources)
         # A namespaced scan snapshots and reconciles that namespace only; any
         # cluster-scoped record it emits is outside the baseline, not "new".
         in_scope = records if namespace is None else [record for record in records if record.namespace == namespace]
         return compute_diff(previous, in_scope, incomplete_sources), kept
+
+    @staticmethod
+    async def _retire_withheld_decreases(
+        reco_repo: "RecommendationRepository",
+        previous: List[RecommendationRecord],
+        records: List[RecommendationRecord],
+        incomplete_sources: FrozenSet[str],
+        withheld_sources: FrozenSet[str],
+    ) -> None:
+        """Marks stale the active rightsizing decreases a withholding source no longer emits (REC-04).
+
+        A decrease is re-emitted only when the container's restart/OOM history
+        is known to be clean; one that is missing was withheld (unknown history)
+        or is no longer advised, and is unsafe to keep either way. Other
+        incomplete sources (for example VPA) still protect it.
+        """
+        from greenkube.core.optimization.lifecycle import RecommendationLifecycle
+        from greenkube.models.metrics import RecommendationType
+
+        emitted = {record.fingerprint for record in records if record.fingerprint}
+        others = frozenset(incomplete_sources) - frozenset(withheld_sources)
+        lifecycle = RecommendationLifecycle(reco_repo)
+        for record in previous:
+            if record.id is None or not record.fingerprint or record.fingerprint in emitted:
+                continue
+            if record.type == RecommendationType.RIGHTSIZING_CPU:
+                current, proposed = record.current_cpu_request_millicores, record.recommended_cpu_request_millicores
+            elif record.type == RecommendationType.RIGHTSIZING_MEMORY:
+                current, proposed = record.current_memory_request_bytes, record.recommended_memory_request_bytes
+            else:
+                continue
+            if current is None or proposed is None or proposed >= current:
+                continue
+            supporters = supporting_sources(record.source, record.sources)
+            if supporters.isdisjoint(withheld_sources) or not supporters.isdisjoint(others):
+                continue
+            try:
+                await lifecycle.transition(
+                    record.id,
+                    "stale",
+                    event_type="stale",
+                    payload={"reason": "reliability_signals_unknown"},
+                    expected_statuses=("active",),
+                )
+                logger.info(
+                    "Retired decrease %s: restart/OOM history could not be read (reliability_signals_unknown).",
+                    record.id,
+                )
+            except Exception as exc:
+                logger.warning("Could not retire withheld decrease %s: %s", record.id, exc)
 
     def _record(self, recommendation: Recommendation) -> RecommendationRecord:
         """The persisted form of a recommendation, with its v2 identity, target and proposal (E4)."""
@@ -653,6 +712,19 @@ def _with_last_known_votes(
         last_known or "unknown",
     )
     return recommendation.model_copy(update=update)
+
+
+def withheld_decrease_sources(reports: Sequence[SourceReport]) -> FrozenSet[str]:
+    """Sources (and their v1 group) whose run withheld decreases for unknown reliability signals."""
+    from greenkube.core.optimization.analyzers.rightsizing import RELIABILITY_SIGNALS_UNKNOWN
+
+    names = set()
+    for report in reports:
+        if any(diagnostic.code == RELIABILITY_SIGNALS_UNKNOWN for diagnostic in report.run.diagnostics):
+            names.add(report.source_id)
+            if report.legacy_source:
+                names.add(report.legacy_source)
+    return frozenset(names)
 
 
 def _run_status(outcomes: List[SourceRunOutcome]) -> OptimizationRunStatus:

@@ -27,7 +27,12 @@ How an increase is sized (USER BUG 2, docs/recommendation.md):
 * one step is capped at ``RIGHTSIZING_MAX_INCREASE_FACTOR`` (default 2) x the
   current request unless OOM kills back it; the next scan re-evaluates;
 * a container OOM-killed or restarted within the window is never offered a
-  memory decrease;
+  CPU or memory decrease;
+* a decrease fails closed on unknown reliability signals (REC-04): it needs an
+  explicit zero OOM-kill count and restart count, or, when either signal could
+  not be read, a rollup restart history without restart
+  (``restart_increase == 0``). Otherwise it is withheld with the skip reason
+  ``reliability_signals_unknown`` (:func:`withheld_decrease`);
 * memory proposals are whole mebibytes, so Git receives ``23Mi``, never a raw
   byte count;
 * a usage summary that only exists at pod level (no container series) never
@@ -91,6 +96,10 @@ POD_CONSISTENCY_TOLERANCE = 0.05
 #: its pod without contradicting it (e2e: 6.7MiB container in a 5.8MiB pod blocked a
 #: 384Mi -> 16Mi decrease).
 POD_CONSISTENCY_SLACK = {"cpu": 5.0, "memory": 4.0 * MIB}
+#: Skip reason of a decrease withheld because the restart/OOM history could not be read (REC-04).
+RELIABILITY_SIGNALS_UNKNOWN = "reliability_signals_unknown"
+#: Text shown for :data:`RELIABILITY_SIGNALS_UNKNOWN`.
+RELIABILITY_SIGNALS_UNKNOWN_TEXT = "decrease withheld: restart/OOM history could not be read"
 #: Evidence flag of an increase sized from the pod's statistics because the container's contradicted them.
 CONTAINER_USAGE_EXCEEDS_POD = "container_usage_exceeds_pod"
 
@@ -190,6 +199,71 @@ def increase_skip_reason(summary: "WorkloadUsageSummary") -> Optional[str]:
     in particular, so GreenKube does not invent one (fail closed and explain).
     """
     return POD_LEVEL_USAGE_ONLY if not summary.container_name else None
+
+
+def rollup_restarts(
+    summary: "WorkloadUsageSummary", pod_summary: Optional["WorkloadUsageSummary"] = None
+) -> Optional[int]:
+    """Restarts in the window from the rollup: the container's, else its pod's, else None.
+
+    Restart counts are stored per pod (``combined_metrics``), so container
+    summaries usually carry none; the pod-level total bounds every container's.
+    """
+    if summary.restart_increase is not None:
+        return summary.restart_increase
+    if pod_summary is not None and pod_summary is not summary:
+        return pod_summary.restart_increase
+    return None
+
+
+def decrease_reliability_block(
+    summary: "WorkloadUsageSummary", pod_summary: Optional["WorkloadUsageSummary"] = None
+) -> Optional[str]:
+    """Why reliability history forbids a decrease, or None when it is known to be clean.
+
+    * ``restarted``: the container was OOM-killed or restarted in the window
+      (scan signals), or its rollup restart count grew while the signals are
+      unknown. Its samples cover its back-off, not its load.
+    * :data:`RELIABILITY_SIGNALS_UNKNOWN`: a signal is unknown (None) and the
+      rollup holds no restart count to fall back on.
+
+    None only for explicit zeros, or, when a signal is unknown, a rollup
+    restart history without restart: an OOM kill restarts the container, so no
+    restart rules out a kill too. Unknown is never treated as healthy.
+    """
+    if summary.oom_kill_count or summary.restarts_in_window:
+        return "restarted"
+    if summary.oom_kill_count == 0 and summary.restarts_in_window == 0:
+        return None
+    restarts = rollup_restarts(summary, pod_summary)
+    if restarts is None:
+        return RELIABILITY_SIGNALS_UNKNOWN
+    return None if restarts == 0 else "restarted"
+
+
+def withheld_decrease(
+    config: "Config",
+    summary: "WorkloadUsageSummary",
+    pod_summary: Optional["WorkloadUsageSummary"],
+    resource: Resource,
+) -> Optional[str]:
+    """:data:`RELIABILITY_SIGNALS_UNKNOWN` when a decrease the usage calls for is withheld
+    because the reliability signals are unknown, else None.
+
+    The decrease is re-evaluated as if the signals were explicit zeros; when that
+    yields a decrease and the real signals are not known to be clean (unknown,
+    or the rollup fallback shows restarts), the decrease was withheld for lack of
+    a readable restart/OOM history.
+    """
+    if summary.oom_kill_count or summary.restarts_in_window:
+        return None
+    if decrease_reliability_block(summary, pod_summary) is None:
+        return None
+    clean = replace(summary, oom_kill_count=0, restarts_in_window=0)
+    proposal = (cpu_proposal if resource == "cpu" else memory_proposal)(config, clean, pod_summary)
+    if proposal is None or proposal.direction != "decrease":
+        return None
+    return RELIABILITY_SIGNALS_UNKNOWN
 
 
 def _threshold(config: "Config") -> float:
@@ -321,10 +395,11 @@ def cpu_proposal(
     if evidence or _cpu_increase_triggered(config, summary):
         # The container's own data contradicts its pod's: no decrease from it either (fail closed).
         return None
-    if summary.oom_kill_count or summary.restarts_in_window:
+    if decrease_reliability_block(summary, pod_summary) is not None:
         # A crash-looping container's samples cover its back-off, not its load; and its CPU
         # decrease would share one action with its memory fix, so the fix would no longer be
-        # increase-only and its own unhealthiness would block it (e2e).
+        # increase-only and its own unhealthiness would block it (e2e). Unknown signals fail
+        # closed (REC-04).
         return None
 
     if stats.avg / request >= config.RIGHTSIZING_CPU_THRESHOLD or not _coverage_ok(config, summary):
@@ -478,8 +553,9 @@ def memory_proposal(
     if evidence or _memory_triggers(config, summary):
         # The container's own data contradicts its pod's: no decrease from it either (fail closed).
         return None
-    if summary.oom_kill_count or summary.restarts_in_window:
-        # A container OOM-killed or restarted in the window may have peaks the samples missed.
+    if decrease_reliability_block(summary, pod_summary) is not None:
+        # A container OOM-killed or restarted in the window may have peaks the samples missed;
+        # unknown signals fail closed (REC-04).
         return None
 
     if stats.avg / request >= config.RIGHTSIZING_MEMORY_THRESHOLD or not _coverage_ok(config, summary):

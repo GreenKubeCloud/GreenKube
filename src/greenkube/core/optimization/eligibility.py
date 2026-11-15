@@ -221,6 +221,12 @@ CODES: Dict[str, Tuple[str, str]] = {
         "The owning GitOps controller is suspended or unhealthy.",
         "Restore the controller to a healthy, syncing state.",
     ),
+    "oom_history_unknown": (
+        "The container's OOM-kill and restart history could not be read: a memory decrease could land below "
+        "peaks that killed it, so it is never automated.",
+        "Make sure Prometheus scrapes kube-state-metrics, wait for the next scan, or apply the change manually "
+        "after checking the container's restarts.",
+    ),
     "policy_interaction_conflict": (
         "An HPA, VPA or PodDisruptionBudget conflicts with this change.",
         "Remove the conflicting writer (for example set the VPA to updateMode Off) or apply the change manually.",
@@ -709,6 +715,9 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
                 warnings.extend(evaluator_warnings)
 
     risk_factors = [str(factor) for factor in getattr(record, "risk_factors", None) or []]
+    if "oom_history_unknown" in risk_factors:
+        # Fail closed (REC-04): an unknown OOM history never reaches a pull request automatically.
+        blockers.append(_entry("oom_history_unknown"))
     for code in ("singleton_workload", "memory_decrease_best_effort"):
         if code in risk_factors:
             warnings.append(_entry(code))

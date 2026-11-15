@@ -75,6 +75,7 @@ def _make_metric(
 ) -> CombinedMetric:
     """Create a CombinedMetric for testing."""
     return CombinedMetric(
+        restart_count=0,
         pod_name=pod_name,
         container_name=container_name,
         namespace=namespace,

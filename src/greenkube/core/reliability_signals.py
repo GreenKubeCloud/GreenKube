@@ -19,7 +19,13 @@ with what rightsizing needs to size increases and to judge decreases:
   specs of the Kubernetes API.
 
 Every source is best effort: a signal that cannot be read stays None
-("unknown"), never "healthy". Duplicate series of one container (several
+("unknown"), never "healthy". Each query runs on its own: one failing query
+(HTTP error, timeout, max-samples limit) leaves its own signal unknown and
+never drops the others. A signal is a known zero only when kube-state-metrics
+is scraped AND the query of that signal answered. The outcome of each signal
+(``ok``, ``failed``, ``unavailable``) is recorded on
+``UsageSnapshot.reliability_signal_status`` so rightsizing can explain a
+withheld decrease (REC-04). Duplicate series of one container (several
 kubelet endpoints or scrape jobs) are merged with ``max``, like usage.
 """
 
@@ -43,6 +49,15 @@ QueryFunction = Callable[[str, datetime], Awaitable[Optional[List[Dict[str, Any]
 _CONTAINERS = 'container!="",container!="POD"'
 #: Resolution at which restarts are matched with their termination reason.
 OOM_STEP = "5m"
+
+#: Outcome of a reliability signal read: the query answered.
+SIGNAL_OK = "ok"
+#: The query failed (HTTP error, timeout, Prometheus limit): the signal is unknown.
+SIGNAL_FAILED = "failed"
+#: No source for the signal (no Prometheus, kube-state-metrics not scraped): the signal is unknown.
+SIGNAL_UNAVAILABLE = "unavailable"
+#: Signals whose outcome is recorded, by name.
+SIGNAL_NAMES = ("oom_kills", "restarts", "throttling")
 
 #: Environment variables that configure a JVM.
 JVM_ENV_VARS = frozenset(
@@ -131,8 +146,12 @@ class ReliabilitySignals:
     jvm: Dict[Tuple[TargetKey, str], str] = field(default_factory=dict)
     #: Pod-spec list of each container (H1): ``container``, ``sidecar`` or ``init``.
     container_kinds: Dict[Tuple[TargetKey, str], str] = field(default_factory=dict)
-    #: kube-state-metrics answered: a target without OOM kills has 0, not unknown.
+    #: kube-state-metrics answered and the OOM query succeeded: a target without OOM kills has 0, not unknown.
     oom_known: bool = False
+    #: kube-state-metrics answered and the restart query succeeded: a target without restarts has 0.
+    restarts_known: bool = False
+    #: Outcome per signal name (:data:`SIGNAL_NAMES`): ``ok``, ``failed`` or ``unavailable``.
+    status: Dict[str, str] = field(default_factory=dict)
 
 
 def _value(item: Mapping[str, Any]) -> Optional[float]:
@@ -164,26 +183,42 @@ def _per_container(
     return dict(totals)
 
 
+async def _safe_query(query: QueryFunction, promql: str, at: datetime) -> Optional[List[Dict[str, Any]]]:
+    """Run one query; None when it failed or raised (one failing query never drops the others)."""
+    try:
+        return await query(promql, at)
+    except Exception as error:
+        logger.warning("Reliability signal query failed (%s): %s", type(error).__name__, promql[:80])
+        return None
+
+
 async def read_prometheus_signals(
     query: QueryFunction, snapshot: UsageSnapshot, *, window_seconds: float, at: datetime
 ) -> ReliabilitySignals:
-    """OOM kills and CPU throttling of the snapshot's targets over ``window_seconds`` before ``at``."""
+    """OOM kills and CPU throttling of the snapshot's targets over ``window_seconds`` before ``at``.
+
+    Each query is independent; a failed one leaves its signal unknown and is
+    recorded in :attr:`ReliabilitySignals.status`.
+    """
     window = f"{max(int(math.ceil(window_seconds)), 300)}s"
     known = list(snapshot.summaries)
     signals = ReliabilitySignals()
 
-    ksm_present = await query("count(kube_pod_container_status_restarts_total)", at)
-    signals.oom_known = bool(ksm_present) and any((_value(item) or 0) > 0 for item in ksm_present or [])
+    ksm_present = await _safe_query(query, "count(kube_pod_container_status_restarts_total)", at)
+    ksm_scraped = bool(ksm_present) and any((_value(item) or 0) > 0 for item in ksm_present or [])
+    ksm_status = SIGNAL_FAILED if ksm_present is None else SIGNAL_UNAVAILABLE
     # Count only the restarts of a step whose last termination, at that step, is OOMKilled:
     # a liveness-probe restart after an older OOM kill in the lookback is not an OOM kill.
-    ksm_oom = await query(
+    ksm_oom = await _safe_query(
+        query,
         "max by (namespace, pod, container) (sum_over_time(("
         f"(round(increase(kube_pod_container_status_restarts_total[{OOM_STEP}])) > 0) "
         "and on (namespace, pod, container) "
         f'(kube_pod_container_status_last_terminated_reason{{reason="OOMKilled"}} > 0))[{window}:{OOM_STEP}]))',
         at,
     )
-    cadvisor_oom = await query(
+    cadvisor_oom = await _safe_query(
+        query,
         f"max by (namespace, pod, container) (increase(container_oom_events_total{{{_CONTAINERS}}}[{window}]))",
         at,
     )
@@ -192,7 +227,15 @@ async def read_prometheus_signals(
         for key, value in source.items():
             kills[key] = max(kills.get(key, 0.0), value)
     signals.oom_kills = {key: int(round(value)) for key, value in kills.items() if round(value) > 0}
-    restarts = await query(
+    # A zero is known only when kube-state-metrics is scraped and its OOM query answered.
+    signals.oom_known = ksm_scraped and ksm_oom is not None
+    if signals.oom_known:
+        signals.status["oom_kills"] = SIGNAL_OK
+    else:
+        signals.status["oom_kills"] = SIGNAL_FAILED if ksm_scraped else ksm_status
+
+    restarts = await _safe_query(
+        query,
         "max by (namespace, pod, container) "
         f"(round(increase(kube_pod_container_status_restarts_total{{{_CONTAINERS}}}[{window}])))",
         at,
@@ -200,18 +243,26 @@ async def read_prometheus_signals(
     signals.restarts = {
         key: int(round(value)) for key, value in _per_container(restarts, known).items() if round(value) > 0
     }
+    signals.restarts_known = ksm_scraped and restarts is not None
+    if signals.restarts_known:
+        signals.status["restarts"] = SIGNAL_OK
+    else:
+        signals.status["restarts"] = SIGNAL_FAILED if ksm_scraped else ksm_status
 
-    throttled = await query(
+    throttled = await _safe_query(
+        query,
         "max by (namespace, pod, container) "
         f"(increase(container_cpu_cfs_throttled_periods_total{{{_CONTAINERS}}}[{window}]))",
         at,
     )
-    periods = await query(
+    periods = await _safe_query(
+        query,
         f"max by (namespace, pod, container) (increase(container_cpu_cfs_periods_total{{{_CONTAINERS}}}[{window}]))",
         at,
     )
     signals.throttled = _per_container(throttled, known)
     signals.periods = _per_container(periods, known)
+    signals.status["throttling"] = SIGNAL_OK if throttled is not None and periods is not None else SIGNAL_FAILED
     return signals
 
 
@@ -292,7 +343,7 @@ def apply_signals(snapshot: UsageSnapshot, signals: ReliabilitySignals) -> None:
                 hint = signals.jvm.get((target, name))
             if kills or signals.oom_known:
                 summary.oom_kill_count = kills
-            if restarts or signals.oom_known:
+            if restarts or signals.restarts_known:
                 summary.restarts_in_window = restarts
             if periods > 0:
                 summary.throttling_ratio = max(0.0, min(throttled / periods, 1.0))
@@ -312,8 +363,12 @@ async def attach_reliability_signals(
     query: Optional[QueryFunction] = None,
     list_pods: Optional[Callable[[], Awaitable[List[Any]]]] = None,
 ) -> ReliabilitySignals:
-    """Reads and attaches OOM kills, CPU throttling and JVM hints; never raises."""
-    signals = ReliabilitySignals()
+    """Reads and attaches OOM kills, CPU throttling and JVM hints; never raises.
+
+    The outcome of each Prometheus signal is copied to
+    ``snapshot.reliability_signal_status``.
+    """
+    signals = ReliabilitySignals(status={name: SIGNAL_UNAVAILABLE for name in SIGNAL_NAMES})
     if not snapshot.summaries:
         return signals
     if query is None and (getattr(config, "PROMETHEUS_URL", "") or "").strip():
@@ -328,6 +383,7 @@ async def attach_reliability_signals(
             )
         except Exception as error:  # a missing signal is unknown, never fatal to a scan
             logger.warning("Could not read OOM and CPU throttling signals: %s", error)
+            signals = ReliabilitySignals(status={name: SIGNAL_FAILED for name in SIGNAL_NAMES})
     try:
         pods = await (list_pods or _list_pods)()
         signals.jvm = jvm_hints_from_pods(pods, snapshot)
@@ -335,6 +391,7 @@ async def attach_reliability_signals(
     except Exception as error:
         logger.warning("Could not read pod specs for JVM detection: %s", error)
     apply_signals(snapshot, signals)
+    snapshot.reliability_signal_status = dict(signals.status)
     logger.debug(
         "Reliability signals: %d containers with OOM kills, %d with CFS data, %d JVM hints.",
         len(signals.oom_kills),

@@ -12,6 +12,7 @@ from greenkube.core.optimization.scoring import score_recommendations
 from greenkube.core.optimization.statistics import percentile
 from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationPatchV2
+from greenkube.models.workload_usage import POD_LEVEL
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -63,6 +64,23 @@ def _current_replicas(series: Sequence[CombinedMetric]) -> Optional[int]:
     return sum(1 for seen in last_seen.values() if latest - seen <= tolerance) or None
 
 
+def _oom_events(summary: Any, context: "OptimizationContext") -> Optional[int]:
+    """OOM kills of the target, or None when unknown.
+
+    When the scan signal is unknown, a rollup restart history without any
+    restart (the container's or its pod's ``restart_increase == 0``) proves
+    there was no OOM kill either: a kill restarts the container.
+    """
+    from greenkube.core.optimization.analyzers.rightsizing import rollup_restarts
+
+    if summary is None:
+        return None
+    if summary.oom_kill_count is not None:
+        return summary.oom_kill_count
+    pod_summary = context.usage_snapshot().summaries.get(summary.target, {}).get(POD_LEVEL)
+    return 0 if rollup_restarts(summary, pod_summary) == 0 else None
+
+
 def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> WorkloadRiskProfile:
     """Workload facts available to a scan: replicas, per-replica headroom and HPA presence."""
     series = series_for(rec, context) if not rec.target_node else []
@@ -78,7 +96,7 @@ def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> W
         replicas=_current_replicas(series) if rec.owner_kind else None,
         replica_cpu_p95_max=_replica_p95_max(series, "cpu_usage_millicores"),
         replica_memory_p95_max=_replica_p95_max(series, "memory_usage_bytes"),
-        oom_events=summary.oom_kill_count if summary is not None else None,
+        oom_events=_oom_events(summary, context),
         cpu_throttling_ratio=summary.throttling_ratio if summary is not None else None,
         hpa_resources=hpa_resources,
         jvm=True if summary is not None and summary.jvm_hint else None,

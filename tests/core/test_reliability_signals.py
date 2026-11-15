@@ -280,8 +280,8 @@ async def test_oom_kills_found_by_the_scan_drive_an_uncapped_memory_increase():
 
 
 def test_risk_profile_reads_the_scan_signals_and_jvm_lowers_memory_decrease_confidence():
-    plain = _summary(API, "web")
-    jvm = _summary(API, "web", jvm_hint="JAVA_TOOL_OPTIONS", oom_kill_count=0)
+    plain = _summary(API, "web", oom_kill_count=0, restarts_in_window=0)
+    jvm = _summary(API, "web", jvm_hint="JAVA_TOOL_OPTIONS", oom_kill_count=0, restarts_in_window=0)
     results = {}
     for name, summary in (("plain", plain), ("jvm", jvm)):
         context = OptimizationContext(config=Config(), usage=_snapshot(summary), analysis_window_seconds=14 * 86400)

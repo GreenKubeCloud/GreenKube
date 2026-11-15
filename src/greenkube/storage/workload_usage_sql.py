@@ -254,6 +254,7 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
         ranked AS (
             SELECT hourly.*,
                 MAX(hour_bucket) OVER ({partition}) AS last_hour,
+                LAG(restart_count) OVER ({partition} ORDER BY hour_bucket) AS previous_restart_count,
                 SUM(CASE WHEN cpu_n > 0 THEN 1 ELSE 0 END) OVER ({partition}) AS cpu_hours,
                 SUM(CASE WHEN mem_n > 0 THEN 1 ELSE 0 END) OVER ({partition}) AS mem_hours,
                 {", ".join(ranks)}
@@ -275,6 +276,11 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
             MAX(CASE WHEN hour_bucket = last_hour THEN cpu_limit END) AS latest_cpu_limit,
             MAX(CASE WHEN hour_bucket = last_hour THEN memory_limit END) AS latest_memory_limit,
             MAX(restart_count) AS restart_count,
+            CASE WHEN COUNT(restart_count) = 0 THEN NULL ELSE SUM(
+                CASE WHEN restart_count IS NULL OR previous_restart_count IS NULL THEN 0
+                    WHEN restart_count >= previous_restart_count THEN restart_count - previous_restart_count
+                    ELSE restart_count END
+            ) END AS restart_increase,
             SUM(total_cost) AS total_cost,
             SUM(co2e_grams) AS co2e_grams,
             SUM(embodied_co2e_grams) AS embodied_co2e_grams,
@@ -423,6 +429,7 @@ def summary_from_row(row: Mapping[str, Any], decode_time: Callable[[Any], Option
         cpu_limit=_i(row["latest_cpu_limit"]),
         memory_limit=_i(row["latest_memory_limit"]),
         restart_count=_i(row["restart_count"]),
+        restart_increase=_i(row["restart_increase"]),
         total_cost=float(row["total_cost"] or 0.0),
         co2e_grams=float(row["co2e_grams"] or 0.0),
         embodied_co2e_grams=float(row["embodied_co2e_grams"] or 0.0),

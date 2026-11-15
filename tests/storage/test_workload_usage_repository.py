@@ -226,6 +226,43 @@ async def test_sql_snapshot_matches_the_reference_summary(db):
         assert snapshot.nodes[node].cpu_request_avg == pytest.approx(expected_node.cpu_request_avg)
 
 
+async def test_sql_snapshot_derives_restarts_in_the_window_from_the_rollup(db):
+    """REC-04: the rollup restart history is the fallback when the scan signals are unknown."""
+    start = _base_hour()
+    # Hourly restart counts 2, 5 (+3), 1 (new pod: +1), 1, and a target without any count.
+    counts = [2, 5, 1, 1]
+    # Restart counts are pod-level (combined_metrics): container rows carry none.
+    rows = [
+        _row(start + timedelta(hours=hour, minutes=5 * step), restart_count=counts[hour])
+        for hour in range(4)
+        for step in range(12)
+    ]
+    rows += [
+        _row(start + timedelta(hours=hour, minutes=5 * step), container_name="web", node=None)
+        for hour in range(4)
+        for step in range(12)
+    ]
+    rows += [
+        _row(
+            start + timedelta(hours=hour, minutes=5 * step), pod_name="db-0", owner_kind="StatefulSet", owner_name="db"
+        )
+        for hour in range(4)
+        for step in range(12)
+    ]
+    repository, _ = await _rolled(db, rows, start, hours=4)
+
+    window = (start - timedelta(hours=1), start + timedelta(hours=5))
+    snapshot = await repository.read_usage_snapshot(*window)
+    reference = summarize(await repository.read_hours(*window))
+
+    api = ("shop", "Deployment", "api")
+    assert snapshot.summaries[api][""].restart_increase == reference.summaries[api][""].restart_increase == 4
+    assert snapshot.summaries[api]["web"].restart_increase is None
+    db_summary = snapshot.summaries[("shop", "StatefulSet", "db")][""]
+    assert db_summary.restart_increase is None
+    assert reference.summaries[("shop", "StatefulSet", "db")][""].restart_increase is None
+
+
 def _profiles_equal(left: UsageSnapshot, right: UsageSnapshot) -> bool:
     for target, profile in right.hour_profiles.items():
         for got, want in zip(left.hour_profiles[target], profile):

@@ -20,6 +20,7 @@ pytestmark = pytest.mark.database
 def _projected_recommendation():
     rows = [
         CombinedMetric(
+            restart_count=0,
             pod_name="api-7f9c5d9f6d-a1b2c",
             namespace="prod",
             owner_kind="Deployment",

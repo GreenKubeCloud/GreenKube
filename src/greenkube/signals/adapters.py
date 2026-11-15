@@ -22,6 +22,7 @@ from greenkube.signals.mapping import signal_from_recommendation
 from greenkube.signals.model import AlgorithmInfo, Capability, SignalOrigin, SourceSignal, TargetRef, TimeWindow
 from greenkube.signals.sdk import (
     CollectContext,
+    Diagnostic,
     Source,
     SourceBatch,
     SourceDeps,
@@ -166,7 +167,13 @@ class AnalyzerSource(Source):
             origin=SignalOrigin.NATIVE,
             fetched_at=self.deps.clock(),
         )
-        return SourceBatch(signals=signals, recommendations=recommendations)
+        diagnostics = [Diagnostic(**note) for note in self.analyzer.scan_diagnostics()]
+        return SourceBatch(
+            signals=signals,
+            recommendations=recommendations,
+            complete=self.analyzer.scan_complete(),
+            diagnostics=diagnostics,
+        )
 
 
 def analyzer_source_class(analyzer_cls: Type["Analyzer"]) -> Type[AnalyzerSource]:

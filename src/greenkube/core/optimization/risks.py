@@ -21,7 +21,10 @@ A suspected JVM also halves the confidence of a memory decrease
 namespaces, orphaned volumes and load balancers) cannot be undone by a revert,
 so they are never low risk and always carry ``irreversible_deletion``.
 
-Unknown profile facts (``None``) never change the risk level.
+Unknown profile facts (``None``) never change the risk level, with one
+exception: an unknown OOM history (``oom_events is None``) makes a memory
+decrease at least medium risk with the factor ``oom_history_unknown``, which
+blocks automation (REC-04: never treat unknown as healthy).
 """
 
 from __future__ import annotations
@@ -51,6 +54,9 @@ JVM_MEMORY_DECREASE_CONFIDENCE = 0.5
 
 #: Risk factor of every recommendation that deletes something (no revert brings it back).
 IRREVERSIBLE_DELETION = "irreversible_deletion"
+
+#: Risk factor of a memory decrease whose OOM history could not be read (blocks automation).
+OOM_HISTORY_UNKNOWN = "oom_history_unknown"
 
 #: CPU throttling ratio above which a CPU decrease is at least medium (high above the second value).
 THROTTLING_MEDIUM = 0.05
@@ -275,6 +281,10 @@ def apply_profile(
             if not increase:
                 level = RiskLevel.HIGH
             add("oom_history")
+        elif resource == "memory" and profile.oom_events is None and _is_decrease(rec, "memory"):
+            # Unknown is never healthy: the decrease may land below peaks that OOM-killed it.
+            level = _at_least(level, RiskLevel.MEDIUM)
+            add(OOM_HISTORY_UNKNOWN)
         if resource == "cpu" and profile.cpu_throttling_ratio is not None:
             if profile.cpu_throttling_ratio > THROTTLING_HIGH:
                 if not increase:

@@ -38,6 +38,7 @@ def multi_container_metrics() -> list[CombinedMetric]:
         for index, (cpu_usage, memory_usage_mib) in enumerate(zip(cpu_usages, memory_usages_mib, strict=True)):
             metrics.append(
                 CombinedMetric(
+                    restart_count=0,
                     pod_name="api-7d9f8b6c5-x2k4p",
                     namespace="prod",
                     owner_kind="Deployment",

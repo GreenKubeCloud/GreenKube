@@ -49,6 +49,9 @@ def _summary(days: float = 14.0, **overrides: Any) -> WorkloadUsageSummary:
         "memory": _stats(avg=100 * MIB, p95=120 * MIB, p99=130 * MIB, peak=140 * MIB),
         "cpu_request": 1000,
         "memory_request": 1024 * MIB,
+        # Known-clean reliability history: unknown signals withhold decreases (REC-04).
+        "oom_kill_count": 0,
+        "restarts_in_window": 0,
     }
     values.update(overrides)
     return WorkloadUsageSummary(**values)
@@ -189,6 +192,7 @@ def _context_with_rows(*, cpu_usage: int, cpu_request: int, days: float) -> Opti
     for hour in range(steps):
         rows.append(
             CombinedMetric(
+                restart_count=0,
                 pod_name="api-7d9f8b6c5d-abcde",
                 namespace="shop",
                 owner_kind="Deployment",
@@ -221,6 +225,7 @@ class TestPercentilesFromSteps:
             burst = ts.hour == 3 and ts.minute < 30
             rows.append(
                 CombinedMetric(
+                    restart_count=0,
                     pod_name="worker-0",
                     namespace="batch",
                     owner_kind="StatefulSet",
@@ -255,6 +260,7 @@ class TestNodes:
     def test_underutilized_node_type_is_never_emitted(self):
         rows = [
             CombinedMetric(
+                restart_count=0,
                 pod_name="solo",
                 namespace="default",
                 node="lonely",

@@ -41,6 +41,9 @@ def _summary(**overrides: Any) -> WorkloadUsageSummary:
         "memory_request": 64 * MIB,
         "memory_limit": 64 * MIB,
         "cpu_request": 100,
+        # Known-clean reliability history unless a test says otherwise (REC-04: unknown withholds decreases).
+        "oom_kill_count": 0,
+        "restarts_in_window": 0,
     }
     values.update(overrides)
     return WorkloadUsageSummary(**values)

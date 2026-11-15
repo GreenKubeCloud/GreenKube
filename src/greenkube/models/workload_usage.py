@@ -168,6 +168,10 @@ class WorkloadUsageSummary:
     oom_kill_count: Optional[int] = None
     #: Container restarts over the lookback (kube-state-metrics), 0 when it reports none, None when unknown.
     restarts_in_window: Optional[int] = None
+    #: Container restarts over the lookback derived from the rollup's hourly ``restart_count``:
+    #: the sum of hour-to-hour increases, a drop (new pod) counting as its new value.
+    #: None when no hour carries a restart count. Fallback when the signals above are unknown.
+    restart_increase: Optional[int] = None
     throttling_ratio: Optional[float] = None
     #: Why the container is believed to run a JVM (``JAVA_TOOL_OPTIONS``, ``-Xmx``, image name), None when not.
     jvm_hint: Optional[str] = None
@@ -224,6 +228,10 @@ class UsageSnapshot:
     source: str = "rows"
     #: First observed hour across all targets (None when unknown).
     first_hour: Optional[datetime] = None
+    #: Outcome of each reliability signal read by the scan (``oom_kills``, ``restarts``,
+    #: ``throttling``): ``ok``, ``failed`` (the query failed) or ``unavailable`` (no source).
+    #: Empty when the scan did not read them.
+    reliability_signal_status: Dict[str, str] = field(default_factory=dict)
 
 
 class BaselineMetric(CombinedMetric):

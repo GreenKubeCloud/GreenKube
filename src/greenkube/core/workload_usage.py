@@ -736,6 +736,7 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             cpu_limit=last.cpu_limit,
             memory_limit=last.memory_limit,
             restart_count=_restart_max(ordered),
+            restart_increase=restart_increase([item.restart_count for item in ordered]),
             total_cost=sum(item.total_cost for item in ordered),
             co2e_grams=sum(item.co2e_grams for item in ordered),
             embodied_co2e_grams=sum(item.embodied_co2e_grams for item in ordered),
@@ -768,6 +769,26 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             memory_request_avg=totals[5] / steps if steps else 0.0,
         )
     return snapshot
+
+
+def restart_increase(counts: Iterable[Optional[int]]) -> Optional[int]:
+    """Restarts over a series of hourly restart counts, oldest first (counter semantics).
+
+    Each rise from one known hour to the next adds the difference; a drop means
+    a new pod whose count started again from zero, so it adds the new value.
+    Hours without a count are skipped. None when no hour carries a count.
+    """
+    total: Optional[int] = None
+    previous: Optional[int] = None
+    for count in counts:
+        if count is None:
+            continue
+        if total is None:
+            total = 0
+        elif previous is not None:
+            total += count - previous if count >= previous else count
+        previous = count
+    return total
 
 
 def _restart_max(ordered: List[_HourTotals]) -> Optional[int]:
