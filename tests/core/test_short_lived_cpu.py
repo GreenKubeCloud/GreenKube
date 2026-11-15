@@ -46,6 +46,10 @@ async def test_container_living_40_seconds_gets_its_cpu_from_the_counter(tmp_pat
     labels = {"namespace": "ns", "pod": "job", "container": "run", "node": "n1"}
     # Evaluated at the end of step 1 the counter holds 20 CPU-seconds; the series is absent before.
     prom.add("container_cpu_usage_seconds_total", labels, lambda ts: 20.0 if started < ts <= started + STEP else None)
+    # cAdvisor's start time proves the container started inside the step (40 s before its end).
+    prom.add(
+        "container_start_time_seconds", labels, lambda ts: started + 260 if started < ts <= started + STEP else None
+    )
     processor = _processor(tmp_path, prom)
 
     rows = await processor.run_range(BASE, BASE + timedelta(seconds=3 * STEP))
@@ -69,3 +73,45 @@ async def test_a_series_present_in_the_previous_step_is_not_read_as_a_start(tmp_
     rows = await processor.run_range(BASE, BASE + timedelta(seconds=2 * STEP))
 
     assert not [row for row in rows if row.pod_name == "job" and row.cpu_usage_millicores is not None]
+
+
+@pytest.mark.asyncio
+async def test_a_scrape_gap_never_reads_a_long_running_counter_as_a_start(tmp_path):
+    """Review 1: after a Prometheus restart the series reappears with its whole counter (50000 s)."""
+    prom = _NoRate()
+    labels = {"namespace": "ns", "pod": "job", "container": "run", "node": "n1"}
+    gap_end = (BASE + timedelta(seconds=STEP)).timestamp()
+    prom.add("container_cpu_usage_seconds_total", labels, lambda ts: 50000.0 if ts > gap_end else None)
+    # The container started days ago.
+    prom.add("container_start_time_seconds", labels, lambda ts: BASE.timestamp() - 86400 if ts > gap_end else None)
+    processor = _processor(tmp_path, prom)
+
+    rows = await processor.run_range(BASE, BASE + timedelta(seconds=3 * STEP))
+
+    assert not [row for row in rows if row.pod_name == "job" and row.cpu_usage_millicores is not None]
+
+
+@pytest.mark.asyncio
+async def test_a_start_without_start_time_or_above_node_capacity_is_rejected(tmp_path):
+    """Review 1: no cAdvisor start time, or more cores than the node has: no recovered CPU."""
+    started = (BASE + timedelta(seconds=STEP)).timestamp()
+    for counter, start_time in ((20.0, None), (5000.0, started + 10)):
+        prom = _NoRate()
+        labels = {"namespace": "ns", "pod": "job", "container": "run", "node": "n1"}
+        prom.add(
+            "container_cpu_usage_seconds_total",
+            labels,
+            lambda ts, value=counter: value if started < ts <= started + STEP else None,
+        )
+        if start_time is not None:
+            prom.add(
+                "container_start_time_seconds",
+                labels,
+                lambda ts, value=start_time: value if started < ts <= started + STEP else None,
+            )
+        processor = _processor(tmp_path, prom)
+
+        rows = await processor.run_range(BASE, BASE + timedelta(seconds=3 * STEP))
+
+        # 5000 CPU-seconds in 300 s is 16.7 cores on a 2-core node.
+        assert not [row for row in rows if row.pod_name == "job" and row.cpu_usage_millicores is not None]

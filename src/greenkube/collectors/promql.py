@@ -163,6 +163,10 @@ class PromQLCatalog:
             "by (namespace,pod,container,node)"
         )
 
+    def container_start_time(self) -> str:
+        """cAdvisor start time (Unix seconds) of each container: proves a counter really started (review 1)."""
+        return f"max({self._container('container_start_time_seconds')}) by (namespace,pod,container,node)"
+
     def container_memory_working_set(self) -> str:
         """Working-set bytes per container (duplicate series counted once)."""
         return f"max({self._container('container_memory_working_set_bytes')}) by (namespace,pod,container,node)"

@@ -373,15 +373,26 @@ class HistoricalRangeProcessor:
         """Core usage of containers whose CPU counter first appears inside a step (COL-03 step 3).
 
         Evaluated from ``chunk.start`` so the step before the first one is
-        seen.  A container present at the previous evaluation is not a start
-        and is never recovered (a scrape gap of a long-running container must
-        not be read as its whole counter).  Returns per sample start the cores
-        per ``(namespace, pod, container)`` and the node of each pod.
+        seen.  A step is a start only when the series is absent at the
+        previous evaluation AND cAdvisor's ``container_start_time_seconds``
+        lies in ``(s - step, s + step]``: a long-running container whose
+        series reappears after a scrape gap (Prometheus restart, node outage)
+        has an old start time and is never read as its whole counter (review
+        1).  Returns per sample start the cores per ``(namespace, pod,
+        container)`` and the node of each pod.
         """
         step = chunk.step_seconds
         try:
-            results = await self.prometheus_collector.collect_range(
-                start=chunk.start, end=chunk.end, step=self._promql.step, query=self._promql.container_cpu_counter_max()
+            results, start_results = await asyncio.gather(
+                self.prometheus_collector.collect_range(
+                    start=chunk.start,
+                    end=chunk.end,
+                    step=self._promql.step,
+                    query=self._promql.container_cpu_counter_max(),
+                ),
+                self.prometheus_collector.collect_range(
+                    start=chunk.start, end=chunk.end, step=self._promql.step, query=self._promql.container_start_time()
+                ),
             )
         except Exception as error:
             raise RangeCollectionError(
@@ -389,30 +400,45 @@ class HistoricalRangeProcessor:
             ) from error
         start = chunk.start.timestamp()
         end = chunk.end.timestamp()
+        started_at: dict[tuple[str, str, str], dict[int, float]] = defaultdict(dict)
+        for series in start_results or []:
+            namespace, pod, container, _node = self._series_identity(series)
+            if namespace and pod and container:
+                started_at[(namespace, pod, container)].update(self._raw_by_sample(series, step))
         cores: dict[int, dict[tuple[str, str, str], float]] = defaultdict(dict)
         nodes: dict[int, dict[tuple[str, str], str]] = defaultdict(dict)
         for series in results or []:
             namespace, pod, container, node = self._series_identity(series)
             if not namespace or not pod or not container:
                 continue
-            present: dict[int, float] = {}
-            for raw_ts, raw_value in series.get("values", []) or []:
-                # Parsed without drop telemetry: the rate query of the same series already counts it.
-                try:
-                    evaluated_at = float(raw_ts)
-                    value = float(raw_value)
-                except (TypeError, ValueError):
-                    continue
-                if not math.isfinite(value) or value < 0:
-                    continue
-                present[int(math.ceil((evaluated_at - _TIMESTAMP_TOLERANCE) / step) * step - step)] = value
+            present = self._raw_by_sample(series, step)
             for sample_start, value in present.items():
                 if not start <= sample_start < end or (sample_start - step) in present:
+                    continue
+                container_start = started_at.get((namespace, pod, container), {}).get(sample_start)
+                if container_start is None or not sample_start - step < container_start <= sample_start + step:
                     continue
                 cores[sample_start][(namespace, pod, container)] = value / step
                 if node:
                     nodes[sample_start].setdefault((namespace, pod), node)
         return cores, nodes
+
+    @staticmethod
+    def _raw_by_sample(series: dict, step: int) -> dict[int, float]:
+        """Finite non-negative values of a series by sample start, without drop telemetry.
+
+        The rate queries of the same series already count dropped samples.
+        """
+        values: dict[int, float] = {}
+        for raw_ts, raw_value in series.get("values", []) or []:
+            try:
+                evaluated_at = float(raw_ts)
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value) and value >= 0:
+                values[int(math.ceil((evaluated_at - _TIMESTAMP_TOLERANCE) / step) * step - step)] = value
+        return values
 
     async def measure_rate_window_scrapes(self, at: datetime) -> float | None:
         """Most samples any cAdvisor CPU series holds in the rate window ending at ``at`` (COL-04 step 3).
@@ -1281,14 +1307,32 @@ class HistoricalRangeProcessor:
                     key = (series_ns, pod)
                     if key in samples.get(sample_start, {}) and key not in counter_cpu_pods[sample_start]:
                         continue
-                    counter_cpu_pods[sample_start].add(key)
-                    samples[sample_start][key] += usage
-                    normalized_container_samples[sample_start][(series_ns, pod, container)] = usage
                     resolved_node = (
                         recovered_nodes.get(sample_start, {}).get(key)
                         or pod_info_node_by_sample.get(sample_start, {}).get(key)
                         or pod_info_node_latest.get(key)
                     )
+                    # Never more cores than the node has (review 1): such a value is not a start.
+                    node_info, _source = node_at(
+                        resolved_node or "", datetime.fromtimestamp(sample_start, tz=timezone.utc)
+                    )
+                    capacity = node_info.cpu_capacity_cores if node_info else None
+                    if capacity and usage > capacity:
+                        logger.warning(
+                            "Counter-start CPU of %s/%s/%s at %s (%.1f cores) exceeds node %s capacity (%s); dropped.",
+                            series_ns,
+                            pod,
+                            container,
+                            datetime.fromtimestamp(sample_start, tz=timezone.utc).isoformat(),
+                            usage,
+                            resolved_node,
+                            capacity,
+                        )
+                        collection_telemetry.record_dropped_sample(collection_telemetry.DROP_REASON_IMPLAUSIBLE)
+                        continue
+                    counter_cpu_pods[sample_start].add(key)
+                    samples[sample_start][key] += usage
+                    normalized_container_samples[sample_start][(series_ns, pod, container)] = usage
                     if resolved_node:
                         pod_node_map_by_ts[sample_start].setdefault(key, resolved_node)
             del recovered_cores, recovered_nodes

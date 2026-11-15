@@ -666,7 +666,8 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      │   │  cpu_usage_millicores NULL with reason no_cpu_sample
      │   ├─ containers too short-lived for rate(): when the CPU counter first appears
      │   │  inside a step (absent at the previous evaluation), counter / step is the
-     │   │  usage (reason cpu_from_counter_start), only for pods without a rate sample
+     │   │  usage (reason cpu_from_counter_start), only for pods without a rate sample,
+     │   │  when container_start_time_seconds is within one step and below node cores
      │   └─ greenkube_collection_dropped_samples_total{reason}
      │
      ├─ Energy estimation per sample:

@@ -17,8 +17,16 @@ DROP_REASON_NON_FINITE = "non_finite"
 DROP_REASON_NEGATIVE = "negative_clamped"
 DROP_REASON_MALFORMED = "malformed"
 DROP_REASON_OUT_OF_WINDOW = "out_of_window"
+#: A value the node cannot produce (counter-start CPU above the node's cores, review 1).
+DROP_REASON_IMPLAUSIBLE = "implausible"
 _DROP_REASONS = frozenset(
-    {DROP_REASON_NON_FINITE, DROP_REASON_NEGATIVE, DROP_REASON_MALFORMED, DROP_REASON_OUT_OF_WINDOW}
+    {
+        DROP_REASON_NON_FINITE,
+        DROP_REASON_NEGATIVE,
+        DROP_REASON_MALFORMED,
+        DROP_REASON_OUT_OF_WINDOW,
+        DROP_REASON_IMPLAUSIBLE,
+    }
 )
 _ERROR_REASONS = frozenset({"collection_failed", "leadership_lost"})
 
