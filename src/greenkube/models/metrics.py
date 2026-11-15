@@ -105,6 +105,9 @@ class PodMetric(BaseModel):
     )
     owner_kind: Optional[str] = Field(None, description="Owner resource kind (Deployment, StatefulSet, etc.).")
     owner_name: Optional[str] = Field(None, description="Owner resource name.")
+    pod_uid: Optional[str] = Field(
+        None, description="Kubernetes pod UID (metadata.uid); a new UID under the same name is a recreated pod."
+    )
 
 
 class RecommendationType(str, Enum):

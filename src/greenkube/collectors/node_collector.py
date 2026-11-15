@@ -9,7 +9,7 @@ from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api
 
 from .base_collector import BaseCollector
-from .k8s_errors import KubernetesListError
+from .k8s_errors import KubernetesListError, list_all_pages
 
 if False:  # TYPE_CHECKING
     pass
@@ -62,12 +62,12 @@ class NodeCollector(BaseCollector):
         try:
             # Async call — pass a request timeout so the collector never hangs
             # indefinitely if the API server is slow or unreachable.
-            nodes = await api.list_node(watch=False, _request_timeout=_k8s_timeout())
-            if not nodes.items:
+            nodes = await list_all_pages(api.list_node, watch=False, _request_timeout=_k8s_timeout())
+            if not nodes:
                 logger.warning("No nodes found in the cluster.")
                 return nodes_info
 
-            for node in nodes.items:
+            for node in nodes:
                 node_name = node.metadata.name
                 labels = node.metadata.labels or {}
 
@@ -283,12 +283,12 @@ class NodeCollector(BaseCollector):
             return node_instance_map
 
         try:
-            nodes = await api.list_node(watch=False, _request_timeout=_k8s_timeout())
-            if not nodes.items:
+            nodes = await list_all_pages(api.list_node, watch=False, _request_timeout=_k8s_timeout())
+            if not nodes:
                 logger.debug("No nodes found when collecting instance types.")
                 return node_instance_map
 
-            for node in nodes.items:
+            for node in nodes:
                 node_name = node.metadata.name
                 labels = node.metadata.labels or {}
                 instance_type = labels.get(label_key)

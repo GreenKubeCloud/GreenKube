@@ -78,6 +78,20 @@ def record_k8s_list_error(resource: str) -> None:
     K8S_LIST_ERRORS.labels(resource=resource if resource in {"pods", "nodes"} else "other").inc()
 
 
+DEGRADED_WINDOWS = Counter(
+    "greenkube_collection_degraded_windows_total",
+    "Collection windows stored in degraded mode after COLLECTION_K8S_LIST_MAX_FAILURES consecutive failed "
+    "Kubernetes list attempts, by list (rows flagged with reason k8s_list_failed).",
+    ["list"],
+    registry=REGISTRY,
+)
+
+
+def record_degraded_window(resource: str) -> None:
+    """Count a window stored without a working Kubernetes pod or node list (review 5)."""
+    DEGRADED_WINDOWS.labels(list=resource if resource in {"pods", "nodes"} else "other").inc()
+
+
 def record_dropped_sample(reason: str, count: int = 1) -> None:
     if count > 0:
         DROPPED_SAMPLES.labels(reason=reason if reason in _DROP_REASONS else DROP_REASON_MALFORMED).inc(count)

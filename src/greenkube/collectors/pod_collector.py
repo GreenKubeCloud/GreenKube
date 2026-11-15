@@ -8,7 +8,7 @@ import logging
 from typing import Iterator, List, Optional
 
 from greenkube.collectors.base_collector import BaseCollector
-from greenkube.collectors.k8s_errors import KubernetesListError
+from greenkube.collectors.k8s_errors import KubernetesListError, list_all_pages
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api
 from greenkube.models.metrics import PodMetric
@@ -37,6 +37,7 @@ def _container_metric(
     namespace: str,
     owner_kind: Optional[str],
     owner_name: Optional[str],
+    pod_uid: Optional[str] = None,
 ) -> PodMetric:
     resources = getattr(container, "resources", None)
     requests = (getattr(resources, "requests", None) or {}) if resources else {}
@@ -53,6 +54,7 @@ def _container_metric(
         kind=kind,
         owner_kind=owner_kind,
         owner_name=owner_name,
+        pod_uid=pod_uid,
     )
 
 
@@ -101,11 +103,13 @@ class PodCollector(BaseCollector):
             return pod_metrics
 
         try:
-            pod_list = await api.list_pod_for_all_namespaces(
-                watch=False, _request_timeout=global_config.K8S_REQUEST_TIMEOUT or None
+            pods = await list_all_pages(
+                api.list_pod_for_all_namespaces,
+                watch=False,
+                _request_timeout=global_config.K8S_REQUEST_TIMEOUT or None,
             )
 
-            for pod in pod_list.items:
+            for pod in pods:
                 pod_name = pod.metadata.name
                 namespace = pod.metadata.namespace
 
@@ -131,6 +135,8 @@ class PodCollector(BaseCollector):
                             owner_kind = "Deployment"
                             owner_name = parts[0]
 
+                uid = getattr(pod.metadata, "uid", None)
+                pod_uid = uid if isinstance(uid, str) and uid else None
                 for container, kind in _containers_with_kind(pod.spec, include_init_containers):
                     pod_metrics.append(
                         _container_metric(
@@ -140,6 +146,7 @@ class PodCollector(BaseCollector):
                             namespace=namespace,
                             owner_kind=owner_kind,
                             owner_name=owner_name,
+                            pod_uid=pod_uid,
                         )
                     )
         except Exception as e:

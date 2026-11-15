@@ -81,6 +81,9 @@ class MetadataSource(StrEnum):
     """``pod_snapshots`` version valid at the sample time, the nearest one, or the live pod list."""
     KUBE_STATE_METRICS = "kube_state_metrics"
     """Reserved: per-step kube-state-metrics series."""
+    STORED_ROW = "stored_row"
+    """Owner, requests and containers of the row already stored for this pod and step: a window re-collected
+    after the pod and its history are gone re-runs the allocation with them."""
     MISSING = "missing"
     """No pod metadata at all: requests are not known, the owner is NULL."""
 

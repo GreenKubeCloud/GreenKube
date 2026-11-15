@@ -37,7 +37,7 @@ from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied
 from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
 from ..models.provenance import MetadataSource, NodeSource, UsageSource
-from ..storage.base_pod_snapshot_repository import PodSnapshotRepository, snapshot_at
+from ..storage.base_pod_snapshot_repository import PodSnapshotRepository, snapshot_at, snapshot_uncertain
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
 
@@ -51,7 +51,11 @@ logger = logging.getLogger(__name__)
 #: snapshots; rows for pods without CPU sample, COL-03).  Rows written before carry the bare package version and
 #: over-state CPU, memory and energy; ``+range.3`` rows keep the node and pod
 #: state of their collection time (``node_source``/``metadata_source`` NULL).
-CALCULATION_VERSION = f"{__version__}+range.4"
+#: range.5 (WP-01.1 review): node snapshot age from the last confirmation, pod
+#: history per observation interval and pod UID, unbounded history lookup for
+#: pods of the window, stored-row metadata on re-collection, degraded rows after
+#: repeated Kubernetes list failures.  ``+range.4`` rows are not rewritten.
+CALCULATION_VERSION = f"{__version__}+range.5"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
@@ -64,6 +68,13 @@ POD_CGROUP_TOLERANCE = 0.05
 CONTAINER_USAGE_EXCEEDS_POD = "container_usage_exceeds_pod"
 #: Estimation reason of a pod row without any pod metadata (no history, not in the live pod list).
 POD_METADATA_MISSING = "pod_metadata_missing"
+#: Estimation reason of a pod row whose history version may belong to another incarnation of the pod
+#: (the sample lies in an unobserved gap followed by a new or unknown pod UID, review 6).
+POD_METADATA_UNCERTAIN = "pod_metadata_uncertain"
+#: Estimation reason of a row stored after COLLECTION_K8S_LIST_MAX_FAILURES failed Kubernetes list attempts (review 5).
+K8S_LIST_FAILED = "k8s_list_failed"
+#: Failure counters kept per window; older entries are dropped (windows that became gaps).
+_MAX_TRACKED_LIST_FAILURES = 256
 #: Estimation reason of a pod row without CPU sample at its step (memory or Running phase only, COL-03).
 NO_CPU_SAMPLE = "no_cpu_sample"
 #: Pod history versions read around the range: a pod of the range was observed at most this far outside it.
@@ -129,6 +140,8 @@ class HistoricalRangeProcessor:
         self.pod_snapshot_repository = pod_snapshot_repository
         self._promql = PromQLCatalog.from_config(self._config)
         self._allocator = MetricRowAllocator(self._config)
+        #: Consecutive failed Kubernetes list attempts per (list, window start, window end) (review 5).
+        self._list_failures: dict[tuple[str, datetime, datetime], int] = {}
         self._gpu_model = GpuPowerModel()
         #: Idle rows (``__idle__`` per node and step) of the last ``run_range`` call.
         self.last_idle_metrics: List[NodeIdleMetric] = []
@@ -464,7 +477,9 @@ class HistoricalRangeProcessor:
         margin = max(_POD_SNAPSHOT_MARGIN, timedelta(seconds=step_seconds))
         try:
             if live_pods:
-                await repository.save_pods(live_pods, now)
+                await repository.save_pods(
+                    live_pods, now, cluster_uid=str(getattr(self._config, "CLUSTER_NAME", "") or "default")
+                )
                 # Versions older than node snapshots are ignored anyway; keep the table bounded.
                 await repository.prune(now - timedelta(days=self._config.NODE_DATA_MAX_AGE_DAYS))
             # No upper bound: a version first observed after the range is the
@@ -479,6 +494,38 @@ class HistoricalRangeProcessor:
                 end.isoformat(),
             )
             return {}
+
+    def _list_failure_budget_spent(self, resource: str, start: datetime, end: datetime, error: Exception) -> bool:
+        """Count a failed pod or node list for the window; True once COLLECTION_K8S_LIST_MAX_FAILURES is reached.
+
+        A persistent failure (missing RBAC, a list that always times out) would
+        otherwise block collection until the window leaves the backfill horizon
+        and becomes a permanent gap.  Once the budget is spent the window is
+        stored in degraded mode: rows without history are flagged with reason
+        ``k8s_list_failed``, logged at ERROR and counted in
+        ``greenkube_collection_degraded_windows_total``.
+        """
+        key = (resource, start, end)
+        attempts = self._list_failures.get(key, 0) + 1
+        self._list_failures[key] = attempts
+        while len(self._list_failures) > _MAX_TRACKED_LIST_FAILURES:
+            self._list_failures.pop(next(iter(self._list_failures)))
+        budget = max(1, int(getattr(self._config, "COLLECTION_K8S_LIST_MAX_FAILURES", 3) or 1))
+        if attempts < budget:
+            return False
+        self._list_failures.pop(key, None)
+        collection_telemetry.record_degraded_window(resource)
+        logger.error(
+            "Kubernetes %s list failed %d time(s) for %s -> %s (%s); storing the window in degraded mode "
+            "(reason %s) instead of leaving a gap.",
+            "pod" if resource == "pods" else "node",
+            attempts,
+            start.isoformat(),
+            end.isoformat(),
+            error,
+            K8S_LIST_FAILED,
+        )
+        return True
 
     async def _require_recent_pod_history(
         self, error: Exception, now: datetime, step_seconds: int, start: datetime, end: datetime
@@ -506,6 +553,97 @@ class HistoricalRangeProcessor:
         logger.warning(
             "Kubernetes pod list failed (%s); pod metadata comes from the pod history for %s.", error, window
         )
+
+    async def _resolve_unseen_pods(
+        self,
+        pod_keys: set[tuple[str, str]],
+        pod_history: dict,
+        live_pods: dict,
+        stored_metadata: dict[tuple[str, str, int], list[PodMetric]],
+        chunk: CollectionWindow,
+    ) -> None:
+        """Find metadata for pods of the chunk that neither the range read of the history nor the live list has.
+
+        1) Every retained history version of those pods, without lower bound:
+        a pod deleted during a controller downtime longer than the read margin
+        keeps its metadata (review 2).  2) For pods still unknown, the owner,
+        requests and containers of the rows already stored for them: a
+        re-collected window re-runs the allocation with the stored requests
+        instead of request 0, so the row stays self-consistent (review 4).
+        """
+        # Pods without history in the range read, or whose earliest version read
+        # starts after the chunk (an older version, or a previous incarnation, may exist).
+        incomplete = {
+            key
+            for key in pod_keys
+            if (key not in pod_history and key not in live_pods)
+            or (key in pod_history and pod_history[key][0].first_seen > chunk.start)
+        }
+        repository = self.pod_snapshot_repository
+        if incomplete and repository is not None:
+            try:
+                found = await repository.get_pod_versions(incomplete, chunk.end + _POD_SNAPSHOT_MARGIN)
+            except Exception as error:
+                logger.warning("Pod metadata history lookup failed: %s", error)
+                found = {}
+            for key, versions in found.items():
+                merged = {(v.first_seen, v.spec_hash, v.pod_uid): v for v in (*pod_history.get(key, ()), *versions)}
+                pod_history[key] = [merged[version_key] for version_key in sorted(merged, key=lambda k: k[0])]
+        unseen = {key for key in pod_keys if key not in pod_history and key not in live_pods}
+        if not unseen:
+            return
+        if not unseen:
+            return
+        try:
+            stored_rows = await self.combined_metrics_repository.read_combined_metrics(chunk.start, chunk.end)
+            read_containers = getattr(self.combined_metrics_repository, "read_container_metrics", None)
+            stored_containers = await read_containers(chunk.start, chunk.end) if read_containers else []
+        except Exception as error:
+            logger.warning("Stored rows unavailable for pods without metadata: %s", error)
+            return
+        if not isinstance(stored_rows, list) or not isinstance(stored_containers, list):
+            return
+        containers_by_row: dict[tuple[str, str, int], list[PodMetric]] = defaultdict(list)
+        for row in stored_containers:
+            if row.timestamp is None or not row.container_name or (row.namespace, row.pod_name) not in unseen:
+                continue
+            containers_by_row[(row.namespace, row.pod_name, int(ensure_utc(row.timestamp).timestamp()))].append(
+                PodMetric(
+                    pod_name=row.pod_name,
+                    namespace=row.namespace,
+                    container_name=row.container_name,
+                    cpu_request=row.cpu_request or 0,
+                    memory_request=row.memory_request or 0,
+                    cpu_limit=row.cpu_limit,
+                    memory_limit=row.memory_limit,
+                    owner_kind=row.owner_kind,
+                    owner_name=row.owner_name,
+                )
+            )
+        for row in stored_rows:
+            if row.timestamp is None or row.container_name or (row.namespace, row.pod_name) not in unseen:
+                continue
+            if row.metadata_source == MetadataSource.MISSING.value:
+                continue
+            if not (row.owner_kind or (row.cpu_request or 0) > 0 or (row.memory_request or 0) > 0):
+                continue
+            key = (row.namespace, row.pod_name, int(ensure_utc(row.timestamp).timestamp()))
+            containers = containers_by_row.get(key)
+            if not containers or sum(c.cpu_request for c in containers) != (row.cpu_request or 0):
+                # Without matching container rows the pod row carries its own
+                # requests; it then gets no container rows (stale ones are deleted on write).
+                containers = [
+                    PodMetric(
+                        pod_name=row.pod_name,
+                        namespace=row.namespace,
+                        container_name="",
+                        cpu_request=row.cpu_request or 0,
+                        memory_request=row.memory_request or 0,
+                        owner_kind=row.owner_kind,
+                        owner_name=row.owner_name,
+                    )
+                ]
+            stored_metadata[key] = containers
 
     # ------------------------------------------------------------------
     # Public API
@@ -585,7 +723,11 @@ class HistoricalRangeProcessor:
                 return None
             for ts, info in reversed(timeline):
                 if ts <= timestamp:
-                    age = timestamp - ts
+                    # node_snapshots_scd writes a version only when the node
+                    # changes: the age counts from the end of the version or
+                    # its last confirmation, not from valid_from (review 1).
+                    confirmed = max(ts, ensure_utc(info.confirmed_until)) if info.confirmed_until else ts
+                    age = timestamp - confirmed
                     if age > timedelta(days=self._config.NODE_DATA_MAX_AGE_DAYS):
                         logger.warning(
                             "Node snapshot for '%s' at %s is too old (age: %s). Ignoring.",
@@ -611,37 +753,57 @@ class HistoricalRangeProcessor:
             pod_list_error = error
             collection_telemetry.record_k8s_list_error("pods")
         if pod_list_error is not None:
-            await self._require_recent_pod_history(pod_list_error, now, chosen_step_sec, start_dt, end_dt)
+            # Rows of pods without history then carry reason k8s_list_failed (review 5).
+            if not self._list_failure_budget_spent("pods", start_dt, end_dt, pod_list_error):
+                await self._require_recent_pod_history(pod_list_error, now, chosen_step_sec, start_dt, end_dt)
+        else:
+            self._list_failures.pop(("pods", start_dt, end_dt), None)
         live_pods: dict[tuple[str, str], list[PodMetric]] = defaultdict(list)
         for pod_metric in pod_metrics_list:
             live_pods[(pod_metric.namespace, pod_metric.pod_name)].append(pod_metric)
         pod_history = await self._pod_history(pod_metrics_list, now, start_dt, end_dt, chosen_step_sec)
 
-        def pod_metadata_at(pod_key: tuple[str, str], timestamp: datetime) -> tuple[list[PodMetric], MetadataSource]:
-            """Containers (with owner and requests) of a pod as of ``timestamp``.
+        gap_tolerance = timedelta(seconds=2 * chosen_step_sec)
+        #: (namespace, pod, sample epoch) -> metadata of the row already stored for it (review 4).
+        stored_metadata: dict[tuple[str, str, int], list[PodMetric]] = {}
+
+        def pod_metadata_at(
+            pod_key: tuple[str, str], timestamp: datetime
+        ) -> tuple[list[PodMetric], MetadataSource, bool]:
+            """Containers (with owner and requests) of a pod as of ``timestamp``, their source and an uncertainty flag.
 
             The history version valid at ``timestamp`` (or the nearest one),
-            else the live pod list, else nothing (``missing``): a pod deleted
-            before its window was collected keeps the metadata it had.
+            else the live pod list, else the metadata of the row already stored
+            for this pod and step (a re-collection after the pod and its
+            history are gone), else nothing (``missing``).  The flag is true
+            when the version may belong to another incarnation of the pod.
             """
             versions = pod_history.get(pod_key)
             if versions:
                 version = snapshot_at(versions, timestamp)
                 if version is not None:
-                    return version.pod_metrics(), MetadataSource.K8S_SNAPSHOT
+                    uncertain = snapshot_uncertain(versions, version, timestamp, gap_tolerance)
+                    return version.pod_metrics(), MetadataSource.K8S_SNAPSHOT, uncertain
             live = live_pods.get(pod_key)
             if live:
-                return live, MetadataSource.K8S_SNAPSHOT
-            return [], MetadataSource.MISSING
+                return live, MetadataSource.K8S_SNAPSHOT, False
+            stored = stored_metadata.get((pod_key[0], pod_key[1], int(timestamp.timestamp())))
+            if stored is not None:
+                return stored, MetadataSource.STORED_ROW, False
+            return [], MetadataSource.MISSING, False
 
         # Current node metadata — collected once here for zone mapping and
         # assembly.  Historical snapshots (node_timeline) cover the past;
         # this provides a best-effort fallback for nodes not yet in the DB.
+        node_list_degraded = False
         try:
             nodes_info = await _list_strictly(self.node_collector.collect) or {}
+            self._list_failures.pop(("nodes", start_dt, end_dt), None)
         except Exception as error:  # KubernetesListError, or any failure of another collector
             collection_telemetry.record_k8s_list_error("nodes")
-            if not node_timeline:
+            if not node_timeline and self._list_failure_budget_spent("nodes", start_dt, end_dt, error):
+                node_list_degraded = True
+            elif not node_timeline:
                 raise RangeCollectionError(
                     f"Kubernetes node list failed for {start_dt.isoformat()} -> {end_dt.isoformat()} and no node "
                     f"snapshot exists: {error}"
@@ -866,6 +1028,13 @@ class HistoricalRangeProcessor:
                         pod_node_map_by_ts[sample_start][pod_key] = node
                     groups[(sample_start, node)].append(pod_key)
             del pods_by_sample, running_by_sample, memory_nodes
+            await self._resolve_unseen_pods(
+                {pod_key for pod_keys in groups.values() for pod_key in pod_keys},
+                pod_history,
+                live_pods,
+                stored_metadata,
+                chunk,
+            )
             latest_sample_ts = max(samples) if samples else None
             current_chunk = current_window and chunk_end == end_dt
             gpu_power_by_group = self._gpu_power_by_group(
@@ -951,7 +1120,7 @@ class HistoricalRangeProcessor:
                 group_pod_metrics: List[PodMetric] = []
                 for em_namespace, pod_name in pod_keys:
                     pod_key = (em_namespace, pod_name)
-                    pod_containers, metadata_source = pod_metadata_at(pod_key, ts)
+                    pod_containers, metadata_source, metadata_uncertain = pod_metadata_at(pod_key, ts)
                     group_pod_metrics.extend(pod_containers)
                     owner = next(
                         ((c.owner_kind, c.owner_name) for c in pod_containers if c.owner_kind and c.owner_name),
@@ -992,6 +1161,14 @@ class HistoricalRangeProcessor:
                     if metadata_source is MetadataSource.MISSING:
                         is_estimated = True
                         estimation_reasons = list(dict.fromkeys([*estimation_reasons, POD_METADATA_MISSING]))
+                    if metadata_source is MetadataSource.MISSING and pod_list_error is not None:
+                        estimation_reasons = list(dict.fromkeys([*estimation_reasons, K8S_LIST_FAILED]))
+                    if node_list_degraded and node_source is NodeSource.UNKNOWN:
+                        is_estimated = True
+                        estimation_reasons = list(dict.fromkeys([*estimation_reasons, K8S_LIST_FAILED]))
+                    if metadata_uncertain:
+                        is_estimated = True
+                        estimation_reasons = list(dict.fromkeys([*estimation_reasons, POD_METADATA_UNCERTAIN]))
                     node_rows.append(
                         CombinedMetric(
                             pod_name=pod_name,

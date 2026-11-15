@@ -184,6 +184,7 @@ The controller collects half-open, step-aligned windows `[start, end)` and recor
 | `config.prometheus.scrapeInterval` | `PROMETHEUS_SCRAPE_INTERVAL` | `30s` | cAdvisor scrape interval. Rate windows span `max(step, 4 × scrapeInterval)` so each rate sees at least four scrapes. |
 | `config.collection.safetyLag` | `COLLECTION_SAFETY_LAG` | `1m` | A window is collected once its end is at least this old, so late scrapes and remote-write delays are included. Increase it for Thanos/Mimir or agent-mode Prometheus. |
 | `config.collection.maxBackfill` | `COLLECTION_MAX_BACKFILL` | `24h` | Catch-up horizon after downtime. Windows older than this are skipped and counted in `greenkube_collection_gap_windows_total`. Keep it within your Prometheus retention. |
+| `config.collection.k8sListMaxFailures` | `COLLECTION_K8S_LIST_MAX_FAILURES` | `3` | Consecutive failed Kubernetes pod or node list attempts (missing RBAC, timeouts) for the same window before the window is stored in degraded mode instead of retried: pods without history get `metadata_source = missing` and the reason `k8s_list_failed`, nodes without snapshot fall back to the defaults. Counted in `greenkube_collection_degraded_windows_total{list}`. |
 
 Durations accept `s`, `m`, `h` and `d` suffixes. The watermark lag is exported as `greenkube_collection_watermark_lag_seconds{source}`; it stays below two steps in steady state.
 

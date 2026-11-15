@@ -137,3 +137,43 @@ async def test_failed_node_list_with_node_history_proceeds_from_snapshots(storag
     row = next(row for row in rows if not row.container_name)
     assert row.node_source == "snapshot"
     assert row.node_instance_type == "m5.large"
+
+
+@pytest.mark.asyncio
+async def test_persistent_pod_list_failure_stores_degraded_rows_after_the_failure_budget(storage):
+    """Review 5: after COLLECTION_K8S_LIST_MAX_FAILURES attempts the window is stored, flagged, not left as a gap."""
+    cfg, snapshots = storage
+    cfg = cfg.model_copy(update={"COLLECTION_K8S_LIST_MAX_FAILURES": 2})
+    processor = build_range_processor(cfg, None, _prometheus(), FakeOpenCost(), pod_snapshot_repository=snapshots)
+    processor.pod_collector = _failing_pod_collector()
+    before = _degraded("pods")
+
+    with pytest.raises(RangeCollectionError, match="pod list"):
+        await processor.run_range(BASE, BASE + timedelta(seconds=STEP))
+    rows = await processor.run_range(BASE, BASE + timedelta(seconds=STEP))
+
+    row = next(row for row in rows if not row.container_name)
+    assert row.metadata_source == "missing"
+    assert row.is_estimated
+    assert "k8s_list_failed" in row.estimation_reasons
+    assert _degraded("pods") == before + 1
+
+
+@pytest.mark.asyncio
+async def test_persistent_node_list_failure_stores_degraded_rows_after_the_failure_budget(storage):
+    cfg, snapshots = storage
+    cfg = cfg.model_copy(update={"COLLECTION_K8S_LIST_MAX_FAILURES": 1})
+    processor = build_range_processor(cfg, None, _prometheus(), FakeOpenCost(), pod_snapshot_repository=snapshots)
+    processor.node_collector = _failing_node_collector()
+
+    rows = await processor.run_range(BASE, BASE + timedelta(seconds=STEP))
+
+    row = next(row for row in rows if not row.container_name)
+    assert row.node_source == "unknown"
+    assert "k8s_list_failed" in row.estimation_reasons
+
+
+def _degraded(resource: str) -> float:
+    from greenkube.core.collection_telemetry import DEGRADED_WINDOWS
+
+    return DEGRADED_WINDOWS.labels(list=resource)._value.get()

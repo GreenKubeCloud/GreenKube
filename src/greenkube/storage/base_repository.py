@@ -243,12 +243,16 @@ class CombinedMetricsRepository(ABC):
     """
 
     @abstractmethod
-    async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
+    async def write_combined_metrics(self, metrics: List[CombinedMetric], *, replace_containers: bool = False) -> int:
         """
         Writes a list of CombinedMetric objects to the repository.
 
         Args:
             metrics: A list of CombinedMetric objects to persist.
+            replace_containers: The batch holds every container row of its pod
+                rows (a collected window): stored container rows of those pods
+                and steps that the batch no longer has are deleted in the same
+                transaction, so pod and container rows agree.
 
         Returns:
             The number of records saved.

@@ -4,9 +4,11 @@ The range processor collects a window after it ended, when a pod of that
 window may already be deleted.  Every collection tick therefore records what
 the Kubernetes API says about each live pod (owner, requests, limits and
 container list) as one version per distinct spec with the interval it was
-observed in.  Later and repeated collections resolve the metadata of a sample
-from this history instead of from the pods that happen to exist at collection
-time.
+observed in.  A version is one observation interval: a spec that changes and
+changes back (A, B, A) yields three versions, and a new pod UID under the same
+name (a recreated StatefulSet pod) starts a new version.  Later and repeated
+collections resolve the metadata of a sample from this history instead of from
+the pods that happen to exist at collection time.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import json
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterable, Sequence
 
 from greenkube.models.metrics import PodMetric
@@ -45,6 +47,8 @@ class PodSnapshot:
     first_seen: datetime
     last_seen: datetime
     spec_hash: str = field(default="", compare=False)
+    pod_uid: str | None = None
+    cluster_uid: str | None = None
 
     def pod_metrics(self) -> list[PodMetric]:
         """The containers of this version as PodMetric records (the pod collector's shape)."""
@@ -56,6 +60,7 @@ class PodSnapshot:
                     "namespace": self.namespace,
                     "owner_kind": self.owner_kind,
                     "owner_name": self.owner_name,
+                    "pod_uid": self.pod_uid,
                 }
             )
             for container in self.containers
@@ -70,6 +75,7 @@ def snapshots_from_pod_metrics(pods: Iterable[PodMetric], seen_at: datetime) -> 
     snapshots = []
     for (namespace, pod_name), containers in by_pod.items():
         owner = next(((c.owner_kind, c.owner_name) for c in containers if c.owner_kind and c.owner_name), (None, None))
+        pod_uid = next((c.pod_uid for c in containers if c.pod_uid), None)
         payload = tuple(
             sorted(
                 ({key: getattr(c, key) for key in CONTAINER_FIELDS} for c in containers),
@@ -89,9 +95,49 @@ def snapshots_from_pod_metrics(pods: Iterable[PodMetric], seen_at: datetime) -> 
                 first_seen=seen_at,
                 last_seen=seen_at,
                 spec_hash=digest,
+                pod_uid=pod_uid,
             )
         )
     return snapshots
+
+
+@dataclass(frozen=True)
+class LatestVersion:
+    """The most recent stored version of a pod, as needed to decide how to record a new observation."""
+
+    version_id: int
+    spec_hash: str
+    pod_uid: str | None
+
+
+def continues_version(latest: LatestVersion | None, snapshot: PodSnapshot) -> bool:
+    """True when ``snapshot`` extends the pod's latest version instead of starting a new one.
+
+    Same spec and no UID change (an unknown UID on either side is not a
+    change).  A spec that differs from the latest version always starts a new
+    version, even when an older version had it (rollback A, B, A).
+    """
+    if latest is None or latest.spec_hash != snapshot.spec_hash:
+        return False
+    return not (latest.pod_uid and snapshot.pod_uid and latest.pod_uid != snapshot.pod_uid)
+
+
+def snapshot_uncertain(
+    versions: Sequence[PodSnapshot], version: PodSnapshot, timestamp: datetime, tolerance: timedelta
+) -> bool:
+    """True when ``version`` (the one valid at ``timestamp``) may not describe the pod then (review 6).
+
+    The sample lies in an unobserved gap after ``version`` (later than its
+    ``last_seen`` plus ``tolerance``) and the next version is another pod
+    incarnation: a different UID, or no UID to tell (the pod may have been
+    recreated with a new spec during the gap).
+    """
+    if timestamp <= version.last_seen + tolerance:
+        return False
+    following = next((candidate for candidate in versions if candidate.first_seen > version.first_seen), None)
+    if following is None:
+        return False
+    return not (version.pod_uid and following.pod_uid and version.pod_uid == following.pod_uid)
 
 
 def snapshot_at(versions: Sequence[PodSnapshot], timestamp: datetime) -> PodSnapshot | None:
@@ -99,7 +145,7 @@ def snapshot_at(versions: Sequence[PodSnapshot], timestamp: datetime) -> PodSnap
 
     The latest version first observed at or before ``timestamp``; failing that
     the earliest version (the pod was first observed after the sample).
-    ``versions`` must be sorted by ``first_seen``.
+    ``versions`` must be sorted by ``first_seen`` (then insertion order).
     """
     valid = None
     for version in versions:
@@ -116,16 +162,27 @@ class PodSnapshotRepository(ABC):
     """Stores and reads the pod metadata history."""
 
     @abstractmethod
-    async def save_pods(self, pods: Sequence[PodMetric], seen_at: datetime) -> int:
+    async def save_pods(self, pods: Sequence[PodMetric], seen_at: datetime, *, cluster_uid: str | None = None) -> int:
         """Record the live pod list observed at ``seen_at``; returns the number of pods recorded.
 
-        A pod whose owner, requests, limits and containers are unchanged extends
-        its current version (``last_seen``); a changed spec starts a new version.
+        A pod whose owner, requests, limits, containers and UID are unchanged
+        since its latest version extends that version (``last_seen``); anything
+        else starts a new version (see :func:`continues_version`).
         """
 
     @abstractmethod
     async def get_snapshots(self, start: datetime, end: datetime) -> dict[tuple[str, str], list[PodSnapshot]]:
         """Versions observed during ``[start, end]``, keyed by ``(namespace, pod)`` and sorted by first_seen."""
+
+    @abstractmethod
+    async def get_pod_versions(
+        self, pods: Iterable[tuple[str, str]], end: datetime
+    ) -> dict[tuple[str, str], list[PodSnapshot]]:
+        """Every retained version of the given pods first observed at or before ``end``, without lower bound.
+
+        Used for pods of a window that the range read did not cover, for
+        example a pod deleted during a controller downtime (review 2).
+        """
 
     @abstractmethod
     async def prune(self, before: datetime) -> int:

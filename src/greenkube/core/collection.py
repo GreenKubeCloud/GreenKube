@@ -14,6 +14,7 @@ a window have been written.  Re-running a window is an idempotent upsert.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -177,7 +178,7 @@ class RangeProcessor(Protocol):
 
 class MetricsWriter(Protocol):
     async def write_combined_metrics(self, metrics: list[CombinedMetric]) -> int:
-        """Upsert combined and container rows."""
+        """Upsert combined and container rows (implementations may take ``replace_containers``)."""
         ...
 
 
@@ -271,6 +272,17 @@ class MetricsCollectionJob:
             collection_telemetry.set_watermark_lag(self.source, now, report.watermark)
         return report
 
+    async def _write_rows(self, rows: list[CombinedMetric]) -> int:
+        """Write a collected window; its container rows replace the stored ones of its pods (review 4)."""
+        write = self.metrics_repository.write_combined_metrics
+        try:
+            accepts_flag = "replace_containers" in inspect.signature(write).parameters
+        except (TypeError, ValueError):
+            accepts_flag = False
+        if accepts_flag:
+            return await write(rows, replace_containers=True)  # type: ignore[call-arg]
+        return await write(rows)
+
     async def _write_idle_metrics(self) -> None:
         """Commits the ``__idle__`` rows of the window just collected (roadmap B2).
 
@@ -315,7 +327,7 @@ class MetricsCollectionJob:
         fence.check("collect metrics")
         rows = await self.processor.run_range(start=window.start, end=window.end)
         fence.check("write metrics")
-        written = await self.metrics_repository.write_combined_metrics(rows) if rows else 0
+        written = await self._write_rows(rows) if rows else 0
         await self._write_idle_metrics()
         report.rows_written += written or 0
         report.windows_collected += 1

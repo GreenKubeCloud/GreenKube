@@ -493,6 +493,10 @@ config:
   collection:
     safetyLag: 1m
     maxBackfill: 24h
+    # Consecutive failed Kubernetes pod or node list attempts for the same window
+    # before it is stored in degraded mode (rows flagged metadata_source=missing,
+    # reason k8s_list_failed) instead of being retried until it becomes a gap.
+    k8sListMaxFailures: 3
 
   # Comma-separated list of allowed CORS origins. Empty (default) keeps the API
   # same-origin: the bundled UI needs no CORS. List exact origins (for example

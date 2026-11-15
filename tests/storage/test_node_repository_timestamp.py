@@ -46,6 +46,7 @@ async def _create_test_db():
             embodied_emissions_kg REAL,
             valid_from TEXT NOT NULL,
             valid_to TEXT,
+            last_seen TEXT,
             is_current BOOLEAN NOT NULL DEFAULT 1
         );
     """)

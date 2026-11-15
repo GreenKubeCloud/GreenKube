@@ -119,16 +119,16 @@ async def test_recollection_without_metadata_keeps_stored_owner_and_requests(sto
     first = await _build(cfg, repo, snapshots, pod_list=[POD_P]).run_range(BASE, BASE + timedelta(seconds=STEP))
     await repo.write_combined_metrics(first)
 
-    # The history is lost too (worst case): the re-collected row has no metadata at all.
+    # The history is lost too (worst case): the re-collected row reuses the stored row's metadata (review 4).
     second = await _build(cfg, repo, None, pod_list=[]).run_range(BASE, BASE + timedelta(seconds=STEP))
-    assert next(row for row in second if not row.container_name).metadata_source == "missing"
+    assert next(row for row in second if not row.container_name).metadata_source == "stored_row"
     await repo.write_combined_metrics(second)
 
     stored = [row for row in await repo.read_combined_metrics(BASE, BASE + timedelta(seconds=STEP))]
     assert len(stored) == 1
     assert (stored[0].owner_kind, stored[0].owner_name) == ("Deployment", "d")
     assert stored[0].cpu_request == 500
-    assert stored[0].metadata_source == "k8s_snapshot"
+    assert stored[0].metadata_source == "stored_row"
 
 
 @pytest.mark.asyncio

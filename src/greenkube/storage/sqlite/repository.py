@@ -1,6 +1,7 @@
 import json
 import logging
 import sqlite3
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, List, Mapping, Optional
 
@@ -105,31 +106,24 @@ def _row_source_values(metric: CombinedMetric) -> tuple[Any, ...]:
     return tuple(getattr(metric, column) for column in ROW_SOURCE_COLUMNS)
 
 
-def _keep_known_metadata(table: str, column: str, known: str) -> str:
-    """Upsert expression that never lets a row without pod metadata erase stored metadata (COL-01).
-
-    A re-collected row whose ``metadata_source`` is ``missing`` keeps the stored
-    value of ``column`` when the stored row had it (``known`` is the SQL test).
-    """
-    return (
-        f"{column} = CASE WHEN excluded.metadata_source = 'missing' AND ({known}) "
-        f"THEN {table}.{column} ELSE excluded.{column} END"
-    )
-
-
 def _metadata_upsert(table: str) -> str:
-    """SET clauses of owner, requests and metadata_source for raw metric upserts."""
-    has_metadata = f"{table}.owner_kind IS NOT NULL OR {table}.cpu_request > 0 OR {table}.memory_request > 0"
-    return ",\n".join(
-        [
-            _keep_known_metadata(table, "owner_kind", f"{table}.owner_kind IS NOT NULL"),
-            _keep_known_metadata(table, "owner_name", f"{table}.owner_name IS NOT NULL"),
-            _keep_known_metadata(table, "cpu_request", f"{table}.cpu_request > 0"),
-            _keep_known_metadata(table, "memory_request", f"{table}.memory_request > 0"),
-            _keep_known_metadata(table, "metadata_source", has_metadata),
-            "node_source = excluded.node_source",
-        ]
+    """Owner, requests and provenance SET clauses, and the guard of raw metric upserts (COL-01, review 4).
+
+    A re-collected row without pod metadata (``metadata_source = 'missing'``)
+    never replaces a stored row that had metadata: its energy, CO2e, cost and
+    flags were computed with request 0, so mixing them with the stored owner
+    and requests would make the row inconsistent.  The whole stored row and
+    its container rows are kept instead.
+    """
+    has_metadata = (
+        f"{table}.owner_kind IS NOT NULL OR COALESCE({table}.cpu_request, 0) > 0 "
+        f"OR COALESCE({table}.memory_request, 0) > 0"
     )
+    assignments = ",\n".join(
+        f"{column} = excluded.{column}"
+        for column in ("owner_kind", "owner_name", "cpu_request", "memory_request", "metadata_source", "node_source")
+    )
+    return f"{assignments}\nWHERE NOT (COALESCE(excluded.metadata_source, '') = 'missing' AND ({has_metadata}))"
 
 
 def _allocation_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -330,7 +324,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         """
         self.db_manager = db_manager
 
-    async def write_combined_metrics(self, metrics: List[CombinedMetric]) -> int:
+    async def write_combined_metrics(self, metrics: List[CombinedMetric], *, replace_containers: bool = False) -> int:
+        """See :meth:`CombinedMetricsRepository.write_combined_metrics`."""
         container_metrics = [metric for metric in metrics if metric.container_name]
         metrics = [metric for metric in metrics if not metric.container_name]
         if not metrics:
@@ -462,6 +457,11 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     except Exception as e:
                         logging.error("Unexpected error processing combined metric %s: %s", metric.pod_name, e)
 
+                # Container rows are rewritten with their pod rows, in the same
+                # transaction, so pod and container rows of a step agree (review 4).
+                if replace_containers:
+                    await self._delete_stale_container_rows(conn, metrics, container_metrics)
+                saved_count += await self._upsert_container_rows(conn, container_metrics)
                 await conn.commit()
         except sqlite3.Error as e:
             logging.error("Failed to commit transaction for combined_metrics: %s", e)
@@ -471,8 +471,33 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
             raise QueryError(f"Unexpected error in write_combined_metrics: {e}") from e
         record_metric_provenance(metrics)
         if container_metrics:
-            saved_count += await self.write_container_metrics(container_metrics)
+            record_metric_provenance(container_metrics)
         return saved_count
+
+    @staticmethod
+    async def _delete_stale_container_rows(
+        conn, pod_rows: List[CombinedMetric], container_rows: List[CombinedMetric]
+    ) -> None:
+        """Delete container rows of re-written pod rows that the new batch no longer produces.
+
+        Pod rows without metadata (``missing``) are skipped: the stored pod row
+        and its containers are kept when they had metadata (review 4).
+        """
+        new_containers: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+        for row in container_rows:
+            if row.timestamp is not None and row.container_name:
+                new_containers[(row.namespace, row.pod_name, to_iso_z(row.timestamp))].add(row.container_name)
+        for row in pod_rows:
+            if row.timestamp is None or row.metadata_source == "missing":
+                continue
+            key = (row.namespace, row.pod_name, to_iso_z(row.timestamp))
+            keep = sorted(new_containers.get(key, ()))
+            placeholders = ", ".join("?" for _ in keep)
+            await conn.execute(
+                "DELETE FROM container_metrics WHERE namespace = ? AND pod_name = ? AND timestamp = ?"
+                + (f" AND container_name NOT IN ({placeholders})" if keep else ""),
+                (*key, *keep),
+            )
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         try:
@@ -993,8 +1018,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         COALESCE(SUM(embodied_co2e_grams), 0) AS embodied_co2e_grams,
                         COALESCE(SUM(total_cost), 0)          AS total_cost,
                         COALESCE(SUM(joules), 0)              AS energy_joules,
-                        COALESCE(SUM(cpu_usage_millicores), 0) AS cpu_usage_millicores,
-                        COALESCE(SUM(memory_usage_bytes), 0)  AS memory_usage_bytes
+                        SUM(cpu_usage_millicores) AS cpu_usage_millicores,
+                        SUM(memory_usage_bytes) AS memory_usage_bytes
                     FROM ({union_query})
                     GROUP BY ts_bucket
                     ORDER BY ts_bucket
@@ -1101,105 +1126,110 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
     async def write_container_metrics(self, metrics: List[CombinedMetric]) -> int:
         if not metrics:
             return 0
-
-        saved_count = 0
         try:
             async with self.db_manager.connection_scope() as conn:
-                for metric in metrics:
-                    container_name = metric.container_name
-                    timestamp = metric.timestamp
-                    if not container_name or timestamp is None:
-                        raise ValueError("container metrics require a container name and timestamp")
-                    cursor = await conn.execute(
-                        """
-                        INSERT INTO container_metrics (
-                            pod_name, namespace, container_name, total_cost, co2e_grams,
-                            embodied_co2e_grams, pue, grid_intensity, joules,
-                            cpu_request, memory_request, cpu_usage_millicores, cpu_usage_max_millicores,
-                            memory_usage_bytes, memory_usage_max_bytes, owner_kind, owner_name,
-                            timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version,
-                            cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
-                            cost_source, usage_source, power_source, intensity_source,
-                            emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
-                            node_source, metadata_source
-                        ) VALUES (
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                        )
-                        ON CONFLICT(namespace, pod_name, container_name, timestamp) DO UPDATE SET
-                            total_cost = excluded.total_cost,
-                            co2e_grams = excluded.co2e_grams,
-                            embodied_co2e_grams = excluded.embodied_co2e_grams,
-                            pue = excluded.pue,
-                            grid_intensity = excluded.grid_intensity,
-                            joules = excluded.joules,
-                            cpu_request = excluded.cpu_request,
-                            memory_request = excluded.memory_request,
-                            cpu_usage_millicores = excluded.cpu_usage_millicores,
-                            cpu_usage_max_millicores = excluded.cpu_usage_max_millicores,
-                            memory_usage_bytes = excluded.memory_usage_bytes,
-                            memory_usage_max_bytes = excluded.memory_usage_max_bytes,
-                            owner_kind = excluded.owner_kind,
-                            owner_name = excluded.owner_name,
-                            duration_seconds = excluded.duration_seconds,
-                            is_estimated = excluded.is_estimated,
-                            estimation_reasons = excluded.estimation_reasons,
-                            calculation_version = excluded.calculation_version,
-                            cost_cpu = excluded.cost_cpu,
-                            cost_ram = excluded.cost_ram,
-                            cost_storage = excluded.cost_storage,
-                            cost_network = excluded.cost_network,
-                            cost_lb = excluded.cost_lb,
-                            cost_source = excluded.cost_source,
-                            usage_source = excluded.usage_source,
-                            power_source = excluded.power_source,
-                            intensity_source = excluded.intensity_source,
-                            emaps_zone = excluded.emaps_zone,
-                            cpu_limit = excluded.cpu_limit,
-                            memory_limit = excluded.memory_limit,
-                            model_version = excluded.model_version,
-                            gpu_power_watts = excluded.gpu_power_watts,
-                            node_source = excluded.node_source,
-                            metadata_source = excluded.metadata_source
-                        """,
-                        (
-                            metric.pod_name,
-                            metric.namespace,
-                            container_name,
-                            metric.total_cost,
-                            metric.co2e_grams,
-                            metric.embodied_co2e_grams,
-                            metric.pue,
-                            metric.grid_intensity,
-                            metric.joules,
-                            metric.cpu_request,
-                            metric.memory_request,
-                            metric.cpu_usage_millicores,
-                            metric.cpu_usage_max_millicores,
-                            metric.memory_usage_bytes,
-                            metric.memory_usage_max_bytes,
-                            metric.owner_kind,
-                            metric.owner_name,
-                            to_iso_z(timestamp),
-                            metric.duration_seconds,
-                            metric.is_estimated,
-                            json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
-                            metric.calculation_version,
-                            *_provenance_values(metric),
-                            metric.emaps_zone,
-                            metric.cpu_limit,
-                            metric.memory_limit,
-                            *_allocation_values(metric),
-                            *_row_source_values(metric),
-                        ),
-                    )
-                    saved_count += cursor.rowcount
+                saved_count = await self._upsert_container_rows(conn, metrics)
                 await conn.commit()
             record_metric_provenance(metrics)
             return saved_count
         except sqlite3.Error as e:
             logging.error("Could not write container metrics: %s", e)
             raise QueryError(f"Could not write container metrics: {e}") from e
+
+    @staticmethod
+    async def _upsert_container_rows(conn, metrics: List[CombinedMetric]) -> int:
+        """Upsert container rows on ``conn`` without committing."""
+        saved_count = 0
+        for metric in metrics:
+            container_name = metric.container_name
+            timestamp = metric.timestamp
+            if not container_name or timestamp is None:
+                raise ValueError("container metrics require a container name and timestamp")
+            cursor = await conn.execute(
+                """
+                INSERT INTO container_metrics (
+                    pod_name, namespace, container_name, total_cost, co2e_grams,
+                    embodied_co2e_grams, pue, grid_intensity, joules,
+                    cpu_request, memory_request, cpu_usage_millicores, cpu_usage_max_millicores,
+                    memory_usage_bytes, memory_usage_max_bytes, owner_kind, owner_name,
+                    timestamp, duration_seconds, is_estimated, estimation_reasons, calculation_version,
+                    cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
+                    cost_source, usage_source, power_source, intensity_source,
+                    emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
+                    node_source, metadata_source
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                ON CONFLICT(namespace, pod_name, container_name, timestamp) DO UPDATE SET
+                    total_cost = excluded.total_cost,
+                    co2e_grams = excluded.co2e_grams,
+                    embodied_co2e_grams = excluded.embodied_co2e_grams,
+                    pue = excluded.pue,
+                    grid_intensity = excluded.grid_intensity,
+                    joules = excluded.joules,
+                    cpu_request = excluded.cpu_request,
+                    memory_request = excluded.memory_request,
+                    cpu_usage_millicores = excluded.cpu_usage_millicores,
+                    cpu_usage_max_millicores = excluded.cpu_usage_max_millicores,
+                    memory_usage_bytes = excluded.memory_usage_bytes,
+                    memory_usage_max_bytes = excluded.memory_usage_max_bytes,
+                    owner_kind = excluded.owner_kind,
+                    owner_name = excluded.owner_name,
+                    duration_seconds = excluded.duration_seconds,
+                    is_estimated = excluded.is_estimated,
+                    estimation_reasons = excluded.estimation_reasons,
+                    calculation_version = excluded.calculation_version,
+                    cost_cpu = excluded.cost_cpu,
+                    cost_ram = excluded.cost_ram,
+                    cost_storage = excluded.cost_storage,
+                    cost_network = excluded.cost_network,
+                    cost_lb = excluded.cost_lb,
+                    cost_source = excluded.cost_source,
+                    usage_source = excluded.usage_source,
+                    power_source = excluded.power_source,
+                    intensity_source = excluded.intensity_source,
+                    emaps_zone = excluded.emaps_zone,
+                    cpu_limit = excluded.cpu_limit,
+                    memory_limit = excluded.memory_limit,
+                    model_version = excluded.model_version,
+                    gpu_power_watts = excluded.gpu_power_watts,
+                    node_source = excluded.node_source,
+                    metadata_source = excluded.metadata_source
+                """,
+                (
+                    metric.pod_name,
+                    metric.namespace,
+                    container_name,
+                    metric.total_cost,
+                    metric.co2e_grams,
+                    metric.embodied_co2e_grams,
+                    metric.pue,
+                    metric.grid_intensity,
+                    metric.joules,
+                    metric.cpu_request,
+                    metric.memory_request,
+                    metric.cpu_usage_millicores,
+                    metric.cpu_usage_max_millicores,
+                    metric.memory_usage_bytes,
+                    metric.memory_usage_max_bytes,
+                    metric.owner_kind,
+                    metric.owner_name,
+                    to_iso_z(timestamp),
+                    metric.duration_seconds,
+                    metric.is_estimated,
+                    json.dumps(metric.estimation_reasons) if metric.estimation_reasons else "[]",
+                    metric.calculation_version,
+                    *_provenance_values(metric),
+                    metric.emaps_zone,
+                    metric.cpu_limit,
+                    metric.memory_limit,
+                    *_allocation_values(metric),
+                    *_row_source_values(metric),
+                ),
+            )
+            saved_count += cursor.rowcount
+        return saved_count
 
     async def write_idle_metrics(self, metrics: List[Any]) -> int:
         """Upserts ``__idle__`` rows (one per node and step) into ``node_idle_metrics`` (B2)."""
