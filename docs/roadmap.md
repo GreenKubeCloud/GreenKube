@@ -1,2754 +1,1733 @@
-# GreenKube — Strategic Roadmap & Implementation Specifications
+# GreenKube roadmap
 
-> **Status:** working document · **Date:** 2026-11-07 · **Baseline:** `dev` @ `ac48c09` (v0.3.1 + unreleased)
-> **Audience:** the maintainer, contributors and coding agents. Every work item is written so that a developer or an agent can pick it up without further context.
-> **Location:** `docs/roadmap.md`, versioned with the code.
-> **Revision 2** (2026-11-07) adds three changes:
-> - a single install topology with no profiles;
-> - GitOps automation that is always on and activates itself;
-> - persistent sign-in.
->
-> See pivot P8 (§4) and category F.
+> **Baseline:** `dev` @ `43eb25f1`. **Source:** the data-quality audit in [`docs/reviews/data-quality-audit.md`](reviews/data-quality-audit.md), which holds the mechanism, evidence and effect on numbers of every finding cited here.
+> **Audience:** developers and coding agents. Each task is written to be picked up without further context.
 
----
+## How to use this roadmap
 
-## Table of contents
+- **Goal.** Make the numbers GreenKube collects, stores, derives and shows reliable, on-premises and in the cloud. No new feature is planned before that, except released capacity (WP-08), which gives fixed-capacity clusters a real result.
+- **Work packages** (`WP-nn`) are numbered by importance. Tasks inside a package are ordered and are done one after the other, by one developer or agent. Packages do NOT have disjoint files: the parallel plan below says which can run at the same time and who leads on each shared file.
+- **Finding IDs** (`COL-01`, `MEA-08`...) point to the audit. "Also covers" lists findings that describe the same root cause from another angle: read them in the audit before closing the task, and check each one's acceptance test.
+- **Evidence.** No finding has been re-checked by a second reviewer. Work test-first: write the regression test from the acceptance text, see it fail on `dev`, then fix. If the test does not fail, the finding is wrong: record that in the audit and move on.
+- **Stored data.** When a fix changes how a value is computed, bump the calculation or model version and state what happens to rows already stored (recompute, flag, or leave with a version marker).
+- **Both databases.** Storage changes must pass on SQLite and PostgreSQL.
+- **Not yet audited:** recommendation sources and consensus, GitOps delivery, long-term operations. Set aside for a later pass: frontend, security, architecture, tests, documentation, portability, GitOps planning. Work items of the previous roadmap revision that code comments still cite (`A1`, `C6`, `F14`...) are in the git history of this file.
 
-0. [How to use this document](#0-how-to-use-this-document)
-1. [Executive summary](#1-executive-summary)
-2. [Positioning](#2-positioning)
-3. [Where GreenKube stands today](#3-where-greenkube-stands-today)
-4. [Strategic pivots](#4-strategic-pivots)
-5. [Synthesis — prioritized categories](#5-synthesis--prioritized-categories)
-6. [Detailed specifications by category](#6-detailed-specifications-by-category)
-7. [Release plan & milestones](#7-release-plan--milestones)
-8. [Success metrics](#8-success-metrics)
-9. [Risks & open decisions](#9-risks--open-decisions)
-- [Appendix A — Defect register](#appendix-a--defect-register)
-- [Appendix B — Recommendation source catalogue](#appendix-b--recommendation-source-catalogue)
-- [Appendix C — Competitive landscape](#appendix-c--competitive-landscape)
-- [Appendix D — Glossary](#appendix-d--glossary)
-- [Appendix E — Execution conventions for agents](#appendix-e--execution-conventions-for-agents)
+## Parallel plan
 
----
+Packages touch overlapping files. The overlap was measured from the source files each finding cites (an indicator: a cited file is where the defect shows, not always where the fix goes).
 
-## 0. How to use this document
+**Waves.** Packages of one wave have the lowest measured overlap and can run at the same time. Start a wave when the previous one is merged.
 
-**Identifiers.** Categories are lettered `A`…`Q` and ranked by priority in §5. Work items are numbered within their category (`A1`, `C0.4`, `H3`…). Defects have global IDs `BUG-nn` (Appendix A) and point back to the work item that fixes them.
-
-**Item types.** `BUG` (incorrect behavior), `FEAT` (new capability), `REFACTOR` (no behavior change), `OPS` (deployment/CI/security), `DOC` (documentation), `DESIGN` (decision or spec to produce before code).
-
-**Priority.**
-- `P0`: blocks the core promise; do now.
-- `P1`: required for the positioning; next 1–3 months.
-- `P2`: important health work; continuous budget.
-- `P3`: opportunistic or later.
-
-**Effort** (one engineer working with coding agents):
-- `S`: ≤ 1 day.
-- `M`: 2–4 days.
-- `L`: 1–2 weeks.
-- `XL`: more than 2 weeks; split it before starting.
-
-**Evidence levels for defects.**
-- *Confirmed (sim)*: reproduced by running the real code with fakes. The scripts are in the audit scratchpad and should be turned into regression tests.
-- *Confirmed (code)*: established by reading the code.
-- *Likely* / *Plausible*: needs a check against a live system before fixing.
-
-**Rule of thumb.** Read the target design of a category before implementing any of its items. Several categories (B, C, E, H) introduce abstractions that later items build on.
-
----
-
-## 1. Executive summary
-
-**What GreenKube already is.** A carefully engineered open-source system (≈70k lines of Python, a SvelteKit UI, a Helm chart, 2,526 tests, ≈83% coverage) that:
-- collects Kubernetes usage, cost (OpenCost) and carbon data (Electricity Maps/Wattnet, Boavizta);
-- generates recommendations from 10 native analyzers plus VPA and Karpenter-backed sources;
-- ranks them;
-- ships CPU/memory request decreases as GitOps pull requests through an unusually defensive pipeline: discovery-based bindings, digest-approved plans, an isolated renderer, leases, idempotent workers;
-- tracks Argo CD/Flux sync, detects the applied change and attempts to verify realized savings.
-
-**The opportunity.**
-- No open-source project, and almost no commercial one, does *recommendation → GitOps PR → sync verification → measured savings ledger*.
-- Commercial optimizers mutate pods in-cluster and ask users to configure Argo CD `ignoreDifferences`. IBM's own Kubecost guidance concedes that "committed manifests will diverge" and that teams who need manifest purity should drive automated PRs.
-- Free recommenders (VPA, Goldilocks, KRR) stop at advice.
-- GreenKube can own the neutral, Git-native, *proven-savings* layer on top of all of them.
-
-**The problem.** GreenKube has built a bank-vault door in front of a ledger that cannot yet count:
-
-1. **The numbers are not trustworthy yet.** The audit found that:
-   - projections multiply request cuts by the pod's *total* cost and claim CO₂e savings that the carbon model cannot produce;
-   - the data pipeline double-counts pod CPU and loses compressed data;
-   - the verifier inflates measured savings about 4× through a traffic-normalization bug, sends every multi-replica change to `rollback_review`, can never measure container-scoped (GitOps) changes, and keeps accruing projected savings for changes that failed verification.
-2. **The loop breaks in real repositories.**
-   - Sync verification requires the *exact* merge SHA, so any later commit makes the plan `SYNC_FAILED`.
-   - Retention deletes the audit trail and permanently blocks workloads after 90 days.
-   - Closed GitHub PRs probably never reconcile.
-   - PR creation cost grows with repository size.
-3. **The pipe is narrow.** Only one action kind can become a PR: decreasing container CPU/memory requests, on Deployments, StatefulSets and DaemonSets, in raw, Kustomize or local-chart Helm layouts.
-4. **The funnel is narrow.** There are three sources (native, VPA, Karpenter); the "Karpenter source" is in fact GreenKube's own heuristic over Karpenter objects. KRR, Goldilocks provenance, Kubecost and cloud recommenders are absent, and there is no scheduled scan.
-5. **The activation energy is high, and daily use has friction.**
-   - About 13 steps and about 3.5 days of data are needed before the first eligible PR.
-   - Two deployment profiles × automation on/off make four install variants, with a 9-row upgrade matrix.
-   - Users paste the API key again after every page reload.
-
-**The plan, in order.**
-
-| # | Phase | What it covers | Categories |
-|---|---|---|---|
-| 1 | Make the numbers right | Fix the measurement pipeline, introduce one Impact Model used by both projections and measurements, rebuild verification and the ledger | A, B, C |
-| 2 | Make the loop reliable | Fix the GitOps pipeline defects | D |
-| 3 | Widen the funnel | A neutral signal model, a Source SDK, consensus, scheduled scans and new connectors | E, G |
-| 4 | Lower the activation energy | One install topology, automation that activates itself, sign in once, lighter delivery modes, guided setup | F |
-| 5 | Widen the pipe | An action framework, then new action kinds | H |
-| 6 | Re-center the product surface | Ranking v2, PR experience, UI (Inbox → Changes → Ledger), docs | I, J, K, L |
-
-**Continuous budget (about 20%):** architecture simplification, Helm/security and quality engineering (M, N, O). Ecosystem items (P, Q) come after v0.6.
-
-**Milestones.**
-
-| Version | Target date | Focus |
+| Wave | Packages | Highest overlap inside the wave (shared files) |
 |---|---|---|
-| v0.3.2 patch | 2026-11-13 | API key kept across reloads (stopgap), same-origin CORS default |
-| v0.4 "Trustworthy" | mid-Dec 2026 | Phases 1–2, plus sign in once |
-| v0.5 "Open aggregator" | end Jan 2027 | Phases 3–4, including one install topology and always-on automation |
-| v0.6 "More levers" | end Mar 2027 | Phase 5 |
-| v1.0 | Q2 2027 | API freeze, end-to-end CI, complete docs |
+| 1 | WP-01 Collection pipeline integrity, WP-06 Recommendation safety, WP-07 Measurement validity | 3 |
+| 2 | WP-02 Storage schema and write semantics, WP-08 Projection, released capacity and fixed-capacity clusters | 1 |
+| 3 | WP-03 Cost integrity, WP-09 Savings ledger | 2 |
+| 4 | WP-05 Rollups, idle share and read consistency | 0 |
+| 5 | WP-04 Energy and carbon integrity, WP-10 API, exports and Prometheus exposition | 2 |
 
----
+Two exceptions to the waves. WP-07 starts in wave 1 on its statistics tasks, but its results on compressed data need WP-05 task 4. WP-04 task 1 (NRG-01, the only critical finding) may be pulled forward into any wave if its fix stays inside the Boavizta collector, its model and the embodied service; this has not been checked.
 
-## 2. Positioning
+**Overlap matrix** (number of source files cited by both packages; `core/config.py` excluded, every package adds settings there).
 
-### 2.1 One-liner
+| | 01 | 02 | 03 | 04 | 05 | 06 | 07 | 08 | 09 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| WP-01 | - | 6 | 6 | 4 | 4 | 3 | 0 | 1 | 1 | 4 |
+| WP-02 | 6 | - | 5 | 6 | 7 | 0 | 1 | 1 | 1 | 4 |
+| WP-03 | 6 | 5 | - | 5 | 7 | 3 | 2 | 9 | 2 | 5 |
+| WP-04 | 4 | 6 | 5 | - | 4 | 1 | 1 | 2 | 2 | 2 |
+| WP-05 | 4 | 7 | 7 | 4 | - | 2 | 5 | 4 | 2 | 8 |
+| WP-06 | 3 | 0 | 3 | 1 | 2 | - | 0 | 7 | 2 | 1 |
+| WP-07 | 0 | 1 | 2 | 1 | 5 | 0 | - | 4 | 3 | 1 |
+| WP-08 | 1 | 1 | 9 | 2 | 4 | 7 | 4 | - | 3 | 0 |
+| WP-09 | 1 | 1 | 2 | 2 | 2 | 2 | 3 | 3 | - | 2 |
+| WP-10 | 4 | 4 | 5 | 2 | 8 | 1 | 1 | 0 | 2 | - |
 
-> **GreenKube turns the Kubernetes optimization advice you already have into reviewed pull requests — and proves what each merged change actually saved, in money and CO₂e.**
+**Lead package per shared file.** The lead is the package with most findings in the file. Another package that must change the file rebases on the lead's branch, or waits for its merge.
 
-Tagline (primary): **"Every recommendation. One pull request. Proven savings."**
-Alternatives: "From advice to verified savings — through Git." / "The savings ledger for GitOps Kubernetes."
-
-### 2.2 The problem GreenKube solves
-
-1. **Advice is abundant, fragmented and contradictory.**
-   - VPA, Goldilocks, KRR, Kubecost, cloud consoles, Karpenter and in-house scripts each produce their own lists, with different algorithms (p95 vs max+15%), windows (3 to 14 days) and units.
-   - They disagree, and nobody knows which one to trust.
-2. **Acting is risky and manual.**
-   - In a GitOps shop the cluster is a projection of Git. Changing requests means editing Helm values or Kustomize overlays across many repositories, owned by many teams.
-   - In-cluster optimizers mutate pods behind Git's back and ask you to ignore the drift.
-3. **Savings are asserted, not proven.**
-   - Tools report *potential* savings.
-   - Almost none measure what happened after the change, and none ties a realized saving to the commit that produced it.
-
-### 2.3 Positioning statement
-
-**Who it's for.** Platform and SRE teams who run Kubernetes through Argo CD or Flux.
-
-**What it is.** GreenKube is the open-source optimization control loop:
-- it aggregates recommendations from every source;
-- it ranks them by risk-adjusted value;
-- it ships them as reviewable pull requests;
-- it measures the savings each change actually realized.
-
-**How it differs.**
-- Unlike in-cluster optimizers, it never changes the cluster behind Git's back.
-- Unlike recommendation dashboards, it does not stop at advice: it closes the loop with a verified, auditable savings ledger.
-
-### 2.4 Core philosophy: the loop
-
-```mermaid
-flowchart LR
-  A[Aggregate<br/>every source, one schema] --> D[Decide<br/>consensus · risk · value]
-  D --> V[Deliver<br/>pull request, Git only]
-  V --> P[Prove<br/>sync · apply · measure]
-  P --> L[Ledger<br/>append-only, with provenance]
-  L --> R[Learn<br/>source track record]
-  R --> D
-```
-
-| Stage | What GreenKube does | Today | Target |
-|---|---|---|---|
-| **Aggregate** | Pulls *signals* from native analyzers, VPA/Goldilocks, KRR, Kubecost, Polaris, cloud recommenders and any tool that speaks the public signal schema. | Native + VPA + a Karpenter heuristic; scans only on API start or when requested | ≥ 6 connectors, scheduled scans, push API |
-| **Decide** | Builds one recommendation per target and capability from all signals. It computes consensus, an impact estimate (same model as measurement), risk and confidence, and ranks by risk-adjusted value in one currency (cost + carbon price × CO₂e). | Fixed-priority arbitration; batch-relative ranking; inflated projections | Consensus, Impact Model, expected-value ranking |
-| **Deliver** | Opens a reviewable PR with evidence, impact, risk and rollback, in the right repository and file, for the right owners. | One action kind, ~13 setup steps | Action framework, 8+ action kinds, patch/CI/GitHub App modes |
-| **Prove** | Confirms the merge reached the cluster (Argo CD/Flux), detects the rollout, then measures savings against a counterfactual with a confidence interval. | Exact-SHA sync; verifier defects | Ancestry-aware sync, measurement strategies, CIs |
-| **Ledger** | Appends immutable entries (projected / allocated / realized), linked to PR, commit, sync revision and method version. | Mutable rows, compression loss, no provenance | Append-only, hash-chained, exportable (CSV/FOCUS-aligned) |
-| **Learn** | Feeds realized-vs-projected outcomes back into confidence per source and capability. | — | Track-record-weighted ranking |
-
-### 2.5 Product principles (invariants)
-
-1. **Git is the only write path.** GreenKube never mutates workloads directly. Every change is a commit that a human (or an explicit policy) approved.
-2. **Neutral by design.** GreenKube's own analyzers are one source among others, judged by the same track record. No vendor lock-in; every connector is a plugin.
-3. **Projected ≠ allocated ≠ realized.** These three kinds of saving are never summed together, never shown as one number, and always labeled.
-4. **One model for estimating and measuring.** A projection and its later measurement are computed by the same versioned Impact Model, or the comparison is meaningless.
-5. **Evidence travels with the change.** The PR body is the evidence; the ledger entry links back to the PR, the commit and the measurement.
-6. **Fail closed, explain why.** Every recommendation that cannot become a PR says why, and what would make it eligible.
-7. **Cost and carbon, measured the same way.** Every number has both dimensions. Ranking unifies them through a configurable carbon price.
-8. **One install, zero-config first.**
-   - A single production-grade topology works with Prometheus alone.
-   - Every capability activates itself when its prerequisites are detected: OpenCost, Electricity Maps, connectors, GitOps discovery, PR delivery.
-   - No feature flag is needed to turn the core loop on; users sign in once.
-
-### 2.6 What GreenKube is not
-
-- **Not an autoscaler or actuator.** It does not replace VPA, HPA, KEDA or Karpenter; it proposes and verifies changes to their configuration.
-- **Not a cost-allocation engine.** It consumes OpenCost or Kubecost and falls back to its own pricing catalog only when they are absent.
-- **Not a carbon-accounting suite.** It produces workload-level, SCI-aligned estimates with documented methodology. Corporate reporting is an export, not the product.
-- **Not a dashboard-first tool.** Footprint views exist to explain recommendations and savings, not as the headline.
-
-### 2.7 Users and jobs-to-be-done
-
-| Persona | Job to be done | What GreenKube must give them |
+| File | Lead | Also changed by |
 |---|---|---|
-| **Platform engineer** (buyer and operator) | "Cut waste across N teams without causing incidents or fighting app owners." | Ranked inbox, safe PRs to the right repo/owners, rollback, policy gates |
-| **App team reviewer** (PR recipient) | "Decide in 30 seconds whether to merge this." | Plain-language PR title, impact, risk, evidence, what to watch |
-| **FinOps practitioner** | "Prove what we actually saved and where." | Ledger with realized vs projected, provenance, export |
-| **Sustainability lead** | "Report defensible workload emissions and reductions." | SCI-aligned methodology, CO₂e on every entry, export |
-
-**Ideal customer profile:**
-- 20–500 services, 1–20 clusters.
-- Argo CD or Flux in place.
-- AWS-heavy (EKS has no native pod-level recommender, so GreenKube fills a real gap) or EU-based (carbon is a co-benefit).
-
-### 2.8 Competitive frame (summary — details in Appendix C)
-
-| | Opens PRs to GitOps repo | Keeps Git as source of truth | Multi-source neutral | Verifies sync | Measures realized savings | Carbon | Open source |
-|---|---|---|---|---|---|---|---|
-| VPA / Goldilocks / KRR | – | n/a (advice only) | – | – | – | – | ✔ |
-| IBM Kubecost | – (controller) | ✘ (`ignoreDifferences`) | – | – | partial (3.0 audits) | estimates | ✘ |
-| PerfectScale, CAST AI, ScaleOps, Spot Ocean | – | ✘ | – | – | partial / undocumented | PerfectScale only | ✘ |
-| StormForge | exports patches | partial | – | – | – | – | ✘ |
-| Harness CCM | – (tickets) | n/a | – | – | ✔ (billing inference) | – | ✘ |
-| **GreenKube (target)** | **✔** | **✔** | **✔** | **✔** | **✔ (with CI and provenance)** | **✔** | **✔ Apache-2.0** |
-
-### 2.9 Messaging changes
-
-- **Lead with:** verified savings, Git-native, multi-source neutrality.
-- **Carbon:**
-  - Keep it a first-class *dimension* of every number ("cost and carbon, measured the same way"), not the headline.
-  - The EU Omnibus I directive (2026) removed roughly 80% of companies from CSRD scope, and the 2026 State of FinOps survey ranks sustainability low while workload waste reduction is #1.
-  - The GreenKube name stays: "green" reads as efficient *and* low-carbon.
-- **Retire as headline claims:**
-  - "FinGreenOps platform";
-  - "full visibility" / "visibility first";
-  - "CSRD/ESRS E1 reporting";
-  - the 0–100 sustainability score.
-- **Adopt a precise vocabulary** (Appendix D):
-  - *signal*, *recommendation*, *change*, *measurement*, *ledger entry*;
-  - *projected*, *allocated*, *realized*.
-- **Honesty as a feature:** "We only count what we measured, and we show you how."
-
-### 2.10 North-star metric
-
-**Verified realized savings run-rate per installation.** This is the annualized cost (and CO₂e) savings from changes whose measurement concluded `realized`. Supporting metrics are in §8.
-
----
-
-## 3. Where GreenKube stands today
-
-### 3.1 Facts
-
-| Dimension | Value |
-|---|---|
-| Version | 0.3.1 (2026-10-25) + unreleased GitOps readiness work |
-| Python source | ≈70k lines; GitOps + automation alone ≈28k lines |
-| Tests | 2,526 collected · 2,484 passed · 42 skipped (live-Postgres tests) · ≈83% statement coverage |
-| Frontend | SvelteKit (Svelte 5 installed, Svelte 4 syntax), 6 routes; `recommendations/+page.svelte` is 2,124 lines |
-| Helm | 296 leaf values, 32 templates; 2 profiles (standalone, production) × automation on/off = 4 install variants, with a 9-row upgrade matrix (`docs/installation.md:494-536`) |
-| UI access | API key kept in memory only (`frontend/src/lib/api.js:10-18`): asked again after every reload or new tab. `API_AUTH_MODE` reserves `session` and `oidc`, but both return 503 (`api/dependencies.py:103`). |
-| Settings | ≈112 `Config` fields (5 unused) |
-| Migrations | 38 per dialect (SQLite and Postgres maintained in parallel) |
-| Recommendation types | 11 (`ZOMBIE_POD`, `RIGHTSIZING_CPU/MEMORY`, `AUTOSCALING_CANDIDATE`, `OFF_PEAK_SCALING`, `IDLE_NAMESPACE`, `CARBON_AWARE_SCHEDULING`, `OVERPROVISIONED/UNDERUTILIZED_NODE`, `ORPHANED_PERSISTENT_VOLUME`, `ORPHANED_LOAD_BALANCER`) |
-| Sources | `greenkube` (10 analyzers), `vpa` (Off-mode VPAs, which include Goldilocks-created ones without provenance), `karpenter` (GreenKube heuristic over NodePools) |
-| PR-able | `RIGHTSIZING_CPU/MEMORY` decreases of container requests on Deployment/StatefulSet/DaemonSet; raw, Kustomize, local-chart Argo Helm, Flux Git-chart HelmRelease |
-| Git providers | GitHub, GitLab, Gitea (personal access tokens) |
-
-### 3.2 Strengths to preserve
-
-- **A safety-first GitOps pipeline**: discovery-based bindings, generation compare-and-set, digest-bound approvals, an isolated renderer sandbox, idempotent operations with fenced leases, and fail-closed defaults. Competitors do not have this.
-- **A rich recommendation record**: evidence block, risk/confidence/effort, lifecycle with events, and a ranking breakdown.
-- **Security hardening** already done: SSRF guards, rate limiting, CSP, secret handling, Trivy, gitleaks.
-- **Breadth of carbon inputs**: Electricity Maps, Wattnet, Boavizta, PUE.
-- **A large, fast test suite** (about 9 s for the 799 GitOps and automation tests).
-- **The demo experience**: `docker run … demo` and demo.greenkube.cloud.
-
-### 3.3 Critical gaps (summary of the five audits)
-
-| Gap | Evidence | Fixed by |
-|---|---|---|
-| Projections are inflated and physically inconsistent | BUG-15, BUG-16, BUG-17 | B |
-| Measurement pipeline corrupts data | BUG-01..03, BUG-32 | A, C0 |
-| Verification is wrong in both directions | BUG-27..38 | C0, C |
-| The loop breaks in real repositories | BUG-43..53 | D |
-| No scheduled scans; ranking unstable; Active list sorted alphabetically | BUG-20..23 | E, I |
-| Only one action kind; most real Helm layouts unsupported | §6.H | H |
-| Four install variants; automation opt-in with about 13 setup steps; ≈3.5 days before the first eligible PR; API key re-entered on every reload | §6.F, BUG-63 | F |
-| UI still visibility-first; no ledger view; duplicated PR lists | §6.K | K |
-| Complexity outpaces scope: 6 overlapping state machines, ~3.3k mirrored storage lines, ~900 lines of dead collection code | §6.M | M |
-| Helm chart unsafe under Argo CD (secret regeneration) | BUG-58 | N |
-
----
-
-## 4. Strategic pivots
-
-| # | From | To | Consequence |
-|---|---|---|---|
-| **P1** | "Pod-level footprint visibility" is the product | Measurement exists to *price and verify changes* | Visibility pages move under "Footprint". The data model is keyed by **workload identity**, not pod name. |
-| **P2** | GreenKube analyzers plus adapters | **Neutral signal aggregator** with a public signal schema | Every source, native included, emits `SourceSignal`s. Consensus replaces fixed priority. Third parties can push signals. |
-| **P3** | Savings = projection × status | Savings = **measurement** with method, confidence interval and provenance | New measurement strategies and an append-only ledger. "Prorated" stops being presented as realized. |
-| **P4** | One hardened path for one action kind | An **action framework** | Generalize before adding kinds; every kind brings its own baseline, apply check, inverse and measurement strategy. |
-| **P5** | Automation is an advanced opt-in feature | **Automation is the product: always on, self-activating, a PR in 15 minutes** | <ul><li>No `automation.enabled` flag: discovery, previews and PR delivery activate as soon as their prerequisites (GitOps controller, Git credentials) are detected, and stay dormant otherwise.</li><li>Patch and CI delivery modes.</li><li>GitHub App.</li><li>Auto-proposed allowlists.</li><li>A warm-up ETA instead of silent ineligibility.</li></ul> |
-| **P6** | Two first-class SQL backends | **Postgres-first**, one SQL dialect layer; SQLite for demo/dev | Removes about 3.3k mirrored lines and 38 duplicated migrations. |
-| **P7** | CO₂e-led messaging | **Cost leads; carbon is co-equal in data** | A configurable carbon price unifies ranking; SCI-aligned methodology docs. |
-| **P8** | Two profiles × automation on/off; API key pasted on every reload | **One install, sign in once** | <ul><li>A single production-grade topology sized for small clusters: scale by replica count, not by profile.</li><li>Postgres-only in Helm.</li><li>Persistent browser sessions: username/password that a password manager can save, HttpOnly cookie.</li><li>Scoped API keys for machines.</li><li>SSO later.</li></ul> |
-
----
-
-## 5. Synthesis — prioritized categories
-
-Ranked by priority. Within a tier, lower rank means start earlier. Horizon weeks count from Monday 2026-11-09 (week 1).
-
-| Rank | ID | Category | Priority | Horizon | Effort | Why it matters |
-|---|---|---|---|---|---|---|
-| 1 | **A** | Measurement integrity — fix the data pipeline | P0 | Weeks 1–3 | L | Every projection and every measurement rests on these numbers; several are currently corrupted. |
-| 2 | **B** | Impact Model v1 — one model for estimates and measurements | P0 | Weeks 1–5 | L | Projections are inflated (total cost × ratio) and claim CO₂e the model cannot produce. Without B, verification can never agree with projection. |
-| 3 | **C** | Verified Savings Ledger v2 — the moat | P0 (C0) / P1 | Weeks 1–3 (C0), 4–14 | XL | "Proven savings" is the differentiator; today it is wrong in both directions and not auditable. |
-| 4 | **D** | Close-the-loop reliability — GitOps pipeline fixes | P0 | Weeks 1–4 | L | Real repositories break sync verification, retention and PR creation; savings never reach the ledger. |
-| 5 | **F** | One install, always-on automation, sign in once (time-to-first-PR) | P0 (F10, F13, F14) / P1 | Weeks 1–10 | L | Adoption and daily-use bottleneck: four install variants, automation opt-in (≈13 steps, ≈3.5 days), API key re-entered on every reload. |
-| 6 | **E** | Recommendation Core v2 — signal model, Source SDK, consensus, scheduled runs | P0 (E1–E3) / P1 | Weeks 1–2, 5–10 | XL | Foundation of the multi-source promise; also fixes "no scheduled scan" and the alphabetical sort. |
-| 7 | **G** | New recommendation sources | P1 | Weeks 6–16 | L | Widens the funnel: Goldilocks, KRR, Kubecost, Polaris, push API, then cloud and commercial sources. |
-| 8 | **H** | New action kinds — what can become a PR | P1 | Weeks 8–20 | XL | Widens the pipe beyond request decreases: increases, limits, replicas/HPA, off-peak schedules, deletions, remote Helm charts, NodePools. |
-| 9 | **I** | Ranking & decisioning v2 | P1 | Weeks 6–10 | M | Risk-adjusted expected value in one currency; stable scores; learning from outcomes. |
-| 10 | **J** | Pull-request experience & collaboration | P1 | Weeks 6–14 | L | The PR is the product's main surface for most users. |
-| 11 | **K** | Product UI re-centering | P1 | Weeks 2–16 | L | Inbox → Changes → Ledger replaces the CO₂-dashboard-first UI. |
-| 12 | **L** | Positioning, documentation & community | P1 | Weeks 1–4, then continuous | M | Communicate the loop; fix stale and contradictory docs; consolidate three doc surfaces. |
-| 13 | **M** | Architecture simplification & refactoring | P2 (continuous, ~15%) | Ongoing | XL | Complexity outpaces scope; it slows every other category. |
-| 14 | **N** | Helm, security & operations | P2 (N1 is P0) | Weeks 1–12 | M | Argo CD-safe install, schema, secure defaults, controller observability. |
-| 15 | **O** | Quality engineering — tests & CI | P2 (O1 is P1) | Ongoing | L | An end-to-end loop test is the only real proof the product works. |
-| 16 | **P** | Ecosystem integrations & reporting | P3 | Months 4–7 | L | Notifications, exports (FOCUS/SCI), MCP, Backstage, multi-cluster. |
-| 17 | **Q** | Beyond CPU/memory — GPU, node shape, storage | P3 | Months 5+ | L | FinOps-for-AI is the top forward priority; VPA and in-place resize don't cover GPUs. |
-
-### 5.1 Dependency graph
-
-```mermaid
-flowchart TD
-  A[A Measurement integrity] --> B[B Impact Model]
-  A --> C0[C0 Verifier & ledger fixes]
-  B --> C[C Ledger v2 / strategies]
-  C0 --> C
-  D[D Loop reliability] --> C
-  E13[E1-E3 Scheduled scans, sort, bounded scan] --> E[E Signal model + SDK + consensus]
-  B --> I[I Ranking v2]
-  E --> G[G New sources]
-  E --> I
-  E --> H0[H0 Action framework]
-  D --> H0
-  H0 --> H[H New action kinds]
-  H --> C
-  F[F One install, always-on automation, sign in once] --> J[J PR experience]
-  D --> F
-  N4[N4 Same-origin CORS default] --> F
-  M8[M8 Automation loop in controller] --> F
-  H0 --> J
-  C --> K[K UI: Ledger page]
-  E --> K
-  M[M Refactoring] -.continuous.-> E
-  M -.-> H0
-  O1[O1 E2E loop test] -.gates.-> C
-```
-
-### 5.2 Capacity rule
-
-Each two-week sprint is split as follows:
-
-| Share | Work |
-|---|---|
-| ≈ 60% | The current milestone's P0/P1 items |
-| ≈ 20% | M/N/O health work, chosen preferably on files touched by the milestone |
-| ≈ 10% | Docs, which ship with features |
-| ≈ 10% | Bugs and community support |
-
----
-
-## 6. Detailed specifications by category
-
-Each category follows the same structure:
-- **Goal**
-- **Current state**
-- **Target design**: abstractions and classes
-- **Work items**: type, priority, effort, problem, spec, acceptance, files
-- **Definition of done**
-
-File paths are relative to `src/greenkube/` unless stated otherwise.
-
----
-
-### Category A — Measurement integrity (fix the data pipeline)
-
-**Priority** P0 · **Horizon** weeks 1–3 · **Effort** L
-
-**Goal.** Make the stored usage, cost and carbon series correct, gap-aware and provenance-tagged. Categories B and C depend on these series.
-
-**Current state.**
-- The production path is `HistoricalRangeProcessor.run_range`, triggered every `PROMETHEUS_QUERY_RANGE_STEP` (`cli/start.py:536`, `cli/utils.py:34-57`).
-- The "instant" path (`DataProcessor.run()`, `CollectionOrchestrator`, `CostNormalizer`, `PrometheusResourceMapper`, `PrometheusCollector.collect`, `BasicEstimator.estimate`) has no production caller. It is about 900 lines; see M4.
-- Defects are confirmed by simulation: double-counted CPU, compression loss, skipped windows.
-
-**Target design.**
-
-1. **`PromQLCatalog`** (`collectors/promql.py`): the single definition of every PromQL expression, parameterized by `step`, `rate_window` and label filters. Both CPU and memory queries carry `container!="", container!="POD"`. `rate_window = max(step, 4 × scrape_interval)` (configurable `PROMETHEUS_SCRAPE_INTERVAL`, default 30s).
-
-2. **`CollectionWindow`** with half-open semantics:
-
-   ```python
-   @dataclass(frozen=True)
-   class CollectionWindow:
-       start: datetime  # inclusive, aligned to step
-       end: datetime    # exclusive
-       step: timedelta
-   ```
-
-3. **`CollectionWatermark`** repository: table `collection_watermarks(cluster_uid, source, last_complete_end, updated_at)`. A collector advances the watermark only after a successful write of the whole window. The scheduler computes `windows_to_collect = [watermark, now - safety_lag)` in step-aligned chunks, with a backfill horizon of `COLLECTION_MAX_BACKFILL` (default 24h).
-
-4. **Per-dimension provenance**, replacing `is_estimated: bool` + `estimation_reasons: list[str]`:
-
-   ```python
-   class CostSource(StrEnum):  OPENCOST="opencost"; KUBECOST="kubecost"; PRICING_CATALOG="pricing_catalog"; CUSTOM_RATE="custom_rate"; NONE="none"
-   class UsageSource(StrEnum): PROMETHEUS="prometheus"; METRICS_SERVER="metrics_server"; NONE="none"
-   class PowerSource(StrEnum): INSTANCE_PROFILE="instance_profile"; NODE_CAPACITY_DERIVED="node_capacity_derived"; DEFAULT_PROFILE="default_profile"; KEPLER="kepler"
-   class IntensitySource(StrEnum): REALTIME="realtime"; CONSOLIDATED="consolidated"; STALE="stale"; ZONE_DEFAULT="zone_default"; GLOBAL_DEFAULT="global_default"
-   ```
-
-   These are stored as columns on metric rows. Consumers (verifier, ranking) declare which dimensions they need to trust. For example, the cost gate requires `cost_source in {opencost, kubecost}`.
-
-5. **`LeaderFence`**: every leader-gated job receives a fencing token (lease generation). Writes include it, and a job checks it before committing.
-
-**Work items.**
-
-#### A1 · BUG · Pod CPU and memory double-counted in range queries — P0 · S
-- **Problem.** The range queries in `core/historical_range_processor.py:280,294,308` sum `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes` without `container!=""`. The pod-level cgroup series is added to the container series. In simulation, CPU was 400m instead of 200m and energy 775 J instead of 610 J. This feeds rightsizing directly. The instant query has the filter (`collectors/prometheus_collector.py:61`). (BUG-01)
-- **Spec.**
-  - Introduce `PromQLCatalog`, used by both the range and instant paths.
-  - Add `container!="",container!="POD"` to every container-scoped CPU and memory expression.
-  - Network and filesystem series stay pod-level by design; document this in the catalog.
-- **Acceptance.**
-  - A fixture-based test with a pod-cgroup series plus two container series returns the sum of the containers only.
-  - Golden energy values are updated.
-  - A changelog entry notes that historic data before the fix is inflated; `calculation_version` is bumped.
-- **Files.** `core/historical_range_processor.py`, `collectors/prometheus_collector.py`, new `collectors/promql.py`, `tests/core/test_historical_range_processor*.py`.
-
-#### A2 · BUG · Half-open windows, watermarks and catch-up — P0 · M
-- **Problem.**
-  - `run_range` returns stored rows when *any* row exists in `[start, end]` (`historical_range_processor.py:98-116`), and SQL uses inclusive `BETWEEN` (`storage/sqlite/repository.py:315`). As a result, every other window is skipped.
-  - OpenCost cost for the skipped windows is dropped; for the computed windows it is counted twice and shifted one step.
-  - `--last` backfill does nothing if any row exists.
-  - Downtime becomes a permanent gap. (BUG-03)
-- **Spec.**
-  - Implement `CollectionWindow` and `CollectionWatermark`.
-  - Remove the read-first shortcut.
-  - All range reads use `timestamp >= start AND timestamp < end`.
-  - The scheduler job `collect_metrics` loops over the missing windows up to the backfill horizon, oldest first.
-  - Expose `greenkube_collection_watermark_lag_seconds{source}` and `greenkube_collection_gap_windows_total`.
-- **Acceptance.**
-  - A simulation over 2 hours with a 5-minute step produces exactly 24 windows and 24×pods rows.
-  - Killing the controller for 30 minutes and restarting it backfills the gap.
-  - Re-running the same window is idempotent (upsert, same values).
-- **Files.** `core/historical_range_processor.py`, `cli/utils.py`, `cli/start.py`, `storage/*/repository.py`, new migration.
-
-#### A3 · BUG · Lossless hourly compression — P0 · M
-- **Problem.** `MetricsCompressor` compresses rows older than a cutoff that is not aligned to the hour, deletes them, and the next run's `ON CONFLICT … = EXCLUDED` overwrites the partial bucket. Every hour older than 7 days keeps only the minutes after the job's start offset; the simulation kept 4 of 12 samples. The same defect exists in the savings-ledger compression (BUG-32), handled by C0.6 and C6. (BUG-02)
-- **Spec.**
-  - Compress only *closed* hours: `bucket_end <= floor_hour(min(now - 24h, watermark))`.
-  - Compress a bucket from its complete raw set in one transaction, then delete exactly those raw rows.
-  - Prune cutoffs are aligned to the hour.
-  - Keep a `compression_watermark` per table.
-  - Add a lower bound so the job never re-reads already compressed periods (today it re-aggregates the whole raw table older than 24h every hour: `metrics_compressor.py:146,284`).
-- **Acceptance.**
-  - The property test "sum of raw before compression equals sum of hourly after compression" holds for `total_cost`, `joules`, `co2e_grams` and `sample_count`, with random job start offsets.
-  - The `sim_compress.py` scenario becomes a regression test.
-- **Files.** `core/metrics_compressor.py`, `storage/*/repository.py`.
-
-#### A4 · BUG · Cost keyed by namespace and pod, with component split — P0 · M
-- **Problem.**
-  - The OpenCost result map is keyed by `pod_name` only (`historical_range_processor.py:258`, `core/collection_orchestrator.py:113`), so same-named pods (`redis-0`) collide across namespaces.
-  - `aggregate=pod` may also merge them on the OpenCost side.
-  - CPU, RAM, PV, network and LB components are discarded; `CombinedMetric` keeps only `total_cost`.
-  - Cost per step is a trailing-window total divided by steps, so new pods are under-costed for 24h after a rollout (BUG-41). (BUG-04)
-- **Spec.**
-  - Query OpenCost `/allocation/compute` with `aggregate=namespace,pod`, `window=<CollectionWindow>`, `accumulate=true` and `includeIdle=false`, and keep idle separately (see B2). Use the exact window rather than a trailing `1d` divided by steps.
-  - Key the cost map by `(namespace, pod)`.
-  - Add columns `cost_cpu`, `cost_ram`, `cost_storage`, `cost_network`, `cost_lb` and `cost_source`; keep `total_cost` as their sum.
-  - Verify the exact OpenCost parameter names against the deployed OpenCost version; add a recorded-response fixture.
-- **Acceptance.**
-  - The two-namespace `redis-0` fixture yields distinct costs.
-  - A 5-minute window's cost equals the OpenCost allocation for that window (±1%).
-  - The component split is persisted.
-- **Files.** `collectors/opencost_collector.py`, `core/historical_range_processor.py`, `core/metric_assembler.py`, `models/metrics.py`, migrations.
-
-#### A5 · BUG · Stale loop variable attaches metrics-server usage to every sample — P1 · S
-- **Problem.**
-  - `ts_f` at `historical_range_processor.py:597` is left over from the loop at line 459, so the condition is always true.
-  - Point-in-time metrics-server usage is attached to every sample of the current chunk.
-  - The container row timestamp is overwritten with "now" (`metric_assembler.py:426`). (BUG-05)
-- **Spec.**
-  - Compare against the sample's own timestamp.
-  - Never overwrite the sample timestamp.
-- **Acceptance.** A unit test with a 3-sample chunk attaches metrics-server data only to the latest sample, and only if it is fresh.
-
-#### A6 · BUG · Filter NaN, Inf and negative values in range parsing — P2 · S
-- **Problem.** `historical_range_processor.py:416-426` accepts NaN and negative values; the instant parser filters them. (BUG-09)
-- **Spec.**
-  - Drop non-finite values.
-  - Clamp negative rates to 0, with a counter `greenkube_collection_dropped_samples_total{reason}`.
-
-#### A7 · BUG · Collect limits and native sidecars — P1 · S
-- **Problem.** `collectors/pod_collector.py` ignores init containers with `restartPolicy: Always` (native sidecars) and never collects limits. Limits are needed for H1 and for risk assessment. (BUG-10)
-- **Spec.**
-  - Add `cpu_limit` and `memory_limit` per container.
-  - Include native sidecars as containers with `kind="sidecar"`.
-  - Keep classic init containers out of the steady-state sums but record them for H1.
-- **Acceptance.** A pod with one container and one native sidecar reports two containers with requests and limits.
-
-#### A8 · BUG · Carbon-intensity staleness and provenance — P1 · S
-- **Problem.**
-  - The intensity lookup takes the latest value with no age limit (`storage/sqlite/repository.py:51-86`).
-  - Defaults are written into history as if they were measured (`collectors/electricity_maps_collector.py:72-93`).
-  - None of this is flagged. (BUG-07)
-- **Spec.**
-  - Add `INTENSITY_MAX_AGE` (default 6h).
-  - Beyond it, use the zone default and set `intensity_source=zone_default`.
-  - Never persist a default into the intensity history table; keep defaults computed at read time.
-  - Store `intensity_source` on metric rows.
-- **Acceptance.** With no token, rows are tagged `zone_default` and the intensity history table stays empty.
-
-#### A9 · BUG · Intensity recompute must update container rows — P2 · S
-- **Problem.** `recompute_carbon_with_latest_intensities` updates `combined_metrics` only (`storage/postgres/repository.py:1377-1425`, `storage/base_repository.py:532`), so container rows drift from the pod aggregate. (BUG-06)
-- **Spec.** Apply the same update to `container_metrics`. On SQLite, use a set-based UPDATE instead of loading 24h of rows into Python.
-
-#### A10 · BUG · Unknown node power profile — P1 · S
-- **Problem.**
-  - When a node's instance type is unknown, the code silently uses `DEFAULT_INSTANCE_PROFILE` (1 vCPU, 1–10 W) (`historical_range_processor.py:188-212,471-477`).
-  - If cAdvisor series lack a `node` label, the whole cluster maps to node `""` and is capped at 10 W. (BUG-08)
-- **Spec.**
-  - Derive a profile from node capacity (`vcores = allocatable.cpu`) × per-core watts from the Boavizta/CCF average, with `power_source=node_capacity_derived`.
-  - Resolve the node from `kube_pod_info` when the cAdvisor label is missing.
-  - Emit `greenkube_unknown_power_profile_nodes`.
-
-#### A11 · REFACTOR · Per-dimension provenance columns — P0 · M
-- **Spec.**
-  - Add the four enums from the target design as columns on `combined_metrics`, `container_metrics` and their hourly tables.
-  - Backfill legacy rows as `cost_source = opencost if total_cost > 0 else none`, `intensity_source = unknown`.
-  - Deprecate `is_estimated` (keep it computed for API v1 compatibility).
-  - Container rows must no longer be blanket-flagged as estimated (`metric_assembler.py:433`; root cause of BUG-29).
-- **Acceptance.** Container rows produced with OpenCost cost and Prometheus usage carry `cost_source=opencost` and `usage_source=prometheus`.
-
-#### A12 · OPS · Controller metrics endpoint and collection health — P1 · S
-- **Problem.** Controller-side telemetry (`record_verification`, `update_cluster_metrics`) lives in a process with no metrics endpoint. (BUG-14)
-- **Spec.**
-  - Serve `/metrics` on the controller (port `9102`, authenticated or bound to the pod network only).
-  - Add a ServiceMonitor and Helm wiring.
-  - Collection metrics: watermark lag, window duration, Prometheus/OpenCost errors, provenance mix.
-
-#### A13 · DESIGN+BUG · Runtime configuration consistency — P1 · S
-- **Problem.**
-  - URLs and tokens edited in the UI only reach the API process; the controller keeps its cached collectors (`api/routers/health.py:63-97`, `core/config.py:724-760`, `core/factory.py:301`).
-  - The API also writes into the release Secret, which causes GitOps drift (BUG-60). (BUG-11)
-- **Decision (recommended).**
-  - Make data-source endpoints and tokens *configuration-as-code only*: Helm values and Secrets.
-  - The UI shows them read-only, with health status and copy-paste Helm snippets.
-  - Remove the Secret-writing RBAC.
-- **Alternative.** A `runtime_settings` table watched by every process. Rejected: it adds a second source of truth.
-
-#### A14 · BUG · Leader fencing for scheduled jobs — P2 · S
-- **Problem.** A controller that loses its Lease mid-job keeps writing (`cli/start.py:369-383`). (BUG-13)
-- **Spec.** Implement `LeaderFence`: check the lease before every commit and abort the job if it was lost.
-
-**Definition of done (A).**
-- All `sim_*.py` audit scenarios exist as regression tests and pass.
-- A 24-hour soak on a kind cluster shows a watermark lag below 2 steps, zero gaps and zero NaN.
-- The provenance mix is visible in metrics.
-- `docs/architecture.md` describes the `run_range` path only.
-
----
-
-### Category B — Impact Model v1 (one model for estimates and measurements)
-
-**Priority** P0 · **Horizon** weeks 1–5 · **Effort** L
-
-**Goal.** Replace ad-hoc savings arithmetic in analyzers and the verifier with a single, versioned, documented model. The model must:
-- compute what a workload *is charged* (allocated cost and allocated CO₂e), what it *draws* (usage energy), and what a change could *release* (capacity, then billable node-hours);
-- be used both to project a recommendation's impact and to measure it after the change.
-
-**Current state.**
-- Analyzers compute `annual_total_cost × request_reduction_ratio`, including RAM and other costs, for CPU (`core/optimization/analyzers/rightsizing_cpu.py:71-74,110-111`), memory and VPA (`core/optimization/providers/vpa.py`). (BUG-15)
-- CO₂e is usage-based (`energy/estimator.py:217-285`), so request cuts do not change it, yet projections claim proportional CO₂e savings (BUG-16). Without OpenCost, cost is 0 (`config.py:137`; BUG-17).
-- Energy is CPU-only (BUG-18).
-- Cost allocation excludes idle while energy allocates 100% of node power to pods (BUG-19).
-- Embodied emissions use `max(request, usage)` (`core/embodied_service.py:191-196`), the only CO₂e component that responds to requests.
-
-**Target design.**
-
-```python
-# src/greenkube/impact/model.py
-class ImpactModel(Protocol):
-    version: str  # semver; persisted on every metric row, projection, and measurement
-
-    def allocate(self, window: CollectionWindow, snapshot: ClusterSnapshot) -> list[WorkloadImpact]:
-        """Per-workload, per-container allocation for one window."""
-
-    def project(self, baseline: WorkloadBaseline, change: ProposedChange, pool: NodePoolContext) -> ImpactDelta:
-        """Expected effect of a proposed change; used by analyzers and connectors."""
-
-    def realize(self, before: NodePoolObservation, after: NodePoolObservation) -> RealizedCapacity:
-        """Cluster/pool-level node-hours and cost actually removed; used by C."""
-```
-
-**Core types:**
-
-```python
-@dataclass(frozen=True)
-class WorkloadRef:          # stable across rollouts, unlike pod names
-    cluster_uid: str; namespace: str; kind: str; name: str; container: str | None
-
-@dataclass
-class WorkloadImpact:
-    ref: WorkloadRef
-    window: CollectionWindow
-    replica_hours: float
-    cpu_core_hours_requested: float;  cpu_core_hours_used: float
-    mem_gib_hours_requested: float;   mem_gib_hours_used: float
-    cost_allocated: CostBreakdown      # cpu, ram, storage, network, lb, gpu (currency)
-    energy_kwh: EnergyBreakdown        # dynamic_cpu, dynamic_mem, idle_share, gpu
-    co2e_operational_g: float          # energy_kwh × PUE × intensity(t)
-    co2e_embodied_g: float             # Boavizta share by reservation
-    provenance: Provenance             # cost/usage/power/intensity sources + model version
-
-@dataclass
-class ImpactDelta:
-    allocated_cost_annual: float           # what the workload stops being charged
-    capacity_released: CapacityDelta       # core-hours/yr, GiB-hours/yr
-    expected_billable_cost_annual: float   # allocated × realization_factor
-    realization_factor: float              # 0..1 from RealizationContext (autoscaler, headroom, pool type)
-    co2e_allocated_annual_g: float         # idle-power + embodied share released
-    co2e_expected_annual_g: float          # × realization_factor
-    assumptions: dict                      # unit prices, intensity, PUE used (rendered in PR body)
-    confidence: float
-```
-
-**Building blocks** (each a protocol with implementations):
-
-| Block | Implementations | Notes |
-|---|---|---|
-| `UsageSource` | Prometheus (`PromQLCatalog`); Kepler (measured power, opt-in); DCGM (GPU) | Kepler's 2026 rewrite attributes active CPU only; use it for dynamic power, never idle |
-| `CostSource` | OpenCost; Kubecost; `PricingCatalog` (bundled list prices per provider/region/instance type, with spot flags); `CustomRates` (per core-hour / GiB-hour from config) | Chain: first available wins; record `cost_source` |
-| `PowerModel` | `LinearCpuPowerModel` (existing min/max per profile); `MemoryPowerModel` (W/GiB, default 0.392 W/GB per CCF); `GpuPowerModel` (TDP or DCGM) | Sum of components |
-| `GridIntensitySource` | Electricity Maps; Wattnet; zone defaults | Staleness limit (A8) |
-| `EmbodiedModel` | Boavizta (existing service) | Lifespan configurable (default 4 years) |
-| `AllocationPolicy` | `ReservationAwareAllocation` (default) | See below |
-| `RealizationContext` | Built from node pools: Cluster Autoscaler / Karpenter present? Consolidation policy? Pool headroom? `do-not-disrupt` / PDB blockers? | Yields `realization_factor` |
-
-**`ReservationAwareAllocation` (the key methodological change).**
-- **Dynamic power** (`util × (max−min)`) is allocated by **usage** share.
-- **Idle power** (`min_watts`) and **embodied emissions** are allocated by **reservation** share: `max(request, usage) / node_allocatable`. Unreserved capacity goes to an explicit `__idle__` workload per node.
-- **Cost:** OpenCost allocated cost (which is `max(request, usage)`-based) plus OpenCost idle mapped to `__idle__`.
-- **Result:** cost and carbon use the same boundary, and request cuts lower a workload's allocated CO₂e (idle + embodied) the same way they lower its allocated cost.
-- This is consistent with SCI (ISO/IEC 21031): O = E × I, M = embodied share.
-
-**Projection rules** (replacing per-analyzer arithmetic):
-- **Container requests:** Δcost = Σ over resources (Δrequest × replica_hours × unit_price[resource]). Unit prices come from the node's OpenCost hourly rates (CPU core-hour, RAM GiB-hour) or the `PricingCatalog`. CPU and memory deltas of the same container are computed *together* in one `ImpactDelta`, so their sum can never exceed the container's allocated cost.
-- **Deletion** (PV, LB, zombie): Δcost = the current allocated rate of the asset; realization_factor = 1.
-- **Replica or schedule changes:** Δ replica-hours × per-replica allocated rate; realization from the pool context.
-- **Node pool changes:** node-hours × price; realization_factor = 1 when the action is the consolidation itself.
-
-**Carbon price (value unification).**
-- Setting `CARBON_PRICE_PER_TONNE` (currency per tCO₂e). The default is a decision (see §9 D-2); a suggested default is 100.
-- `value_annual = expected_billable_cost_annual + carbon_price × co2e_expected_annual_g / 1e6`. Used by I.
-
-**Work items.**
-
-#### B1 · DESIGN · Impact methodology document — P0 · M
-- Write `docs/methodology/impact-model.md` covering:
-  - the allocation policy;
-  - the formulas;
-  - provenance;
-  - the realization factor;
-  - SCI mapping;
-  - limitations (no network or storage energy; embodied lifespan; Kepler scope).
-- It is the reference for code review. Version 1.0.0 accompanies `ImpactModel.version`.
-
-#### B2 · FEAT · `impact/` package with `ReservationAwareAllocation` — P0 · L
-- **Spec.**
-  - Implement the protocols and types above.
-  - Plug them into `HistoricalRangeProcessor` so per-window rows are produced by `ImpactModel.allocate`.
-  - Persist `model_version`.
-  - Add `__idle__` rows per node, flagged `scope="idle"`.
-- **Acceptance.**
-  - Golden fixture (3 nodes, 10 pods, mixed requests and usage): per-pod values match hand-computed numbers.
-  - Σ allocated + idle = node totals for cost, energy and embodied (conservation test).
-- **Files.** New `impact/` package; `energy/estimator.py` and `core/calculator.py` become implementations behind the protocols; `core/metric_assembler.py`.
-
-#### B3 · FEAT · Cost fallback chain and `PricingCatalog` — P0 · M
-- **Spec.**
-  - Bundle `data/pricing/{aws,gcp,azure,ovh,scaleway}.json`: on-demand hourly price per instance type and region, generated by a script from public price lists. Commit the script, not a scraper in the runtime.
-  - `CustomRates` from Helm: `impact.pricing.cpuCoreHour`, `ramGiBHour`, `currency`.
-  - Node cost = catalog price, apportioned to CPU and RAM with the OpenCost default ratio, then allocated by `max(request, usage)`.
-  - `cost_source=pricing_catalog`.
-- **Acceptance.**
-  - Without OpenCost, a cluster of known instance types has non-zero costs that are within 15% of OpenCost on the same fixture.
-  - The UI shows a "cost source: list prices" badge.
-
-#### B4 · BUG · Analyzers and connectors use `ImpactModel.project` — P0 · M
-- **Problem.** BUG-15 and BUG-16.
-- **Spec.**
-  - Remove `annual_total_cost × ratio` everywhere: `rightsizing_cpu.py`, `rightsizing_memory.py`, `providers/vpa.py`, `zombie.py`, `off_peak.py`, `autoscaling.py`, `providers/karpenter.py`, `orphaned_*.py`.
-  - Analyzers emit *proposals*; the engine calls `ImpactModel.project` once per target (see E4).
-  - Persist `ImpactDelta` as `impact` JSON on the recommendation.
-  - Keep `potential_savings_cost` and `potential_savings_co2e_grams` as `expected_billable_cost_annual` and `co2e_expected_annual_g` for API v1 compatibility.
-- **Acceptance.**
-  - Property test: for any container, the projected cost delta (CPU + memory) ≤ allocated container cost.
-  - A CPU-only cut projects zero RAM savings.
-  - Projected CO₂e for request cuts equals the idle and embodied share released × realization factor.
-
-#### B5 · FEAT · Memory and GPU power — P1 · M
-- **Spec.**
-  - Add `MemoryPowerModel` (configurable `POWER_MEMORY_W_PER_GIB`, default 0.392).
-  - Add `GpuPowerModel`: DCGM `DCGM_FI_DEV_POWER_USAGE` when present, otherwise the TDP table for common GPU types (bundled `data/gpu_profiles.json`).
-  - Fill `gpu_usage` from DCGM or Kepler (today `gpu_usage_millicores` is never populated).
-- **Acceptance.**
-  - On the m5.large fixture, memory adds ≈3 W at 8 GiB fully reserved.
-  - GPU nodes get non-zero power when DCGM is present.
-
-#### B6 · FEAT · `RealizationContext` — P1 · M
-- **Spec.** Read the following to compute `realization_factor` per node pool:
-  - Cluster Autoscaler status (`kube-system/cluster-autoscaler-status` ConfigMap; parse defensively);
-  - Karpenter NodePools (consolidation policy `WhenEmpty | WhenEmptyOrUnderutilized | Balanced`, disruption budgets);
-  - node-group headroom;
-  - `do-not-disrupt` / `safe-to-evict=false` annotations and blocking PDBs.
-- **Default heuristic:**
-
-  | Situation | `realization_factor` |
-  |---|---|
-  | No autoscaler | 0.0 (fixed nodes: allocated savings only) |
-  | Karpenter `WhenEmptyOrUnderutilized` or `Balanced` | 0.8 |
-  | Cluster Autoscaler | 0.6 |
-  | Any of the above, with blockers | ×0.5 |
-
-  Show the factor and its reasons in the evidence and PR body.
-
-#### B7 · FEAT · Kepler measured-power mode — P3 · M
-- **Spec.** Optional `UsageSource` for dynamic CPU power on bare metal (`kepler_container_cpu_joules_total`). Never use it for idle. `power_source=kepler`.
-
-#### B8 · REFACTOR · Recalculation policy — P2 · S
-- **Spec.**
-  - When `model_version` changes, raw rows within retention can be recomputed by a CLI command (`greenkube recompute --since`).
-  - Hourly rows keep their original version.
-  - The UI shows the version mix.
-
-**Definition of done (B).**
-- No analyzer computes savings itself.
-- Projections and allocations come from `ImpactModel` and carry `model_version`.
-- Golden and conservation tests pass.
-- The methodology doc is published.
-- Without OpenCost, costs are non-zero and labeled.
-
----
-
-### Category C — Verified Savings Ledger v2 (the moat)
-
-**Priority** P0 for C0, P1 for the rest · **Horizon** C0 in weeks 1–3; C1–C9 in weeks 4–14 · **Effort** XL
-
-**Goal.** Every applied change gets an honest, reproducible measurement, with:
-- a counterfactual baseline;
-- a confidence interval;
-- confounder checks;
-- an outcome.
-
-Every saving lands in an append-only ledger with full provenance (recommendation → plan → PR → merge commit → synced revision → measurement → method version).
-
-**Current state** (audit, reproduced):
-- Traffic normalization inflates savings about 4× (BUG-27).
-- The p95 gate false-fails multi-replica changes (BUG-28).
-- Container-scoped (GitOps) changes are never measurable (BUG-29).
-- Failed or inconclusive changes keep accruing projected savings (BUG-30).
-- Retest-until-pass (BUG-31).
-- Ledger compression loses about 50% (BUG-32).
-- Non-idempotent accrual (BUG-33).
-- One bad record breaks all attribution (BUG-34).
-- OOM, readiness and throttle gates are inert (BUG-35).
-- CPU and memory records double-count (BUG-36).
-- State-machine defects (BUG-37, BUG-38).
-- No restatement (BUG-39).
-- Mixed reporting units (BUG-40, BUG-42).
-- No provenance; mutable rows; mislabelled fields (`baseline_value` holds a projected *saving*; `confidence` is the recommendation's, not the measurement's).
-
-#### C0 · Immediate verifier and ledger fixes (P0, weeks 1–3)
-
-Make today's flow *not wrong* before the redesign lands. Each is `S` unless noted.
-
-| ID | Fix | Defect |
-|---|---|---|
-| C0.1 | Disable traffic normalization until C3 ships. When it returns, compute load as a **rate** (bytes/s averaged per timestamp bucket, weighted by `sample_count`), never as sums of row values across raw and hourly rows (`core/optimization/verifier.py:357-371`). Remove the unused `seasonality_factor` read. | BUG-27 |
-| C0.2 | Health gates are **per replica**: compute the p95 over per-pod usage samples (not the replica sum, `verifier.py:395-402,575-580`) and compare it with the per-pod proposed request × headroom. Restarts are computed as per-pod deltas of cumulative counters; new pods start from their first observation. | BUG-28 |
-| C0.3 | Use provenance (A11) instead of `is_estimated` to select trusted rows. The cost gate requires `cost_source ∈ {opencost, kubecost, pricing_catalog}`; the usage gate requires `usage_source=prometheus`. Fix the hourly container readers that drop `sample_count` (`storage/sqlite/repository.py:22` and the Postgres equivalent). (M) | BUG-29 |
-| C0.4 | The attributor writes **no** rows for `not_realized`, `inconclusive`, `failed`, `rollback_review` or `reverted`. "Prorated" rows are relabeled `projected` and excluded from "realized" totals everywhere (API, gauges, UI). | BUG-30 |
-| C0.5 | Fixed-horizon evaluation: `not_realized` is a terminal outcome for that measurement. Re-measurement only happens through an explicit `POST /recommendations/{id}/remeasure` that creates a *new* measurement. Exclude `not_realized` from `verify_due` (`verifier.py:123-126`, `lifecycle.py:338-351`). | BUG-31 |
-| C0.6 | Stop compressing and deleting ledger rows. Rollups become read-side aggregates (SQL views or materialized views refreshed hourly). Migration: recompute hourly ledger aggregates from raw where raw still exists; mark older hourly rows `legacy_compressed=true`. (M) | BUG-32 |
-| C0.7 | Idempotent accrual on a fixed grid: periods are UTC 5-minute or hour slots, keyed `(recommendation_id or measurement_id, quantity, period_start)` with a unique constraint and an `accrual_watermarks` table advanced under the leader fence. Missing slots are backfilled; duplicates are impossible. (M) | BUG-33 |
-| C0.8 | Validate the user-supplied `cost_saved` and `carbon_saved_co2e_grams` on PATCH `/apply` (finite; bounded by 10× the projection; signed allowed but flagged). Mark them `method=user_declared`; never present them as measured. Attribution processes each record in its own try/except with a counter `greenkube_attribution_errors_total`. | BUG-34 |
-| C0.9 | Wire `HealthCollector` into the verifier (`cli/start.py:322`): OOMKilled from `kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}`, readiness from `kube_pod_status_ready`, CPU throttling ratio from `container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total`. Missing signals → the gate reports `not_available` (shown, not silently passed). (M) | BUG-35 |
-| C0.10 | Attribution groups (interim): when CPU and memory records target the same container and were applied by the same plan, measure once and split the measured cost delta by the OpenCost `cost_cpu`/`cost_ram` components (A4). | BUG-36 |
-| C0.11 | State machine fixes: <ul><li>`mark_inconclusive` writes `event_type=inconclusive` (new enum value, `lifecycle.py:322`);</li><li>forbid `ACTIVE→VERIFIED`;</li><li>`PATCH /apply` refuses non-`active`/`pr_open` records (409);</li><li>add `VERIFIED→REGRESSED` (C8) and `ROLLBACK_REVIEW→APPLIED` (operator dismisses a false positive, with reason);</li><li>all transitions compare-and-swap and atomic with their event.</li></ul> | BUG-37 |
-| C0.12 | `applied_at` = rollout completion time (`updatedReplicas == replicas == availableReplicas` and `observedGeneration >= generation`), not detection time. The baseline window ends at the PR **merge** time (or at plan approval for manual applies) and must not overlap the after-window. `freeze_baseline` records the evidence window it copies, not "now". | BUG-38 |
-| C0.13 | Persist `measured_ledger_input` immutably in a `savings_measurements` row (C1) and never delete it on inconclusive (`lifecycle.py:314-318`). | BUG-37 |
-| C0.14 | Reporting: <ul><li>`/recommendations/savings` returns three never-mixed blocks: `projected_annual`, `run_rate_annual` (from realized measurements), `realized_to_date` (sum of ledger accruals);</li><li>if the ledger read fails, return 503 instead of silently falling back (`api/routers/recommendations.py:352`);</li><li>`_total` gauges become monotonic counters; supersessions are reported as separate reversal counters;</li><li>the window filter includes the partial first hour.</li></ul> | BUG-40, BUG-42 |
-
-**Acceptance (C0).**
-- The audit scripts `verify_e2e.py`, `verify_container.py` and `ledger_compress.py` become regression tests and assert correct outcomes:
-  - a 1-replica CPU cut with no real CO₂e change → cost `realized` (allocated), CO₂e `n/a`;
-  - 2 replicas at 200m with 300m proposed → no rollback_review;
-  - container-scoped → measurable;
-  - compression sums conserved;
-  - two attribution runs → one row per slot.
-
-#### C — Target design (C1–C9)
-
-**Domain objects** (new package `verify/`):
-
-```python
-@dataclass(frozen=True)
-class ChangeEvent:                      # created by the applied detector; immutable
-    change_id: str                      # uuid
-    recommendation_ids: list[int]
-    plan_id: str | None; pr_url: str | None
-    merge_sha: str | None; gitops_revision: str | None; synced_at: datetime | None
-    target: WorkloadRef; workload_uid: str
-    generation_before: int; generation_after: int
-    spec_digest_before: str; spec_digest_after: str   # sha256 of the normalized pod template
-    rollout_started_at: datetime; rollout_completed_at: datetime
-    action_kind: str                    # from H0 registry
-    application_method: Literal["gitops_pr","manual","detected"]
-
-@dataclass(frozen=True)
-class BaselineSnapshot:
-    snapshot_id: str; content_sha256: str
-    window: TimeWindow                  # ≥ 7 days, ends at merge/approval
-    hourly_series: dict                 # per hour-of-week: replicas, usage, allocated cost, energy, load driver
-    price_card: dict; intensity_source: str
-    impact_model_version: str; collector_versions: dict
-
-class SavingsMeasurementStrategy(Protocol):
-    key: str; version: str
-    def required_windows(self, change: ChangeEvent) -> WindowPlan     # pre/post, warm-up exclusion, min coverage
-    async def collect(self, change: ChangeEvent, plan: WindowPlan) -> ObservationSet
-    def counterfactual(self, obs: ObservationSet) -> CounterfactualModel
-    def estimate(self, obs: ObservationSet, cf: CounterfactualModel) -> SavingsEstimate   # per quantity, rate + 90% CI
-    def health(self, obs: ObservationSet) -> list[HealthFinding]
-
-@dataclass(frozen=True)
-class SavingsEstimate:
-    quantity: Literal["allocated_cost","billed_cost","energy_kwh","co2e_g","core_hours","gib_hours"]
-    rate_per_hour: float; ci_low: float; ci_high: float
-    coverage: float; confounders: list[Confounder]
-    outcome: Literal["realized","not_realized","inconclusive","contaminated"]
-```
-
-**Strategies** (registered by `action_kind` from H0):
-
-| Strategy | Measures | Notes |
-|---|---|---|
-| `RequestRightsizingStrategy` | Freed capacity = Σ(Δrequest × replica-hours) in core-hours and GiB-hours; **allocated** cost and allocated CO₂e (idle + embodied share) via ImpactModel; usage-energy delta ≈ 0 (reported, not claimed) | Primary strategy for v0.4–0.5 |
-| `CapacityRealizationAllocator` | Pool-level node-hours and node cost vs a counterfactual (demand ÷ pre-period bin-packing efficiency). Splits **realized billed** cost and CO₂e across the period's changes in proportion to capacity freed | Runs daily per node pool; produces `realized_billed` entries |
-| `ResourceDeletionStrategy` | Pre-change allocated rate × time since the asset disappeared from OpenCost / Kubernetes | High confidence; PV, LB, zombie |
-| `ReplicaScalingStrategy` | Replica-hours per unit of load (HPA, KEDA, off-peak) | Needs a load driver |
-| `NodeConsolidationStrategy` | Node-hours × price (Karpenter NodePool edits) | Directly billable |
-| `TemporalShiftStrategy` | kWh × Δintensity (carbon-aware, off-peak) | CO₂e-only |
-
-**Baseline and normalization (C3).**
-- `LoadDriverResolver` picks the first available load driver with ≥ 0.8 coverage, in this order:
-  1. ingress/mesh requests/s (nginx, Istio, Envoy metrics) for the workload;
-  2. a configured custom metric (`greenkube.io/load-metric` annotation);
-  3. CPU usage (weakest; flagged).
-- Counterfactual (IPMVP Option B style):
-  - MVP: hour-of-week matched means, scaled by the load-driver ratio.
-  - v2: OLS `metric ~ load + hour_of_week` fitted on ≥ 7 days pre-change, predicted onto post-change load.
-- Post-window: starts at `rollout_completed_at + warmup` (default 1h); covers ≥ 7 days with aligned hour-of-week coverage ≥ 0.8; minimum samples derive from coverage, not a fixed 36.
-- CO₂e is computed per period from that period's actual intensity, never annualized from a snapshot.
-
-**Confounders and statistics (C4).**
-- `ConfounderDetector` checks for:
-  - other `ChangeEvent`s on the same workload or in the same pool;
-  - image or spec changes (spec digest);
-  - HPA min/max edits;
-  - replica-count shifts beyond the load model's prediction;
-  - price-card changes;
-  - node-pool instance-type changes.
-- Each confounder lowers confidence; severe ones → `contaminated`.
-- Moving-block bootstrap by day gives a 90% CI.
-- Outcome rule (fixed horizon, no repeated testing):
-  - `realized` if the CI lower bound > 0;
-  - `not_realized` if the CI upper bound ≤ ε;
-  - otherwise `inconclusive`.
-- Report signed values; never floor at 0.
-- Projection accuracy (estimate ÷ projection) is reported separately and **not used as a gate**; it feeds the track record (I3).
-
-**Ledger (C6)** — append-only:
-
-```sql
-CREATE TABLE savings_measurements (            -- immutable
-  measurement_id UUID PRIMARY KEY, change_id UUID NOT NULL, group_id UUID NOT NULL,
-  strategy_key TEXT NOT NULL, strategy_version TEXT NOT NULL, impact_model_version TEXT NOT NULL,
-  baseline_snapshot_id UUID NOT NULL, windows JSONB NOT NULL, load_driver TEXT,
-  counterfactual_params JSONB, estimates JSONB NOT NULL,   -- list of SavingsEstimate
-  confounders JSONB, outcome TEXT NOT NULL, evidence_sha256 TEXT NOT NULL,
-  supersedes_measurement_id UUID, decided_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE savings_ledger_entries (          -- INSERT-only (trigger rejects UPDATE/DELETE)
-  entry_id UUID PRIMARY KEY, cluster_uid TEXT NOT NULL,
-  measurement_id UUID, change_id UUID NOT NULL, recommendation_ids INT[] NOT NULL,
-  entry_kind TEXT NOT NULL CHECK (entry_kind IN ('accrual','reversal','restatement')),
-  method TEXT NOT NULL CHECK (method IN ('projected','measured_allocated','realized_billed','user_declared')),
-  quantity TEXT NOT NULL, value DOUBLE PRECISION NOT NULL, unit TEXT NOT NULL, currency TEXT,
-  price_card_version TEXT, intensity_g_per_kwh DOUBLE PRECISION, intensity_source TEXT,
-  method_version TEXT NOT NULL, confidence DOUBLE PRECISION,
-  period_start TIMESTAMPTZ NOT NULL, period_end TIMESTAMPTZ NOT NULL,   -- fixed UTC grid
-  reverses_entry_id UUID, created_at TIMESTAMPTZ NOT NULL, created_by TEXT NOT NULL,
-  prev_hash TEXT, hash TEXT NOT NULL,
-  UNIQUE (change_id, measurement_id, quantity, method, period_start, entry_kind)
-);
-```
-
-- `cluster_uid` is the `kube-system` namespace UID; it replaces `CLUSTER_NAME="default"` collisions.
-- The hash chain is per cluster: `hash = sha256(prev_hash || canonical_json(row))`, so tampering is detectable.
-- Rollups are views. Nothing is deleted.
-- When a measurement concludes, a `restatement` entry replaces the projected accruals of the measurement window with measured ones: a `reversal` of the projected rows plus `accrual` of the measured rows, all linked.
-
-**Lifecycle states (C2):**
-`applied → measuring → {realized | not_realized | inconclusive | contaminated}`, then `realized → {regressed | closed}`.
-
-`DriftMonitor` (C8) closes accrual when:
-- the spec drifts (spec digest ≠ `spec_digest_after`);
-- the workload is deleted;
-- a later change supersedes it.
-
-It posts reversal entries when a measurement is superseded.
-
-**Work items (C1–C9).**
-
-| ID | Type | Item | Pri | Effort |
-|---|---|---|---|---|
-| C1 | FEAT | `ChangeEvent` and `BaselineSnapshot` creation in the applied detector, with rollout-completion detection (C0.12) and spec digests | P1 | M |
-| C2 | FEAT | Measurement lifecycle states and `measurements` API (`GET /api/v2/changes/{id}/measurements`) | P1 | M |
-| C3 | FEAT | `LoadDriverResolver` + hour-of-week counterfactual (MVP), then OLS (v2) | P1 | L |
-| C4 | FEAT | `ConfounderDetector` + bootstrap CI + outcome rule | P1 | M |
-| C5 | FEAT | `AttributionGroup`: one measurement per (workload, change); split across recommendations by cost components or projected share | P1 | S |
-| C6 | FEAT | Append-only ledger tables, hash chain, accrual watermarks, read-side rollups, restatement | P1 | L |
-| C7 | FEAT | Ledger API and export: `GET /api/v2/ledger/entries` (cursor), `/ledger/summary`, CSV and FOCUS-aligned export (`x-greenkube-*` extension columns: method, measurement_id, pr_url, co2e_g) | P1 | M |
-| C8 | FEAT | `DriftMonitor` + `regressed` state + reversal entries | P2 | M |
-| C9 | DOC | `docs/methodology/savings-measurement.md`: IPMVP-inspired method, strategies, CI, outcome rule, limitations, auditing guide | P1 | M |
-| C10 | FEAT | `CapacityRealizationAllocator` (pool-level realized billed savings) | P2 | L |
-
-**Definition of done (C).** For a GitOps rightsizing PR on the kind end-to-end environment (O1), the ledger shows:
-- `projected` accruals until the measurement concludes;
-- then a `restatement` to `measured_allocated` with a CI;
-- every entry linked to PR URL, merge SHA, synced revision, measurement and method version;
-- the hash chain verifies;
-- the CSV export reconciles with the UI totals.
-
----
-
-### Category D — Close-the-loop reliability (GitOps pipeline fixes)
-
-**Priority** P0 · **Horizon** weeks 1–4 · **Effort** L
-
-**Goal.** A merged GreenKube PR must reliably reach `SYNCED → APPLIED → measuring` in real repositories, including busy monorepos, GitHub, GitLab and Gitea, multi-replica APIs, and restarts.
-
-**Current state.**
-- Defensive design; 799 automation and GitOps tests, all against fakes.
-- Real-world breakpoints were found by the audit (BUG-43..57).
-
-**Work items.**
-
-#### D1 · BUG · Ancestry-aware sync confirmation — P0 · M
-- **Problem.** `gitops/sync.py:640-646` requires `observed_sha == merge_commit_sha`. If any later commit lands before the controller syncs (another PR, Renovate, image write-back), the result is `REVISION_MISMATCH`, then `SYNC_FAILED`. Apply detection never runs and savings are never recorded. (BUG-43)
-- **Spec.**
-  - Add `GitProvider.is_ancestor(ancestor_sha, descendant_sha) -> bool | None`:
-    - GitHub: `GET /repos/{o}/{r}/compare/{base}...{head}`, with `status in {ahead, identical}`.
-    - GitLab: `GET /projects/:id/repository/merge_base` or compare.
-    - Gitea: compare API.
-  - Sync is `SYNCED` when the observed revision equals the merge SHA, or descends from it **and** the rendered target still contains the planned values (live-state check through the applied detector).
-  - Cache ancestry results.
-  - New reason `SYNC_CONFIRMED_DESCENDANT`.
-- **Acceptance.** A fake provider with merge SHA M and observed revision D (D descends from M) → `SYNCED`. A non-descendant → `MISMATCHED` with a clear reason.
-
-#### D2 · BUG · Retention must never brick workloads or delete audit data — P0 · S
-- **Problem.**
-  - `prune_automation_history` deletes `automation_plan_files` for `APPLIED`/`SYNC_FAILED` plans (`storage/base_gitops_sql_repository.py:1586-1595`).
-  - The mapper then builds a `Plan` with `file_plan=None`, which the validator rejects (`gitops/contracts.py:545-556`).
-  - Policy history reads fail, so every future plan for that workload gets `POLICY_EVIDENCE_MISSING` permanently, and `GET` on the plan returns 500.
-  - Retention also deletes `recommendation_events` (`:1613-1616`), which is the audit trail. (BUG-44)
-- **Spec.**
-  - Never delete `recommendation_events`. Archive them to a cold table if needed, or allow an explicit opt-in retention with export first.
-  - Plan-file pruning keeps a compact `file_plan_summary` (paths, digests, diff stats) so the `Plan` remains valid. The validator accepts `file_plan=None` when `file_plan_summary` exists.
-  - Policy history reads are tolerant of pruned plans.
-- **Acceptance.** The `prune_check.py` scenario becomes a regression test: after pruning, `GET /plans/{id}` returns 200 and new plans for the workload pass policy.
-
-#### D3 · BUG · GitHub PRs closed without merge — P0 · S
-- **Problem.**
-  - GitHub keeps a test-merge `merge_commit_sha` on PRs closed without merging.
-  - The webhook (`automation/webhooks.py:336`) and the poll path (`automation/pr_lifecycle.py:281-291`) copy it.
-  - `_verify_provider_state` rejects unmerged states that have a merge SHA, so the plan stays `PR_OPEN` forever and blocks the workload. (BUG-45, *Likely*)
-- **Spec.** When `merged == false`, ignore `merge_commit_sha`.
-- **Acceptance.** Add a fixture from a real GitHub payload of a closed-unmerged PR, then a regression test.
-
-#### D4 · BUG · GitLab fast-forward and squash merges — P1 · S
-- **Problem.** A null `merge_commit_sha` on fast-forward merges leads to `SYNC_FAILED` (BUG-46, *Plausible*).
-- **Spec.** Fall back to `squash_commit_sha`, then to the MR `sha` (head) when the merge method is fast-forward. Record which one was used.
-
-#### D5 · BUG · PR creation cost independent of repository size — P0 · M
-- **Problem.**
-  - `_branch_state` lists the whole tree and fetches every file at base and branch (`automation/plan_worker.py:1084-1121`).
-  - On GitHub that is one Contents-API call per file (`automation/git/github.py:70`).
-  - It is called 3 times on the happy path, about 6×(N+1) requests. A 1,000-file repo exceeds the 5,000 requests/hour limit. (BUG-47)
-- **Spec.**
-  - Compare tree blob SHAs (`GET /git/trees/{sha}?recursive=1` on GitHub, `repository/tree` on GitLab) and fetch content only for planned paths.
-  - Create commits with the Git Data API (blobs → tree → commit → ref update): a single atomic commit and O(changed files) calls.
-  - Add a provider call budget per operation with a metric.
-- **Acceptance.** A fake 5,000-file repo → fewer than 15 provider calls to open a PR.
-
-#### D6 · BUG · Re-opening a preview must not 409 — P0 · S
-- **Problem.** A preview persists a `VALIDATED` plan. Closing the modal doesn't cancel it, and `create_plan` evaluates policy without excluding the caller's own existing plan (`automation/plan_runtime.py:403`), so the user gets `WORKLOAD_PLAN_ALREADY_EXISTS` for 30 minutes. (BUG-48)
-- **Spec.**
-  - A new preview for the same workload and recommendations *supersedes* an existing `DRAFT`/`VALIDATED` plan; the supersede path exists at `automation/plans.py:399-403` but is unreachable.
-  - Add `DELETE /automation/plans/{id}` (cancel), called by the UI on modal close.
-- **Acceptance.** Preview → close → preview returns a new plan; the old one is `SUPERSEDED`.
-
-#### D7 · BUG · Unrelated commits must not stale approved plans — P0 · M
-- **Problem.** Approval and the worker require the branch head to equal the plan's base revision (`plans.py:645-652`, `plan_worker.py:428-433`). In busy monorepos, approvals keep returning 409. (BUG-49)
-- **Spec.**
-  - Accept a moved head when the touched files' blob SHAs are unchanged between base and head; per-file checks already exist at `plan_worker.py:1445-1466`.
-  - Re-render only when a touched file changed.
-  - Record `base_revision` and `committed_on_revision` separately.
-
-#### D8 · BUG · SQLite connection poisoning — P0 · S
-- **Problem.** `storage/sqlite/pull_request_repository.py:107-117` raises on a compare-and-set conflict without rolling back. The shared connection stays in a transaction, and every later write fails. A webhook racing the poller is enough to trigger it. (BUG-50)
-- **Spec.**
-  - All SQLite writes go through a `transaction()` context manager that always rolls back on exception.
-  - Add a lint test that greps for bare `BEGIN`.
-
-#### D9 · BUG · Supervised worker loops — P0 · S
-- **Problem.** `_run_worker_loop` has no exception handling (`cli/automation_worker.py:208-226`), and the inline task has no done-callback (`api/app.py:233`). The worker dies silently while the API stays ready. (BUG-51)
-- **Spec.**
-  - Wrap each iteration with try/except, add jittered backoff, and log with error codes.
-  - Add a done-callback that restarts the task with backoff.
-  - Readiness reflects the heartbeat age of in-process execution loops (in the controller after F8).
-
-#### D10 · BUG · Lease loss after a PR is opened — P1 · S
-- **Problem.** If the lease is lost between recording the PR and `mark_succeeded`, the reclaiming worker marks the plan `STALE` while the PR stays open (`plan_worker.py:1150-1156,1289-1317`). (BUG-52)
-- **Spec.** On reclaim, search for an open PR on the deterministic branch and adopt it (`PR_OPEN`) before considering staleness.
-
-#### D11 · BUG · Unrelated PR webhooks — P1 · S
-- **Problem.** Closed PRs that GreenKube doesn't know are marked `retryable`, retried every 5 minutes forever, answered with 503 and never pruned (`api/routers/webhooks.py:~197`, `base_gitops_sql_repository.py:1970-1976`). (BUG-53)
-- **Spec.**
-  - New terminal status `ignored`; respond 202.
-  - Retention prunes `ignored` rows.
-
-#### D12 · BUG · Small correctness items — P2 · S
-- **Spec.** (BUG-56)
-  - Return the real render warnings instead of the `"render-warning"` placeholder (`api/routers/plans.py:249`).
-  - `token_configured` must reflect the presence of a resolvable secret (`api/routers/automation.py:265`).
-  - Remove `TEAM_REVIEWERS` from Gitea capabilities (`automation/git/gitea.py:55`).
-  - Make `save_plan` a compare-and-set insert (`plans.py:364-403`).
-
-#### D13 · BUG+DESIGN · Policy gates truthfulness — P1 · M
-- **Problem.**
-  - Missing rollout or HPA evidence is marked `NOT_AVAILABLE` and *passes* (`automation/policy.py:541-545,597`), while the docs say it fails closed.
-  - Any HPA blocks even memory-only changes (`gitops/discovery/kubernetes.py:797-811`).
-  - VPAs are never checked, despite the gate being named `hpa_vpa_pdb`. (BUG-55)
-- **Spec.**
-  - Add setting `automation.policy.missingEvidence: fail|warn` (default `fail` in production, `warn` in standalone) and document it.
-  - The HPA gate blocks only when the HPA scales on the resource being changed (CPU utilization targets block CPU changes; memory changes pass with a warning).
-  - Add a VPA gate: block when a VPA in `Recreate/InPlaceOrRecreate/InPlace/Auto` mode targets the workload (a conflicting writer).
-  - Surface the gate result per recommendation in `eligibility` (F10).
-
-#### D14 · FEAT · Wire Kustomize rollback — P1 · S
-- **Problem.** `create_plan_runtime` passes `rollback_renderer=None` (`automation/plan_runtime.py:1526,1610`), so every Kustomize rollback returns `ROLLBACK_UNSUPPORTED`. (BUG-54)
-- **Spec.** Construct `KustomizeRollbackRenderer` with the sandbox backend; add a test.
-
-#### D15 · REFACTOR · Indexes and query shapes — P2 · S
-- **Problem.** (BUG-57)
-  - The sync-pending query no longer matches its partial index.
-  - Branch cleanup does a full scan.
-  - `list_plans*` is N+1 (3 queries per plan, no LIMIT).
-  - `expire_due_plans` loads every live plan every 60 s in every API replica.
-- **Spec.** Add the indexes, set-based queries and LIMITs, and move expiry to the single automation-controller loop (M8).
-
-**Definition of done (D).**
-- The kind end-to-end loop (O1) passes 20 consecutive runs, including:
-  - a concurrent unrelated commit before sync;
-  - a GitHub closed-unmerged PR fixture;
-  - a 1,000-file repo;
-  - a worker kill during PR creation;
-  - a retention pass at "day 91" via a fake clock.
-
----
-
-### Category E — Recommendation Core v2 (signal model, Source SDK, consensus, scheduled runs)
-
-**Priority** P0 for E1–E3, P1 for the rest · **Horizon** weeks 1–2 (E1–E3), weeks 5–10 (E4–E10) · **Effort** XL
-
-**Goal.** Make GreenKube a neutral aggregator:
-- every source, native analyzers included, emits **signals** in one schema;
-- the engine builds one **recommendation** per target and capability from all signals, by consensus;
-- scans run on a schedule in the controller;
-- third parties can plug in or push signals.
-
-**Current state.**
-- `RecommendationSource` (`core/optimization/providers/base.py`) has `is_available()` and `collect(context) -> list[Recommendation]`.
-- There are three sources, built by `core/optimization/registry.py`.
-- Arbitration (`core/optimization/dedup.py:73-105`) keeps the highest-priority source and **discards the others' proposals**; `superseded_by` is never set.
-- The `Recommendation` model is flat and resource-specific (`current_cpu_request_millicores`, `cron_schedule`, …).
-- Scans run only at API startup (once per API replica) or on `refresh=true`.
-- A single failing source blocks persistence for all sources (`core/optimization/engine.py:107-109`).
-- The Active list is sorted `ORDER BY priority DESC` on a text column, which gives medium → low → high (BUG-20).
-
-**Target design.**
-
-```python
-# src/greenkube/recommend/model.py
-class TargetRef(BaseModel):                    # canonical, cluster-qualified
-    cluster_uid: str
-    api_version: str; kind: str                # Deployment, StatefulSet, DaemonSet, CronJob, Rollout,
-                                               # HorizontalPodAutoscaler, NodePool, PersistentVolume, Service, Namespace
-    namespace: str | None; name: str
-    container: str | None = None
-    def key(self) -> str: ...                  # "cluster/apps.Deployment/ns/name[/container]"
-
-class Capability(StrEnum):
-    CONTAINER_REQUESTS = "container_requests"; CONTAINER_LIMITS = "container_limits"
-    REPLICAS = "replicas"; HORIZONTAL_AUTOSCALING = "horizontal_autoscaling"
-    SCHEDULE = "schedule"                      # off-peak / sleep windows
-    CLEANUP = "cleanup"                        # orphaned PV/LB, zombie, idle namespace
-    NODE_POOL = "node_pool"; PLACEMENT = "placement"   # carbon-aware placement
-    HYGIENE = "hygiene"                        # missing requests/limits, best-practice findings
-
-class ResourceSpec(BaseModel):
-    cpu_request_m: int | None = None; memory_request_bytes: int | None = None
-    cpu_limit_m: int | None = None;   memory_limit_bytes: int | None = None
-
-class ContainerResourcesProposal(BaseModel):
-    kind: Literal["container_resources"] = "container_resources"
-    container: str; current: ResourceSpec; proposed: ResourceSpec
-    direction: Literal["decrease", "increase", "mixed"]
-class ReplicasProposal(BaseModel):     kind: Literal["replicas"] = "replicas"; current: int; proposed: int
-class HpaProposal(BaseModel):          kind: Literal["hpa"] = "hpa"; min_replicas: int; max_replicas: int; target_cpu_utilization: int | None
-class ScheduleProposal(BaseModel):     kind: Literal["schedule"] = "schedule"; timezone: str; sleep_at: str; wake_at: str; weekdays: str; replicas_while_asleep: int = 0
-class DeletionProposal(BaseModel):     kind: Literal["deletion"] = "deletion"; reason: str
-class NodePoolProposal(BaseModel):     kind: Literal["node_pool"] = "node_pool"; patch: dict          # JSON merge patch on NodePool spec
-class AdvisoryProposal(BaseModel):     kind: Literal["advisory"] = "advisory"; text: str              # not PR-able
-Proposal = Annotated[ContainerResourcesProposal | ReplicasProposal | HpaProposal | ScheduleProposal
-                     | DeletionProposal | NodePoolProposal | AdvisoryProposal, Field(discriminator="kind")]
-
-class AlgorithmInfo(BaseModel):
-    name: str                     # "vpa-recommender", "krr.simple", "greenkube.balanced_p95"
-    params: dict = {}             # {"cpu_percentile": 95, "memory_buffer_pct": 15, "history": "336h"}
-    window: TimeWindow | None = None
-
-class SourceSignal(BaseModel):
-    signal_id: str                # sha256(source_id, target.key(), capability, proposal canonical json)
-    source_id: str                # "greenkube.rightsizing", "vpa", "goldilocks", "krr", "kubecost", "polaris", "gke", "push:<client>"
-    source_version: str | None
-    source_ref: str | None        # "ns/vpa-name", KRR run id, Kubecost query id
-    target: TargetRef; capability: Capability; proposal: Proposal
-    algorithm: AlgorithmInfo
-    source_confidence: float | None = None
-    source_estimate: dict | None = None          # savings claimed by the source (kept for comparison only)
-    raw: dict = {}                                # trimmed raw payload for audit (≤ 8 KiB)
-    fetched_at: datetime
-
-class Recommendation(BaseModel):                  # consolidated & persisted (API v2 shape)
-    id: int; fingerprint: str                     # v4 = sha256(cluster_uid, target.key(), capability)
-    revision: int                                 # increments when the consolidated proposal changes
-    target: TargetRef; capability: Capability; proposal: Proposal
-    signals: list[SignalRef]; consensus: Consensus
-    impact: ImpactDelta                           # from B
-    risk: RiskAssessment; confidence: float
-    value: ValueScore                             # from I
-    eligibility: DeliveryEligibility              # from F10 / H0
-    status: RecommendationStatus; lifecycle: LifecycleInfo
-```
-
-**Source SDK.**
-
-```python
-# src/greenkube/recommend/sdk.py
-class SourceConnector(ABC):
-    id: ClassVar[str]
-    display_name: ClassVar[str]
-    tier: ClassVar[Literal["native", "oss", "commercial", "cloud", "custom"]]
-    capabilities: ClassVar[frozenset[Capability]]
-    settings_model: ClassVar[type[BaseModel]]      # validated from `sources.<id>` config
-
-    def __init__(self, settings: BaseModel, deps: ConnectorDeps): ...   # http, kube, clock, impact model, inventory
-
-    @abstractmethod
-    async def probe(self) -> SourceHealth:          # available | degraded | unavailable, with reason & version
-        ...
-    @abstractmethod
-    async def fetch(self, ctx: FetchContext) -> SourceBatch:
-        ...
-
-@dataclass
-class FetchContext:
-    cluster_uid: str; scope: ScopeFilter            # namespaces include/exclude
-    inventory: WorkloadInventory                    # live owners, containers, replicas, HPAs (resolve pods → owners)
-    window_hint: TimeWindow; deadline: datetime
-
-@dataclass
-class SourceBatch:
-    signals: list[SourceSignal]
-    complete: bool                                  # False → do not mark this source's previous signals stale
-    diagnostics: list[Diagnostic]                   # e.g. "12 VPAs skipped: updateMode=Auto"
-```
-
-- **Discovery.**
-  - Built-ins are registered in code.
-  - Third-party connectors are loaded through Python entry points, group `greenkube.sources`.
-  - They are enabled through config:
-
-  ```yaml
-  sources:
-    greenkube:   { enabled: true }
-    vpa:         { enabled: auto }          # auto = enabled when probe() succeeds
-    goldilocks:  { enabled: auto }
-    krr:         { enabled: false, mode: job, schedule: "0 */6 * * *", strategy: simple, history: 336h }
-    kubecost:    { enabled: false, url: "", window: 7d }
-    polaris:     { enabled: false, mode: job }
-    push:        { enabled: true }          # POST /api/v1/signals
-  ```
-
-- **Persistence.**
-  - `source_runs(run_id, optimization_run_id, source_id, started_at, finished_at, status, complete, signal_count, error_code, diagnostics jsonb)`
-  - `source_signals(signal_id, run_id, source_id, target_key, capability, proposal jsonb, algorithm jsonb, raw jsonb, fetched_at)`, kept 30 days.
-  - `recommendation_signals(recommendation_id, revision, signal_id)`.
-- **Isolation.**
-  - Each connector runs with its own timeout, rate limit and circuit breaker.
-  - A failed or incomplete source keeps its previous signals as "last known" with an age and never blocks other sources.
-
-**Consensus.**
-
-```python
-class ConsensusPolicy(Protocol):
-    name: str
-    def combine(self, signals: list[SourceSignal], ctx: ConsensusContext) -> ConsensusResult: ...
-
-@dataclass
-class Consensus:
-    policy: str                                     # safest | median | weighted | priority
-    chosen_from: list[str]                          # source ids that support the chosen proposal
-    agreement: float                                # 1 − (max−min)/max over proposed values, per resource
-    contested: bool                                 # agreement < 0.5 or directions disagree
-    spread: dict                                    # per resource: {source_id: value}
-```
-
-| Policy | Rule |
-|---|---|
-| `safest` (default) | For request decreases, choose the **highest** proposed value among sources (least aggressive). For increases, choose the highest value. |
-| `median` | Median per resource. |
-| `weighted` | Weighted median, with weights from the source track record (I3). |
-| `priority` | Today's behavior; kept for compatibility. |
-
-- Agreement ≥ 0.8 adds a confidence bonus.
-- `contested` blocks auto-approval and is shown in the UI ("VPA 300m · KRR 250m · GreenKube 280m → 300m").
-- **Deduplication across sources that share an engine:** Goldilocks VPAs *are* VPA recommendations. They are a single signal with `source_id="goldilocks"` and `algorithm.name="vpa-recommender"`, never two votes.
-
-**Work items.**
-
-#### E1 · BUG · Scheduled, leader-gated recommendation scans — P0 · M
-- **Problem.** No scheduled scan exists (`cli/start.py:530-565`); scans happen only at API startup in every replica (`api/startup.py:107`) or on GET `refresh=true` (side effects on GET). (BUG-21)
-- **Spec.**
-  - Add a controller job `recommendation_scan` every `RECOMMENDATION_SCAN_INTERVAL` (default `1h`), behind the leader fence.
-  - Remove the API startup scan.
-  - `POST /api/v1/optimization/runs` enqueues a run request (`optimization_run_requests` row, deduplicated while one is pending) and returns `202 {run_id}`. `GET /api/v1/optimization/runs/{id}` returns its status.
-  - `refresh=true` on GET is deprecated; it enqueues and returns current data with a `X-GreenKube-Run-Id` header.
-  - The UI polls the run and reloads on completion (K9).
-- **Acceptance.**
-  - Two API replicas plus a controller produce exactly one scan per interval.
-  - GET endpoints perform no writes.
-
-#### E2 · BUG · Correct default ordering — P0 · S
-- **Problem.** BUG-20 (`storage/postgres/recommendation_repository.py:356`, `storage/sqlite/recommendation_repository.py:408`).
-- **Spec.**
-  - Sort by `ranking_score DESC NULLS LAST, potential_savings_cost DESC, id`.
-  - Priority, where still needed, uses `CASE priority WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END`.
-  - Add a contract test on both backends.
-
-#### E3 · BUG · Memory-bounded scans — P0 · L
-- **Problem.**
-  - `ContextBuilder` materializes up to `RECOMMENDATION_MAX_METRIC_ROWS=750k` `CombinedMetric` objects of about 3.5 KB each (≈2.6 GB), against a 512 MiB API limit. (BUG-12)
-  - Namespace filtering happens in Python (`storage/base_repository.py:245-261`).
-- **Spec.**
-  - Add a `workload_usage_hourly` rollup (written by compression), keyed by `WorkloadRef`, holding:
-    - avg, p50, p90, p95, p99 and max of CPU and memory;
-    - requests and limits;
-    - replicas;
-    - sample count;
-    - allocated cost and CO₂e.
-  - Analyzers read `WorkloadUsageSummary` objects (one per target, about 1 KB) computed in SQL over the lookback window.
-  - Percentiles come from the stored per-hour percentiles plus max, which is conservative. Document the approximation, or use Prometheus `quantile_over_time` at collection time per step.
-- **Acceptance.** A scan on 500 pods × 14 days peaks below 300 MB RSS and finishes in under 60 s on SQLite and Postgres.
-
-#### E4 · REFACTOR · Signal and Recommendation v2 data model — P1 · L
-- **Spec.**
-  - Implement the models above.
-  - Migration:
-    - add `target jsonb`, `proposal jsonb`, `consensus jsonb`, `impact jsonb`, `revision int`, `fingerprint_v4`;
-    - backfill from the flat columns.
-  - API v1 keeps the flat fields, computed from the proposal.
-  - Add an API v2 under `/api/v2/recommendations`.
-  - Analyzers return signals (`source_id="greenkube.<analyzer>"`).
-- **Acceptance.**
-  - Round-trip tests from v1 to v2 to v1.
-  - Existing frontend works unchanged on v1.
-
-#### E5 · FEAT · Source SDK, registry, health and persistence — P1 · L
-- **Spec.**
-  - Implement the SDK, entry-point loading, config schema per source, the `source_runs`/`source_signals` tables and the health API (`GET /api/v1/sources`).
-  - Port VPA and native to the SDK.
-  - Rename the current `KarpenterSource` to the native analyzer `greenkube.nodepool` that reads Karpenter objects (it is a GreenKube heuristic, not Karpenter advice); see G5.
-- **Acceptance.**
-  - A sample third-party connector package (`examples/greenkube-source-example`) installs via `pip` and appears in `/sources`.
-
-#### E6 · FEAT · Consensus engine — P1 · M
-- **Spec.**
-  - Implement the policies, `Consensus`, agreement and contested flags.
-  - Replace `arbitrate()`.
-  - Show the per-source spread in the evidence.
-  - Config: `RECOMMENDATION_CONSENSUS_POLICY` (default `safest`).
-- **Acceptance.**
-  - Fixture: VPA 300m, KRR 250m, native 280m → `safest` = 300m, agreement 0.83.
-  - Goldilocks + VPA on the same VPA object → one signal.
-
-#### E7 · FEAT · Identity and revisions — P1 · M
-- **Spec.**
-  - `fingerprint_v4 = sha256(cluster_uid, target.key(), capability)`.
-  - When the consolidated proposal changes, `revision += 1` and a `recommendation_revisions` row stores the previous proposal.
-  - Plans pin `(recommendation_id, revision)`.
-  - A record never mutates under an open plan: new revisions are queued and shown as "newer advice available" on the PR (J5).
-
-#### E8 · BUG · Per-source reconciliation — P1 · S
-- **Problem.** BUG-22.
-- **Spec.** A recommendation becomes `stale` only when **all** sources that previously supported it completed successfully and none re-emitted it. Failed or incomplete sources never cause staleness.
-
-#### E9 · FEAT · Native analyzer upgrades — P1 · L
-- **Spec.**
-  - **Two-way rightsizing.** Emit `increase` proposals when p99 usage > request × 0.9, there are OOMs or throttling > 5%, or memory working set > 90% of the limit. These are reliability recommendations: their value is negative cost but positive risk reduction (I1 handles them).
-  - **Limits.**
-    - `cpu_limit`: recommend removing it or setting it to ≥ p99 × 1.5 when throttling.
-    - `memory_limit`: recommend `memory_limit ≥ request` and ≥ max × 1.1.
-    - Make the policy configurable (`limits.policy: keep|remove_cpu|memory_equals_request`).
-  - **Windows.**
-    - Default lookback 14 days (it covers weekly cycles).
-    - Require ≥ 1 full week of coverage for decreases; JVM detection (`JAVA_TOOL_OPTIONS`, image name heuristics) adds a risk factor.
-  - **Percentiles.** Use per-step maxima (from Prometheus `max_over_time` per step) for p95/p99, not the average of averages (`core/optimization/statistics.py:usage_stats`).
-  - **Cleanup.** Drop `UNDERUTILIZED_NODE` (fewer than 3 pods and under 15% CPU), which duplicates the node analyzer with weaker logic. Fold it into `greenkube.nodepool`.
-  - **Identity.** Workload-level analyzers emit `TargetRef` with `container`.
-
-#### E10 · FEAT · Optimization run snapshots and diff — P2 · S
-- **Spec.**
-  - Persist each run with per-source health, counts, and the diff against the previous run (new, changed, resolved).
-  - `GET /api/v1/optimization/runs?limit=`.
-  - The UI shows "since last scan: +4 new, 2 resolved".
-
-**Definition of done (E).**
-- Scans are scheduled and leader-gated.
-- Three or more sources run through the SDK; consensus is visible in the UI.
-- A third-party example connector works.
-- Scans are memory-bounded.
-- Sort order is correct.
-
----
-
-### Category F — One install, always-on automation, sign in once (time-to-first-PR)
-
-**Priority** P0 (F10, F13, F14) / P1 · **Horizon** weeks 1–10 · **Effort** L
-
-**Goal.** Three outcomes:
-
-1. **One install.**
-   - A single `helm install` with no profile to choose and no feature flag to flip.
-   - It deploys the full loop in a production-grade topology that is small enough for an evaluation cluster.
-2. **Automation is the product.**
-   - GitOps discovery, previews and PR delivery are always present.
-   - Each capability activates itself when its prerequisites appear (Argo CD/Flux, Git credentials) and stays dormant, with an explanation, when they are missing.
-   - A platform engineer goes from `helm install` to an opened PR in **under 30 minutes**, or under 15 with the GitHub App, and always knows what is missing.
-3. **Sign in once.**
-   - Users authenticate with credentials their browser or password manager can save, and stay signed in across reloads and tabs.
-   - Machines use scoped API keys.
-
-**Current state.**
-- **Four install variants:**
-  - `profile: standalone | production` (`helm-chart/values.yaml:14`) × `automation.enabled` (`values.yaml:17`, default `false`) × `automation.mode` (inline / worker / disabled).
-  - `docs/installation.md` needs a "Deployment profiles" section, a dev-vs-prod comparison and a 9-row transition matrix (`docs/installation.md:23-40,494-536`).
-  - Two templates maintain the same containers twice: the standalone `deployment.yaml` (collector + API in one pod) and `production-deployments.yaml`.
-  - `automation.enabled` is tested in more than 15 template conditions (`configmap.yaml:54-63`, `production-deployments.yaml:3-116`, `networkpolicy.yaml`, `automation-worker*.yaml`).
-  - Production uses a Helm-hook migration Job.
-  - Both profiles already default to bundled Postgres (`config.db.type: postgres`); SQLite is an option.
-- **Automation is opt-in.**
-  - About 13 setup steps (audit §3): `automation.enabled`; token Secret; `providers[]`; mandatory non-empty allowlist (the chart fails otherwise); NetworkPolicy-enforcing CNI for Kustomize/Helm; a worker; discovery wait; manual binding resolution; Helm values mapping; policy gates requiring ≥ 36 samples and ≥ 50% coverage of a 7-day lookback (≈3.5 days); pre-created labels; preview; digest approval.
-  - Enabling it requires a `helm upgrade` with complete provider values.
-  - The production profile enables automation with no providers, so it shows a permanent "not ready" (BUG-61).
-- **Authentication.**
-  - The UI keeps the API key in a module variable (`frontend/src/lib/api.js:10-18`), so every reload or new tab asks for it again (BUG-63).
-  - `API_AUTH_MODE` already reserves `session` and `oidc`, and the settings `SESSION_COOKIE_NAME`, `SESSION_COOKIE_SECURE`, `OIDC_ISSUER` and `OIDC_AUDIENCE` exist (`core/config.py:227-231,434-439`). Both modes return 503 (`api/dependencies.py:103`).
-  - The audit actor is `api-key:<digest>`, so no human identity reaches audit events or plan approvals.
-- **Eligibility.** The UI hides "Preview plan" unless about 60 lines of client-side checks pass (`frontend/src/routes/recommendations/+page.svelte:240-312`). The server has an eligibility endpoint that the UI doesn't use.
-
-**Target design.**
-
-**1. One install topology** (replaces both profiles):
-
-| Component | Default | Scales by | Responsibilities |
-|---|---|---|---|
-| `api` Deployment | 1 replica · 100m / 128Mi | `api.replicas` (optional HPA) | Stateless: REST, UI, webhooks ingress, authentication. **No background jobs.** |
-| `controller` Deployment | 1 replica · 100m / 256Mi | `controller.replicas` (leader election always on; extra replicas are hot standbys) | Every leader-gated loop: collection, scans (E1), lifecycle and measurement (C), discovery, sync, the automation controller loop and plan execution (M8). Runs database migrations at startup under an advisory lock; the API reports not-ready until `schema_version` matches. |
-| `renderer` Deployment | 1 replica · 25m / 96Mi | `renderer.replicas` | Isolated Helm/Kustomize rendering: no Secrets, no service-account token, egress-deny NetworkPolicy (F6) |
-| `postgres` StatefulSet | bundled | — | `postgres.enabled: false` + `database.existingSecret` for an external Postgres |
-| `worker` Deployment | 0 replicas | `worker.replicas` | Optional extra plan executors for very large installations |
-
-- **Removed:**
-  - `profile`, `replicaCount`, the `production.*` block, `automation.enabled`, `automation.mode`, `values-production.yaml`;
-  - SQLite in Helm (`config.db.type`, `config.db.path`, `config.persistence`);
-  - the migration hook Job;
-  - the two-container standalone pod.
-- **Footprint.** Default requests total ≈ 325m CPU / ≈ 600 MiB including Postgres.
-- **HA.** High availability is two numbers (`api.replicas: 2`, `controller.replicas: 2`), not a different install.
-- **SQLite** remains for `greenkube demo` and local development only. This resolves decision D-1.
-
-**2. Capability activation (automation always on):**
-
-| Capability | Activates when | Otherwise |
-|---|---|---|
-| Observe (collection, footprint) | Always | — |
-| Recommend | Always; each source activates when its probe succeeds (E5) | — |
-| Measure & ledger | Always (manually applied changes are detected and measured too) | — |
-| Discover | Argo CD or Flux CRDs are present (re-probed every discovery interval) | Dormant; the checklist explains how to connect a GitOps controller |
-| Preview | Discover + a resolved binding + the repository is readable (public, or read credentials) | The recommendation shows the blocker and its fix (F10) |
-| Deliver (open PRs) | Preview + write credentials for that repository + delivery not paused | Patch download only (F4) |
-| Webhooks | A provider webhook Secret is configured | Polling only |
-
-- An `AutomationReadiness` reconciler runs in the controller, every 60 s and on watched Secret or ConfigMap changes. It:
-  - computes the active capabilities per repository and persists them (`automation_capabilities` table);
-  - starts and stops the delivery loops (a loop runs only when at least one repository is deliverable);
-  - exposes the result in `/api/v1/setup/status` (F1) and as `greenkube_capability_active{capability}`.
-- **Credentials without values files.**
-  - A default provider entry is inferred for each discovered repository host: `github.com` → GitHub, `gitlab.com` → GitLab; self-hosted hosts are probed via `/api/v4/version` (GitLab) or `/api/v1/version` (Gitea) (F2).
-  - It reads the Secret `greenkube-git-credentials` in the release namespace: key `token`, or `appId` + `privateKey` for a GitHub App.
-  - Creating that Secret activates delivery within a minute, with no `helm upgrade` and no restart.
-  - Explicit `automation.providers[]` entries still override the inference (self-hosted URLs, several credentials).
-- **Safety without a feature flag:**
-  - A PR is never opened without an explicit approval of a plan digest by a signed-in user. `autoApprove` (F5) is opt-in and off by default.
-  - The repository allowlist defaults to `["@discovered"]`: repositories referenced by discovered Argo CD/Flux sources and reachable with the configured credentials. An explicit list narrows it. With a GitHub App, the installation's repository selection *is* the allowlist.
-  - A global policy switch `automation.policy.pauseDelivery: true` blocks PR creation for change freezes or incident response while discovery, previews and measurement keep running. It is a policy, not a feature flag.
-
-**3. Authentication: sign in once.**
-
-```text
-Browser ──(login form: username + password, password-manager friendly)──► POST /api/v1/auth/login
-        ◄── Set-Cookie: greenkube_session=<opaque>; HttpOnly; SameSite=Strict; Secure(auto); Path=/
-        ──(cookie + X-CSRF-Token on unsafe methods)──► API
-Machines (CI, Prometheus, push API, MCP) ──Authorization: Bearer gk_<id>_<secret>──► API (scoped keys)
-Auth proxy / OIDC (F16) ──► same session machinery
-```
-
-A single dependency `authenticate(request) -> Principal` replaces `verify_api_key`. It resolves, in order:
-1. a Bearer API key → `apikey:<name>` with scopes;
-2. a session cookie → `user:<username>` with a role;
-3. trusted proxy headers when `auth.mode=proxy` (F16).
-
-`Principal` flows into audit events, plan approvals and ledger `created_by`.
-
-**Work items — install and access (revision 2).**
-
-#### F11 · OPS · One install topology (remove profiles) — P1 · L
-- **Problem.** Four documented install variants and a 9-row upgrade matrix. Duplicated Deployment templates. A Helm-hook migration Job. Automation running inside the API in standalone mode.
-- **Spec.**
-  - Implement target design 1.
-  - Helm: one `components.yaml` template rendering `api`, `controller`, `renderer` and `worker` from a shared container spec.
-  - Delete the standalone branch of `deployment.yaml`, `production-deployments.yaml` and `migration-job.yaml`.
-  - Migrations move to controller startup (the existing runner already takes an advisory lock).
-  - The API readiness probe checks `schema_version`.
-  - The Lease is always rendered.
-  - Remove the SQLite values.
-  - Default resources sized for kind/minikube.
-  - The `wait-for-postgres` init container stays.
-- **Acceptance.**
-  - `helm template` with empty values renders exactly api, controller, renderer and postgres, plus Services, RBAC and NetworkPolicies.
-  - A kind smoke install reaches Ready in under 3 minutes.
-  - With `api.replicas=2` and `controller.replicas=2`, killing the leader hands over within the lease duration.
-  - helm-unittest suites are updated; no Helm hooks remain except the chart test pod.
-- **Depends on.** F8 / M8 (automation loops in the controller), N1 (secrets).
-
-#### F12 · FEAT · Always-on automation with capability activation — P1 · L
-- **Problem.**
-  - Automation is off by default and gated in more than 15 template conditions.
-  - Turning it on needs a `helm upgrade` with complete provider values.
-  - The production profile shows "not ready" out of the box (BUG-61).
-- **Spec.**
-  - Implement target design 2: the `AutomationReadiness` reconciler, the `automation_capabilities` table, provider inference, the default credentials Secret, hot activation and deactivation, the `@discovered` allowlist and `pauseDelivery`.
-  - Remove `automation.enabled` and `automation.mode`; compatibility is handled by F17.
-  - RBAC for Argo CD/Flux discovery is always rendered (read-only).
-  - The UI shows capability state in the setup checklist (F1) and per-recommendation blockers (F10).
-- **Acceptance.** On a kind cluster with Argo CD:
-  - install with no automation values;
-  - discovery is active within 5 minutes and delivery is dormant with a clear reason;
-  - `kubectl -n greenkube create secret generic greenkube-git-credentials --from-literal=token=…` activates delivery within 60 s, without restart;
-  - deleting the Secret makes delivery dormant again, and open PRs remain tracked through webhooks or live-state apply detection;
-  - with `pauseDelivery: true`, plan approval returns a policy error and nothing else stops.
-- **Depends on.** D9 (supervised loops), F2, F8, M8.
-
-#### F13 · BUG · Stopgap: keep the API key across reloads — P0 · S (0.3.x patch)
-- **Problem.** The UI keeps the API key in memory only, so it is asked again after every reload or new tab. (BUG-63)
-- **Spec.**
-  - Store the key in `sessionStorage`, wrapped in try/catch. It is per tab and cleared when the tab closes.
-  - Clear it on 401 and on "Sign out".
-  - Put the dialog inside a real `<form>` with a read-only `username` field (value `api-key`, `autocomplete="username"`) and the key field `type="password" autocomplete="current-password"`, so browsers and password managers offer to save and autofill it.
-  - Do not use `localStorage`: it keeps a long-lived admin credential beyond the session.
-  - F14 replaces this.
-- **Acceptance.**
-  - A reload keeps the user signed in; closing the tab forgets the key.
-  - Chrome and Firefox offer to save the credential.
-
-#### F14 · FEAT · Sign in once: local accounts and server-side sessions — P0 · M
-- **Spec.**
-  - **Mode.** Implement the reserved `API_AUTH_MODE=session` contract and make it the default for the UI. API keys keep working for machines (F15).
-  - **Bootstrap, without Helm `lookup`** (follows Argo CD's `argocd-initial-admin-secret` pattern):
-    - On first start with no users, the controller creates the user `admin` with a random password.
-    - It stores the password's scrypt hash (stdlib `hashlib.scrypt`, per-user salt; no new dependency).
-    - It writes the plaintext to the Secret `<release>-initial-admin`, using a namespaced Role limited to that resource name (`create`, `get`, `delete`).
-    - Alternatively, `auth.admin.existingSecret` provides the password.
-    - The UI forces a password change at first sign-in, then offers to delete the initial Secret.
-    - NOTES.txt prints the command that reads it (N11).
-  - **Endpoints:**
-    - `POST /api/v1/auth/login` `{username, password, remember}`
-    - `POST /api/v1/auth/logout`
-    - `GET /api/v1/auth/me` (user, role, CSRF token)
-    - `POST /api/v1/auth/password`
-    - `GET /api/v1/auth/sessions`, `DELETE /api/v1/auth/sessions/{id}`
-  - **Sessions.**
-    - An opaque 256-bit token in the cookie named by `SESSION_COOKIE_NAME` (default `greenkube_session`).
-    - Server-side table `auth_sessions(token_sha256 PK, user_id, created_at, last_seen_at, idle_expires_at, absolute_expires_at, remember, user_agent, ip, revoked_at)`, shared by all API replicas through Postgres.
-    - Defaults: 12 h sliding idle timeout, 7-day absolute lifetime. "Keep me signed in" extends the absolute lifetime to 30 days.
-    - A password change revokes all of the user's sessions.
-    - Expired sessions are purged daily.
-  - **Cookie attributes.**
-    - `HttpOnly`, `SameSite=Strict`, `Path=/`.
-    - `Secure` when the request is HTTPS, either directly or via `X-Forwarded-Proto` from `TRUSTED_PROXY_IPS`, or always when `auth.session.secureCookie: always`.
-    - Plain-HTTP access from anything other than `localhost` shows a banner recommending TLS (N6 provides the Ingress).
-  - **CSRF.**
-    - Unsafe methods require a same-origin `Origin`/`Referer` and an `X-CSRF-Token` header matching the session.
-    - The API stays same-origin by default. **N4 (no wildcard credentialed CORS) is a hard prerequisite.**
-  - **Brute force.**
-    - Per-IP and per-username limits through the existing `limits` dependency (for example 5 per minute with exponential backoff).
-    - Generic error messages.
-    - Metric `greenkube_auth_failures_total`.
-  - **Login UI.**
-    - A real `<form>` with `autocomplete="username"` and `autocomplete="current-password"` and a native submit event, so browsers and password managers save and autofill.
-    - The app calls `/auth/me` at load and shows the form only on 401.
-  - **Identity.** `Principal` replaces `authenticated_actor` strings. Audit events, plan approvals, ignore reasons and ledger entries record `user:<name>`.
-- **Acceptance.**
-  - After one sign-in, the user stays signed in across reloads, new tabs, and (with "keep me signed in") a browser restart.
-  - Sign-out revokes the session server-side.
-  - A cross-origin form POST is rejected.
-  - Two API replicas share sessions.
-  - Chrome, Firefox and Safari save and autofill the credentials (manual check, recorded in the PR).
-  - Security review checklist completed: cookie flags, CSRF, rate limits, hashing parameters, session fixation (new token at login).
-
-#### F15 · FEAT · Scoped API keys for machines — P1 · M
-- **Spec.**
-  - Table `api_keys(id, name, prefix, secret_sha256, scopes[], created_by, created_at, last_used_at, expires_at, revoked_at)`.
-  - Key format `gk_<8-char id>_<32-byte secret>`, shown once.
-  - Scopes: `read`, `write`, `approve`, `signals:write` (G6), `metrics:read` (Prometheus scrape), `admin`.
-  - Created and revoked in the UI (K11) or the API.
-  - The Helm-provided `GREENKUBE_API_KEY` remains accepted as a deprecated bootstrap admin key for one minor release (flagged in the setup checklist), then becomes optional. With it gone, the chart no longer needs to generate an API key (N1).
-  - The ServiceMonitor uses a `metrics:read` key.
-- **Acceptance.** A Prometheus scrape works with a `metrics:read` key, and that key is rejected on `/api/v1/recommendations`.
-
-#### F16 · FEAT · SSO and roles — P2 · L
-- **Spec.**
-  - **`auth.mode: proxy`.** Trust `X-Auth-Request-User`, `X-Forwarded-User` and `X-Forwarded-Groups` only from `TRUSTED_PROXY_IPS`, and create the same session. Works with oauth2-proxy, Authentik and Pomerium.
-  - **Native OIDC.** Authorization code + PKCE, using the reserved `OIDC_ISSUER` and `OIDC_AUDIENCE` settings.
-  - Group → role mapping.
-  - **Roles:**
-    - `viewer`: read.
-    - `operator`: approve plans, ignore/restore, mark applied.
-    - `admin`: settings, users, API keys.
-  - Plan approval requires `operator`.
-
-#### F17 · OPS · Upgrade path from 0.3.x installs — P1 · M
-- **Spec.**
-  - **Values compatibility for one minor release.** `profile`, `replicaCount`, `production.components.*`, `automation.enabled` and `automation.mode` are accepted, mapped and reported as deprecated in NOTES:
-    - `production.components.api.replicas` → `api.replicas`;
-    - `automation.enabled: false` → `automation.policy.pauseDelivery: true`.
-    - In the next minor release, the values schema (N2) rejects them with a pointer to the upgrade guide.
-  - **Standalone → single topology.** The old `<release>` Deployment is replaced by `<release>-api` and `<release>-controller`. The bundled Postgres StatefulSet, PVC and Secret names are unchanged, so data is preserved.
-  - **SQLite installs** (`config.db.type=sqlite`):
-    - A pre-upgrade validation fails with the exact migration command.
-    - `greenkube db copy --from sqlite:///data/greenkube_data.db --to "$DB_CONNECTION_STRING"`, documented as a one-shot Job manifest, copies recommendations, events, savings ledger and GitOps state. Metrics are optional.
-  - **Authentication.** Existing users go through the initial-admin flow on their first visit; existing API keys keep working.
-- **Acceptance.** CI upgrade tests lose no recommendations, events, ledger rows or bindings when upgrading from:
-  - 0.3.1 `standalone` with Postgres;
-  - 0.3.1 `production` with automation;
-  - 0.3.1 with SQLite, via the copy Job.
-
-#### F18 · DOC · One installation guide — P1 · M
-- **Spec.**
-  - Rewrite `docs/installation.md` as one path:
-    1. `helm install`;
-    2. sign in;
-    3. optionally connect Git (one Secret);
-    4. done.
-  - Optional additive sections: external Postgres, Ingress/TLS (needed for `Secure` cookies on remote access), HA, SSO.
-  - Delete "Deployment profiles", "Development vs production at a glance" and the transition matrix (`docs/installation.md:23-40,494-536`).
-  - Update the README quick start accordingly.
-- **Acceptance.** The default path fits on one screen; every option is an additive section.
-
-**Work items — onboarding and delivery.**
-
-#### F1 · FEAT · Guided setup checklist — P1 · M
-- **Spec.**
-  - Add `GET /api/v1/setup/status` that aggregates:
-    - data sources (Prometheus, OpenCost, intensity);
-    - recommendation sources;
-    - GitOps controllers discovered;
-    - repositories discovered with their allowlist state;
-    - provider credentials;
-    - renderer availability;
-    - worker heartbeat;
-    - evidence warm-up.
-  - Each check has `status`, `reason`, `fix` (a copy-paste Helm/kubectl snippet or a UI action) and `docs_url`.
-  - The UI shows a checklist page (K6) and a banner until it is complete.
-
-#### F2 · FEAT · Allowlist and provider inference — P1 · S
-- **Spec.**
-  - Propose allowlist entries from repo URLs found by discovery: "Allow these 3 repositories". Persist to config through a values snippet in GitOps mode, or to the DB-backed allowlist (`add_provider_allowlist`, `automation/plan_runtime.py:160`) in standalone mode.
-  - Infer provider `type` and `apiBaseUrl` from the host (github.com, gitlab.com, self-hosted via API probe).
-
-#### F3 · FEAT · GitHub App authentication — P1 · L
-- **Spec.**
-  - Support GitHub App credentials (app id, private key Secret, installation id auto-discovered per repo): installation tokens, verified commits, bot identity, higher rate limits.
-  - Provide an app manifest (`docs/examples/github-app-manifest.json`) for one-click app creation in the user's org, so there is no GreenKube-hosted SaaS dependency.
-  - GitLab: document project and group access tokens with minimal scopes.
-
-#### F4 · FEAT · Delivery modes — P1 · L
-- **Spec.** Setting `automation.delivery.mode`:
-
-  | Mode | What happens |
-  |---|---|
-  | `direct` | Today's behavior: GreenKube opens the PR. |
-  | `patch` | No Git credentials. The approved plan is downloadable as a `git format-patch` (`GET /automation/plans/{id}/patch`) plus a CLI (`greenkube plan apply-patch <id>`). Tracking relies on live-state apply detection plus an optional "I opened PR <url>" link-back. |
-  | `ci` | A GitHub Action (`greenkube/open-pr-action`) or GitLab CI component polls `GET /automation/plans?status=approved&delivery=ci`, applies the plan with the CI's own token, opens the PR and reports back (`POST /automation/plans/{id}/delivery` with the PR URL and head SHA). No write token lives in the cluster. |
-
-- **Acceptance.** All three modes reach `PR_OPEN` → `MERGED` → `SYNCED` in the end-to-end test (O1). For `patch`, linkage happens by branch name or PR body trailer.
-
-#### F5 · FEAT · One-click "Open PR" with policy-based auto-approval — P1 · M
-- **Spec.**
-  - The UI flow is "Open PR". It previews the diff inline; one more click submits the digest. The PR review on the Git provider *is* the human approval.
-  - Add setting `automation.autoApprove: {maxRisk: low, minConfidence: 0.8, contested: false}` so eligible plans skip the extra click (still a PR, still reviewed in Git).
-  - Remove the legacy `/apply-pr`, `/apply-pr/eligibility` and `/automation/operations/{id}` routes (`api/routers/automation.py`) after one release of deprecation headers.
-
-#### F6 · OPS · Renderer sandbox: always present, small, verified — P1 · S
-- **Spec.**
-  - The renderer is part of the single topology (F11): always deployed, with lower requests (25m CPU, 96Mi) and the existing limits. Scale-to-zero when idle is a later optimization.
-  - Probe NetworkPolicy enforcement with a canary pod, at startup and daily.
-  - If egress is not enforced, Kustomize/Helm previews still work but carry a `renderer_egress_unenforced` warning, and the setup checklist offers the init-container firewall. Rationale: the renderer holds no Secrets and no service-account token, Helm runs in template mode without `lookup`, and remote Kustomize bases already fail closed.
-  - Raw-manifest repos never call the renderer.
-
-#### F7 · FEAT · Warm-up state with ETA — P1 · S
-- **Spec.**
-  - Evidence gates are computed relative to the available history: `eligible_at = first_sample + required_coverage`.
-  - Recommendations show "Collecting evidence — eligible in ~31h".
-  - `minCoverage` is evaluated against the data available since install, capped at the lookback.
-
-#### F8 · OPS · Automation runs in the controller — P1 · M
-- **Spec.**
-  - Plan operations, PR polling, the webhook outbox, branch cleanup, plan expiry and retention all run in the controller process, leader-gated in one "automation controller" loop (M8).
-  - The API never runs workers.
-  - `automation.mode` disappears.
-  - An optional `worker.replicas` (default 0) adds dedicated executors for large installations. The queue leases are safe across processes once D9 lands.
-  - Remove the `production.components.automation` block and the inline/worker/disabled matrix from Helm and the docs.
-
-#### F9 · DOC+OPS · "First PR in 15 minutes" sandbox — P1 · M
-- **Spec.**
-  - Add `docs/examples/quickstart/`: a kind config, an Argo CD install, an in-cluster Gitea, and a sample app repo with deliberately oversized requests.
-  - Add `make quickstart` (or a script) that installs GreenKube with demo-accelerated evidence (`RECOMMENDATION_MIN_SAMPLES=6`, 30-second step), so a PR opens within minutes.
-  - Reused by O1.
-
-#### F10 · FEAT · Server-side eligibility on every recommendation — P0 · M
-- **Spec.**
-  - `eligibility = {can_open_pr, delivery_modes[], blockers[{code, message, fix}], warnings[]}` is computed in the engine:
-    - action kind supported (H0);
-    - binding resolved;
-    - policy gates;
-    - warm-up.
-  - Replace the frontend `safeActionFor` (K2).
-  - Blocker codes are documented in `docs/reference/eligibility-codes.md`.
-
-**Definition of done (F).** On a fresh kind quickstart with Argo CD:
-
-1. One `helm install` with no profile and no automation values.
-2. The user signs in once; the browser offers to save the credentials, and the user stays signed in across reloads.
-3. The setup checklist shows discovery active and delivery waiting for credentials.
-4. Creating one credentials Secret activates delivery without `helm upgrade`.
-5. A PR is open within 15 minutes of install with the GitHub App, or 30 minutes with a personal access token, following only the in-app checklist.
-6. Upgrades from 0.3.1 standalone and production releases preserve all data (F17).
-
----
-
-### Category G — New recommendation sources
-
-**Priority** P1 (Tier 1), P2 (Tier 2), P3 (Tier 3) · **Horizon** weeks 6–16 · **Effort** L
-
-**Goal.** Widen the funnel with connectors built on the Source SDK (E5). Prefer sources that are free, have no vendor login and are widely deployed. Each connector ships with:
-- a recorded-payload fixture;
-- mapping tests;
-- a health probe;
-- docs: `docs/sources/<id>.md` with what it reads, permissions, configuration and limitations.
-
-**Common rules.**
-- Map every source to `SourceSignal` with `algorithm` filled in (percentile, buffer, window).
-- Resolve owners through `WorkloadInventory`.
-- Keep the source's own savings estimate in `source_estimate` for comparison; GreenKube always recomputes impact with B.
-
-#### G1 · FEAT · Goldilocks provenance — P1 · S
-- **Spec.**
-  - In the VPA connector, VPAs with labels `creator=Fairwinds` and `source=goldilocks` become signals with `source_id="goldilocks"`, `algorithm.name="vpa-recommender"`, `source_ref=<ns>/<vpa>`.
-  - Read namespace opt-in labels (`goldilocks.fairwinds.com/enabled`) for diagnostics.
-  - A Goldilocks VPA and a user VPA on the same target are two signals from the *same* engine. Consensus counts them once (`engine_family="vpa"`).
-  - Also read `lowerBound`, `upperBound` and `uncappedTarget` into `raw` and risk: target close to `upperBound` means a volatile workload.
-- **Acceptance.** A fixture with one Goldilocks VPA and one user VPA → a UI badge "Goldilocks" and one consensus vote.
-
-#### G2 · FEAT · Robusta KRR connector — P1 · M
-- **Spec.**
-  - Two modes:
-    1. **`job`**: GreenKube runs KRR as a Kubernetes CronJob (`robustadev/krr` image pinned by digest; Prometheus URL injected) with `krr simple -f json --logtostderr`. The output goes to stdout and is collected from pod logs, or via `--fileoutput` to a shared emptyDir uploaded by a sidecar to `POST /api/v1/sources/krr/reports`.
-    2. **`push`**: users run KRR in CI and `POST` the JSON report (API key with `signals:write` scope).
-  - **Mapping:**
-    - each scan entry's object (cluster, namespace, kind, name, container) → `TargetRef`;
-    - recommended requests and limits for CPU and memory → `ContainerResourcesProposal`, *including increases*;
-    - strategy settings (CPU percentile, memory buffer, history duration) → `algorithm.params`;
-    - KRR severity → `source_confidence` hint.
-  - Pin the parser against KRR's current JSON schema with a recorded fixture from the version in use. KRR is in maintenance mode, so fail soft on unknown fields.
-  - RBAC: KRR needs cluster read plus Prometheus access. Document it.
-- **Acceptance.** The fixture report yields signals for all containers. Consensus with VPA works.
-
-#### G3 · FEAT · Kubecost connector — P1 · M
-- **Spec.**
-  - Request sizing: `GET /model/savings/requestSizingV2` with `window`, `algorithmCPU`, `algorithmRAM`, `qCPU`, `qRAM`, `targetCPUUtilization`, `targetRAMUtilization` and `filter` → `ContainerResourcesProposal`.
-  - Abandoned workloads → `DeletionProposal` with `capability=cleanup`.
-  - Cluster or node-group sizing → `NodePoolProposal` or `AdvisoryProposal`.
-  - Probe the version. Kubecost 3.x moved to the `finops-agent` with ClickHouse and renamed cluster sizing "Node Group Sizing"; validate paths against the deployed version and keep the path map versioned.
-  - Note the licensing: the free tier is gated at $100K spend per 30 days.
-- **Acceptance.** Recorded fixtures for 2.x and 3.x.
-
-#### G4 · FEAT · Polaris and Popeye hygiene findings — P2 · M
-- **Spec.**
-  - Run `polaris audit --format=json` as a Job, or ingest it via push.
-  - `cpuRequestsMissing` / `memoryRequestsMissing` → `capability=hygiene`, plus a native follow-up proposal computed from usage (set requests at p95 × headroom).
-  - Other findings → `AdvisoryProposal`, not PR-able, shown in an "Hygiene" tab.
-  - Popeye (`-o json`) is optional and mapped the same way.
-
-#### G5 · FEAT · Autoscaler realization signals and the NodePool analyzer — P1 · M
-- **Spec.**
-  - Cluster Autoscaler status ConfigMap and Karpenter NodePools/NodeClaims, events (`Unconsolidatable`, `DisruptionBlocked`) and metrics (`karpenter_nodepools_cost_total`, `karpenter_voluntary_disruption_decisions_total`) feed `RealizationContext` (B6), not recommendations.
-  - The native `greenkube.nodepool` analyzer emits NodePool proposals:
-    - `consolidationPolicy: WhenEmpty` → `WhenEmptyOrUnderutilized` or `Balanced`;
-    - excessive `consolidateAfter`;
-    - no `capacity-type` diversity → allow spot for stateless pools;
-    - single architecture → allow arm64 where the images are multi-arch.
-  - These are high-risk and PR-able via H7.
-
-#### G6 · FEAT · Push API and public signal schema — P1 · M
-- **Spec.**
-  - Publish `schemas/signal.v1alpha1.json` (JSON Schema for `SourceSignal`, minus server-computed fields).
-  - Add `POST /api/v1/signals` (batch, idempotent on `signal_id`, API key scope `signals:write`).
-  - A batch declares `source_id="push:<client>"` and `complete: bool`.
-  - Optional later (P3): a `RecommendationSignal` CRD so in-cluster tools can write signals without HTTP.
-  - This is the "neutral aggregator protocol": any tool, script or vendor can contribute.
-- **Acceptance.** A curl example in the docs. Schema validation errors return 422 with JSON pointers.
-
-#### G7 · FEAT · GKE recommender insights — P2 · M
-- **Spec.**
-  - Google Recommender API insights for workload over- and under-provisioning (subtypes `WORKLOAD_OVERPROVISIONED` and `WORKLOAD_UNDERPROVISIONED`).
-  - Discover the insight type at runtime (`insightTypes.list`) because the ID is not stable in public docs.
-  - Auth via Workload Identity.
-  - Alternative input: the Cloud Monitoring VPA metrics `kubernetes.io/autoscaler/container/{cpu,memory}/per_replica_recommended_request_*`.
-  - GKE gives no recommendations when VPA is enabled or for HPA target metrics; record this in diagnostics.
-
-#### G8 · FEAT · Commercial connectors via SDK (community or partners) — P3 · M each
-- **Spec.**
-  - **PerfectScale:** public API at `api.app.perfectscale.io/public/v1`, Expert package only, 10 requests/minute; workloads, node groups, carbon.
-  - **StormForge:** CLI `stormforge get recommendations … -o json`.
-  - **CAST AI:** API, after path verification.
-  - **Densify/Kubex:** API.
-  - Each must respect rate limits and paid gating. Ship as separate packages (`greenkube-source-<vendor>`) to keep the core neutral and Apache-2.0.
-
-#### G9 · FEAT · Azure Advisor (AKS) — P3 · S
-- **Spec.** Configuration-level advisories only (enable VPA, cost analysis, autoscaler profile) → `AdvisoryProposal`.
-
-**Explicitly not sources:**
-- HPA (a conflict and risk input).
-- Kepler (a measurement input to B).
-- OpenCost (a cost input to B; it has no recommendation API).
-- AWS Compute Optimizer (no EKS pod coverage).
-
-**Definition of done (G, Tier 1).** Native, VPA, Goldilocks, KRR, Kubecost and Push are live. Consensus spans at least two sources on the demo dataset. `docs/sources/*.md` is published.
-
----
-
-### Category H — New action kinds (what can become a PR)
-
-**Priority** P1 (H0–H4, H6), P2 (H5, H7, H8) · **Horizon** weeks 8–20 · **Effort** XL
-
-**Goal.** Generalize the GitOps pipeline from "decrease container requests" to a registry of action kinds. Each kind has:
-- its own operations;
-- target resolution;
-- policy gates;
-- baseline capture;
-- apply detection;
-- inverse (rollback);
-- PR section;
-- measurement strategy.
-
-**Current state.**
-- `ActionPlanV3` contains `SetContainerResources`. `DeleteResource` and `AddHorizontalPodAutoscaler` exist in `gitops/contracts.py:361-381`, but nothing produces or plans them.
-- About 20 call sites hard-code `isinstance(op, SetContainerResources)`, including:
-  - `automation/plan_worker.py:658,707,783,1550`
-  - `automation/plan_runtime.py:877,1687,1761`
-  - `gitops/planning/raw_manifest.py:265`
-  - `gitops/planning/kustomize.py:301`
-  - `automation/rollback.py:511,573,880`
-  - `core/optimization/applied_detector.py:492,550`
-- Validation forbids "unrelated changes", which also forbids creating resources.
-- Bindings are workload-only (Deployment, DaemonSet, StatefulSet).
-
-**Target design.**
-
-```python
-# src/greenkube/deliver/actions/base.py
-class ActionKindSpec(Protocol):
-    kind: str                                   # "container_resources", "replicas", "hpa", "keda_cron", "sleepinfo",
-                                                # "vpa_mode", "delete_resource", "nodepool_patch"
-    capability: Capability
-    risk_class: Literal["low", "medium", "high"]
-    def ops_for(self, rec: Recommendation, live: LiveState) -> list[TypedOp]
-    def targets(self, ops: list[TypedOp]) -> list[ResourceRef]             # what bindings are needed
-    def gates(self) -> list[PolicyGate]
-    def capture_baseline(self, live: LiveState) -> ActionBaseline           # generalizes PreApplyWorkloadBaseline
-    def is_applied(self, live: LiveState, ops: list[TypedOp], baseline: ActionBaseline) -> AppliedVerdict
-    def inverse(self, ops: list[TypedOp], baseline: ActionBaseline) -> list[TypedOp]
-    def compile(self, ops: list[TypedOp]) -> list[PrimitiveOp]               # typed → primitive
-    def pr_section(self, ops: list[TypedOp], rec: Recommendation) -> PrSection
-    measurement_strategy: str                   # key in C strategy registry
-
-# primitive layer — the only thing renderers know about
-class SetField(BaseModel):       op: Literal["set"]; ref: ResourceRef; path: str; value: Any          # JSON pointer
-class RemoveField(BaseModel):    op: Literal["remove"]; ref: ResourceRef; path: str
-class CreateResource(BaseModel): op: Literal["create"]; manifest: dict; placement: PlacementHint
-class DeleteResource(BaseModel): op: Literal["delete"]; ref: ResourceRef
-
-class PatchStrategy(Protocol):                  # one per renderer: raw, kustomize, helm_values, flux_postrender
-    renderer: RendererKind
-    def supports(self, op: PrimitiveOp, binding: ResourceBinding) -> Support      # ok | needs_mapping(reason) | unsupported(reason)
-    def plan(self, ops: list[PrimitiveOp], snapshot: RepoSnapshot, binding: ResourceBinding) -> list[FileEdit]
-```
-
-- **Generic validation.** `render(before)` vs `render(after)` → the resource-set delta must equal the expected delta. That is a set of `(ResourceRef, json_pointer)` changes plus the created and deleted refs. This replaces `ValidationResult.requests_within_limits` with per-kind invariants (for example, request ≤ limit for container resources).
-- **Resource bindings.** Generalize `workload_source_bindings` to `resource_bindings(gvk, namespace, name)`. The Argo CD and Flux inventories already list every managed resource.
-- **Placement hints** for `CreateResource`:
-
-  | Layout | Where the new resource goes |
-  |---|---|
-  | Raw | A new file next to the workload's file (`<name>-<kind>.yaml`) |
-  | Kustomize | A new file plus an entry in `resources:` |
-  | Helm | Unsupported unless a values toggle exists (e.g. `autoscaling.enabled`); otherwise fail closed with an explanation |
-
-**Work items.**
-
-#### H0 · REFACTOR · Action framework — P1 · XL (split into H0a–H0d)
-- **H0a** — Introduce `ActionKindSpec` and the registry. Port `container_resources` behind it with no behavior change.
-- **H0b** — Primitive op layer; move the raw and Kustomize planners to `PatchStrategy`.
-- **H0c** — Generic expected-delta validation; generalized baselines, apply detection and inverse.
-- **H0d** — Resource bindings (GVK + name) from the Argo CD and Flux inventories.
-- **Acceptance.**
-  - No `isinstance(op, SetContainerResources)` left outside the `container_resources` spec.
-  - All existing tests are green.
-  - Adding a no-op test kind needs no change outside `deliver/actions/`.
-
-#### H1 · FEAT · Container resources v2 — P1 · L
-- **Spec.**
-  - Increases (reliability).
-  - Limits (set, raise, remove CPU limit; memory limit policy).
-  - Native sidecars and init containers.
-  - CronJob, Job and Argo Rollouts (`argoproj.io/v1alpha1 Rollout`).
-  - Lift the "decrease only" check (`core/optimization/actions.py:97`).
-  - Increase PRs carry a "reliability" label and show the value as risk reduction.
-- **Acceptance.** End-to-end: a memory increase PR for a container with OOM history merges, syncs and is applied, and the OOM rate drops (health measurement).
-
-#### H2 · FEAT · Helm: remote charts and multi-source Argo apps — P1 · L
-- **Problem.** Only same-repo charts work (`gitops/planning/helm.py:664-668,828,656`). Remote chart repositories, OCI charts, and Argo multi-source apps with `$values` (the common pattern) fail closed.
-- **Spec.**
-  - **Argo multi-source:** edit the values file in the `$values` Git source. Render the chart from the Helm repo or OCI registry inside the sandbox; allowlist chart repo egress *only* for the sandbox, via a pull-through cache or pre-fetch by the controller.
-  - **Values-path mapping registry:** known charts (bitnami/*, common app charts) map `container → values path` (`resources`, `<component>.resources`). Infer unknown charts by render probe (as today); fall back to a one-time user mapping stored per chart+version.
-  - Allow multiple containers per plan (lift `helm.py:656`).
-  - **Flux** HelmRepository and OCIRepository charts: values edits in HelmRelease `spec.values`, or `valuesFrom` ConfigMaps in Git. The post-renderer stays the universal fallback.
-- **Acceptance.** End-to-end with a bitnami chart from OCI, and with an Argo multi-source app.
-
-#### H3 · FEAT · Replicas and HPA — P1 · M
-- **Spec.**
-  - `replicas`: `SetField(spec.replicas)` only when no HPA targets the workload. Otherwise propose `hpa` min/max changes.
-  - `hpa`: `CreateResource(HorizontalPodAutoscaler)` for `AUTOSCALING_CANDIDATE`, or `SetField` on an existing HPA (minReplicas, maxReplicas, target utilization).
-  - Gate: when creating an HPA on CPU, the workload must have CPU requests.
-  - Measurement: `ReplicaScalingStrategy`.
-
-#### H4 · FEAT · Off-peak schedules (KEDA cron default, kube-green optional) — P1 · M
-- **Spec.**
-  - `OFF_PEAK_SCALING` → `ScheduleProposal`.
-  - **Default:** `CreateResource(keda.sh/v1alpha1 ScaledObject)` with a `cron` trigger (`timezone`, `start`, `end`, `desiredReplicas`). KEDA is CNCF Graduated.
-    - KEDA creates its own HPA. If an HPA already exists, convert it into a ScaledObject with its existing triggers plus cron, or fail closed with an explanation.
-  - **Optional:** kube-green `SleepInfo` (`weekdays`, `sleepAt`, `wakeUpAt`, `timeZone`, `excludeRef`). Its release cadence has slowed; warn about it.
-  - Probe the CRDs before offering the action.
-  - Measurement: `ReplicaScalingStrategy` + `TemporalShiftStrategy`.
-
-#### H5 · FEAT · VPA mode graduation — P2 · M
-- **Spec.**
-  - `vpa_mode`: `SetField(spec.updatePolicy.updateMode)` `Off → InPlaceOrRecreate`.
-  - Requires Kubernetes ≥ 1.33 (in-place resize GA in 1.35) and VPA ≥ 1.6 (where `InPlaceOrRecreate` is GA). Never write `Auto`, which is deprecated.
-  - **Caveat:** this hands requests to the VPA, so the requests in Git drift. The PR also adds the Argo `ignoreDifferences` entry for container resources on that workload, and the docs explain the trade-off against principle 1.
-  - Policy default: disabled.
-
-#### H6 · FEAT · Delete orphaned resources — P1 · M
-- **Spec.**
-  - `delete_resource` for PersistentVolume, LoadBalancer Service, zombie Deployment and idle namespace.
-  - File deletion, removal of one document from a multi-document file, or removal of a Kustomize `resources:` entry.
-  - Gates:
-    - Argo CD `prune` enabled or Flux `prune: true`, otherwise warn that the deletion won't propagate;
-    - a PV with `reclaimPolicy: Retain` → the PR notes that the cloud disk must be released manually.
-  - Apply detection: the resource is absent.
-  - Measurement: `ResourceDeletionStrategy`.
-  - Resources not managed by GitOps get an `AdvisoryProposal` with a `kubectl delete` snippet.
-
-#### H7 · FEAT · Karpenter NodePool patches — P2 · M
-- **Spec.**
-  - `nodepool_patch`: `SetField` on `spec.disruption.*` and `spec.template.spec.requirements`. Cluster-scoped, usually in a platform repo, often Terraform-managed. Detect when the NodePool is not GitOps-managed and fall back to advisory.
-  - Risk class: high.
-  - Requires two approvers via provider settings, documented.
-  - Measurement: `NodeConsolidationStrategy`.
-
-#### H8 · FEAT · Change sets (batching) — P2 · L
-- **Spec.**
-  - Implement `change_set_id`, which is already persisted but never set.
-  - One plan covers N bindings in the same repo and ref. Grouping rules come from J4 (namespace, team, CODEOWNERS).
-  - Per-batch policy budgets and per-item validation.
-  - Partial failure drops the failing items and re-renders.
-  - Data model: one PR row per plan, plus a `plan_recommendations` link table (fixes the N-rows-per-PR duplication in `recommendation_pull_requests`).
-
-#### H9 · FEAT · Manual mode for non-GitOps clusters — P1 · S
-- **Spec.**
-  - "Mark as applied" in the UI, using `applyRecommendation` (already in `frontend/src/lib/api.js:294` but unused).
-  - Export a `kubectl patch` snippet or manifest diff.
-  - Optional `greenkube.io/source: repo@ref:path` annotation binding (`ControllerKind.ANNOTATION` exists but nothing produces it), with sync confirmed from live state.
-  - These changes are still measured (C).
-
-**Definition of done (H, v0.6).**
-- H0–H4, H6 and H9 are merged.
-- End-to-end tests cover container resources (raw, Kustomize, remote Helm), HPA creation, KEDA cron and PV deletion.
-- Each new kind has a measurement strategy and a rollback.
-
----
-
-### Category I — Ranking & decisioning v2
-
-**Priority** P1 · **Horizon** weeks 6–10 · **Effort** M
-
-**Goal.** Rank by **risk-adjusted expected value in one currency**. Scores must be stable across runs and filters, explainable, and improved by outcomes.
-
-**Current state.**
-- `core/optimization/scoring.py`: log1p + min-max normalization **within the batch**. Scores change when the filter or the set changes (BUG-23).
-- Fixed source authority (`vpa 1.0, karpenter 0.8, greenkube 0.5`).
-- Effort fixed per type.
-- Confidence is a hand-tuned sum (`core/optimization/risks.py:_base_confidence`).
-
-**Target design.**
-
-```text
-value_annual   = expected_billable_cost_annual + carbon_price × co2e_expected_annual_t      (from ImpactDelta)
-p_success      = f(confidence, track_record[source_family, capability], risk_class)        (Beta posterior mean)
-incident_cost  = risk_aversion × base_incident_cost[risk_level] × blast_radius(replicas, criticality labels)
-effort_cost    = effort_hours[action_kind, delivery_mode] × engineer_hour_cost (default 0 = ignore)
-EV             = p_success × value_annual − (1 − p_success) × incident_cost − effort_cost
-```
-
-- For **reliability recommendations** (increases): `value_annual` is negative (cost up), and EV includes `incident_cost_avoided = p_incident_now × base_incident_cost`. Show these in a separate "Reliability" lane so they are never hidden by cost-only ranking.
-- **Profiles** become presets over `carbon_price`, `risk_aversion` and the effort weight (`balanced`, `cost_first`, `carbon_first`, `low_risk`, `quick_wins`).
-- Scores are **absolute** (currency per year), shown as "≈ $412/yr expected · 0.82 success".
-
-**Work items.**
-
-| ID | Type | Item | Pri | Effort |
-|---|---|---|---|---|
-| I1 | FEAT | `ValueScore` with EV components and absolute scoring; the `ranking_factors` breakdown in currency; deprecate batch min-max | P1 | M |
-| I2 | FEAT | Carbon price setting, profiles as presets, per-request override (`?profile=` / `?carbon_price=`) | P1 | S |
-| I3 | FEAT | Source track record: Beta(α,β) per (source family, capability), updated from measurement outcomes (`realized` → α+1; `not_realized` or `rollback_review` → β+1); exposed in `/sources` ("VPA: 14/16 realized") and used by `p_success` and `weighted` consensus | P1 | M |
-| I4 | FEAT | Risk model v2: per-replica headroom; OOM and throttling history (from C0.9 signals); replicas = 1 (singleton) penalty; HPA/VPA/PDB interplay; JVM flag; in-place-resize constraints (memory decrease best-effort; static CPU manager incompatible); criticality labels (`greenkube.io/criticality`) | P1 | M |
-| I5 | FEAT | Unified `PolicySet` (namespaces allow/deny, max risk, change freeze, budgets, contested handling), used by ranking eligibility, plan creation and auto-approve (replaces the scattered checks in `automation/policy.py` and the analyzers) | P2 | M |
-| I6 | FEAT | Bundles: suggested groups (per namespace, team, CODEOWNERS owner) with aggregated EV, feeding J4 and H8 | P2 | S |
-
-**Definition of done (I).**
-- Ranking is stable across namespace filters (property test).
-- The top-N UI shows EV and its components.
-- The track record updates after verification outcomes.
-
----
-
-### Category J — Pull-request experience & collaboration
-
-**Priority** P1 · **Horizon** weeks 6–14 · **Effort** L
-
-**Goal.** For most stakeholders the PR *is* GreenKube. A reviewer must be able to decide in 30 seconds, and the PR must keep reporting until the savings are proven.
-
-**Current state.**
-- Title: `Apply GreenKube plan pln-<24 hex>` (`automation/plan_worker.py:1488`).
-- The body (`plan_worker.py:1500-1643`) is thorough but machine-oriented:
-  - CO₂e in g/yr;
-  - CPU and memory both printed even when only one changes;
-  - no totals, no links back, no rollback instructions;
-  - labels default to none.
-- Reviewers are configured globally, with no CODEOWNERS routing.
-- There are no post-merge updates and no commit signing.
-
-**Work items.**
-
-#### J1 · FEAT · PR template v2 — P1 · M
-- **Title.** `greenkube: rightsize payments/api (cpu 500m→200m, mem 1Gi→512Mi) · −$412/yr · −18 kgCO₂e/yr`
-  - Conventional-commit prefix configurable.
-  - Truncated at 72 characters, with the full summary in the body.
-- **Body.** Rendered from a Jinja2 template; overridable with `automation.pr.template` from a ConfigMap.
-  1. **Summary**: one sentence plus a totals table (per month and per year; cost and CO₂e; projected, with the realization factor).
-  2. **Changes**: per container, only the resources that change, as current → proposed, with the delta.
-  3. **Why**: consensus line (sources and values), evidence (window, coverage, p95, p99, max, restarts), and a link to the Grafana or GreenKube chart.
-  4. **Risk & what to watch**: risk level and factors; headroom over p95; HPA/PDB/VPA notes; "watch these metrics for 24h".
-  5. **Assumptions**: unit prices, cost source, carbon intensity and source, PUE, Impact Model version.
-  6. **Rollback**: "Revert this PR", or the GreenKube rollback link. Say explicitly when a layout doesn't support automated rollback.
-  7. **Verification plan**: when measurement starts and ends, which strategy, where the results will be posted.
-  8. Collapsible rendered and source diffs (existing).
-  9. Machine-readable footer:
-
-     ```text
-     <!-- greenkube:v1 {"plan_id":..., "recommendation_ids":[...], "revision":..., "change_set_id":..., "digest":...} -->
-     ```
-
-     plus git trailers `GreenKube-Plan:` and `GreenKube-Recommendations:` in the commit message.
-- **Setting.** `GREENKUBE_EXTERNAL_URL`, needed for deep links (`/recommendations/{id}`, `/changes/{plan_id}`, `/ledger?change=`).
-- **Acceptance.** Snapshot tests of the rendered body for each action kind. Body ≤ 60k characters, with truncation that preserves sections 1–7.
-
-#### J2 · FEAT · Labels and metadata — P1 · S
-- **Spec.**
-  - Default labels: `greenkube`, `optimization/<capability>`, `risk/<level>`, `reliability` (for increases).
-  - Auto-create missing labels where the provider allows it; drop the "labels must pre-exist" requirement from the docs.
-  - Draft PRs for `high` risk.
-
-#### J3 · FEAT · CODEOWNERS routing — P1 · M
-- **Spec.**
-  - Parse `CODEOWNERS` (GitHub and GitLab syntax) from the snapshot.
-  - Request reviews from the owners of the touched paths.
-  - Owner-to-team mapping is used by bundles (I6) and change sets (H8).
-  - Fallback: configured reviewers.
-
-#### J4 · FEAT · Grouping policies — P2 · M
-- **Spec.**
-  - `automation.grouping: none | workload | namespace | owner | repo_path`, with `maxItemsPerPr` and `maxRiskInGroup`.
-  - Produces change sets (H8).
-  - The PR title summarizes the group: `greenkube: rightsize 7 workloads in payments · −$2.3k/yr`.
-
-#### J5 · FEAT · Lifecycle feedback on the PR — P1 · M
-- **Spec.** Post or update one GreenKube comment with the status timeline:
-  - synced (revision, controller);
-  - applied (rollout completed);
-  - measuring (ETA);
-  - outcome (realized savings with CI, or not realized, or rollback review), with a link to the ledger.
-- Add a check-run or commit status `greenkube/validation` (render diff valid, policy result) on the PR head.
-- When a newer recommendation revision exists (E7), comment "newer advice available".
-
-#### J6 · FEAT · Comment commands — P2 · M
-- **Spec.**
-  - `/greenkube rebase` re-renders on the current head.
-  - `/greenkube refresh` uses the latest revision.
-  - `/greenkube explain` posts the evidence detail.
-  - `/greenkube snooze 14d` closes the PR and snoozes the recommendation.
-  - Commands are authorized by repository write permission (provider API check) and processed via webhooks.
-
-#### J7 · FEAT · Notifications — P2 · S
-- **Spec.**
-  - Slack and Microsoft Teams incoming webhooks; generic CloudEvents webhook (also P6).
-  - Events: PR opened, merged, measurement concluded, rollback_review, weekly digest ("this week: 5 PRs merged, $1.2k/yr realized, 3 high-value items waiting").
-
-#### J8 · OPS · Signed commits — P2 · S
-- **Spec.** Verified commits via the GitHub App (F3). For GitLab and Gitea, optional SSH/GPG signing key Secret.
-
-**Definition of done (J).** On the end-to-end loop, the PR has a readable title, labels, CODEOWNERS reviewers, a full template v2 body, a validation check, and a final comment with the measured outcome.
-
----
-
-### Category K — Product UI re-centering
-
-**Priority** P1 · **Horizon** weeks 2–16 · **Effort** L
-
-**Goal.** The UI tells the loop: **what to do next (Inbox) → what is in flight (Changes) → what it saved (Ledger)**. Footprint charts become supporting context.
-
-**Current state** (`frontend/`, SvelteKit, 6 routes):
-- The dashboard leads with CO₂e, cost, energy and pod tiles. Savings sum measured and projected values together.
-- Recommendations appear last and unranked ("first 3").
-- The recommendations page is 2,124 lines:
-  - its default "Projected savings" sort is actually alphabetical by priority (BUG-20);
-  - the score is never shown;
-  - only the type filter is exposed (the API supports source, risk and capability);
-  - there is no bulk PR, no manual apply, and no detail page.
-- PR lists are duplicated across Recommendations and Automation, with no sync state on the former.
-- There is no ledger view.
-- Every page load schedules a full scan and never reloads its result (BUG-25).
-
-**Information architecture (target).**
-
-| Route | Purpose | Key components |
-|---|---|---|
-| `/` **Overview** | Verified savings to date (realized), pending verification (projected), annual opportunity (EV), changes in flight; top 5 Inbox items with "Open PR" | `SavingsHero`, `PipelineStrip`, `InboxPreview`, `SetupBanner` |
-| `/inbox` (replaces `/recommendations`) | Ranked recommendations (EV), filters (source, capability, risk, namespace, owner, eligibility), multi-select into one plan, eligibility reasons inline, "Mark applied", "Ignore", "Hygiene" and "Reliability" lanes | `RecommendationCard`, `ConsensusBadge`, `EligibilityHint`, `BulkBar` |
-| `/inbox/[id]` | Evidence, consensus spread per source, impact assumptions, ranking breakdown, diff preview, PR, sync, measurement timeline, ledger rows | `EvidencePanel`, `ImpactAssumptions`, `Timeline`, `PlanPreview` |
-| `/changes` | One pipeline board: Plan → PR open → Merged → Synced → Applied → Measuring → Realized / Not realized / Rollback review; replaces both PR lists | `ChangeBoard`, `ChangeRow` |
-| `/ledger` | Entries by period, namespace, owner, action kind and method (projected / measured_allocated / realized_billed); CSV and FOCUS export; methodology link; hash-chain verification status | `LedgerTable`, `LedgerTotals`, `ExportMenu` |
-| `/integrations` | Recommendation sources (health, last run, track record), data sources, Git providers, GitOps discovery coverage, setup checklist (F1) | `SourceCard`, `SetupChecklist` |
-| `/footprint` | Today's dashboard charts, nodes and report builder, moved here | existing |
-| `/settings` | Read-only config view (A13), account and API keys (K11), preferences | existing |
-
-**Work items.**
-
-| ID | Type | Item | Pri | Effort |
-|---|---|---|---|---|
-| K1 | FEAT | Savings-first Overview; never sum projected and realized (show both, labeled) | P1 | M |
-| K2 | FEAT | Inbox: server ranking (EV) by default, filters wired to the API, multi-select plans, eligibility from F10 (delete `safeActionFor`), manual apply (H9) | P0/P1 | L |
-| K3 | FEAT | Recommendation detail page with deep links (target of PR links, J1) | P1 | M |
-| K4 | FEAT | Changes board (merges the two PR lists; shows sync and measurement state) | P1 | M |
-| K5 | FEAT | Ledger page and export (needs C7) | P1 | M |
-| K6 | FEAT | Integrations page and setup checklist (needs E5, F1) | P1 | M |
-| K7 | REFACTOR | Move visibility pages under `/footprint`; keep Grafana as the deep-analysis surface | P2 | S |
-| K8 | REFACTOR | Frontend tech debt: <ul><li>Svelte 5 runes migration;</li><li>split the 2,124-line page into components;</li><li>modular ECharts imports (1.15 MB chunk today);</li><li>svelte-check + ESLint + Prettier;</li><li>OpenAPI-generated typed client (M11);</li><li>configurable currency (`utils/format.js:22-27`);</li><li>persisted UI prefs (localStorage, try/catch).</li></ul> | P2 | L |
-| K9 | BUG | <ul><li>Stop `refresh=true` on page load; poll the run status and reload on completion (E1);</li><li>pass `AbortController` signals;</li><li>route the 5 mutation helpers through `request()` so 401 opens the auth dialog (`frontend/src/lib/api.js:121-142,294-342,592-602`);</li><li>apply the namespace filter consistently;</li><li>persist dismissal of the connectivity popup;</li><li>optional providers report `inactive`, not `unconfigured` (`core/health.py:198-205`).</li></ul> | P0 | M |
-| K10 | FEAT | Accessibility and responsive: <ul><li>labeled nav in collapsed mode;</li><li>`role=tab` / `aria-selected`;</li><li>no colour-only status;</li><li>contrast ≥ WCAG AA;</li><li>keyboard-operable cards (remove `svelte-ignore a11y`);</li><li>mobile layout for Overview, Inbox and Changes.</li></ul> | P2 | M |
-| K11 | FEAT | Authentication UI for F13–F16: <ul><li>login page (password-manager friendly);</li><li>first-login password change;</li><li>account menu (change password, active sessions with revoke, sign out);</li><li>API keys page (create with scopes, show once, revoke);</li><li>TLS warning banner on remote plain-HTTP access.</li></ul> | P0/P1 | M |
-
-**Definition of done (K).** A new user lands on the Overview, sees the setup state, opens the top Inbox item, opens a PR, follows it on Changes, and later sees the measured entry on Ledger. Playwright smoke tests cover this path (O5).
-
----
-
-### Category L — Positioning, documentation & community
-
-**Priority** P1 · **Horizon** weeks 1–4, then continuous · **Effort** M
-
-**Goal.** Communicate the loop clearly and consistently, and make the docs a single source of truth that matches the code.
-
-**Already done in this pass** (2026-11-07, uncommitted):
-- `README.md` rewritten around the loop, with an honest "What works today" table (verification labeled beta) and the demo image pinned to the release tag (`sync_version.py` keeps it current).
-- New `docs/concepts.md`.
-- Positioning refreshed:
-  - `pyproject.toml`: description and keywords;
-  - `helm-chart/Chart.yaml`: description and keywords only; the Artifact Hub category and changes list are still to do in L11;
-  - the intros of `docs/architecture.md` and `docs/recommendation.md`;
-  - `CONTRIBUTING.md`: intro and contribution priorities;
-  - `.github/instructions/ai_instructions.instructions.md`: vision, stack, structure, doc rules.
-- `docs/recommendation.md`: fixed the VPA "enable with …=true" contradiction and the missing Karpenter step.
-- `CHANGELOG.md` `[Unreleased]` entry added.
-- This roadmap moved from `docs/specs/` (git-ignored) to `docs/roadmap.md` (versioned) in revision 2.
-
-**Work items.**
-
-| ID | Type | Item | Pri | Effort |
-|---|---|---|---|---|
-| L1 | DOC | Keep the README honest as features land: update the "What works today" table every release | P1 | S |
-| L2 | DOC | Restructure the docs (Diátaxis), as a tree under `docs/` (see below) | P1 | M |
-| L3 | DOC | `docs/concepts.md` (done) → expand with diagrams as E, C and H land | P1 | S |
-| L4 | DOC | `docs/get-started/first-pr.md` built on F9 | P1 | M |
-| L5 | DOC | Methodology docs (B1, C9) | P0/P1 | M |
-| L6 | DOC | Source connector docs and the "write your own source" SDK guide (E5, G6) | P1 | M |
-| L7 | DOC | Fix stale and contradictory statements (list below) | P0 | S |
-| L8 | DOC | Websites: <ul><li>align greenkube.cloud's SEO title and the "Visibility first" section with the loop;</li><li>replace the docs.greenkube.cloud hero ("FinGreenOps… full visibility… for tech SMEs");</li><li>make repo `docs/` the single source imported by the Starlight site (sync script);</li><li>stop rsyncing `docs/` to gh-pages;</li><li>rename the two site repos (`greenkube-marketing`, `greenkube-docs`).</li></ul> | P1 | M |
-| L9 | DOC | <ul><li>This document is public in `docs/roadmap.md` and linked from the README.</li><li>Add a GitHub Project board mirroring its IDs.</li><li>Until fixed, consider handling security-relevant defects through private security advisories rather than only this public register: BUG-58 (Secret regeneration under Argo CD) and BUG-59 (wildcard credentialed CORS).</li></ul> | P1 | S |
-| L10 | DOC | Community files: `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue and PR templates, `GOVERNANCE.md` (when contributors > 3) | P1 | S |
-| L11 | DOC | Metadata: <ul><li>Grafana dashboard title ("GreenKube FinGreenOps Dashboard" → "GreenKube — Savings & Footprint");</li><li>`frontend/src/app.html` title and meta;</li><li>Artifact Hub category and changes list (`helm-chart/Chart.yaml` lists 0.2.x items);</li><li>`artifacthub-repo.yml` owner email consistency.</li></ul> | P1 | S |
-| L12 | DOC | Generated reference: Helm values doc (helm-docs), OpenAPI page, metrics catalog, eligibility and policy error codes | P2 | M |
-| L13 | DOC | Single installation guide (F18) and an authentication guide (sign-in, initial admin password, sessions, API keys and scopes, SSO via proxy/OIDC) | P1 | M |
-
-**L2 — target docs tree:**
-
-```text
-docs/
-  get-started/   overview.md · demo.md · install.md · first-pr.md
-  concepts/      loop.md · sources-and-consensus.md · ranking.md · gitops-plans.md · verification-and-ledger.md
-  methodology/   impact-model.md · savings-measurement.md
-  guides/        sources/*.md · git-providers.md · argo-flux.md · webhooks.md · production.md · grafana.md · upgrades.md
-  reference/     helm-values.md · api.md · cli.md · metrics.md · eligibility-codes.md · configuration.md
-  project/       contributing.md · release.md · security.md · roadmap.md
-```
-
-**L7 — known stale or contradictory items:**
-- ~~`docs/recommendation.md:62` says to enable VPA with `RECOMMENDATION_VPA_ENABLED=true`, though it is on by default; generation step 3 omits Karpenter.~~ Fixed in this pass.
-- `docs/recommendation.md:174` says ignoring requires a reason; the UI says "(optional)" (`recommendations/+page.svelte:1070`).
-- `docs/architecture.md:149-150` cites `utils/region_mapping.py` and `energy/instance_profiles.py`; both live in `src/greenkube/data/`.
-- `docs/architecture.md:262,491` describes the instant `run()` path as the main flow; production uses `run_range`.
-- `docs/architecture.md` CO₂e formula divides by 1000; the code produces grams without that division.
-- `docs/architecture.md:464` claims "mobile-first"; the UI is not responsive.
-- `docs/testing.md` says `postgres:16-alpine`; `docker-compose.test.yml` uses 18.0.
-- `docs/installation.md:408` says the key is in `greenkube-secrets`; the README uses Secret `greenkube`.
-- `CONTRIBUTING.md:116,127` and the `release.yml` header say `:latest` is pushed on release; `release.yml:121-122` pushes only the version tag. The README demo command therefore pulls a stale `latest` (BUG-62; fix in O6).
-- `docs/rollouts.md` documents `RolloutReconciler`, which is used only by tests (delete with M4 or wire it in).
-- `docs/automation.md`: the policy gates are described as failing closed on missing evidence; the code passes `NOT_AVAILABLE` (BUG-55; align after D13). The Helm support table overstates remote-chart support (align after H2).
-- `docs/automation.md:102` tells users to curl the eligibility endpoint; replace with F10.
-
----
-
-### Category M — Architecture simplification & refactoring
-
-**Priority** P2 (continuous, about 15% of capacity) · **Effort** XL overall
-
-**Goal.** Cut accidental complexity so that categories E, H and C can move fast:
-- one storage dialect layer;
-- explicit module boundaries;
-- single transition tables;
-- less code.
-
-**Target module boundaries** (bounded contexts; enforce with `import-linter`):
-
-```text
-src/greenkube/
-  measure/     collectors/, promql.py, windows & watermarks, compression        (A)
-  impact/      ImpactModel, allocation, pricing, power, intensity, embodied      (B)
-  recommend/   model.py, sdk.py, connectors/ (native analyzers, vpa, krr…), consensus, ranking, policy   (E, G, I)
-  deliver/     actions/ (registry), gitops/ (discovery, bindings, planning, renderers), providers/, pr/  (D, F, H, J)
-  verify/      change events, baselines, strategies, ledger, drift              (C)
-  platform/    storage (dialect layer, UoW, migrations), config (settings classes), api, scheduler, leader, observability
-  cli/, demo/
-```
-
-Rules:
-- `recommend` never imports `deliver`.
-- `deliver` reads recommendations through a narrow interface.
-- `verify` depends on `impact` and `deliver` contracts (`ChangeEvent`), not on internals.
-
-**Work items.**
-
-| ID | Type | Item | Pri | Effort |
-|---|---|---|---|---|
-| M1 | REFACTOR | Package re-layout per the target tree (mechanical moves with re-export shims for one release) + `import-linter` contracts in CI | P2 | L |
-| M2 | DESIGN+REFACTOR | **Storage: Postgres-first.** Decide between (a) extending the existing `BaseSQL*` + `UnitOfWork` pattern with a `Dialect` helper (placeholders, upsert, `hour_bucket`, `bool_or`, `julianday` vs `timestamptz`), or (b) SQLAlchemy Core (async) + Alembic. **Recommendation: (a) now** (lower risk, already proven in the GitOps repos), and (b) only if the migration count keeps growing. Port the measurement, recommendation, savings, summary, node and PR repositories. Removes about 3.3k mirrored lines. SQLite stays for `demo` and dev; production Helm requires Postgres. | P2 | XL |
-| M3 | REFACTOR | Squash migrations: create a `0100_baseline` per dialect equal to the current schema; new installs start there; existing installs keep running the old chain up to 0037 then jump. Single migration stream once M2 lands. Enable `PRAGMA foreign_keys=ON` on SQLite (`core/db.py:141-147`). | P2 | M |
-| M4 | REFACTOR | **Dead code removal** (see the list below) | P1 | M |
-| M5 | REFACTOR | Split large files: <ul><li>`gitops/planning/helm.py` (2,597) → `argo_values.py`, `flux_postrender.py`, `values_mapping.py`;</li><li>`storage/base_gitops_sql_repository.py` (2,274) → bindings, plans, webhooks, heartbeats/leases, retention;</li><li>`automation/plan_runtime.py` (1,878) → facade, provider config, factories, rollback orchestration;</li><li>`automation/plan_worker.py` (1,727) → executor, tree diff, PR rendering (moves to J1 templates);</li><li>`api/metrics_endpoint.py` (1,255) → per-domain collectors;</li><li>`models/metrics.py` (860) → `models/recommendation.py`, `models/metrics.py`, `models/pull_request.py`.</li></ul> | P2 | L |
-| M6 | REFACTOR | Deduplicate helpers: 15 local UTC helpers → `utils/time.py`; 7 commit-SHA regexes → `deliver/git/sha.py`; 3 `_plan_digest` implementations; `canonical_repository_identity` = `sanitize_repository_url` (`gitops/contracts.py:210-247`) + copy in `api/routers/plans.py:268`; `_recommendation_records_for_pr` defined twice (`plan_worker.py:716,732`); supported-renderer set ×4 | P2 | S |
-| M7 | REFACTOR | **State machines.** One explicit transition table per aggregate (Plan, Operation, Recommendation lifecycle, Measurement) in `*/states.py`, enforced by a single `transition()` that is compare-and-set and atomic with its event. `action_status` and PR `sync_status` become *derived* views of plan status instead of stored copies (today at least five writers update them non-atomically). One PR row per plan + `plan_recommendations` link table (with H8). | P1 | L |
-| M8 | REFACTOR | **Process topology.** Controller = every leader-gated loop (collection, scans, lifecycle, measurement, attribution, discovery, sync, *and* one "automation controller" loop for webhook outbox, PR polling, branch cleanup, plan expiry and retention, under one DB lease). API = stateless request handling. Worker (optional) = operation execution only. Removes the expiry sweep running in every API replica (`api/startup.py:40`). | P1 | L |
-| M9 | REFACTOR | Configuration: split `Config` (≈112 fields, `core/config.py`, 805 lines) into nested settings classes (`MeasurementSettings`, `ImpactSettings`, `SourceSettings`, `RecommendationSettings`, `VerificationSettings`, `AutomationSettings`, `StorageSettings`, `ApiSecuritySettings`) injected through constructors; ban `get_config()` outside composition roots (39 call sites today); keep env-var names for compatibility. | P2 | L |
-| M10 | REFACTOR | Singletons and lifecycle: stop closing cached singletons after each tick (`cli/utils.py:99-100`, `cli/start.py:116`); replace the 14 `@lru_cache` factories with an explicit composition root per process | P2 | M |
-| M11 | REFACTOR | API v2 and contracts: versioned `/api/v2` (signals, recommendations v2, changes, measurements, ledger); generated OpenAPI → typed frontend client; deprecation headers on v1 | P2 | M |
-| M12 | REFACTOR | Data model: replace the 39-field `CombinedMetric` (about 3.5 KB per object) with `workload_usage`, `workload_impact` and `node_pool_hour` facts keyed by `WorkloadRef` (with B2 and E3) | P2 | L |
-
-**M4 — dead or obsolete code to remove** (verify each with a grep before deleting):
-- Instant collection path (≈900 lines): `DataProcessor.run()` (`core/processor.py:119-320`), `CollectionOrchestrator`, `CostNormalizer`, `PrometheusResourceMapper`, `PrometheusCollector.collect()` and its parsers, `BasicEstimator.estimate()`, `LOW_NODE_CPU_THRESHOLD`.
-- `ConfigService` persistence and `load()` (`core/config.py:636-787`), the configuration repositories (both dialects) and migration 0020's table (keep the migration file; drop the table in a new migration).
-- Unused settings: `PROMETHEUS_QUERY_RANGE_MAX_SAMPLES`, `OIDC_ISSUER`, `OIDC_AUDIENCE`, `SESSION_COOKIE_NAME`, `SESSION_COOKIE_SECURE`.
-- `RecommendationStatus.PLAN_CREATED`, `PLAN_STATUS_CHANGED` and `PLAN_ACTION_STATUS_CHANGED` (`models/metrics.py:160-162`; event-like values in a status enum, unused) (BUG-24).
-- `automation/rollout/` and `models/rollout`, which are used only by tests (or wire them in), plus `docs/rollouts.md`.
-- `ControllerKind.EXPLICIT_REPOSITORY` and `ANNOTATION`, unless H9 implements them.
-- `ProviderGitBlobResolver` (`automation/plans.py:120`), the single-file `update_file` path (`automation/git/registry.py:346`), the `queue` parameter (`cli/automation_worker.py:80`), `_legacy_target_selector` (`gitops/planning/helm.py:2111`), and the Helm alias keys `tokenSecret` / `repositories`.
-- About 13 storage methods with no callers (e.g. `upsert_worker_heartbeat`, `get_by_idempotency_key`, `list_recommendations_by_action_status`).
-- Plan-service alias layers: `AutomationPlanService` vs `RuntimePlanService` facades, `create/read/approve/stale/expire/supersede` aliases (`automation/plans.py:735-773`), `PlanService =` (`:892`), `create_plan_for_recommendations` / `prepare_plan` (`automation/plan_runtime.py:451-475`), `get_plan_service` vs `build_plan_api_service`.
-- Legacy routes (after F5 deprecation).
-- `core/sustainability_score.py` (487 lines; feeds one gauge): move it to an optional plugin or delete it. It is not part of the positioning.
-- `api/routers/report.py` and `core/aggregator.py`: reduce them to a measurement export (CSV / FOCUS-aligned) once the Ledger export exists.
-- The demo generator (`demo/data_generator.py`, 1,712 lines, which bypasses the estimator): replace it with recorded Prometheus/OpenCost fixtures replayed through the real pipeline (O7).
-- `gpu_usage_millicores` (never populated): repurpose in B5 or drop.
-- The runtime dependencies `pyrefly` and `rich` (`pyproject.toml:63,75`): move to the dev group if unused in `src/`.
-
----
-
-### Category N — Helm, security & operations
-
-**Priority** P2 (N1 is P0) · **Horizon** weeks 1–12 · **Effort** M
-
-| ID | Type | Item | Pri | Effort |
-|---|---|---|---|---|
-| N1 | OPS+BUG | **Argo CD-safe secrets.** The release Secret is a pre-install/pre-upgrade hook built with `lookup` + `randAlphaNum` (`helm-chart/templates/secret.yaml:2-12,62,103`). Under Argo CD (`helm template`), `lookup` returns nothing, so every sync can regenerate the API key and Postgres password while the PVC keeps the old password; the PVC guard (`postgres-statefulset.yaml:4-7`) also relies on `lookup`. Fix: (a) document `secrets.existingSecret` as the GitOps path; (b) when generating, use a non-hook Secret annotated `helm.sh/resource-policy: keep`, plus Argo `IgnoreExtraneous`/`argocd.argoproj.io/compare-options` guidance; or (c) a tiny init job that creates the Secret only if absent (owned outside the release). Recommended: (a) + (c). Add a test rendering under `helm template` twice → stable output. With F14/F15, the chart no longer needs to generate an API key: bootstrap credentials are created by the application, Argo CD-style, so only the bundled Postgres password remains in scope. (BUG-58) | P0 | M |
-| N2 | OPS | `values.schema.json` (generated + hand-tuned) replacing most of the 58 `fail` guards; `.helmignore` (exclude `tests/`) | P1 | M |
-| N3 | OPS | Knob reduction: <ul><li>remove `profile`, `replicaCount`, the `production.*` block, `automation.enabled` / `automation.mode`, the SQLite values and `values-production.yaml` (F11, F12, with F17 compatibility);</li><li>collapse the three `minSamples` knobs (`values.yaml:42,430,436`);</li><li>group sources under `sources.*` (E5);</li><li>remove legacy aliases.</li></ul> | P1 | M |
-| N4 | OPS+BUG | Secure defaults: `corsOrigins: ""` (today `'*'` with `allow_credentials=True`: `values.yaml:333`, `api/app.py:331-337`) (BUG-59). **Ship before or with F14:** once the UI uses cookie sessions, a wildcard credentialed CORS policy would let any website act as the signed-in user. BUG-61 disappears with F12. | P0 | S |
-| N5 | OPS | Pod Security Admission `restricted` compliance: Postgres init container not root (`postgres-statefulset.yaml:45`); renderer firewall init container optional and documented; CI check with `kubectl --dry-run=server` against a restricted namespace | P2 | M |
-| N6 | OPS | Ingress and Gateway API `HTTPRoute` templates (optional), with `GREENKUBE_EXTERNAL_URL` wiring for PR deep links (J1) | P1 | S |
-| N7 | OPS | Controller `/metrics` + ServiceMonitor (A12); PrometheusRule alerts for watermark lag, scan failures, measurement backlog, ledger hash-chain errors | P1 | S |
-| N8 | OPS+BUG | Remove API RBAC that writes runtime config into the release Secret (A13) (BUG-60) | P1 | S |
-| N9 | OPS | `cluster_uid` from the `kube-system` namespace UID (RBAC: get namespaces) used everywhere (C6, E4) | P1 | S |
-| N10 | OPS | Chart metadata: description, keywords, Artifact Hub category, current `artifacthub.io/changes` generated at release from the CHANGELOG | P1 | S |
-| N11 | OPS | NOTES.txt prints the exact command to read the initial admin password (F14) and the setup-checklist URL | P1 | S |
-
----
-
-### Category O — Quality engineering (tests & CI)
-
-**Priority** P2 (O1 is P1) · **Effort** L
-
-| ID | Type | Item | Pri | Effort |
-|---|---|---|---|---|
-| O1 | OPS | **End-to-end loop CI** (kind + Argo CD + Flux variant + Gitea + Prometheus + sample app repo; built on F9): recommendation → plan → PR → merge (via Gitea API) → sync → applied → measurement (fake clock / accelerated windows) → ledger entries. Scenarios from D's definition of done. Nightly plus on-demand for PRs touching `deliver/`, `verify/` | P1 | L |
-| O2 | OPS | Golden-number tests: ImpactModel (B2), measurement strategies (C), ledger conservation; property tests (Hypothesis) for compression conservation, projection bounds and ranking stability | P0/P1 | M |
-| O3 | OPS | Turn the audit scratch scripts into regression tests: `sim_range.py`, `sim_compress.py`, `sim_ledger.py`, `verify_e2e.py`, `verify_container.py`, `ledger_compress.py`, `prune_check.py`, `policy_check.py`, `audit1–3.py` | P0 | M |
-| O4 | OPS | Contract tests: repository ordering and pagination on both backends; Git provider contracts against recorded real payloads (GitHub closed-unmerged PR; GitLab fast-forward MR; Gitea) | P1 | M |
-| O5 | OPS | Frontend: svelte-check, ESLint, Vitest coverage threshold (60% → 75%), Playwright smoke for the K definition-of-done journey | P1 | M |
-| O6 | OPS | CI hygiene: <ul><li>delete the dead README-badge job (`.github/workflows/ci.yml:77-103`) and its `contents: write`;</li><li>raise `fail_under` 70 → 80 (actual ≈83%);</li><li>job timeout 10 → 20 min;</li><li>frontend tests in the release gate;</li><li>Dependabot or Renovate (pip, npm, actions, Docker);</li><li>pin actions by SHA;</li><li>SBOM (syft) + cosign keyless signing + SLSA provenance;</li><li>push `latest` on release, or change the README demo to a pinned tag (BUG-62);</li><li>untrack the stale `coverage.json` (tracked, June, lists deleted modules) and gitignore it.</li></ul> | P1 | M |
-| O7 | OPS | Replay harness: record Prometheus `query_range` + OpenCost + Kubernetes list responses from a real cluster (anonymized) → replay through the real pipeline; becomes the demo dataset generator (replaces most of `demo/data_generator.py`) and a regression test of the model | P2 | L |
-| O8 | OPS | Live-Postgres tests always run in CI (they are skipped locally without `GREENKUBE_TEST_POSTGRES_DSN`); add a `make test-pg` with docker compose | P2 | S |
-| O9 | OPS | Coverage focus: raise the lowest-covered critical files above 80%: <ul><li>`storage/postgres/savings_repository.py` (64%);</li><li>`storage/postgres/recommendation_repository.py` (65%);</li><li>`automation/plan_runtime.py` (66.5%);</li><li>`collectors/karpenter_collector.py` (45%);</li><li>`api/startup.py` (51%);</li><li>`storage/sqlite/optimization_run_repository.py` (31%).</li></ul> | P2 | M |
-
----
-
-### Category P — Ecosystem integrations & reporting
-
-**Priority** P3 · **Horizon** months 4–7 · **Effort** L
-
-| ID | Item | Notes |
-|---|---|---|
-| P1 | **Ledger exports**: CSV, JSON, FOCUS-aligned (FOCUS 1.3 added allocation columns for shared resources; 1.4 is current) with `x-greenkube-*` extension columns; scheduled export to S3/GCS | Builds on C7 |
-| P2 | **SCI report** per workload and service (ISO/IEC 21031: (O + M) per R, with a configurable functional unit R, e.g. requests from the load driver) | Builds on B, C3 |
-| P3 | **MCP server** (tools: `list_recommendations`, `explain_recommendation`, `open_pull_request` [respecting policy], `get_ledger_summary`), so AI agents and IDE assistants can drive the loop; OpenCost already ships an MCP server, so align tool naming | High leverage, low effort |
-| P4 | **Backstage plugin**: per-component open recommendations, PRs and realized savings | Owner mapping via CODEOWNERS / catalog |
-| P5 | **Grafana dashboard v2**: savings ledger (realized vs projected), pipeline funnel, source health, measurement accuracy; drop the `volkovlabs-echarts-panel` plugin dependency | Replaces `dashboards/greenkube-grafana.json` |
-| P6 | **Outbound events**: CloudEvents webhooks for every lifecycle transition (recommendation, plan, PR, measurement, ledger) | Powers J7 and third-party automation |
-| P7 | **Multi-cluster hub**: a central GreenKube aggregating ledgers and inboxes across clusters (agent mode per cluster) | Candidate for a commercial edition; see §9 D-5 |
-
----
-
-### Category Q — Beyond CPU/memory (GPU, node shape, storage)
-
-**Priority** P3 · **Horizon** months 5+ · **Effort** L
-
-| ID | Item | Notes |
-|---|---|---|
-| Q1 | **GPU idle and underuse analyzer**: DCGM utilization and memory; idle GPU pods; MIG partition advice; GPU power in B5 | VPA and in-place resize don't cover GPUs; FinOps-for-AI is the #1 forward priority in the 2026 State of FinOps |
-| Q2 | **Node shape**: arm64/Graviton and spot suitability per workload (multi-arch images, PDB tolerance, statelessness) → NodePool requirement proposals (H7) | Uses `karpenter_cloudprovider_instance_type_offering_price_estimate` |
-| Q3 | **PVC rightsizing**: over-provisioned PVCs (usage ≪ request), storage class downgrades (advisory unless the CSI driver supports expansion/migration) | Deletion is already covered by H6 |
-| Q4 | **Kubecost GPU-aware node-group sizing** ingestion (G3 extension) | |
-
----
-
-## 7. Release plan & milestones
-
-Dates assume one core maintainer working with coding agents, and the §5.2 capacity rule. Each milestone ends with: changelog, docs updated, end-to-end loop green (from v0.5), and a demo refresh.
-
-### v0.3.2 — patch · week 1 · target 2026-11-13
-
-**Theme.** Remove the daily friction and the riskiest defaults now.
-
-| Scope | Items |
-|---|---|
-| Access | F13 (API key kept across reloads, password-manager friendly form) |
-| Security | N4 (no wildcard credentialed CORS) |
-| Release | O6 subset (push or pin the demo image tag, BUG-62) |
-
-### v0.4.0 — "Trustworthy" · weeks 1–5 · target 2026-12-11
-
-**Theme.** The numbers are right, the loop closes in real repositories, and users sign in once.
-
-| Scope | Items |
-|---|---|
-| Measurement | A1–A5, A8, A10, A11, A12 |
-| Impact | B1, B2, B3, B4 |
-| Verification | C0.1–C0.14 |
-| Loop | D1, D2, D3, D5, D6, D7, D8, D9, D11 |
-| Core | E1, E2, E3 |
-| Onboarding & access | F10, F14 (sign in once), F15 (scoped API keys, MVP) |
-| UI | K2 (server ranking + eligibility only), K9, K11 (login, account, API keys) |
-| Ops/QA | N1, O3, O2 (impact golden), O6 (CI hygiene subset) |
-| Docs | L5 (impact methodology), L7, L11 |
-
-**Exit criteria:**
-- All P0 defects in Appendix A are closed.
-- The audit scenarios run as regression tests.
-- A rightsizing PR on the quickstart reaches `measuring`, and its projected and measured allocated values agree within 20%.
-- Users stay signed in across reloads and tabs, and the browser saves their credentials.
-
-### v0.5.0 — "Open aggregator" · weeks 6–11 · target 2027-01-29 (holiday buffer included)
-
-**Theme.** Many sources, one consensus, one install, a PR in 15 minutes.
-
-| Scope | Items |
-|---|---|
-| Core | E4, E5, E6, E7, E8, E9 (two-way rightsizing + windows) |
-| Sources | G1 (Goldilocks), G2 (KRR), G3 (Kubecost), G5 (realization signals), G6 (push API) |
-| Ranking | I1, I2, I3, I4 |
-| Install & onboarding | F11 (one topology), F12 (always-on automation), F17 (upgrade path), F18 (one install guide), F1, F2, F3, F4 (`patch` + `ci`), F5, F6, F7, F8, F9 |
-| PR | J1, J2, J3, J5 |
-| UI | K1, K3, K6 |
-| Loop | D4, D10, D13, D14 |
-| Ledger | C1, C2, C5, C9 |
-| Ops/QA | O1, O4, O5, N2, N3, N6, N7, N9 |
-| Refactor | M4, M7 (Recommendation + Measurement tables), M8 (automation loop in the controller; needed by F8, F11, F12) |
-| Docs | L2, L4, L6, L8, L9, L10, L13 |
-
-**Exit criteria:**
-- Six sources live, with consensus visible in the UI.
-- Time-to-first-PR is under 15 minutes on the quickstart with the GitHub App.
-- One install path: no profile and no automation flag. CI upgrade tests from 0.3.1 standalone, production and SQLite installs pass.
-- The end-to-end loop CI is green nightly.
-
-### v0.6.0 — "More levers" · weeks 12–20 · target 2027-03-26
-
-**Theme.** More kinds of change, proven with real measurement.
-
-| Scope | Items |
-|---|---|
-| Actions | H0 (a–d), H1, H2, H3, H4, H6, H9 |
-| Ledger | C3, C4, C6, C7, C8 |
-| UI | K4, K5, K7 |
-| PR | J4, J6, J7 |
-| Sources | G4, G7 |
-| Refactor | M1, M5, M6 |
-| Ops/QA | N5, O7, O9 |
-
-**Exit criteria:**
-- Eight action kinds are PR-able, each with a measurement strategy.
-- The ledger is append-only with a verified hash chain and exports.
-- Two external users run the full loop in production.
-
-### v0.7 → v1.0 — "Production-grade" · April–June 2027
-
-| Scope | Items |
-|---|---|
-| Actions | H5, H7, H8 |
-| Ledger | C10 (pool-level realized billed savings) |
-| Sources | G8 (via partners or community), G9 |
-| Platform | M2, M3, M9, M10, M11 (API v2 freeze), M12 |
-| Access | F16 (SSO via proxy or OIDC, roles) |
-| Ecosystem | P1, P2, P3, P5, P6 |
-| AI workloads | Q1 |
-| UI | K8, K10, K11 |
-| Docs | L12 |
-
-**v1.0 criteria:**
-- API v2 stable with a deprecation policy.
-- Upgrade path tested from 0.3.x.
-- Security review done.
-- Docs complete per L2.
-- Six months of ledger data in a production deployment without integrity errors.
-
-### Gantt (indicative)
-
-```mermaid
-gantt
-  dateFormat  YYYY-MM-DD
-  title GreenKube roadmap (indicative)
-  section P0 Credibility
-  A Measurement integrity        :a, 2026-11-09, 21d
-  B Impact Model v1              :b, 2026-11-09, 35d
-  C0 Verifier & ledger fixes     :c0, 2026-11-09, 21d
-  D Loop reliability             :d, 2026-11-09, 28d
-  E1-E3 Scans, sort, bounded     :e1, 2026-11-09, 14d
-  F13-F15 Sign in once           :f1, 2026-11-09, 28d
-  section P1 Aggregator & onboarding
-  E4-E10 Signals, SDK, consensus :e, 2026-12-14, 42d
-  G Tier-1 sources               :g, 2026-12-21, 42d
-  F11-F12 One install, always-on automation :f2, 2026-12-14, 35d
-  F Onboarding & delivery modes  :f, 2026-12-14, 42d
-  I Ranking v2                   :i, 2027-01-04, 28d
-  J PR experience                :j, 2027-01-04, 56d
-  section P1 Levers & proof
-  H0 Action framework            :h0, 2027-01-25, 28d
-  H1-H6 Action kinds             :h, 2027-02-22, 42d
-  C1-C9 Ledger v2                :c, 2026-12-14, 98d
-  K UI re-centering              :k, 2026-11-16, 120d
-  section Continuous
-  M/N/O health                   :m, 2026-11-09, 230d
-```
-
----
-
-## 8. Success metrics
-
-| Metric | Definition | Baseline (today) | Target v0.5 | Target v1.0 |
-|---|---|---|---|---|
-| **Verified realized savings run-rate** (north star) | Σ annualized `measured_allocated` + `realized_billed` from measurements with outcome `realized`, per install | not measurable (verifier defects) | measurable on the quickstart | > 5% of the cluster's allocated cost on reference installs |
-| Time to first PR | `helm install` → first PR opened | hours to days (≈13 steps + ≈3.5 days of evidence) | < 15 min (GitHub App, quickstart) | < 30 min on real clusters |
-| Install variants | Profiles × automation modes documented and tested | 4, with a 9-row upgrade matrix | 1 | 1 |
-| Sign-in prompts | Credential prompts per user in normal use | every page reload or new tab | ≤ 1 per 7 days (≤ 1 per 30 days with "keep me signed in") | 0 with SSO |
-| PR-eligible share | Share of the top-20 EV recommendations with `can_open_pr = true` | ≈ rightsizing decreases only | ≥ 50% | ≥ 75% |
-| PR merge rate | Merged ÷ opened GreenKube PRs (30-day window) | unknown | ≥ 40% | ≥ 60% |
-| Definitive outcome rate | Applied changes reaching `realized` or `not_realized` within 14 days | ≈ 0% for GitOps changes (always inconclusive) | ≥ 60% | ≥ 80% |
-| Projection accuracy | Median measured ÷ projected (allocated) for rightsizing | ≈ 4× inflated or 0 | 0.7–1.3 | 0.8–1.2 with 90% CI coverage ≥ 85% |
-| Rollback-review rate | Applied changes ending in `rollback_review` | false positives on every multi-replica change | < 5% | < 3% |
-| Sources live per install | Median sources with `available` health | 1–2 | ≥ 2 | ≥ 3 |
-| Scan resource use | p95 duration / peak RSS at 500 pods × 14 days | up to ≈2.6 GB possible | < 60 s / < 300 MB | same |
-| Ledger integrity | Hash-chain verification failures | n/a | 0 | 0 |
-| Engineering health | Coverage; mirrored storage lines; open P0 bugs | 83%; ≈3.3k; 20+ | ≥ 85%; ≤ 2k; 0 | ≥ 85%; < 500; 0 |
-
-Instrument these as Prometheus metrics (product analytics stay local; no phone-home without explicit opt-in).
-
----
-
-## 9. Risks & open decisions
-
-### 9.1 Risks
-
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| Methodology credibility challenged by FinOps or sustainability experts | Medium | High | Publish B1/C9 methodology early; label projected, allocated and realized strictly; invite external review (FinOps Foundation community, GSF) |
-| Scope explosion across sources × action kinds × layouts | High | High | SDK + action framework first (E5, H0); tiered connectors; community/partner packages for commercial sources |
-| Single-maintainer bandwidth | High | High | Agent-executable specs (this doc), §5.2 capacity rule, aggressive dead-code removal (M4), good-first-issue labeling from Appendix A |
-| Upstream API churn (Kubecost 3.x paths, KRR maintenance mode, GKE recommender IDs) | Medium | Medium | Versioned connector contracts, recorded fixtures, runtime capability probes, fail-soft parsing |
-| Verification needs ≥ 7 days post-change → slow feedback | High | Medium | Show interim "measuring" with partial estimates and CI; demo-accelerated mode for evaluation |
-| Requests cuts don't save cash without node scale-down | High | Medium | Separate allocated vs realized-billed (B6, C10); show the realization factor in PRs; NodePool recommendations (G5/H7) |
-| GitHub App adoption friction (org admins) | Medium | Medium | Keep PAT and `ci` delivery mode; manifest-based app creation |
-| Data migration risk (provenance columns, ledger v2, storage refactor) | Medium | High | Additive migrations first, dual-write periods, backfill scripts with dry-run, upgrade tests from 0.3.x in CI |
-| Always-on automation surprises users (unexpected PRs) | Low | High | <ul><li>A PR always needs explicit approval of a plan digest by a signed-in user; auto-approve is opt-in.</li><li>The allowlist defaults to discovered GitOps repositories within the credentials' scope.</li><li>Global `pauseDelivery`.</li><li>The setup checklist shows exactly which capabilities are active.</li></ul> |
-| Upgrade from standalone or SQLite installs | Medium | Medium | F17 values compatibility, pre-upgrade validation with actionable messages, `greenkube db copy`, CI upgrade tests |
-| Cookie sessions add CSRF and session-theft surface | Medium | High | `SameSite=Strict`, Origin check, CSRF token, HttpOnly cookie, server-side revocation, rate-limited login, strict CORS (N4) before F14, security review checklist |
-
-### 9.2 Open decisions (owner: maintainer)
-
-| ID | Decision | Options | Recommendation |
-|---|---|---|---|
-| D-1 | SQLite in Helm installs? | keep both / Postgres-only | **Decided (rev. 2): Postgres-only in Helm** (F11); SQLite stays for `greenkube demo` and local development |
-| D-2 | Default carbon price | 0 (disabled) / EU ETS-like (~€70–90/t) / internal shadow price (e.g. 100) | **100 (currency-agnostic units) configurable**; profiles override; document rationale |
-| D-3 | GitHub App distribution | public GreenKube-hosted app / per-org app via manifest | **Per-org app via manifest** (no SaaS dependency, keeps data in-cluster) |
-| D-4 | Tagline | see §2.1 | "Every recommendation. One pull request. Proven savings." |
-| D-5 | Open-core boundary | all OSS / hub & SSO commercial | Keep the full single-cluster loop Apache-2.0; consider multi-cluster hub, SSO/RBAC and managed ledger retention as a commercial edition later |
-| D-6 | VPA in-place mode graduation (H5) vs "Git is the only write path" | offer / don't | Offer as opt-in, disabled by default, explicit trade-off in the PR |
-| D-7 | Sustainability score | keep / plugin / delete | **Plugin or delete** (M4) |
-| D-8 | Limits policy default (E9) | keep / remove CPU limits / memory = request | **keep** by default; recommend changes only with throttling/OOM evidence |
-| D-9 | Public roadmap granularity | full / themes | **Decided (rev. 2): the full roadmap is public in `docs/roadmap.md`**; see L9 for security-relevant defects |
-| D-10 | Default UI authentication | API key in the browser / local accounts + sessions / SSO only | **Decided (rev. 2): local accounts + server-side sessions** (F14); scoped API keys for machines (F15); proxy and OIDC as options (F16) |
-| D-11 | Automation on/off switch | `enabled` flag / none / policy pause | **Decided (rev. 2): no feature flag.** Capabilities activate themselves; a global `policy.pauseDelivery` covers freezes and incidents |
-| D-12 | Separate automation worker Deployment | always / optional / never | **Optional** (`worker.replicas`, default 0); execution runs in the controller by default |
-
----
-
-## Appendix A — Defect register
-
-**Severity levels:**
-- **Critical**: corrupts numbers or breaks the core loop.
-- **High**: wrong results or loop failure in common setups.
-- **Medium**: wrong in edge cases, or degrades trust.
-- **Low**: minor.
-
-**Confidence**: see §0. **Paths** are relative to `src/greenkube/` unless prefixed.
-
-### A.1 Measurement pipeline
-
-| ID | Sev | Defect | Where | Confidence | Fix |
-|---|---|---|---|---|---|
-| BUG-01 | Critical | Range CPU/memory queries lack `container!=""`: pod cgroup summed with containers (≈2× CPU, inflated energy) | `core/historical_range_processor.py:280,294,308` | Confirmed (sim + code) | A1 |
-| BUG-02 | Critical | Hourly compression with non-hour-aligned cutoff + overwrite upsert loses data in every hour older than 7 days | `core/metrics_compressor.py:146,284,345-375` | Confirmed (sim) | A3 |
-| BUG-03 | High | Read-first shortcut + inclusive `BETWEEN` skip every other window; cost dropped, doubled and shifted; backfill no-op | `core/historical_range_processor.py:98-116`; `storage/sqlite/repository.py:315` | Confirmed (sim) | A2 |
-| BUG-04 | High | OpenCost cost map keyed by `pod_name` only: cross-namespace collisions; component split discarded | `core/historical_range_processor.py:258`; `core/collection_orchestrator.py:113`; `collectors/opencost_collector.py:55` | Confirmed (code) | A4 |
-| BUG-05 | Medium | Stale loop variable `ts_f` attaches metrics-server usage to every sample; container timestamp overwritten | `core/historical_range_processor.py:597`; `core/metric_assembler.py:426` | Confirmed (code) | A5 |
-| BUG-06 | Medium | Intensity recompute updates `combined_metrics` only; container rows drift | `storage/postgres/repository.py:1377-1425`; `storage/base_repository.py:532` | Confirmed (code) | A9 |
-| BUG-07 | Medium | Stale or default intensity used silently; defaults written into history as real values | `storage/sqlite/repository.py:51-86`; `collectors/electricity_maps_collector.py:72-93` | Confirmed (code) | A8 |
-| BUG-08 | Medium | Unknown node → default 1 vCPU / 10 W profile without flag; missing `node` label caps the whole cluster at 10 W | `core/historical_range_processor.py:188-212,471-477` | Confirmed (code) | A10 |
-| BUG-09 | Low | NaN and negative values not filtered in range parsing | `core/historical_range_processor.py:416-426` | Plausible | A6 |
-| BUG-10 | Medium | Native sidecars ignored; limits not collected | `collectors/pod_collector.py` | Confirmed (code) | A7 |
-| BUG-11 | Medium | Runtime URL and token changes reach only the API process; controller keeps cached collectors | `api/routers/health.py:63-97`; `core/config.py:724-760`; `core/factory.py:301` | Confirmed (code) | A13 |
-| BUG-12 | High | Scans materialize up to 750k `CombinedMetric` (≈2.6 GB) per API replica vs 512 MiB limit | `api/app.py:237`; `api/startup.py:107`; `core/optimization/context_builder.py` | Plausible (memory measured) | E3 |
-| BUG-13 | Low | Controller keeps writing after losing its Lease mid-job | `cli/start.py:369-383` | Plausible | A14 |
-| BUG-14 | Medium | Controller-side telemetry never exported (no metrics endpoint) | `core/optimization/verifier.py:186-188` | Confirmed (code) | A12 |
-
-### A.2 Estimation
-
-| ID | Sev | Defect | Where | Confidence | Fix |
-|---|---|---|---|---|---|
-| BUG-15 | Critical | Rightsizing projections apply the request-cut ratio to *total* pod cost (CPU + RAM + other); CPU + memory projections on one container can exceed 100% | `core/optimization/analyzers/rightsizing_cpu.py:71-74,110-111`; `rightsizing_memory.py`; `providers/vpa.py` | Confirmed (code) | B4 |
-| BUG-16 | Critical | Rightsizing projects CO₂e savings ∝ request cut, but the carbon model is usage-based (no effect) | `core/optimization/analyzers/rightsizing_cpu.py:111`; `energy/estimator.py:217-285` | Confirmed (code + sim) | B2, B4 |
-| BUG-17 | High | No cost at all without OpenCost (`DEFAULT_COST = 0`) | `core/config.py:137`; `core/metric_assembler.py:173-177` | Confirmed (code) | B3 |
-| BUG-18 | Medium | Energy model is CPU-only (no memory or GPU) | `energy/estimator.py:217-285` | Confirmed (code) | B5 |
-| BUG-19 | Medium | Cost (idle excluded) and energy (100% of node power on pods) use different allocation boundaries | `collectors/opencost_collector.py`; `energy/estimator.py` | Confirmed (code) | B2 |
-
-### A.3 Recommendation core and UI
-
-| ID | Sev | Defect | Where | Confidence | Fix |
-|---|---|---|---|---|---|
-| BUG-20 | High | Active list sorted `ORDER BY priority DESC` on TEXT (medium → low → high); UI labels it "Projected savings" | `storage/postgres/recommendation_repository.py:356`; `storage/sqlite/recommendation_repository.py:408`; `frontend/src/routes/recommendations/+page.svelte:48` | Confirmed (code) | E2, K2 |
-| BUG-21 | High | No scheduled recommendation scan; scans only at API startup (per replica) and on GET `refresh=true` | `cli/start.py:530-565`; `api/startup.py:107` | Confirmed (code) | E1 |
-| BUG-22 | Medium | Any source failure blocks persistence and reconciliation for all sources | `core/optimization/engine.py:107-109` | Confirmed (code) | E8 |
-| BUG-23 | Medium | Batch-relative min-max normalization makes ranking unstable across runs and filters | `core/optimization/scoring.py:79-86,113-114` | Confirmed (code) | I1 |
-| BUG-24 | Low | `RecommendationStatus` contains unused event-like values | `models/metrics.py:160-162` | Confirmed (code) | M4 |
-| BUG-25 | Medium | Every dashboard/recommendations page load schedules a full scan; results never reloaded; abort no-op; 401 bypass in 5 helpers | `frontend/src/routes/+page.svelte:135`; `recommendations/+page.svelte:97-114`; `frontend/src/lib/api.js:121-142,294-342,592-602` | Confirmed (code) | K9 |
-| BUG-26 | Low | Arbitration discards losing sources' proposals; `superseded_by` never set | `core/optimization/dedup.py:73-105` | Confirmed (code) | E6 |
-
-### A.4 Verification and ledger
-
-| ID | Sev | Defect | Where | Confidence | Fix |
-|---|---|---|---|---|---|
-| BUG-27 | Critical | Traffic normalization sums per-row bytes across raw (5 min) and hourly rows → ratio ≈4.25 → measured savings inflated ≈4× | `core/optimization/verifier.py:357-371` | Confirmed (sim) | C0.1 |
-| BUG-28 | Critical | p95 health gate compares replica-summed usage with per-replica request → every multi-replica change goes to `rollback_review`; restart gate mixes per-pod and summed counters | `core/optimization/verifier.py:395-402,575-580`; `core/optimization/evidence.py:285` | Confirmed (sim) | C0.2 |
-| BUG-29 | Critical | Container rows always `is_estimated` → container-scoped (all GitOps) changes always `inconclusive`; hourly container readers drop `sample_count` | `core/metric_assembler.py:433`; `core/optimization/verifier.py:592-604`; `storage/sqlite/repository.py:22` | Confirmed (sim) | A11, C0.3 |
-| BUG-30 | High | `not_realized` / `inconclusive` keep accruing projected savings as "prorated" | `core/savings_attributor.py:86-99` | Confirmed (sim) | C0.4 |
-| BUG-31 | High | Retest-until-pass: `not_realized` re-evaluated every ≈7.2 h forever with a growing window | `core/optimization/verifier.py:123-126`; `core/optimization/lifecycle.py:338-351` | Confirmed (sim) | C0.5 |
-| BUG-32 | Critical | Ledger hourly compression overwrites partial buckets (≈50% loss); `_total` gauges decrease | `storage/sqlite/savings_repository.py:220-274`; `storage/postgres/savings_repository.py:232-250` | Confirmed (sim) | C0.6, C6 |
-| BUG-33 | High | Accrual not idempotent (wall-clock `period_end`); restarts or failover double count; downtime never backfilled | `core/savings_attributor.py:73-75`; `cli/start.py:209-221,570-590` | Confirmed (sim) | C0.7 |
-| BUG-34 | High | One invalid user-supplied saving (e.g. negative) breaks attribution for all records; arbitrary claims accepted | `models/metrics.py:538-543`; `core/savings_attributor.py:156` | Confirmed (sim) | C0.8 |
-| BUG-35 | High | OOM, readiness and throttling gates inert in production (verifier built without health collector) | `cli/start.py:322` | Confirmed (code) | C0.9 |
-| BUG-36 | Medium | CPU and memory records on the same container each claim the whole workload cost delta | `core/optimization/verifier.py:635-655` | Confirmed (code) | C0.10, C5 |
-| BUG-37 | Medium | State machine: `VERIFIED` terminal; `rollback_review` → `reverted` only; `ACTIVE→VERIFIED` allowed; PATCH `/apply` re-applies any status; `mark_inconclusive` writes event `verified`; `measured_ledger_input` overwritten and deleted | `core/optimization/lifecycle.py:29-54,314-322`; `api/routers/recommendations.py:374-404`; `core/optimization/verifier.py:189-192` | Confirmed (code) | C0.11, C0.13 |
-| BUG-38 | Medium | `applied_at` = detection time (after-window includes old pods); baseline `captured_at = now` copies days-old evidence | `core/optimization/applied_detector.py`; `core/optimization/lifecycle.py:61-89` | Confirmed (code) | C0.12 |
-| BUG-39 | Medium | Measured savings never restate earlier prorated accrual | `storage/sqlite/savings_repository.py:74-99` | Confirmed (code) | C6 |
-| BUG-40 | Medium | `/recommendations/savings` mixes annual run-rates with windowed totals; "realized" gauges include projected values and `rollback_review`; window filter drops the partial first hour | `storage/sqlite/recommendation_repository.py:895-915`; `storage/postgres/recommendation_repository.py:485`; `api/metrics_endpoint.py:1039-1063` | Confirmed (code) | C0.14 |
-| BUG-41 | Medium | New pods under-costed for 24 h after rollout (trailing 1d cost ÷ 288) → savings inflated early in the after-window | `core/cost_normalizer.py:34-36`; `collectors/opencost_collector.py:55` | Plausible | A4 |
-| BUG-42 | Medium | `/recommendations/savings` silently falls back to records when the ledger read fails | `api/routers/recommendations.py:352` | Confirmed (code) | C0.14 |
-
-### A.5 GitOps delivery loop
-
-| ID | Sev | Defect | Where | Confidence | Fix |
-|---|---|---|---|---|---|
-| BUG-43 | Critical | Sync requires `observed_sha == merge_commit_sha`; any later commit → `SYNC_FAILED`; savings never recorded | `gitops/sync.py:640-646` | Confirmed (code) | D1 |
-| BUG-44 | Critical | Retention deletes plan files of `APPLIED`/`SYNC_FAILED` plans → mapper `ValidationError` → permanent `POLICY_EVIDENCE_MISSING`; also deletes `recommendation_events` | `storage/base_gitops_sql_repository.py:1586-1616`; `storage/gitops_mapper.py:206-235`; `gitops/contracts.py:545-556` | Confirmed (sim) | D2 |
-| BUG-45 | High | GitHub closed-unmerged PRs carry `merge_commit_sha` → `MISMATCHED`; plan stays `PR_OPEN` forever | `automation/webhooks.py:336`; `automation/pr_lifecycle.py:281-291,~684` | Likely | D3 |
-| BUG-46 | Medium | GitLab fast-forward merges (null merge SHA) → `SYNC_FAILED` | `automation/pr_lifecycle.py`; `automation/sync_runtime.py` | Plausible | D4 |
-| BUG-47 | High | PR creation costs ≈6×(N+1) provider calls for an N-file repo (GitHub rate limit at ≈1k files) | `automation/plan_worker.py:1084-1121`; `automation/git/github.py:70` | Confirmed (code) | D5 |
-| BUG-48 | High | Re-opening a preview → 409 `WORKLOAD_PLAN_ALREADY_EXISTS` for 30 min | `automation/plan_runtime.py:403`; `automation/plans.py:399-403`; `frontend/src/routes/recommendations/+page.svelte:739` | Confirmed (code + repro) | D6 |
-| BUG-49 | High | Any unrelated commit makes an approved plan stale (exact base-revision check) | `automation/plans.py:645-652`; `automation/plan_worker.py:428-433` | Confirmed (code) | D7 |
-| BUG-50 | High | SQLite connection poisoned after a compare-and-set conflict (no rollback) | `storage/sqlite/pull_request_repository.py:107-117` | Confirmed (sim) | D8 |
-| BUG-51 | High | Worker loop unsupervised; API stays ready while the queue is dead | `cli/automation_worker.py:208-226`; `api/app.py:233` | Confirmed (code) | D9 |
-| BUG-52 | Medium | Lease loss after the PR is opened → plan `STALE` while the PR stays open (untracked merge) | `automation/plan_worker.py:1150-1156,1289-1317` | Confirmed (sim with fakes) | D10 |
-| BUG-53 | Medium | Unlinked closed-PR webhooks retried forever (503), never pruned | `api/routers/webhooks.py:~197`; `storage/base_gitops_sql_repository.py:1970-1976` | Confirmed (code) | D11 |
-| BUG-54 | Medium | Kustomize rollback never wired (`rollback_renderer=None`) | `automation/plan_runtime.py:1526,1610` | Confirmed (code) | D14 |
-| BUG-55 | Medium | Policy: missing rollout/HPA evidence passes as `NOT_AVAILABLE` (docs say fail closed); HPA blocks memory-only changes; VPA never checked | `automation/policy.py:541-545,597`; `gitops/discovery/kubernetes.py:797-811` | Confirmed (code) | D13 |
-| BUG-56 | Low | Render-warning placeholder; `token_configured` semantics; Gitea `TEAM_REVIEWERS`; `save_plan` check-then-act race | `api/routers/plans.py:249`; `api/routers/automation.py:265`; `automation/git/gitea.py:55`; `automation/plans.py:364-403` | Confirmed (code) | D12 |
-| BUG-57 | Medium | Sync-pending query misses its partial index; branch cleanup full scan; N+1 `list_plans*`; `expire_due_plans` loads all live plans every 60 s per API replica | `storage/base_gitops_sql_repository.py`; `automation/plans.py:388,708` | Confirmed (EXPLAIN) | D15, M8 |
-
-### A.6 Deployment and operations
-
-| ID | Sev | Defect | Where | Confidence | Fix |
-|---|---|---|---|---|---|
-| BUG-58 | High | Release Secret built with `lookup` + `randAlphaNum` in a hook → regenerated under Argo CD (API key / Postgres password churn); PVC guard ineffective | `helm-chart/templates/secret.yaml:2-12,62,103`; `helm-chart/templates/postgres-statefulset.yaml:4-7` | Confirmed (code) | N1 |
-| BUG-59 | Medium | CORS `'*'` with `allow_credentials=True` by default | `helm-chart/values.yaml:333`; `api/app.py:331-337` | Confirmed (code) | N4 |
-| BUG-60 | Medium | API writes runtime config into the release Secret → GitOps drift | `helm-chart/templates/role.yaml`; `helm-chart/templates/configmap.yaml:110,117` | Confirmed (code) | A13, N8 |
-| BUG-61 | Low | Production profile enables automation with `providers: []` → "not ready" out of the box | `helm-chart/values-production.yaml` | Confirmed (code) | F12 |
-| BUG-62 | Low | `latest` image tag not pushed on release, but the README demo uses it (README now pinned to the release tag) | `.github/workflows/release.yml:121-122`; `README.md` | Confirmed (code) | O6 |
-| BUG-63 | Medium | UI keeps the API key in memory only: asked again after every reload or new tab. `API_AUTH_MODE` values `session` and `oidc` are reserved but return 503 | `frontend/src/lib/api.js:10-18`; `api/dependencies.py:103`; `core/config.py:227-231` | Confirmed (code) | F13, F14 |
-
----
-
-## Appendix B — Recommendation source catalogue
-
-| Source | Tier | Signals | Interface | Notes / gotchas | Item |
-|---|---|---|---|---|---|
-| GreenKube native analyzers | native | container requests (↓↑), limits, replicas/HPA candidates, schedules, cleanup, node pools, placement | in-process | Judged by the same track record as any other source | E9 |
-| VPA recommender | oss | container requests (target, lower/upper bounds, uncapped target) | CRD `status.recommendation.containerRecommendations[]` | `Auto` mode deprecated; `InPlaceOrRecreate` GA in VPA 1.6 (needs K8s ≥ 1.33); conflicts with HPA on the same metric | E5 |
-| Goldilocks | oss | same as VPA (it creates `updateMode: Off` VPAs) | VPAs labeled `creator=Fairwinds`, `source=goldilocks`, named `goldilocks-<controller>` | Same engine as VPA: count as one consensus vote | G1 |
-| Robusta KRR | oss | container requests and limits (↓↑) | CLI `krr simple -f json` (also yaml/csv/html); Job or CI push | `simple`: CPU p95, memory max + 15%, 14-day history by default; releases mostly CVE fixes (maintenance mode) | G2 |
-| IBM Kubecost | commercial (free tier ≤ $100K spend per 30 days) | request sizing; abandoned workloads; node-group sizing | `GET /model/savings/requestSizingV2` (+ others) | 3.0 moved to ClickHouse / `finops-agent`; verify paths per version | G3 |
-| Fairwinds Polaris | oss | hygiene (missing requests/limits, best practices) | `polaris audit --format=json` | Findings, not sizes; GreenKube computes values | G4 |
-| Popeye | oss | over/under allocation, hygiene | `popeye -o json` | Self-described as brittle on recent K8s | G4 |
-| Cluster Autoscaler | oss (actuator) | realization context | `kube-system/cluster-autoscaler-status` ConfigMap, metrics `:8085`, events | Loosely structured status: parse defensively | G5, B6 |
-| Karpenter (AWS, Azure NAP) | oss (actuator) | realization context; NodePool policy proposals (native analyzer) | NodePool/NodeClaim CRDs, events, `karpenter_*` metrics | No dry-run; `Balanced` consolidation policy is new | G5, H7 |
-| KEDA | oss (actuator) | target for schedule proposals | `ScaledObject` (cron trigger) | CNCF Graduated; creates its own HPA | H4 |
-| kube-green | oss (actuator) | target for schedule proposals | `SleepInfo` CRD | Slowed release cadence | H4 |
-| GKE recommender | cloud | workload over/under-provisioned insights | Recommender API (discover insight type at runtime) or Cloud Monitoring VPA metrics | No recommendations when VPA enabled or for HPA target metrics | G7 |
-| Azure Advisor (AKS) | cloud | config-level advisories only | Advisor API | No per-workload numbers | G9 |
-| AWS | cloud | — | — | Compute Optimizer does not cover EKS pods: native analyzers fill the gap | — |
-| PerfectScale (DoiT) | commercial | workloads, node groups (incl. Karpenter), carbon | Public API `api.app.perfectscale.io/public/v1` (Expert package, 10 req/min) | Paid gating | G8 |
-| StormForge (CloudBolt) | commercial | container requests/limits | CLI `stormforge get recommendations … -o json`; Kustomize export | No public REST reference found | G8 |
-| CAST AI / Densify-Kubex | commercial | workload sizing | APIs (paths to verify) | Apply in-cluster by default | G8 |
-| Push API (any tool) | custom | any capability | `POST /api/v1/signals` (schema `signal.v1alpha1`) | The neutral protocol | G6 |
-| OpenCost | cost input | — | `/allocation`, `/assets` | No recommendation API; cost basis for B | B3 |
-| Kepler | measurement input | — | `kepler_container_cpu_joules_total` | 2026 rewrite: active CPU only, VM/GPU immature | B7 |
-
----
-
-## Appendix C — Competitive landscape
-
-Research as of 2026-11-07. URLs are primary sources where possible. Treat items flagged "unverified" as hypotheses.
-
-| Product | Applies how | Opens GitOps PRs | Realized-savings tracking | Carbon | License | Sources |
-|---|---|---|---|---|---|---|
-| IBM Kubecost 3.x | Cluster controller ("Kubecost Actions"); recommends Argo `ignoreDifferences` + `RespectIgnoreDifferences=true` | No (sample script pushes to main) | Partial (3.0 audits recommendations vs realized) | Estimates | Proprietary (chart Apache-2.0) | apptio.com/blog/gitops-with-ibm-kubecost-preventing-argo-cd-rollbacks/ · apptio.com/blog/ibm-kubecost-3-0-faster-smarter-and-built-for-scale/ · docs.kubecost.com/apis/savings-apis/api-request-right-sizing-v2 |
-| PerfectScale (DoiT) | Mutates pods; Argo ignores its field manager | No | Automation KPIs / audit | Yes (Scope 1/2) | Proprietary | docs.perfectscale.io/enable-automation/automation-with-argocd.md · docs.perfectscale.io/api/public-api.md |
-| CAST AI | Eviction or in-place (1.33+); annotations for GitOps users | No | Unverified | Not found | Proprietary | docs.cast.ai/docs/workload-autoscaling-overview |
-| ScaleOps | In-place / admission; claims GitOps compatibility | Claimed (unverified) | Not documented | Not found | Proprietary | scaleops.com/product/automated-pod-rightsizing/ |
-| Spot Ocean (Flexera) | Automatic + in-place rightsizing | No | Unverified | Not found | Proprietary | flexera.com/blog/finops/in-place-pod-rightsizing-how-to-save-k8s-resources-without-missing-a-beat/ |
-| StormForge (CloudBolt) | Applier / webhook / Argo field manager; exports patches and Kustomize components | Exports only | Not documented | Not found | Proprietary | docs.stormforge.io/docs/guides/kustomize-export/ |
-| Komodor | Admission controller for rightsizing; Klaudia opens PRs for *config* fixes | Config fixes only | Audit log | Not found | Proprietary | help.komodor.com (snippets only; unverified) |
-| Harness CCM | Manual / Jira / ServiceNow | No | **Yes**: "Savings Realized" via billing auto-inference | Not found | Proprietary | developer.harness.io/docs/cloud-cost-management/use-ccm-cost-optimization/ccm-recommendations/ec2-recommendations |
-| Kubeadapt Cost Gates | GitHub App opens rightsizing PRs (alpha) | Yes | Not documented | Not found | Commercial | landing-page-2id.pages.dev/docs/v1/how-to-guides/setup-cost-gates |
-| rere | KRR JSON → auto-merged Flux PRs | Yes | No | No | Source-available, not OSS | github.com/ca-moes/rere |
-| AWS sample K8sResourceResizer | AMP + GitHub Actions + Argo render; Bedrock-written PR text | Yes | No | No | MIT-0 (sample) | github.com/aws-samples/K8sResourceResizer |
-| VPA / Goldilocks / KRR | Advice (VPA can actuate in-cluster) | No | No | No | Apache-2.0 / MIT | github.com/kubernetes/autoscaler · github.com/FairwindsOps/goldilocks · github.com/robusta-dev/krr |
-
-**Market and standards facts used in this document:**
-- In-place pod resize is GA in Kubernetes 1.35 (kubernetes.io/blog/2025/12/19/kubernetes-v1-35-in-place-pod-resize-ga/). VPA `InPlaceOrRecreate` is GA in VPA 1.6, and `Auto` is deprecated (github.com/kubernetes/autoscaler/blob/master/vertical-pod-autoscaler/docs/features.md).
-- FOCUS 1.3 (Dec 2025) added allocation columns for shared resources; 1.4 is current (focus.finops.org).
-- SCI is ISO/IEC 21031:2024 (iso.org/standard/86612.html); SCI for AI was ratified in late 2025.
-- EU Omnibus I (Directive (EU) 2026/470) narrowed CSRD scope to more than 1,000 employees and more than €450M turnover.
-- CNCF TAG Environmental Sustainability was folded into TAG Operational Resilience in 2025.
-- State of FinOps 2026: workload optimization and waste reduction is the #1 current priority; FinOps for AI is the #1 forward priority; sustainability is low priority (data.finops.org).
-- Kepler was re-architected in 2026, attributes active CPU only, and its VM and GPU support is immature (cncf.io/blog/2026/06/30/kepler-re-architected-…).
-
-**Where GreenKube wins:**
-- Git stays authoritative.
-- Vendor-neutral aggregation across free and paid sources.
-- Verified, provenance-linked savings ledger.
-- Carbon as a co-equal dimension.
-- Apache-2.0.
-
-**Where it must not compete:**
-- Real-time in-cluster autoscaling.
-- Billing-grade cost allocation.
-
----
-
-## Appendix D — Glossary
-
-| Term | Definition |
-|---|---|
-| **Signal** | One source's opinion about one target and capability (`SourceSignal`), with algorithm and evidence. Many signals can exist for the same target. |
-| **Recommendation** | GreenKube's consolidated proposal for one target and capability, built from signals by a consensus policy, enriched with impact, risk, confidence, value and eligibility. Has revisions. |
-| **Capability** | The optimization domain (container requests, limits, replicas, schedule, cleanup, node pool, placement, hygiene). Used for consensus and track record. |
-| **Consensus** | How signals become one proposal (`safest`, `median`, `weighted`, `priority`), with agreement score and contested flag. |
-| **Impact Model** | The versioned model that allocates cost and carbon to workloads and projects the effect of changes. The same model is used to measure. |
-| **Projected** | Expected effect of a change before it happens (from the Impact Model). Never counted as savings. |
-| **Allocated savings** | Reduction in what a workload is charged (cost and the idle + embodied share of carbon) after a change, measured per workload. Effective immediately; cash only if capacity is reclaimed. |
-| **Realized (billed) savings** | Reduction in node-hours and bill at pool level, attributed to the changes that freed the capacity. |
-| **Realization factor** | Probability-like factor (0–1) that freed capacity turns into removed nodes, based on autoscaler and pool context. |
-| **Value (EV)** | Risk-adjusted expected value per year in one currency: cost + carbon price × CO₂e, weighted by success probability, minus incident and effort costs. |
-| **Eligibility** | Whether a recommendation can become a PR now, with blockers and fixes. |
-| **Capability activation** | The always-on automation model: each capability (discover, preview, deliver, webhooks) activates itself when its prerequisites are detected and otherwise stays dormant with a stated reason. |
-| **Principal** | The authenticated identity behind a request: a signed-in user (session) or a scoped API key. Recorded on audit events, approvals and ledger entries. |
-| **Binding** | The resolved link between a live Kubernetes resource and its source in Git (repo, ref, path, renderer, controller). |
-| **Plan** | A validated, digest-addressed set of file edits implementing one or more recommendations on one binding (or a change set). |
-| **Change set** | A group of plans or bindings delivered as one PR. |
-| **Change event** | The immutable record that a change landed in the cluster (merge SHA, synced revision, rollout completion, spec digests). |
-| **Measurement** | The immutable result of a savings measurement strategy for a change: estimate, CI, confounders, outcome. |
-| **Ledger entry** | Append-only accounting record (accrual, reversal or restatement) for one quantity, period and method, linked to change and measurement. |
-| **Track record** | Per-source-family and capability history of realized vs not-realized outcomes, used to weight confidence and consensus. |
-
----
-
-## Appendix E — Execution conventions for agents
-
-1. **One item, one branch, one PR.** Branch `roadmap/<ID>-<slug>` (e.g. `roadmap/A1-promql-container-filter`). PR title `[<ID>] <title>`. Link the item ID and any `BUG-nn` in the description.
-2. **Test first.** For `BUG` items, first add the failing regression test, reusing the audit scenario where one exists (O3). For `FEAT` items, add contract or golden tests for the new abstraction before wiring it in.
-3. **Both backends.** Any storage change must pass on SQLite *and* Postgres (`GREENKUBE_TEST_POSTGRES_DSN`) until M2 lands.
-4. **Migrations are additive first.** Add columns or tables, dual-write, backfill, then remove in a later release. Every migration has an upgrade test from 0.3.1 data.
-5. **Configuration discipline.** A new setting goes into `core/config.py` (or the M9 settings class), `helm-chart/values.yaml` (+ schema after N2), `docs/reference/configuration.md`, and the ConfigMap/Secret template.
-6. **Docs ship with code.** Update the relevant concept, guide or reference page and the CHANGELOG `[Unreleased]` section in the same PR.
-7. **No silent fallbacks.** Every fallback sets a provenance value or a diagnostic visible in the API and UI (principle 6).
-8. **Never mix projected and measured.** Any API field, metric or UI number must state its method (principle 3). Reviewers reject PRs that sum them.
-9. **Respect module boundaries** (M1) once `import-linter` contracts exist; until then, follow the target tree for new code.
-10. **Definition of done per item:**
-    - tests green on both backends;
-    - `ruff format` + `ruff check`;
-    - pyrefly baseline not increased;
-    - docs and changelog updated;
-    - for user-visible changes, a screenshot or recorded API sample in the PR.
+| `src/greenkube/cli/start.py` | WP-05 | WP-02, WP-04, WP-07, WP-09, WP-10 |
+| `src/greenkube/storage/postgres/repository.py` | WP-02 | WP-01, WP-03, WP-04, WP-05, WP-10 |
+| `src/greenkube/core/historical_range_processor.py` | WP-01 | WP-02, WP-03, WP-04, WP-08 |
+| `src/greenkube/impact/projector.py` | WP-08 | WP-03, WP-04, WP-06, WP-09 |
+| `src/greenkube/storage/sqlite/repository.py` | WP-02 | WP-01, WP-03, WP-05, WP-10 |
+| `src/greenkube/api/metrics_endpoint.py` | WP-10 | WP-01, WP-03, WP-09 |
+| `src/greenkube/core/collection.py` | WP-01 | WP-02, WP-03, WP-05 |
+| `src/greenkube/core/optimization/verifier.py` | WP-07 | WP-03, WP-05, WP-08 |
+| `src/greenkube/impact/recompute.py` | WP-05 | WP-02, WP-03, WP-04 |
+| `src/greenkube/core/metric_assembler.py` | WP-01 | WP-03, WP-04 |
+| `src/greenkube/core/metrics_compressor.py` | WP-05 | WP-02, WP-04 |
+| `src/greenkube/core/migrations/scripts/postgres/0050_impact_allocation.sql` | WP-02 | WP-01, WP-05 |
+| `src/greenkube/core/optimization/lifecycle.py` | WP-09 | WP-06, WP-08 |
+| `src/greenkube/impact/model.py` | WP-08 | WP-03, WP-06 |
+| `src/greenkube/models/provenance.py` | WP-03 | WP-05, WP-08 |
+| `src/greenkube/verify/deletion.py` | WP-03 | WP-07, WP-08 |
+| `src/greenkube/verify/series.py` | WP-07 | WP-05, WP-08 |
+| `src/greenkube/verify/service.py` | WP-07 | WP-05, WP-09 |
+| `src/greenkube/verify/strategy.py` | WP-07 | WP-05, WP-08 |
+
+Shared configuration files (`core/config.py`, `helm-chart/values.yaml`, `values.schema.json`, the ConfigMap template, `docs/configuration.md`): add settings only, never reorder, and resolve merges by union.
+
+## WP-01 · Collection pipeline integrity
+
+**Goal.** Every stored row describes its own sample time, every hole is recorded, and nothing is dropped or defaulted silently.
+
+**Main files.** src/greenkube/core/historical_range_processor.py, core/collection.py, core/collection_telemetry.py, collectors/promql.py, collectors/prometheus_collector.py, collectors/pod_collector.py, collectors/node_collector.py, collectors/metrics_server_collector.py, collectors/discovery/, the collection loop in cli/start.py
+
+**Depends on.** none
+
+### WP-01.1 · Build history from the state at sample time, not at collection time
+
+**Also covers.** RECON-01 (Backfilled or re-collected rows take pod requests, owner and PVC data from the Kubernetes API as it is at coll...); COST-07 (Historical windows are priced with the requests and nodes read from the live API at collection time: rows of p...); NRG-10 (Zone and PUE are taken from the live node list only: pods of a node that left the cluster before its window is...); NRG-11 (Reservation shares use the requests of pods alive at collection time: rows of terminated pods (last steps afte...); RECON-06 (Container rows are produced only for pods that still exist at collection time and, on runtimes without contain...); MEA-12 (Rows of dead or terminating pods that carry no owner and zero requests are attached to the workload by pod-nam...)
+
+#### COL-01 · Requests, owners and node zone/provider/PUE are read from the Kubernetes API at collection time, so rows of deleted pods and removed nodes get request 0, owner NULL, default zone/PUE and no container rows, and re-collecting a window overwrites good rows with these degraded values.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** L · **Where** `src/greenkube/core/historical_range_processor.py:508-539`; `src/greenkube/core/historical_range_processor.py:563`; `src/greenkube/core/historical_range_processor.py:738-742`; `src/greenkube/core/historical_range_processor.py:789-812`; `src/greenkube/core/metric_assembler.py:196-212`; `src/greenkube/storage/postgres/repository.py:274-294`
+
+**Problem.** run_range builds pod_request_map / pod_mem_map / pod_owner_map from one PodCollector.collect() call (current pods) and nodes_info / node_contexts from one NodeCollector.collect() call (current nodes), then applies them to every historical sample of the window: `cpu_request=pod_request_map.get(pod_key, 0)`, `owner = pod_owner_map.get(pod_key)`, `provider = _ni.cloud_provider if _ni else None`, `zone = node_context.emaps_zone if node_context else DEFAULT_ZONE`, `node_zone=(_ni.zone if _ni else None)`. Only the power profile uses the stored node history (get_node_info_at). assemble_container_metrics builds container rows only for pods of the current pod list, so a deleted pod gets none. A window [T, T+step) is collected at T+step+safety lag, so a pod deleted before that instant is already gone. The upsert then writes `owner_kind = EXCLUDED.owner_kind`, `cpu_request = EXCLUDED.cpu_request`, so re-collecting a window (watermark lost, `--last`, catch-up) replaces previously correct rows; container rows of that window are not rewritten, so pod and container rows diverge.
+
+**Fix.** 1) Add a pod metadata history: table pod_snapshots (cluster_uid, namespace, pod, pod_uid, owner_kind, owner_name, node, containers JSON with name/kind/requests/limits, first_seen, last_seen), refreshed at every collection tick (later by a watch). run_range resolves requests, limits, owner and container list as of the sample time from this table. 2) For pods the API poll never saw, read the same facts from kube-state-metrics range queries on the chunk (kube_pod_owner, kube_pod_container_resource_requests, kube_pod_container_resource_limits, kube_pod_info) and prefer them when present, because they are exact per step. 3) Node provider, zone, emaps zone, PUE and instance type must come from get_node_info_at(node, ts) (node_snapshots_scd), falling back to the current node only when no snapshot exists; build zone contexts for snapshot nodes too. 4) Never store 0/NULL as a default: add a column metadata_source (k8s_snapshot | kube_state_metrics | missing), store requests as NULL when missing, add estimation reason pod_metadata_missing, and let the allocator use the last known request of that pod. 5) Upsert rule: a row whose new metadata_source is 'missing' must not overwrite non-null owner/request columns; when a window is re-collected, rewrite its container rows in the same transaction (delete rows of pods that produce none) so pod and container rows agree. 6) Migration: repair stored rows with owner NULL or request 0 from other rows of the same (namespace, pod) and from kube-state-metrics while Prometheus retention allows, bump CALCULATION_VERSION and re-run the allocation of the repaired windows. Document the behaviour in docs/methodology/impact-model.md.
+
+**Acceptance.** a) Fixture: pod P (Deployment d, request 500m) has CPU series until 10:07 and is absent from the pod list at collection time, with a snapshot or KSM series available: rows 10:00 and 10:05 carry owner Deployment/d, cpu_request 500 and container rows exist. b) Without any metadata: request is NULL, metadata_source='missing', the row is flagged, and the allocator uses the last known request. c) A node absent from the API but present in node_snapshots_scd yields its real zone, provider PUE and instance type. d) Re-running a window after the pod is deleted leaves owner/request unchanged and pod joules equal the sum of its container joules. e) The 14 live kind pods have no NULL-owner rows after the migration.
+
+#### RECON-05 · When a node is no longer in the Kubernetes API at collection time, its historical rows fall back to DEFAULT_ZONE, the default PUE and no embodied profile although node_snapshots_scd holds the node's history: CO2e was 19 times too high and embodied carbon zero in the simulation.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/core/historical_range_processor.py:536-539`; `src/greenkube/core/historical_range_processor.py:563`; `src/greenkube/core/historical_range_processor.py:566-570`; `src/greenkube/core/historical_range_processor.py:738-742`; `src/greenkube/core/historical_range_processor.py:811-813`; `src/greenkube/core/historical_range_processor.py:394-396`
+
+**Problem.** run_range reads nodes_info from node_collector.collect() (nodes that exist now) and derives from it the zone map (`node_contexts = await self.zone_mapper.map_nodes(nodes_info)`), the provider and PUE (`_ni = nodes_info.get(node_name); provider = _ni.cloud_provider if _ni else None`), node_instance_type, node_zone and the Boavizta cache (`prepare_embodied_data(nodes_info)`). The historical snapshot returned by get_node_info_at() is used only for the power profile. For a node that was scaled down, replaced or reclaimed since the step, the rows get `zone = DEFAULT_ZONE`, the default PUE, NULL node_instance_type and node_zone, and `_node_spec` finds no entry in boavizta_cache for the snapshot's (provider, instance type), so embodied carbon is 0. The rows are flagged (reason 'not found in zone map', intensity_source global_default) but the numbers are wrong while the correct zone, provider and instance type sit in node_snapshots_scd.
+
+**Fix.** In HistoricalRangeProcessor.run_range resolve every node attribute per (node, sample) with one function `node_at(node_name, ts)` = get_node_info_at(node_name, ts) (snapshot valid at ts) or, failing that, the earliest snapshot after ts, or the current NodeInfo; use it for zone mapping (NodeZoneMapper must accept a NodeInfo and map its zone/region to the Electricity Maps zone without calling the API), provider and PUE, node_instance_type, node_zone, the power profile (already done) and the embodied profile. Build boavizta_cache from the union of current nodes and all snapshots that intersect the window (node_timeline) instead of nodes_info only. Add a node_source value to the row provenance (current_api | snapshot | unknown) and keep the existing fallback reasons only when no snapshot exists. Make analyze_nodes run before the first collection and at least once per collection step for clusters with node churn (NODE_ANALYSIS_INTERVAL <= step), or save the node inventory inside the collection job, so a node that lives shorter than the analysis interval still gets a snapshot. Repair: `greenkube recompute` should accept --fix-node-context to rewrite zone, PUE, intensity, CO2e and embodied carbon of rows flagged 'not found in zone map' from the snapshots.
+
+**Acceptance.** a) e5_node_gone.py after the fix prints for the node-gone run the same emaps_zone (FR), grid_intensity (26.0), pue, node_instance_type (cpu-6), CO2e (0.0751 g) and embodied (0.475 g) as the node-present run. b) Unit test: snapshot A (zone eu-west-3, provider aws, m5.large) valid 10:00-12:00 and no current node: rows at 11:00 carry emaps_zone FR, the AWS PUE and a non-zero embodied share. c) With no snapshot at all the row keeps the fallback values, is flagged, and node_source = unknown.
+
+### WP-01.2 · Record every hole and every dropped row; never commit an empty or partial window as collected
+
+**Also covers.** RECON-04 (Windows older than COLLECTION_MAX_BACKFILL are abandoned although Prometheus still holds them, and the hole is...); RECON-12 (Rows can be dropped without any trace while the window is committed: a failed intensity lookup skips every pod...); NRG-08 (Lookup and Kubernetes API errors are swallowed inside run_range: an intensity lookup error drops every pod of ...)
+
+#### COL-04 · Holes are not recorded anywhere: windows older than the backfill horizon only increment an in-memory counter, and a window for which Prometheus returns no series is committed as collected with zero rows.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** L · **Where** `src/greenkube/core/collection.py:136-164`; `src/greenkube/core/collection.py:252-258`; `src/greenkube/core/collection.py:305-334`; `src/greenkube/core/collection_telemetry.py:31-36`; `src/greenkube/core/historical_range_processor.py:275-289`
+
+**Problem.** plan_collection drops every window before now - COLLECTION_MAX_BACKFILL and returns only a count; run() logs it and increments greenkube_collection_gap_windows_total (a process-local counter that restarts at 0). _collect_window advances the watermark whenever run_range returns, including with an empty list: `written = ... if rows else 0` then `advance(...)`. An empty CPU result is not an error (_collect_cpu only raises on query errors), so Prometheus without data for the window (scrapes stopped, TSDB lost, wrong data source, scrape interval longer than half the rate window, remote-write lag longer than COLLECTION_SAFETY_LAG) is stored as 'nothing ran'. collection_watermarks has only (cluster_uid, source, last_complete_end, updated_at). GET /api/v1/health returns only status and version; no API route or UI element shows coverage.
+
+**Fix.** 1) New table collection_windows (cluster_uid, source, window_start, window_end, status collected|empty|gap|failed, expected_steps, steps_with_data, pod_rows, cpu_series, reason, collected_at), written in the same transaction as the rows; abandoned ranges get status gap. 2) Distinguish 'no workload' from 'no data': before committing an empty or thin window, run cheap probes on the same range (count(up{job=~"kubelet|cadvisor.*"}), count(kube_pod_info), max(timestamp(container_cpu_usage_seconds_total)) >= window_end - scrape interval). If the scrape targets have no samples the window is failed and retried until it leaves the backfill horizon, then recorded as gap with the reason. 3) Measure the real scrape interval once per hour (count_over_time(up{job="kubelet"}[10m])) and report a configuration error when the rate window holds fewer than 2 scrapes. 4) Expose coverage: GET /api/v1/collection/coverage?start=&end=, fields in /api/v1/health (watermark, lag, last gap), a gauge greenkube_collection_coverage_ratio, and a UI banner on every period that contains gap or empty windows. 5) Hourly and daily rollups store coverage = steps_with_data / expected_steps so consumers can flag or scale partial periods explicitly. 6) Backfill collection_windows for existing data from the distinct timestamps of combined_metrics, marking the rest unknown.
+
+**Acceptance.** a) Scenario S5 produces 577 gap rows and 22 failed/gap rows with reason no_scrape_data instead of 22 empty successes, and the API coverage for the 72 h is 24/865. b) A window whose Prometheus answer is empty while up{job=kubelet} has samples and no pod runs is stored as empty. c) /api/v1/health shows the watermark lag and the last gap. d) An hourly rollup built from 19 of 120 steps carries coverage 0.158. e) The counter survives a controller restart because the API reads the table.
+
+#### COL-03 · Rows are created only for pods that have a CPU sample at the step; memory, network and OpenCost cost of every other pod or step are dropped without trace and no reconciliation against the OpenCost total exists.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/core/historical_range_processor.py:660-697`; `src/greenkube/core/historical_range_processor.py:759-776`
+
+**Problem.** `groups` (the list of pod rows to build per sample and node) is filled only from `samples`, the parsed CPU rate results: `for pod_key in pod_map: groups[(sample_start, node)].append(pod_key)`. Memory, network, restart, storage and cost maps are only looked up for those keys. `rate()` needs two scrapes of the same container series inside the rate window, so a pod has no CPU sample when it lived less than about two scrape intervals, when its containers restart faster than that (each restart is a new cgroup series), or during its first step. Its memory sample and its OpenCost allocation exist but are never stored.
+
+**Fix.** 1) Build the pod set of each sample as the union of: CPU keys, pod-cgroup CPU keys, memory keys, running pods from kube_pod_info / kube_pod_status_phase when kube-state-metrics exists, and OpenCost allocations with minutes > 0. 2) A pod without a CPU sample gets a row with cpu_usage_millicores NULL (never 0), reason no_cpu_sample, and still takes part in the allocation through its requests. 3) Recover CPU of short-lived series: add a second query `max by (namespace,pod,container,node,name) (max_over_time(container_cpu_usage_seconds_total{...}[step]))` and, for a series whose first sample lies inside the step, use counter_value / step as core usage (the counter starts at 0 with the container). 4) Reconcile every window: compare the sum of stored OpenCost-sourced cost with the OpenCost window total; store the difference as an explicit __unattributed__ row per namespace (so totals match) and export greenkube_collection_cost_unattributed_ratio. 5) Record per window the number of pods with memory but no CPU (see COL-04 window table).
+
+**Acceptance.** Fixture S1: 'late' has 12 rows (3 with NULL CPU and reason no_cpu_sample), 'memonly' has 12 rows, total stored cost = 3.60 +/- 1%. A container that lives 40 s and burns 20 CPU-seconds yields a row with about 67 millicores for a 300 s step. The reconciliation metric is 0 for the fixture and equals the missing share when a pod is removed from the Prometheus fixture.
+
+#### COL-08 · When the carbon-intensity lookup raises, every pod row of the (step, node) group is skipped without log, metric or error and the window is committed.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/core/historical_range_processor.py:743-751`; `src/greenkube/core/historical_range_processor.py:599`
+
+**Problem.** `carbon_result = await calculator.calculate_emissions(...)` is wrapped in `except Exception: carbon_result = None`, followed by `skipped_carbon += len(pod_keys); continue`. skipped_carbon is never read again. Usage, cost and energy rows of the group are lost although only the CO2e factor was unavailable.
+
+**Fix.** Do not drop rows: on an exception raise RangeCollectionError so the window is retried; if the error persists for more than N attempts store the rows with co2e NULL, intensity_source='unavailable' and a reason, to be filled by the existing intensity recompute job. Log at ERROR and count greenkube_collection_rows_skipped_total{reason}. Remove the dead counter.
+
+**Acceptance.** Scenario S10: report.error is set and the watermark does not move; after the lookup works again the window has its rows. Unit test for the degraded mode: rows present with co2e NULL and intensity_source='unavailable'.
+
+#### COL-07 · A failed Kubernetes pod or node list is swallowed (collectors return an empty result), and the window is stored with request 0, owner NULL, no container rows and default zone/PUE, then committed.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/collectors/pod_collector.py:140-142`; `src/greenkube/collectors/node_collector.py:110-115`; `src/greenkube/core/historical_range_processor.py:503-539`
+
+**Problem.** PodCollector.collect catches every exception and returns [] ('Return empty list on failure'); NodeCollector.collect and collect_instance_types return {}. run_range cannot tell an API error from an empty cluster, builds empty request/owner maps and node info, and writes the rows; MetricsCollectionJob advances the watermark, so the window is never repaired. Nothing in estimation_reasons mentions the missing pod metadata.
+
+**Fix.** PodCollector and NodeCollector raise a typed error (or return a result object with ok=False) on API failure. run_range raises RangeCollectionError when the pod list or node list failed and no snapshot newer than one step is available (see COL-01 snapshot table); with a recent snapshot it proceeds and flags the rows metadata_source=snapshot. An empty but successful list remains valid. Add a counter greenkube_collection_k8s_list_errors_total.
+
+**Acceptance.** Scenario S4 with a raising pod collector: report.error is set, no row is written and the watermark stays at 10:00; the next tick with a working API stores cpu_request=500 and the owner.
+
+### WP-01.3 · Give the cluster a stable identity for watermarks and rows
+
+**Also covers.** COST-04 (The collection watermark is keyed by the cluster name, which on the kind install fell back to the controller's...); RECON-10 (The collection watermark is keyed by the auto-detected cluster name, and a missing watermark row is treated as...); LED-02 (The v1 ledger, the accrual watermark and the v2 projection are keyed by CLUSTER_NAME, which falls back to the ...)
+
+#### COL-02 · The cluster key of the collection watermark falls back to the node name when the node list fails at start, so each controller reschedule forks the watermark and re-collects the whole backfill horizon over existing rows.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/config.py:1105-1138`; `src/greenkube/core/config.py:1141-1184`; `src/greenkube/core/collection.py:221`; `src/greenkube/core/collection.py:153-155`
+
+**Problem.** MetricsCollectionJob keys the watermark with `cluster_uid or config.CLUSTER_NAME or 'default'`. CLUSTER_NAME is auto-detected once, synchronously, at configuration load: _list_nodes_in_cluster has a 5 s budget and returns None on any error, and _auto_detect_cluster_name then returns K8S_NODE_NAME. The docstring says the name 'must not depend on the node a pod runs on', but this fallback does. A controller that starts on another node finds no watermark under its new key, so plan_collection starts at now - COLLECTION_MAX_BACKFILL and re-collects every window with the current pod/node state (see COL-01).
+
+**Fix.** 1) Remove the K8S_NODE_NAME fallback. 2) Resolve the cluster identity before the controller loops start, with retries and backoff: the kube-system namespace UID (already used by verify/ledger/identity.py) becomes cluster_uid for watermarks and every cluster-keyed table; CLUSTER_NAME stays a display label. If the identity cannot be resolved, the collection loop does not start and readiness reports it. 3) Persist the resolved identity in the database and reuse it at later starts. 4) Migration at start: when watermark rows exist under other keys in the same database, adopt max(last_complete_end) of the rows whose key is a node name of this cluster or 'default', then delete the legacy rows. 5) Helm: document config.clusterName and warn in NOTES.txt when it is empty on a multi-node cluster. 6) plan_collection with watermark None must not blindly re-collect: start at the newest stored combined_metrics timestamp + step when rows already exist.
+
+**Acceptance.** a) Unit: _auto_detect_cluster_name with a failing node list never returns the node name. b) Integration: two controller instances started with K8S_NODE_NAME=a then b against one database use the same watermark row and the second plans zero already collected windows. c) With an existing database holding rows up to T and no watermark, the first plan starts at T + step. d) Live kind after upgrade: one watermark row.
+
+#### STO-09 · Metric rows carry no cluster identity and nothing prevents two installs from writing the same database schema; keys are (pod_name, namespace, timestamp) and (node, timestamp).
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/migrations/scripts/postgres/0000_initial_schema.sql:3-41`; `src/greenkube/core/migrations/scripts/postgres/0050_impact_allocation.sql:13-37`; `src/greenkube/core/migrations/scripts/postgres/0038_collection_watermarks.sql:3-9`; `src/greenkube/core/collection.py:221`
+
+**Problem.** collection_watermarks, the savings ledger and recommendations are keyed by a cluster name or uid, but combined_metrics, container_metrics, node_idle_metrics, both hourly tables and node_snapshots_scd have no cluster column. (1) Two GreenKube installs pointed at one external PostgreSQL with the default DB_SCHEMA (a plausible operator shortcut: one managed database for dev and prod clusters) write into the same tables: each keeps its own watermark, rows of same-named objects (kube-system static pods such as etcd-<node>, StatefulSet pods such as prometheus-k8s-0, nodes named node-1 or minikube) overwrite each other on every step, and all other rows are added together in every total. Nothing detects it. (2) When the cluster name changes (COST-04, COL-02) the rows cannot be attributed to the old or new identity, which is why the fork can only be handled by re-collecting. (3) A database restored into another cluster carries rows that look native.
+
+**Fix.** 1. Add a singleton table `installation(cluster_uid TEXT PRIMARY KEY, cluster_name, created_at)`, written once by the controller from the kube-system namespace UID. At every start compare it with the live cluster UID and refuse to collect (clear error, `/readyz` not ready) when they differ, unless `ALLOW_CLUSTER_UID_CHANGE=true` is set once. 2. Key the watermark by that uid, not by the display name (fixes the fork at its root). 3. When multi-cluster becomes a goal (roadmap P7), add cluster_uid to the metric tables and to their unique keys; until then the guard of step 1 is enough. 4. Document `one schema per cluster` in docs/installation.md.
+
+**Acceptance.** Starting a second controller against a database whose installation.cluster_uid differs fails before any write with an explicit message; renaming CLUSTER_NAME does not change the watermark key or trigger a re-collection.
+
+### WP-01.4 · Make container rows truthful on every runtime
+
+**Also covers.** RECON-07 (Container usage filled from the Metrics API is stored with usage_source = prometheus and is clamped one-sidedl...)
+
+#### COL-05 · On clusters whose cAdvisor exports only pod-level series (cri-dockerd: Minikube Docker driver, Docker Desktop, Mirantis), container rows are Metrics API snapshots stored with usage_source=prometheus, and catch-up windows get no container rows at all.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/historical_range_processor.py:880-919`; `src/greenkube/core/metric_assembler.py:275-279`; `src/greenkube/core/metric_assembler.py:303-309`
+
+**Problem.** When Prometheus has no container-level series, run_range falls back to the pod cgroup for pod rows and fills container usage from MetricsServerCollector for the latest sample of a current window. The assembler labels a container row metrics_server only when the key is in resource_maps.container_timestamp_map, but run_range builds PodResourceMaps with container_cpu_usage_map, container_memory_usage_map and container_sample_count_map only, so that branch is dead and the row inherits the pod row's usage_source 'prometheus'. The value is the Metrics API rate over metrics-server's own window (about 15-30 s), read at collection time (after the step ended), stored as the usage of the whole step; when it exceeds the pod cgroup by more than 5% it is scaled down (reason container_usage_exceeds_pod). During catch-up only the last sample of the current window is filled, so older windows have pod rows without container rows.
+
+**Fix.** 1) Carry the source per filled container: add container_usage_source_map to PodResourceMaps (or populate container_timestamp_map without overriding the row timestamp) and store usage_source='metrics_server' plus the Metrics API window in a new column sample_window_seconds; when CPU comes from Prometheus and memory from the Metrics API store both sources (cpu_usage_source, memory_usage_source). 2) Consumers (rightsizing statistics, verification gates, evidence) must treat metrics_server rows as point samples: lower confidence, never as step averages; show it in the recommendation evidence. 3) Detect the capability once per run (container-level series present or not) and expose it in /api/v1/health and the UI: 'container usage is sampled from the Metrics API because cAdvisor exports pod-level series only'. 4) Offer the measured alternative: when kubelet /metrics/resource is scraped (ServiceMonitor resource endpoint) its container_cpu_usage_seconds_total has container labels; document enabling it for cri-dockerd and prefer it. 5) Catch-up windows on such clusters must be marked pod_level_usage_only in the window table instead of silently lacking container rows. 6) Migration: on clusters detected as pod-level-only, set usage_source='metrics_server' on existing container rows.
+
+**Acceptance.** Scenario S7 stores usage_source='metrics_server' for the container row and 'prometheus' for the pod row. A cluster with container series is unchanged. The health endpoint reports container_usage_source=metrics_server on the Minikube environment. A verification gate requiring Prometheus usage rejects or downgrades these rows in a unit test.
+
+#### COL-17 · Container rows are all-or-nothing per pod: when one container of the pod spec has no usage sample at the step, no container row is written for any container of that pod.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/core/metric_assembler.py:214-221`
+
+**Problem.** `has_container_usage = all(container_key in cpu_map or container_key in memory_map for container_key in container_keys)`; `if not has_container_usage: continue`. container_keys are all steady-state containers of the current pod spec (including native sidecars). A container that is waiting (ImagePullBackOff, CrashLoopBackOff back-off), finished, or just restarted has no series for the step.
+
+**Fix.** Write a container row for every container that has a sample; containers without a sample get no row (or a row with NULL usage and reason no_sample). Compute cost and energy shares over the containers that have samples plus the request-based share of the others, so that the container rows still sum to the pod row.
+
+**Acceptance.** Scenario S8 yields one container row for app with 250 millicores and the sum of container joules and cost equals the pod row within rounding.
+
+#### COL-09 · The pod-cgroup fallback is used only when the container query returns nothing for the whole cluster, so in a cluster mixing both kinds of nodes or runtimes every pod that has pod-level series only disappears, together with the idle rows of its node.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/core/historical_range_processor.py:275-300`; `src/greenkube/collectors/prometheus_collector.py:333-339`; `src/greenkube/collectors/promql.py:120-144`
+
+**Problem.** _collect_cpu: `results = await self._query_range(chunk, container_cpu_usage()); if results: return results; return await self._query_range(chunk, pod_cgroup_cpu_usage())`; _collect_memory and PrometheusCollector.collect_range do the same. The container query filters container!="", so pods with only a pod cgroup series are absent as soon as one container-level series exists anywhere. The parser already supports mixed input (`elif key not in named_pods`), but never receives it.
+
+**Fix.** Query both levels in one expression and choose per pod: CPU `max by (namespace,pod,container,node) (rate(container_cpu_usage_seconds_total{pod!="",container!="POD"}[w]))` (container="" is the pod cgroup), same for memory; drop the empty-result fallbacks in _collect_cpu, _collect_memory and PrometheusCollector.collect_range. Keep the existing per-pod rule (containers when present, else pod cgroup). Use the pod cgroup as an invariant for pods with containers: when the container sum is below the pod cgroup by more than a tolerance, flag container_series_incomplete.
+
+**Acceptance.** Scenario S2: on-cri-dockerd has 12 rows with 700 millicores, n2 has 12 idle rows, and on-containerd still has 500 millicores (no double count; the A1 regression tests stay green).
+
+### WP-01.5 · Correct the PromQL semantics
+
+**Also covers.** RECON-15 (Against a non-deduplicated HA Prometheus pair the stored usage depends on which replica answers: row values di...)
+
+#### COL-11 · CPU is aggregated with max over all series of a container, so consecutive container instances inside one rate window (restart, crash loop, pod recreated under the same name) are not added and CPU is under-counted.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/collectors/promql.py:120-125`; `src/greenkube/core/historical_range_processor.py:177-200`
+
+**Problem.** container_cpu_usage() is `max(rate(container_cpu_usage_seconds_total{...}[w])) by (namespace,pod,container,node)`. The comment lists 'the old and new cgroup of a restarted container' as duplicates, but they are consecutive in time: each series' rate covers its own part of the window and the true usage is their sum. max keeps only the larger one.
+
+**Fix.** Deduplicate per container instance, then add instances: `sum by (namespace,pod,container,node) (max by (namespace,pod,container,node,name) (rate(container_cpu_usage_seconds_total{container!="",container!="POD",name!=""}[w])))` for cAdvisor series (name is the runtime container id: equal for duplicate cgroup paths and scrape jobs, different for consecutive instances), `or` the existing max expression restricted to name="" for sources without that label (kubelet /metrics/resource). Keep the Python-side max between the two sources. Memory keeps max. Bump CALCULATION_VERSION.
+
+**Acceptance.** FakePrometheus (extended to evaluate the nested aggregation) or a recorded Prometheus fixture: two series of one container with different name and rates 0.3 and 0.2 in one window give 500 millicores; two series with the same name and different id give the max; a /metrics/resource duplicate does not double. The live handover example stores 6, 8, 8.
+
+#### COL-12 · Memory is stored as one instant value per step (the working set at the end of the step), so peaks between two evaluation points are invisible to rightsizing.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/collectors/promql.py:132-144`; `src/greenkube/core/metric_assembler.py:290-291`
+
+**Problem.** container_memory_working_set() is `max(container_memory_working_set_bytes{...}) by (...)` evaluated at each step boundary; with the default 5-minute step one scrape out of ten is kept. memory_usage_max_bytes of raw container rows is always None, and later maxima are maxima of these point samples.
+
+**Fix.** Collect two memory figures per step: the average for allocation, `max by (...) (avg_over_time(container_memory_working_set_bytes{...}[step]))`, stored in memory_usage_bytes, and the peak, `max by (...) (max_over_time(container_memory_working_set_bytes{...}[step]))`, stored in memory_usage_max_bytes on pod and container rows; rollups take MAX of the peak. Rightsizing and risk checks must use the peak. Do the same for CPU peaks if finer than the step is wanted (max_over_time of a sub-query rate). Old rows keep NULL peak and are treated as lower confidence.
+
+**Acceptance.** Fixture with a container at 100Mi except one scrape at 400Mi inside a step: memory_usage_max_bytes = 400Mi and memory_usage_bytes about 130Mi for that step; the memory recommendation never goes below 400Mi plus headroom.
+
+#### COL-14 · Network figures of hostNetwork pods are the node's traffic, repeated for every hostNetwork pod of the node, and the stored values are bytes per second in columns and metrics named *_bytes.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/collectors/promql.py:168-178`; `src/greenkube/core/historical_range_processor.py:821-824`; `src/greenkube/api/metrics_endpoint.py:109-126`
+
+**Problem.** pod_network_receive/transmit are `sum(rate(container_network_*_bytes_total[w])) by (namespace,pod,node)` without interface filter. For a pod in the host network namespace cAdvisor reports the node's interfaces (nine per pod on kind: eth0, tunnels...), so each such pod carries the whole node traffic. The result is a rate, stored in network_receive_bytes / network_transmit_bytes / disk_read_bytes / disk_write_bytes and exported as greenkube_pod_network_receive_bytes.
+
+**Fix.** 1) Read host-network status per pod (kube_pod_info{host_network="true"} or the pod spec in the snapshot of COL-01) and store NULL network values with reason host_network_shared for those pods; optionally store the node traffic once on the node idle row. 2) Exclude non-physical interfaces for the others (interface!~"lo|veth.*|cali.*|lxc.*|cilium.*|docker.*|flannel.*|cni.*|tun.*|gre.*|sit.*|ip6.*|erspan.*"). 3) Rename the fields to *_bytes_per_second in the model, API and exported metrics (keep the old metric names as deprecated aliases for one release) or convert to bytes per step (rate x step) consistently; document the unit in docs and UI.
+
+**Acceptance.** Fixture with two hostNetwork pods and one normal pod on a node: hostNetwork pods have NULL network with the reason, the normal pod has its eth0 rate, and the namespace sum equals the normal pod. API field names carry the unit.
+
+#### COL-13 · Persistent-volume request and usage per pod are joined by PVC name without the namespace, so same-named claims in different namespaces overwrite each other.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/collectors/prometheus_collector.py:243-270`
+
+**Problem.** _pvc_values builds `values[pvc] = float(value)` keyed by the persistentvolumeclaim label only, for kube_persistentvolumeclaim_resource_requests_storage_bytes and kubelet_volume_stats_used_bytes; the pod mapping then reads `request_by_pvc.get(pvc)`. The last series returned wins. The values are also the current ones, applied to every historical sample of the window.
+
+**Fix.** Key both value maps by (namespace, persistentvolumeclaim) and look them up with the namespace of the pod mapping series. Aggregate duplicates with max. For historical windows use range queries on the chunk instead of the instant value.
+
+**Acceptance.** The simulation returns 500Gi/420Gi for prod and 10Gi/1Gi for staging.
+
+#### COL-18 · Sum-based queries (network, disk, restarts, ephemeral storage) double when the same series is visible twice, and partial responses of Thanos/Mimir are accepted as complete.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** S · **Where** `src/greenkube/collectors/promql.py:146-190`; `src/greenkube/collectors/prometheus_collector.py:320-339`
+
+**Problem.** CPU and memory use max and are safe, but pod_network_*, pod_disk_*, pod_ephemeral_storage_usage and pod_restarts use sum(...) by (namespace,pod[,node]) and therefore add replicas when the backend exposes both copies (Thanos Query without replica-label deduplication, Mimir or VictoriaMetrics without HA dedup, two kube-state-metrics replicas, kubelet scraped by two jobs). collect_range only checks status == 'success' and ignores the 'warnings' field, so a partial answer from a store that is down is stored and committed.
+
+**Fix.** Wrap the sum queries with an inner max over the identity labels of one source series: network `sum by (namespace,pod,node) (max by (namespace,pod,node,interface) (rate(...)))`, disk and ephemeral `sum by (...) (max by (namespace,pod,node,container,device) (...))`, restarts `sum by (namespace,pod) (max by (namespace,pod,container,uid) (kube_pod_container_status_restarts_total))`. Send dedup=true and partial_response=false to Thanos-compatible endpoints (harmless for Prometheus) and treat a response carrying warnings as a failed window. Add PROMETHEUS_EXTRA_MATCHERS to the configuration (the catalogue already supports extra_matchers) so multi-cluster backends can be filtered by cluster label.
+
+**Acceptance.** FakePrometheus with every series duplicated under a replica label returns the same stored values as without duplicates; a response with status success and warnings raises PrometheusQueryError.
+
+#### COL-20 · restart_count stores the lifetime restart counter of the pod, and consumers read it as restarts of the observed period.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** S · **Where** `src/greenkube/collectors/promql.py:184-185`; `src/greenkube/core/optimization/evidence.py:300`; `src/greenkube/core/optimization/risks.py:209-213`; `src/greenkube/core/sustainability_score.py:444-451`
+
+**Problem.** pod_restarts() is `sum(kube_pod_container_status_restarts_total) by (namespace,pod)`: a cumulative value since pod creation, stored on every row. Rollups correctly use MAX, but evidence takes max(restart_count) of the series and risks.py returns HIGH 'restart_history' for a memory decrease as soon as it is non-zero; the stability score averages the cumulative values.
+
+**Fix.** Store the per-step delta next to the cumulative value: `sum by (namespace,pod) (increase(kube_pod_container_status_restarts_total[step]))` in a new column restarts_in_step (rollups SUM it), keep restart_count as cumulative with MAX. Evidence and risk use the sum of restarts_in_step over the lookback window, per container when available, with the termination reason from kube_pod_container_status_last_terminated_reason.
+
+**Acceptance.** A pod with a constant counter of 5 over the window has 0 restarts in evidence and no restart_history risk; a counter going 5 -> 7 yields 2.
+
+#### COL-19 · Ephemeral-storage usage is never collected on CRI runtimes, and network and disk are absent on cri-dockerd; the product does not tell the user that these dimensions are unavailable.
+
+**Severity** low · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/collectors/promql.py:146-162`
+
+**Problem.** pod_ephemeral_storage_usage reads container_fs_usage_bytes{container!=""}; with containerd/CRI-O cAdvisor has no per-container filesystem series (kind: the metric does not exist at all), and on cri-dockerd no series has a container label. Network series on Minikube exist only for the root cgroup.
+
+**Fix.** Read ephemeral storage from the kubelet volume/pod stats available in Prometheus (kubelet_volume_stats_* covers PVCs only; for ephemeral usage use the kubelet Summary API, /api/v1/nodes/<node>/proxy/stats/summary, which reports per-pod ephemeral-storage usedBytes and needs the nodes/proxy get permission in the chart RBAC). Add a capability report (per metric family: available / missing, with the reason) to /api/v1/health and the UI, computed from one probe query per family at each run.
+
+**Acceptance.** On kind the health capability report says ephemeral_storage_usage: missing (no container_fs_usage_bytes series); with the Summary API source enabled the column is populated for a pod writing to an emptyDir.
+
+### WP-01.6 · Fix provider detection and workload ownership
+
+#### COL-15 · Cloud provider detection classifies GKE nodes in us-* regions, and Linode, Oracle, IBM and Alibaba nodes, as AWS, and misses AWS nodes without EKS labels outside five region prefixes.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/collectors/node_collector.py:158-197`
+
+**Problem.** _detect_cloud_provider tests, before the GCP check, `'node.kubernetes.io/instance-type' in labels and region.startswith(('us-','eu-','ap-','ca-','sa-'))` and returns 'aws'. GKE regions us-central1, us-east1, us-east4, us-west1... match, as do Linode us-east, OCI eu-frankfurt-1, IBM eu-de, Alibaba ap-southeast-1. AWS regions me-*, af-*, il-*, mx-*, cn-* without eks.amazonaws.com labels (kOps, self-managed, some Karpenter nodes) return 'unknown'.
+
+**Fix.** Detect the provider from node.spec.providerID first (aws://, gce://, azure://, ovh / openstack://, scaleway://, linode://, oci / ocid1., ibm://, alicloud...), then from provider-specific label prefixes (cloud.google.com/, eks.amazonaws.com/, karpenter.k8s.aws/, kubernetes.azure.com/, k8s.ovh.net/, node.k8s.ovh/, k8s.scaleway.com/, lke.linode.com/, oci.oraclecloud.com/, ibm-cloud.kubernetes.io/), and remove the region-prefix heuristic. Let CLOUD_PROVIDER in the configuration override detection. Unknown stays unknown and flagged. Recompute stored rows of affected clusters (provider, PUE, power source) under a new CALCULATION_VERSION.
+
+**Acceptance.** The nine label sets of sim_provider.py give gcp, gcp, gcp, linode/unknown, oci/unknown, ibm/unknown, alibaba/unknown, aws, aws; a node with providerID gce://... and no cloud.google.com label is gcp.
+
+#### COL-16 · Workload owners are derived by cutting the last dash-separated token of the ReplicaSet name and calling the result a Deployment, and Job pods keep the Job as owner, so Argo Rollouts and bare ReplicaSets get a non-existent Deployment and every CronJob run is a separate workload.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/collectors/pod_collector.py:110-127`
+
+**Problem.** `if owner_kind == 'ReplicaSet': parts = owner_name.rsplit('-', 1); owner_kind = 'Deployment'; owner_name = parts[0]`. The ReplicaSet's own ownerReferences are never read. A ReplicaSet owned by an Argo Rollout `web` (web-6d5f7c9b8) becomes Deployment/web; a bare ReplicaSet `my-rs` becomes Deployment/my. A pod owned by Job `report-28912345` (created by CronJob report) is stored as Job/report-28912345. The automation layer does support Rollout targets (automation/actions/workloads.py), so the usage rows and the targets disagree.
+
+**Fix.** Resolve the real controller chain: list ReplicaSets and Jobs once per tick (apps/v1 and batch/v1, paginated) and map pod -> ReplicaSet -> its controller ownerReference (Deployment, Rollout, or none: keep ReplicaSet), pod -> Job -> CronJob when the Job has a CronJob controller owner. With kube-state-metrics, kube_replicaset_owner and kube_job_owner give the same for history. Store owner_api_version too. Migration: re-map stored rows whose owner is Deployment/<x> when no such Deployment exists but a Rollout <x> does, and rows with Job/<cronjob>-<suffix> to CronJob/<cronjob>.
+
+**Acceptance.** Unit tests with fake pods: Rollout-owned ReplicaSet -> ('Rollout','web'); bare ReplicaSet 'my-rs' -> ('ReplicaSet','my-rs'); Deployment-owned -> ('Deployment','web'); CronJob Job -> ('CronJob','report'); standalone Job -> ('Job', name).
+
+### WP-01.7 · Stop credential leakage and URL replacement in Prometheus discovery
+
+#### COL-06 · A single failed instant query makes PrometheusCollector replace the configured Prometheus URL with a discovered one for the rest of the process, and discovery probes send the configured bearer token or basic credentials to every candidate service.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/collectors/prometheus_collector.py:94-142`; `src/greenkube/collectors/prometheus_collector.py:182-219`; `src/greenkube/collectors/discovery/prometheus.py:52-80`
+
+**Problem.** _query_run_loop (used by collect_pod_storage in every run_range) tries three URL shapes; when all fail (timeout, 5xx, 4xx) it calls _discover_and_update_url, which takes the first discovered service that answers `up`, then `_update_url` sets self.base_url and `self.settings.PROMETHEUS_URL = url` on the shared Config singleton and disables TLS verification for http URLs. Later range queries of the same run and every later PrometheusCollector(cfg) use the new endpoint. PrometheusDiscovery._probe_prometheus_endpoint and _probe_url attach `Authorization: Bearer <PROMETHEUS_BEARER_TOKEN>` or basic auth to each probe.
+
+**Fix.** 1) Discovery runs only when PROMETHEUS_URL is empty. With a configured URL a failure is returned to the caller (instant queries return an error state, range queries raise PrometheusQueryError). 2) Never mutate Config from a collector; keep a discovered URL in the collector and record it in the health endpoint with its origin (configured | discovered). 3) Never send configured credentials to a discovered endpoint; credentials are bound to the configured URL host. 4) A discovered endpoint must pass a data check before use (count(container_cpu_usage_seconds_total) > 0) and the choice is logged at WARNING and exported as an info metric. 5) Keep the TLS verification setting of the configuration.
+
+**Acceptance.** The simulation shows base_url and cfg.PROMETHEUS_URL unchanged after the failure, the instant query reports an error, and only mimir.example.com received the Authorization header. With PROMETHEUS_URL empty, discovery still works and sends no credentials.
+
+### WP-01.8 · Test PromQL semantics against a real query engine
+
+#### COL-21 · Tests cannot detect PromQL semantic errors: the fake Prometheus takes pre-computed rates and the alternative label names handled in _series_identity can never occur.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** M · **Where** `tests/core/fake_prometheus.py:1-60`; `src/greenkube/core/historical_range_processor.py:156-163`
+
+**Problem.** FakePrometheus receives 'already-computed per-second rates', evaluates one aggregation level and ignores range windows, staleness, counter resets and series lifetimes; tests therefore pass whatever the rate window, the max/sum choice across restarts or the behaviour of short-lived series. _series_identity accepts kubernetes_namespace, namespace_name, pod_name, kubernetes_pod_name, container_name and kubernetes_node, but every query aggregates `by (namespace,pod,container,node)`, so those labels are removed before the parser sees them (dead code that suggests support for setups that would in fact yield no data).
+
+**Fix.** Add an integration test tier that runs the catalogue against a real Prometheus (promtool tsdb create-blocks-from openmetrics with recorded cAdvisor/kube-state-metrics fixtures: container restart, short-lived pod, duplicate scrape job, pod-level-only node, hostNetwork pod, HA duplicate) and asserts stored core-seconds against the counter deltas. Remove the dead label alternatives or implement label-name configuration (PROMETHEUS_LABEL_NAMESPACE/POD/CONTAINER/NODE) applied in the catalogue's by() clauses and selectors.
+
+**Acceptance.** The integration suite fails on the current max-across-restarts query and on a 40-second pod, and passes after COL-03 and COL-11 are fixed; configuring a custom node label name returns rows grouped by that node.
+
+## WP-02 · Storage schema and write semantics
+
+**Goal.** Stored values keep their precision and meaning, and a re-collection can never degrade a good row.
+
+**Main files.** src/greenkube/core/migrations/, core/db.py, the write methods of storage/postgres/repository.py and storage/sqlite/repository.py, storage/*/node_repository.py, storage/unit_of_work.py, models/metrics.py validators, cli/db.py
+
+**Depends on.** none. Merge before WP-05, which owns the read methods of the same repository files.
+
+### WP-02.1 · Store additive quantities in double precision
+
+**Also covers.** STO-11 (The PostgreSQL carbon recompute compares a float4 column with a float8 intensity (`IS DISTINCT FROM`), so ever...)
+
+#### NRG-06 · Energy, CO2e and cost are stored as float4 (REAL) in PostgreSQL and summed with SUM(real): totals drift by percents beyond ~1M rows and stop growing beyond ~17M rows.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/migrations/scripts/postgres/0001_baseline_migrations.sql:13`; `src/greenkube/core/migrations/scripts/postgres/0002_hourly_aggregation_and_node_scd2.sql:20`; `src/greenkube/core/migrations/scripts/postgres/0033_container_metrics.sql:12`; `src/greenkube/storage/postgres/repository.py:779-786`; `src/greenkube/storage/postgres/repository.py:986-989`; `src/greenkube/storage/postgres/repository.py:1103-1106`
+
+**Problem.** combined_metrics, combined_metrics_hourly, container_metrics(_hourly) declare joules, co2e_grams, embodied_co2e_grams, total_cost, pue, grid_intensity as REAL (4-byte float). PostgreSQL's `sum(real)` accumulates in float4 and returns real, and the repository sums these columns without a cast (aggregate_summary, timeseries, by-namespace, top-pods, report). A float4 accumulator has 24 bits: once the running sum is ≥ 2^21 times a typical addend each addition is rounded to a coarse grid (systematic drift), and once it is ≥ 2^24 times the addend the addend is lost entirely, so the total saturates. The result also depends on the plan (parallel partial aggregates sum fewer rows each), so the same request can return different totals. node_idle_metrics, metrics_summary and workload_usage_hourly use double precision; SQLite REAL is 8 bytes and is not affected.
+
+**Fix.** 1) Migration (PostgreSQL): `ALTER TABLE combined_metrics ALTER COLUMN joules TYPE double precision, ALTER COLUMN co2e_grams TYPE double precision, ALTER COLUMN embodied_co2e_grams TYPE double precision, ALTER COLUMN total_cost TYPE double precision, ALTER COLUMN pue TYPE double precision, ALTER COLUMN grid_intensity TYPE double precision` and the same for combined_metrics_hourly, container_metrics, container_metrics_hourly (table rewrite: run in the controller migration with a lock timeout, batch per table; document the duration for large tables). Existing values keep their 7 significant digits (acceptable per row). 2) Until/independently of the migration, cast in every aggregate: `SUM(joules::double precision)` etc. in storage/postgres/repository.py (all SUM/AVG over these columns, including metrics_compressor SQL: `SUM(co2e_grams::double precision)`). 3) Add a repository test on real PostgreSQL that inserts 3M rows of 1e-4 (COPY) and asserts the summary equals 300 ± 1e-6 relative; add a schema test that no numeric measure column of the metrics tables is `real`. 4) Hourly rows already compressed were summed in float4 per (pod, hour) over ≤ 12 raw rows — error negligible, no backfill needed; cached summaries are recomputed by the next SummaryRefresher run.
+
+**Acceptance.** a) After migration `select data_type from information_schema.columns where table_name like '%metrics%' and column_name in ('joules','co2e_grams','embodied_co2e_grams','total_cost')` returns only 'double precision'. b) 30M-row synthetic sum test returns 3000 ± 0.001. c) /metrics/summary on the live kind DB equals the float8 SQL sum to 1e-9 relative. d) Repeating /report/summary 5 times returns identical totals.
+
+### WP-02.2 · Make upserts non-degrading and remove rows a new pass no longer produces
+
+#### STO-01 · Every metrics upsert overwrites all columns unconditionally and never removes rows the new pass did not produce, so any re-collection of a stored window replaces good values with degraded ones and leaves a mix of two collection generations.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** L · **Where** `src/greenkube/storage/postgres/repository.py:274-317`; `src/greenkube/storage/postgres/repository.py:480-512`; `src/greenkube/storage/postgres/repository.py:566-572`; `src/greenkube/storage/sqlite/repository.py:335-380`; `src/greenkube/storage/sqlite/repository.py:1088-1120`; `src/greenkube/core/collection.py:305-334`
+
+**Problem.** combined_metrics, container_metrics and node_idle_metrics are written with `INSERT ... ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET <every column> = EXCLUDED.<column>` (container key: namespace, pod_name, container_name, timestamp; idle key: node, timestamp). There is no comparison of provenance or quality between the stored row and the incoming row, and no delete of the rows of the window that the new pass did not return. A window is re-collected whenever (a) the watermark row is missing or forked (cluster name change, see COST-04/COL-02/RECON-10: seen live on kind), (b) an operator runs `greenkube start --last ...`, (c) a crash happens between the row commits and the watermark commit (STO-03), (d) the first run after an upgrade re-collects 24 h (CHANGELOG, data note of A1). The second pass is computed from the Kubernetes API and OpenCost as they are at that later time (RECON-01, COST-01): pods that were deleted meanwhile get cpu_request=0, memory_request=0 and owner NULL, an OpenCost outage gives cost_source=custom_rate. These values silently replace the opencost cost, the real requests and the owner that were stored by the first pass. Rows that only the first pass produced stay, rows that only the second pass produced are added, so the window total is the sum of rows from two different allocations (each pass allocates node energy and cost over the pods it saw).
+
+**Fix.** 1. Give every raw row a write generation: add `collected_at TIMESTAMPTZ` and `collection_run_id` (UUID of the MetricsCollectionJob window pass) to combined_metrics, container_metrics and node_idle_metrics (new migration, both dialects; NULL on existing rows). 2. Make the window write a replace, not a per-row upsert: in one transaction (see STO-03) upsert the rows of the pass, then `DELETE FROM <table> WHERE timestamp >= window.start AND timestamp < window.end AND collection_run_id IS DISTINCT FROM $run` so that a window always holds exactly one generation. 3. Add a quality guard so that a later pass cannot degrade a stored row. Define a total order per dimension in greenkube.models.provenance (cost: opencost > opencost_derived > list_price > custom_rate > none; requests/owner: observed > unknown; usage: prometheus container series > pod series > metrics API). The job must load the stored rows of the window, and for each key keep the stored value of a dimension when the incoming provenance is strictly worse (cost fields together with cost_source; cpu_request, memory_request, cpu_limit, memory_limit, owner_kind, owner_name together). Rows the new pass did not return are kept only if step 2's delete is restricted to rows whose every dimension is not better than the new pass; simplest rule: when the new pass is degraded on any cluster-wide dimension (OpenCost unavailable, pod list failed, pods of the window no longer in the API), do not replace the window at all, log it and export `greenkube_collection_recollect_skipped_total{reason}`. 4. Energy, CO2e and modelled cost are shares of a node total: they must be recomputed for the whole window from the merged inputs (never mixed row by row). 5. Backfill: none possible for already degraded rows; document in CHANGELOG. Expose `collected_at` in the metrics API.
+
+**Acceptance.** a) Collect window W with OpenCost and live pods; delete pod P; re-collect W with `--last` while OpenCost is down: P's row keeps cost_source=opencost, its cost, cpu_request>0 and owner; the test of SIM B prints the first-pass rows unchanged. b) Re-collect W with a strictly better pass (OpenCost back after an outage): costs are replaced and cost_source=opencost. c) After any re-collection, all rows of W have the same collection_run_id and SUM(joules) of pod rows + idle rows equals the node energy of the model for W (within 1e-6). d) Same tests on PostgreSQL and SQLite.
+
+### WP-02.3 · Commit a window atomically and never swallow row errors
+
+#### STO-04 · The SQLite metrics writer swallows per-row errors and still commits, so the window is reported written and the watermark advances over missing rows.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/storage/sqlite/repository.py:302-426`; `src/greenkube/storage/sqlite/repository.py:421-424`; `src/greenkube/storage/sqlite/repository.py:261-265`
+
+**Problem.** `SQLiteCombinedMetricsRepository.write_combined_metrics` wraps each row INSERT in `try: ... except sqlite3.Error: logging.error(...) except Exception: logging.error(...)` and then commits the rows that succeeded. The method returns normally, so `MetricsCollectionJob` counts the window as collected and advances the watermark. The PostgreSQL writer is all-or-nothing (executemany raises), so the two dialects behave differently, and every test that runs on SQLite cannot detect a rejected row. `save_history` of the carbon-intensity repository has the same per-row swallow.
+
+**Fix.** Remove the inner try/except in write_combined_metrics (and in SQLiteCarbonIntensityRepository.save_history): run all INSERTs of the batch in one explicit transaction (`db_manager.transaction(immediate=True)`), let any error roll the batch back and raise QueryError, exactly like the PostgreSQL writer. Set `PRAGMA busy_timeout` explicitly (for example 30000 ms) in DatabaseManager.setup_sqlite. Return the number of rows given, not the sum of cursor.rowcount.
+
+**Acceptance.** SIM A1 and A2 as tests: write_combined_metrics raises QueryError, no row of the batch is stored, MetricsCollectionJob.run returns error != None and the watermark is unchanged; the next run stores the 3 rows.
+
+#### STO-03 · A collection window is committed in four independent transactions (pod rows, container rows, idle rows, watermark) and PostgreSQL node snapshots in one autocommit statement per step, so a failure or a concurrent reader sees a partial window.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/collection.py:316-334`; `src/greenkube/storage/postgres/repository.py:235`; `src/greenkube/storage/postgres/repository.py:375-377`; `src/greenkube/storage/postgres/repository.py:552-553`; `src/greenkube/storage/postgres/repository.py:575-576`; `src/greenkube/storage/postgres/collection_watermark_repository.py:1-60`
+
+**Problem.** `MetricsCollectionJob._collect_window` calls `write_combined_metrics(rows)` (which commits the pod rows, then opens a second connection and commits the container rows), then `write_idle_metrics` (third commit), then `watermark_repository.advance` (fourth commit). Each uses `db_manager.connection_scope()`; `UnitOfWork` exists but is not used on this path. Consequences: (1) readers (API, recommendation engine, change measurement, the hourly compressor) can read a step with pod rows but no container rows or no `__idle__` rows; (2) when the container or idle write fails, the pod rows of the window stay while the watermark does not move; if the failure persists (for example one bad container row raises ValueError at postgres/repository.py:519 for the whole batch) the job re-collects the same window on every run and never reaches the following ones (head-of-line blocking), and after COLLECTION_MAX_BACKFILL the window is abandoned with its partial content; (3) a forced `--last` pass that is not contiguous with the watermark has no completion marker at all. Nothing records that a stored window is partial.
+
+**Fix.** 1. Add `write_window(window, pod_rows, container_rows, idle_rows, cluster_uid, source)` to the metrics repositories: one `UnitOfWork` (PostgreSQL: one connection + transaction; SQLite: BEGIN IMMEDIATE) that upserts the three row sets and advances the watermark with the same connection, then commits. The watermark repository gets an `advance(..., connection=...)` variant. 2. MetricsCollectionJob calls only `write_window`; leader-fence check immediately before it. 3. Validate rows before the transaction and quarantine invalid ones with a counter (`greenkube_collection_rows_rejected_total{reason}`) and an entry in a new `collection_window_log` table (window start/end, run id, rows per table, rejected rows, status complete|partial|failed) instead of failing the whole batch forever; the API health payload exposes the last partial or failed windows. 4. PostgreSQL batches: keep one transaction but send rows in chunks of at most 5,000 per executemany. 5. Same transaction rule for PostgresNodeRepository.save_nodes (see STO-06).
+
+**Acceptance.** Fault-injection test on both dialects: make write of idle rows raise; afterwards the window has 0 pod rows, 0 container rows and the watermark is unchanged. Make it succeed: all three sets and the watermark appear atomically (a concurrent reader polling during the write never observes pod rows of a step without its idle rows). A row with a NULL container timestamp is rejected and counted, the other rows of the window are stored and the window is logged as partial.
+
+### WP-02.4 · Remove schema limits: 64-bit ids, UTC time buckets
+
+**Also covers.** ROL-08 (Day, week and month buckets are computed with date_trunc in the PostgreSQL session time zone, which the connec...)
+
+#### STO-05 · combined_metrics.id and combined_metrics_hourly.id are 32-bit SERIAL and every upsert consumes a sequence value even when it updates, so large or long-lived installs stop collecting when the sequence is exhausted.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/core/migrations/scripts/postgres/0000_initial_schema.sql:3-4`; `src/greenkube/core/migrations/scripts/postgres/0002_hourly_aggregation_and_node_scd2.sql:9-10`; `src/greenkube/core/migrations/scripts/postgres/0002_hourly_aggregation_and_node_scd2.sql:62`; `src/greenkube/storage/postgres/repository.py:236-274`
+
+**Problem.** Live schema: combined_metrics.id integer, combined_metrics_hourly.id integer, node_snapshots_scd.id integer, carbon_intensity_history.id integer (container_metrics, node_idle_metrics are bigint). `INSERT ... ON CONFLICT DO UPDATE` calls nextval() for every proposed row, including the rows that end as an UPDATE (re-collections, the hourly compression upsert, the 24 h carbon recompute does not, but every `--last` and every watermark fork does). At 2,147,483,647 PostgreSQL raises `nextval: reached maximum value of sequence`, every write of the batch fails, the watermark stops, and after COLLECTION_MAX_BACKFILL the missed windows are abandoned.
+
+**Fix.** New migration (PostgreSQL): `ALTER SEQUENCE ... AS BIGINT` and `ALTER TABLE ... ALTER COLUMN id TYPE BIGINT` for combined_metrics, combined_metrics_hourly, node_snapshots_scd, node_snapshots, carbon_intensity_history and every other table whose id is int4 (list them from information_schema). The column rewrite takes an ACCESS EXCLUSIVE lock and rewrites the table: document the duration in docs/upgrading.md, or for large tables do it online (add id_new BIGINT, backfill in batches, swap). Better: drop the surrogate id from the raw and hourly metric tables and make the natural key the primary key (the id is only used by the carbon recompute join, which can use ctid-free key joins). Add a startup check that warns when any sequence is above 50% of its type.
+
+**Acceptance.** After the migration `select data_type from information_schema.columns where column_name='id' and table_name in (...)` returns bigint everywhere; a test sets the sequence to 2,147,483,640, writes 20 rows and succeeds; tests/integration/test_upgrade_from_v031.py still passes.
+
+#### STO-10 · PostgreSQL time buckets and report years are computed with date_trunc/EXTRACT in the session time zone, which the pool never sets to UTC, so on a database whose default time zone is not UTC daily, weekly, monthly and yearly figures are shifted and labelled with the wrong date.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** S · **Where** `src/greenkube/core/db.py:119-128`; `src/greenkube/storage/postgres/repository.py:985-1004`; `src/greenkube/storage/postgres/repository.py:855-856`; `src/greenkube/storage/postgres/repository.py:677-696`
+
+**Problem.** `asyncpg.create_pool(... server_settings={'search_path', 'statement_timeout'})` does not set `timezone`. `aggregate_timeseries` groups by `date_trunc('<unit>', ts)` on TIMESTAMPTZ values, `aggregate_grouped_row_count` uses `date_trunc('<unit>', timestamp)` and `list_metric_years` uses `EXTRACT(YEAR FROM timestamp)`. On timestamptz these functions work in the session TimeZone. The bucket comes back as an aware datetime in UTC and is formatted with a fixed pattern (`'%Y-%m-%dT00:00:00Z'`, `'%Y-%m-01T00:00:00Z'`, `'%Y-%m-%dT%H:00:00Z'`) that overwrites the hour and minute. The compressor (`_POSTGRES_HOUR`) and the SQLite queries use explicit UTC, so the write side and the SQLite dialect disagree with these reads. The bundled PostgreSQL runs in UTC; an external PostgreSQL (supported by the chart) with `timezone` set at server, database or role level does not.
+
+**Fix.** 1. Add `'timezone': 'UTC'` to the pool `server_settings` in core/db.py and to cli/db.py's asyncpg.connect. 2. Make the SQL independent of the session anyway: replace `date_trunc(u, ts)` with `date_trunc(u, ts, 'UTC')` (PostgreSQL 12+) or `date_trunc(u, ts AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`, and `EXTRACT(YEAR FROM ts)` with `EXTRACT(YEAR FROM ts AT TIME ZONE 'UTC')`, in every repository (grep date_trunc and EXTRACT). 3. Format buckets with `isoformat()` of the returned value instead of a pattern that overwrites the time part, and assert the returned bucket is at 00:00 UTC for day and coarser units. 4. If local-time reporting is wanted, add an explicit REPORT_TIMEZONE setting and return offsets.
+
+**Acceptance.** Integration test on PostgreSQL with `ALTER ROLE <user> SET timezone='Asia/Kolkata'`: rows at 2026-11-14T23:30Z and 2026-11-15T00:30Z give two daily buckets labelled 2026-11-14 and 2026-11-15, hourly buckets on whole UTC hours, and list_metric_years returns the UTC year; results equal the SQLite ones.
+
+### WP-02.5 · Distinguish unknown from zero, reject invalid values, keep sub-millicore usage
+
+#### STO-08 · Unknown requests, cost and energy are stored as 0 (model and schema defaults) instead of NULL, so SUM, AVG and MAX treat missing measurements as real zeros and hourly rows erase the difference.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** L · **Where** `src/greenkube/models/metrics.py:912-944`; `src/greenkube/core/historical_range_processor.py:808-809`; `src/greenkube/core/migrations/scripts/postgres/0033_container_metrics.sql:7-16`; `src/greenkube/core/migrations/scripts/postgres/0002_hourly_aggregation_and_node_scd2.sql:15-22`; `src/greenkube/core/metrics_compressor.py:108-122`
+
+**Problem.** CombinedMetric declares `total_cost: float = 0.0`, `co2e_grams = 0.0`, `joules = 0.0`, `cpu_request: int = 0`, `memory_request: int = 0`, `pue = 1.0`, `grid_intensity = 0.0`; the container and hourly tables add `DEFAULT 0` on the same columns. The processor writes `pod_request_map.get(pod_key, 0)`. A BestEffort pod (really no request) and a pod whose spec was not available at collection time are both stored as 0; a pod without cost data and a free pod are both 0 (only cost_source tells, and it is not used by the aggregates). The compressor then stores MAX(cpu_request), SUM(total_cost), AVG(pue), AVG(grid_intensity) over these zeros.
+
+**Fix.** Make the measurement columns nullable end to end: CombinedMetric fields `Optional[...] = None` for cpu_request, memory_request, total_cost, joules, co2e_grams, grid_intensity; migrations drop the DEFAULT 0 on raw, container and hourly tables (no rewrite of existing rows; add `request_source TEXT` with values spec|unknown and backfill 'unknown' where cpu_request=0 AND memory_request=0 AND owner_kind IS NULL). The processor writes NULL when the pod spec is unknown and 0 only when the spec is known and has no request. Aggregates: SUM ignores NULL but every aggregate returns `coverage` = rows with a value / rows; the compressor stores MAX over non-NULL and a `request_known_samples` count; consumers (rightsizing, impact shares) must skip steps with NULL requests instead of using 0.
+
+**Acceptance.** A window collected while the pod list fails stores cpu_request NULL and request_source=unknown; aggregate endpoints return coverage < 1 for it; the hourly row of an hour with 10 known steps at 500m and 2 unknown has cpu_request=500 and request_known_samples=10; a BestEffort pod has cpu_request=0 and request_source=spec.
+
+#### STO-18 · Neither CombinedMetric nor the metric tables reject NaN, infinite or negative values, and a single NaN stored in a PostgreSQL float column turns every SUM that includes the row into NaN.
+
+**Severity** low · **Evidence** plausible · **Effort** S · **Where** `src/greenkube/models/metrics.py:902-1034`; `src/greenkube/core/migrations/scripts/postgres/0000_initial_schema.sql:3-41`; `src/greenkube/core/migrations/scripts/postgres/0033_container_metrics.sql:2-27`; `src/greenkube/core/migrations/scripts/postgres/0050_impact_allocation.sql:13-37`; `src/greenkube/storage/postgres/repository.py:160-215`
+
+**Problem.** CombinedMetric has no validator: `CombinedMetric(joules=nan, total_cost=inf, co2e_grams=-5, cpu_request=-1)` is accepted. The metric tables have no CHECK constraint. Prometheus samples and OpenCost numbers are filtered with math.isfinite at the collectors (historical_range_processor.py:123, opencost_collector.py:33), but values computed afterwards (allocation shares, intensity records written by save_history from `record.get('carbonIntensity')`, recompute updates, `greenkube recompute`, the push API) reach the database unchecked. PostgreSQL stores NaN in REAL/DOUBLE columns and `SUM` over a set containing one NaN is NaN (and NaN sorts above every number in MAX and ORDER BY); SQLite silently stores NaN as NULL, so the two dialects differ. No failure path that produces NaN was found in this audit (live tables hold no NaN, infinite or negative value); this is a missing safeguard.
+
+**Fix.** Add a pydantic model validator on CombinedMetric and NodeIdleMetric (finite, and >= 0 for cost, energy, CO2e, requests, usage, duration > 0) that raises; the collection job quarantines the row and counts it (`greenkube_collection_rows_rejected_total{reason}`). Add CHECK constraints (`joules >= 0 AND joules <> 'NaN'` etc.) with NOT VALID then VALIDATE in a later migration. Validate intensity records before save_history.
+
+**Acceptance.** Writing a row with NaN joules raises before any SQL; the PostgreSQL tables reject a direct INSERT of NaN or a negative cost; the window is logged as partial with the rejected row counted.
+
+#### STO-17 · CPU usage is stored as integer millicores (and hourly averages are cast to INTEGER), so pods using less than 0.5 m are stored as exactly 0 while carrying energy and cost.
+
+**Severity** low · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/core/historical_range_processor.py:688`; `src/greenkube/core/historical_range_processor.py:868`; `src/greenkube/models/metrics.py:948-950`; `src/greenkube/core/metrics_compressor.py:104-105`; `src/greenkube/core/migrations/scripts/postgres/0000_initial_schema.sql:14`
+
+**Problem.** `int(round(cores * 1000))` is applied before storage and the columns cpu_usage_millicores, cpu_usage_avg and cpu_usage_max are INTEGER in both dialects. Energy is allocated from the unrounded value, so a row can have cpu_usage_millicores = 0 and joules > 0. The hourly table rounds a second time (`AVG(...)::INTEGER`, truncation on SQLite).
+
+**Fix.** Store CPU usage as DOUBLE PRECISION millicores (or integer microcores) in raw, container and hourly tables and in CombinedMetric (`Optional[float]`); keep the API field name and round only for display. Migration: ALTER COLUMN TYPE (values already stored stay integers).
+
+**Acceptance.** A pod with a constant 0.3 m usage is stored with 0.3 (raw) and 0.3 (hourly average) on both dialects; SUM over 100 such pods returns 30 m.
+
+### WP-02.6 · Make node snapshot versions stable
+
+#### NRG-07 · Two writers flip node_snapshots_scd.embodied_emissions_kg between NULL and the value every cycle: the SCD table grows by ~2 versions per node per cycle, and `greenkube recompute` zeroes embodied emissions when the latest version is the NULL one.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/embodied_service.py:119-132`; `src/greenkube/cli/start.py:163-175`; `src/greenkube/storage/postgres/node_repository.py:20-33`; `src/greenkube/storage/sqlite/node_repository.py:26-37`; `src/greenkube/impact/recompute.py:163-169`; `src/greenkube/impact/recompute.py:181-185`
+
+**Problem.** `save_nodes` creates a new SCD-2 version whenever one of `_SCD_COMPARE_COLS` changes, and `embodied_emissions_kg` is one of them. Two jobs save the same nodes with different values: `analyze_nodes()` (node-analysis loop) saves fresh `NodeCollector.collect()` objects whose `embodied_emissions_kg` is None, and `EmbodiedEmissionsService.prepare_embodied_data()` — called by every `run_range`, i.e. every collection cycle — sets `info.embodied_emissions_kg = profile['gwp_manufacture']` and calls `node_repository.save_nodes` again. Each alternation closes the current version and opens a new one, for nodes that did not change at all. Consequences: (1) unbounded growth of node_snapshots_scd and of the per-run node timeline (`get_snapshots(start, end)` + `get_latest_snapshots_before`), slowing every collection and every recommendation context build over months; (2) `MetricRecomputer._nodes_at(end)` takes the latest snapshot before the chunk end and `_spec` computes `embodied_g_per_hour` from `info.embodied_emissions_kg`; when that version is a NULL one the whole chunk is re-allocated with embodied = 0 for pods, containers and idle rows; (3) the node history is useless as an audit trail (hundreds of identical versions); (4) once the flapping is fixed, `get_node_info_at` will hit its 'snapshot too old' branch (age measured from the version start, NODE_DATA_MAX_AGE_DAYS=30) for every stable node at every step.
+
+**Fix.** 1) Remove embodied emissions from node identity: drop `embodied_emissions_kg` from `_SCD_COMPARE_COLS` (both backends) and stop calling `node_repository.save_nodes` from `prepare_embodied_data` (delete embodied_service.py:119-132; node snapshots are owned by the node-analysis loop and by nothing else). 2) Keep embodied data in `instance_carbon_profiles` keyed by (provider, instance_type) [+ node override], with source and fetched_at (see NRG-01), and make every consumer read it from there: `MetricRecomputer._spec`, `ImpactProjector._build_pool`, the nodes API. `MetricRecomputer` must use the embodied repository (or the profile recorded at collection time) rather than the snapshot column, and must refuse to lower a stored non-zero embodied value to 0 because a lookup returned nothing (keep the row's value and count it in the report). 3) Migration: collapse consecutive SCD versions that are identical on all remaining compare columns (keep the earliest valid_from and the latest valid_to), in batches; add a unique partial index `(node_name) WHERE is_current`. 4) `get_node_info_at`: measure staleness against the version's `valid_to`/`is_current` (a current version is never 'too old'); add `get_latest_snapshots_before(..., include_inactive=True)` for recompute so removed nodes keep their capacity. 5) Add gauge `greenkube_node_snapshot_versions_total` and a test that runs analyze_nodes + run_range alternately 50 times and asserts one version per unchanged node.
+
+**Acceptance.** a) 50 alternating analyze_nodes()/run_range() cycles on an unchanged cluster leave exactly 1 row per node in node_snapshots_scd. b) sim_recompute.py scenario: embodied totals identical before and after `greenkube recompute --all`. c) Migration on the live minikube DB reduces 305 versions to 1 (or to the number of real changes). d) A node unchanged for 45 days still resolves its snapshot (no 'too old' warning) while it is current.
+
+#### STO-06 · Node snapshot versions (SCD2) are compared against float4 columns and written without a transaction or a uniqueness constraint, so any non-float4-exact capacity or embodied value creates a new version on every cycle and two writers can leave zero or two current rows.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/storage/postgres/node_repository.py:22-33`; `src/greenkube/storage/postgres/node_repository.py:50-115`; `src/greenkube/core/migrations/scripts/postgres/0002_hourly_aggregation_and_node_scd2.sql:62-77`; `src/greenkube/storage/sqlite/node_repository.py:128`
+
+**Problem.** `node_snapshots_scd.cpu_capacity_cores` and `embodied_emissions_kg` are REAL (float4) in PostgreSQL. `save_nodes` reads the current row and compares `current[col] != getattr(node, col)` in Python. asyncpg returns the float4 widened to a double, so a stored 1037.3 comes back as 1037.300048828125 and never equals the collector's 1037.3: the row is closed and a new version inserted on every call. Today the values are 14 cores and the flat 100 kg default (NRG-01), which are float4-exact, so the churn seen live (708 versions per node in 12.5 h) is the NULL/100 flip of NRG-07; as soon as real Boavizta values or fractional allocatable CPU are stored, the float4 mismatch produces the same churn by itself. Separately: the close (UPDATE ... is_current=FALSE) and the INSERT are two autocommit statements on a plain `connection_scope()` (no transaction), there is no unique index on (node_name) WHERE is_current, and two writers (node analysis and the embodied service) call save_nodes within seconds of each other. A crash or an interleaving between the two statements leaves a node with no current row or with two. `get_latest_snapshots_before` then returns an arbitrary one (ORDER BY valid_from DESC, first seen). The PostgreSQL fallback timestamp is `datetime.utcnow()` (naive). The SQLite repository additionally inserts one legacy `node_snapshots` row per node per call; neither that table nor node_snapshots_scd is pruned by the retention job (metrics_compressor._prune_raw covers only the metric tables).
+
+**Fix.** 1. Migration: `ALTER TABLE node_snapshots_scd ALTER COLUMN cpu_capacity_cores TYPE DOUBLE PRECISION, ALTER COLUMN embodied_emissions_kg TYPE DOUBLE PRECISION` (same for node_snapshots). 2. Compare with a tolerance for floats (`math.isclose(rel_tol=1e-6)`), and never treat NULL -> value of embodied_emissions_kg from a writer that does not know the value as a change: writers pass only the fields they own (node analysis must not null the embodied value; fix shared with NRG-07). 3. Run save_nodes in one transaction with `SELECT ... FOR UPDATE` on the current row, and add `CREATE UNIQUE INDEX uq_node_scd_current ON node_snapshots_scd(node_name) WHERE is_current` (after a data fix that keeps the newest current row per node). 4. Data repair migration: collapse consecutive versions of a node that are equal on every compared column (keep the first valid_from and the last valid_to). 5. Stop writing the legacy node_snapshots table in SQLite or prune it with the raw retention.
+
+**Acceptance.** PostgreSQL test: save a node with cpu_capacity_cores=3.92 and embodied_emissions_kg=1037.3 one hundred times: exactly one row. Two concurrent save_nodes calls with different values: exactly one current row per node, valid intervals contiguous. After the repair migration on a copy of the live kind database each node has at most a handful of versions.
+
+### WP-02.7 · Use the model and calculation versions on read
+
+#### STO-07 · No read path uses calculation_version or model_version, the hourly tables do not keep model_version, and rows written before the model changes (documented as about 2x inflated CPU and energy) are summed with current rows without any flag.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/metrics_compressor.py:132`; `src/greenkube/core/historical_range_processor.py:47-49`; `src/greenkube/core/migrations/scripts/postgres/0050_impact_allocation.sql:1-12`; `src/greenkube/storage/postgres/repository.py:709-803`; `CHANGELOG.md:334`
+
+**Problem.** Raw rows carry `calculation_version` (`<version>+range.3`) and `model_version` (Impact Model 2.0.0, NULL on rows written before migration 0050). `grep` over src/greenkube shows that the only readers are `greenkube recompute` (raw rows only) and the compressor, which stores `MAX(calculation_version)` (a lexical maximum, so `0.10.0+range.3` < `0.9.0+range.2`) and drops model_version: combined_metrics_hourly and container_metrics_hourly have no model_version column. No aggregate query (aggregate_summary, aggregate_timeseries, aggregate_by_namespace, aggregate_top_pods, summary refresher, reports) filters or reports by version. CHANGELOG states that rows stored before the A1 fix are inflated (pod cgroup summed with container series, about 2x CPU and energy) and that `older raw and hourly rows are not rewritten`. An install upgraded from 0.3.1 therefore shows monthly and yearly totals that add legacy-semantics hours to new ones, with nothing in the API or UI to tell them apart, and legacy hourly rows can never be recomputed (their raw rows are gone).
+
+**Fix.** 1. Migration: add `model_version TEXT` to both hourly tables; compressor stores the single version of the hour or 'mixed' (same rule as `_source_aggregate`), and replaces MAX(calculation_version) with the same rule. 2. Add a small table `metric_semantics_epochs(valid_from, calculation_version, model_version, note)` written when the controller first runs a new version, and return from every aggregate endpoint a `model_versions` list plus `legacy_share` (fraction of the energy that comes from rows whose model_version is NULL or older than the current one). The UI marks the legacy period on time series (annotation at the epoch boundary) and adds a warning on totals that span it. 3. Offer `greenkube recompute --hourly`: for legacy hourly rows apply the documented correction only when it is exact; otherwise let the operator exclude legacy periods (`exclude_legacy=true` query parameter, default true for savings and report endpoints). 4. Backfill: mark existing hourly rows with model_version NULL -> 'legacy' during the migration.
+
+**Acceptance.** Database seeded with hours of calculation_version '0.3.1' and hours of the current version: `GET /api/v1/metrics/summary` over both returns legacy_share > 0 and both versions; with exclude_legacy=true the total equals the sum of current-version rows only; compression of an hour holding two versions stores 'mixed'; '0.10.0' is never ordered below '0.9.0'.
+
+### WP-02.8 · Small storage defects
+
+#### STO-12 · SQLite stores timestamps as ISO text with variable fractional precision, so range bounds that fall in the same second as a row select the wrong rows.
+
+**Severity** low · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/utils/time.py:46-48`; `src/greenkube/storage/sqlite/repository.py:460-462`; `src/greenkube/storage/sqlite/repository.py:1196-1198`; `src/greenkube/storage/sqlite/collection_watermark_repository.py:9-10`
+
+**Problem.** `to_iso_z` uses `datetime.isoformat()`, which prints microseconds only when they are not zero. Rows are step-aligned (`2026-11-15T10:00:00Z`), bounds derived from `now` are not (`2026-11-15T10:00:00.500000Z`). In text order '.' (0x2E) sorts before 'Z' (0x5A), so `10:00:00.5Z < 10:00:00Z`. A lower bound inside the second of a row includes the row that is before it, an upper bound excludes the row that is before it. The compressor works around it with an extra bucket predicate (comment at metrics_compressor.py:181-183), the watermark repository with a fixed-width format; every other SQLite read and the node repositories (isoformat with +00:00) do not.
+
+**Fix.** Make `to_iso_z` fixed width: `ensure_utc(value).strftime('%Y-%m-%dT%H:%M:%S.%fZ')` is not compatible with stored rows, so instead truncate every SQLite bound to whole seconds with explicit semantics (`>= floor(start)` and `< ceil(end)`), or store epoch seconds (INTEGER) in new SQLite columns and migrate. Use one helper for all SQLite repositories, including the node repositories.
+
+**Acceptance.** SIM C as a test returns the 10:05:00 row for the first query and the 10:00:00 row for the second, on SQLite and PostgreSQL alike.
+
+#### STO-13 · pod_count in summaries is COUNT(DISTINCT pod_name) without the namespace, so same-named pods of different namespaces are counted once.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** S · **Where** `src/greenkube/storage/postgres/repository.py:785`; `src/greenkube/storage/sqlite/repository.py:762`; `frontend/src/routes/footprint/+page.svelte:180`
+
+**Problem.** aggregate_summary computes `COUNT(DISTINCT pod_name) AS pod_count` over the union of raw and hourly rows. The pod identity everywhere else is (namespace, pod_name). StatefulSet pods (`postgres-0`, `redis-0`, `prometheus-k8s-0`) commonly exist in several namespaces. The figure is shown as `Active Pods` on the Footprint page and as unique_pods in the report, although it counts every pod that had a row in the period, not the active ones.
+
+**Fix.** Use `COUNT(DISTINCT (namespace, pod_name))` on PostgreSQL and `COUNT(DISTINCT namespace || '/' || pod_name)` on SQLite; rename the UI label to `Pods seen in period`.
+
+**Acceptance.** Two rows (ns a, pod db-0) and (ns b, pod db-0): pod_count = 2 on both dialects.
+
+#### STO-15 · All pending migrations run in one transaction that takes ACCESS EXCLUSIVE locks on the metric tables and then rewrites them (0039 backfill), with the statement timeout disabled.
+
+**Severity** low · **Evidence** likely · **Effort** M · **Where** `src/greenkube/core/migrations/runner.py:93-119`; `src/greenkube/core/migrations/scripts/postgres/0039_metric_provenance.sql:8-104`
+
+**Problem.** `_run_postgres` opens one transaction for the whole batch (0038 to 0113 when upgrading from 0.3.1), sets `statement_timeout = 0` and applies every script. 0039 first runs `ALTER TABLE ... ADD COLUMN` on combined_metrics, combined_metrics_hourly, container_metrics and container_metrics_hourly (ACCESS EXCLUSIVE, held until the batch commits) and then `UPDATE` every row of the four tables, the container one with two correlated sub-selects per row. Every row is rewritten once (table size doubles until vacuum) and no reader or writer can touch the tables until all later migrations have finished. Old API pods still running during the rolling upgrade block and then fail on their 30 s statement timeout. A failure in any later script rolls the whole batch back and the controller repeats the full rewrite at each restart. The runner also keeps no checksum of applied scripts and applies any version missing from schema_migrations regardless of order (the shipped numbering has gaps: 0047-0049, 0051, 0062, 0067...), so a script added later with a lower number runs after higher ones on existing databases and before them on new ones, and an edited script is never noticed. (Scripts 0000-0037 are unchanged since v0.3.1.)
+
+**Fix.** Run one transaction per migration (keep the advisory lock for the batch), split data backfills from DDL into separate versions executed in batches by key range outside the DDL transaction, and record progress so a restart resumes. Document expected durations in docs/upgrading.md.
+
+**Acceptance.** Upgrade test with 5 million seeded rows: no lock on combined_metrics is held for more than a few seconds (checked through pg_locks sampling), and killing the controller during the backfill resumes without redoing completed ranges.
+
+#### STO-16 · `greenkube db copy` drops all metric history by default and the documentation says it is re-collected, although only the last COLLECTION_MAX_BACKFILL (24 h) can be.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** S · **Where** `src/greenkube/cli/db.py:26-28`; `src/greenkube/cli/db.py:53-75`; `docs/upgrading.md:132-135`
+
+**Problem.** The SQLite to PostgreSQL copy excludes METRIC_TABLES (raw, hourly and container metrics, idle rows, node snapshots, intensity history, usage rollups and both watermarks) unless `--include-metrics` is given. The docstring and docs/upgrading.md say `Metric history is large and is re-collected`. After the copy the controller has no watermark and collects only the last 24 h; hourly history of the previous months cannot be rebuilt (Prometheus retention is usually 15 days and the backfill horizon 24 h). The savings ledger, baselines and change measurements are copied and keep referring to periods for which the new database holds no metric.
+
+**Fix.** Copy the hourly tables, node snapshots, intensity history and watermarks by default (they are small) and keep only the raw tables behind `--include-raw-metrics`; correct the docstring and docs/upgrading.md to state exactly what is lost; print the first and last hour copied.
+
+**Acceptance.** Copy of a SQLite file holding 90 days of hourly rows without any flag: the PostgreSQL combined_metrics_hourly has the same row count and sums; aggregate_summary over the 90 days matches the source within float tolerance.
+
+## WP-03 · Cost integrity
+
+**Goal.** Cost comes from one stated source per row, is conserved against OpenCost, and is repaired after an outage.
+
+**Main files.** src/greenkube/collectors/opencost_collector.py, impact/pricing.py, data/pricing/, scripts/generate_pricing_catalog.py, the cost functions of core/metric_assembler.py, models/provenance.py
+
+**Depends on.** WP-01 for the hole and re-collection mechanism used to re-price a window.
+
+### WP-03.1 · Never replace OpenCost cost silently; re-price the window when OpenCost is back
+
+**Also covers.** RECON-09 (An OpenCost outage or lag is stored as modelled custom_rate cost (+10.8% in the simulation), the window is mar...)
+
+#### COST-01 · An OpenCost outage, empty answer or rejected request silently switches the window to list-price or default-rate cost, the watermark still advances, the window is never re-priced, and a re-collection overwrites good OpenCost cost.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** L · **Where** `src/greenkube/collectors/opencost_collector.py:400-443`; `src/greenkube/core/historical_range_processor.py:572-579`; `src/greenkube/core/metric_assembler.py:38-55`; `src/greenkube/impact/rows.py:288-319`; `src/greenkube/core/collection.py:305-334`; `src/greenkube/storage/postgres/repository.py:274-320`
+
+**Problem.** Step by step. (1) OpenCostCollector.collect() never raises for a failed call: an unresolved URL, any httpx.HTTPError (timeout, 401, 503), invalid JSON and an empty data list all end in 'return []' (lines 400-403, 412-415, 419-424, 438-443); only a Prometheus counter records outcome error or empty. (2) run_range builds 'cost_map = {(c.namespace, c.pod_name): c for c in cost_metrics}' inside 'try ... except Exception: cost_map = {}' (572-579), so an outage is indistinguishable from a cluster without OpenCost. (3) Every row then goes through cost_fields(None, ...) which yields cost_source none, and MetricRowAllocator._apply replaces it by the modeled cost labelled pricing_catalog or custom_rate (rows.py 297-318). (4) MetricsCollectionJob._collect_window writes the rows and advances the watermark (collection.py 316-334); report.error stays None. The window is collected exactly once, and nothing re-reads OpenCost later (impact/recompute.py: 'Nothing is re-read from Prometheus or OpenCost'). (5) pricing_catalog is in TRUSTED_COST_SOURCES, and the verifier trusts each row on its own (cost_is_trusted), so rows priced by OpenCost (spot, discounts, custom pricing) and rows priced at on-demand list price are compared in one measurement. (6) The upsert is unconditional: 'ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET total_cost = EXCLUDED.total_cost, ... cost_source = EXCLUDED.cost_source', so 'greenkube collect --last' (or any re-run of a window) during an outage replaces stored OpenCost cost by the fallback.
+
+**Fix.** 1. Collector contract: make collect()/collect_range() return a typed result (status = ok | empty | unavailable | not_configured, plus metrics) or raise OpenCostUnavailableError for transport errors, non-2xx, invalid JSON and unresolved URL after OpenCost was configured or discovered once. Never return [] for an error. 2. run_range: keep the status of the window. When OpenCost is configured/was reachable before (persist last successful allocation time, e.g. a collection_watermarks row with source opencost_cost) and the status is unavailable or empty, still write usage rows but mark their cost as pending: modeled cost with a distinct provenance (new cost_source value such as pending_opencost, or a cost_pending boolean column) that is never trusted, and enqueue the window in a new table cost_backfill_queue(cluster, window_start, window_end, attempts, last_error). 3. New controller job 'cost reconciliation' (every few minutes, leader only): for each queued window still inside Prometheus/OpenCost retention, call collect_range for the exact window and UPDATE only total_cost, cost_cpu, cost_ram, cost_storage, cost_network, cost_lb, cost_source, is_estimated and estimation_reasons of pod rows, then re-split container rows; drop the queue entry on success; expose greenkube_cost_backfill_pending_windows and the age of the oldest entry. 4. Upsert guard in write_combined_metrics and write_container_metrics (Postgres and SQLite): when the stored cost_source is opencost, opencost_derived or kubecost and EXCLUDED.cost_source is not, keep the stored cost columns (CASE expressions). 5. Measurement: require one price basis per measurement; rows whose cost_source family differs from the dominant family of the baseline are excluded (or the verdict is inconclusive with reason mixed_price_basis). 6. Health: GET /health/services must test the allocation endpoint itself and report the last successful allocation; the UI shows a banner while windows are pending. 7. Backfill of stored rows: one-off 'greenkube cost backfill --since <raw retention>' that re-queries OpenCost for raw rows with cost_source custom_rate or pricing_catalog in periods where the same cluster has opencost rows. Document the behaviour in docs/methodology/impact-model.md and docs/configuration.md.
+
+**Acceptance.** (a) Range harness with a fake OpenCost answering 503 for window 2: rows of window 2 carry the pending provenance, is_cost_trusted is False for them, cost_backfill_queue has one entry, the usage watermark advances. (b) After the fake recovers, one reconciliation run sets those rows to cost_source opencost with total_cost equal to the allocation (0.010320 in the simulation data) and empties the queue. (c) A forced re-collection of window 1 while OpenCost is down leaves its stored opencost cost unchanged (both databases). (d) Verifier test: baseline of opencost rows and an after-window containing pricing_catalog rows never produces a realized saving from the price switch (rows excluded or verdict inconclusive). (e) A cluster that never had OpenCost produces modeled rows and no queue entry. (f) HTTP 401 and invalid JSON behave like 503.
+
+### WP-03.2 · Do not trust allocations that carry no usable cost
+
+**Also covers.** RECON-11 (OpenCost allocations with zero duration (minutes = 0, start = end) are stored as a trusted OpenCost cost of 0 ...)
+
+#### COST-05 · OpenCost allocations that carry no usable cost (minutes = 0, or sub-precision figures that cannot be rebuilt) are stored with the trusted label opencost, as an exact zero or a rounded value.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/collectors/opencost_collector.py:128-152`; `src/greenkube/collectors/opencost_collector.py:193-202`; `src/greenkube/collectors/opencost_collector.py:291-300`; `src/greenkube/impact/rows.py:120-125`; `src/greenkube/models/provenance.py:111-136`; `src/greenkube/models/provenance.py:187-209`
+
+**Problem.** Case A, zero minutes. After a gap in OpenCost's own data, or in the first window of a new pod, OpenCost answers with allocations where minutes = 0, start = end, cpuCoreHours = 0 and totalCost = 0 while cpuCoreRequestAverage is set. needs_node_prices returns False ('if minutes is None or minutes <= 0: return False'), so nothing is rebuilt; untrusted_cost_reason needs _ran_with_requests, which requires 'minutes > 0', so the zero is not flagged; the CostMetric gets source opencost and total 0. _is_observed_cost is True for it, so the modeled fallback is not applied either. The documented rule (a zero for a pod with requests is a missing price, fail closed) is bypassed. is_cost_trusted rejects such a row at read time only when the row has a request; pods without requests pass as trusted zeros, and hourly rollups sum the zero and keep the trusted label. Case B, failed rebuild. When rebuilt_cost returns None for a non-zero sub-precision allocation (node price not yet known, agreement check failed), the 5-decimal OpenCost figures are kept with source opencost and are trusted although their rounding error is unbounded relative to the value.
+
+**Fix.** 1. In _allocation_to_cost_metric treat an allocation with minutes <= 0 (or start == end, or cpuCoreHours == 0 and ramByteHours == 0 while a request or usage average is positive) as carrying no cost: source none, whatever the requests. The row then receives the modeled cost with its own label (or, with COST-01, the pending provenance and a later re-pricing). 2. For a non-zero allocation below PRECISION_FLOOR whose rebuild fails, do not keep the trusted label: use source none (fail closed, as the methodology states) or a new untrusted label opencost_rounded; count these in a metric greenkube_opencost_unrebuilt_allocations_total. 3. Move the zero rule out of the read path: is_cost_trusted must not accept a zero total from an OpenCost-family source for any row whose usage or request is positive; keep the current check as defence in depth. 4. Stored rows: migration or one-off command that sets cost_source to none for raw rows with cost_source opencost, total_cost = 0 and (cpu_request > 0 or memory_request > 0 or cpu_usage_millicores > 0), then 'greenkube recompute' to give them the modeled cost; hourly rows containing such steps cannot be repaired and should be marked mixed. 5. Update the OpenCost precision section of docs/methodology/impact-model.md.
+
+**Acceptance.** (a) Unit test with the recorded live item (minutes 0, start = end, request 0.1 core, totalCost 0): CostMetric.source is none; for the pod without requests but with cpuCoreUsageAverage > 0 as well. (b) run_range with such an allocation stores a row whose cost_source is not opencost and whose total_cost is the modeled reservation cost, never 0 for a pod with a request. (c) A sub-precision allocation with cpuCost 0.00003 and no node price is not trusted. (d) is_cost_trusted({cost_source: opencost, total_cost: 0, cpu_usage_millicores: 6}) is False. (e) On the e2e clusters no row has cost_source like 'opencost%' and total_cost = 0 with a positive request.
+
+### WP-03.3 · Make per-step cost independent of how the window was chunked
+
+**Also covers.** RECON-08 (The OpenCost cost of a pod is spread over its Prometheus rows with `step / (minutes x 60)`, so the stored cost...)
+
+#### COL-10 · In multi-step (catch-up or backfill) windows each row of a pod gets OpenCost cost x step / running time, so pods that ran only part of the window are over-costed.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/collectors/opencost_collector.py:319-336`; `src/greenkube/core/historical_range_processor.py:573-577`; `src/greenkube/core/historical_range_processor.py:771-776`
+
+**Problem.** run_range asks OpenCost once for the whole window and gives every row of the pod `min(1, step / (minutes * 60))` of the window cost. The number of rows is the number of steps with a CPU sample, which exceeds running_time / step whenever the pod covers partial steps. Scheduled single-step windows are exact (share 1); the error appears in the 1-hour chunks used after downtime and for the first-install backfill.
+
+**Fix.** Query OpenCost with the collection step for multi-step windows (window=start,end with step=<step> and accumulate=false) and use each step's own allocation; if the step is finer than OpenCost's resolution, split the window allocation by the pod's running seconds inside each step (overlap of the allocation start/end with the step), normalised so that the shares of one pod sum to 1, and put the share of steps without a row into the unattributed row of COL-03.
+
+**Acceptance.** Scenario S9 stores 0.70 +/- 1% for job-7min (0.30 and 0.40 by running seconds) and 1.20 for the steady pod; a property test checks that the per-pod stored cost of a window equals the OpenCost allocation.
+
+### WP-03.4 · Split pod cost between containers by reservation
+
+**Also covers.** IMP-02 (Container rows receive the pod's CPU cost by CPU-usage share (not reservation share), so per-container request...)
+
+#### COST-02 · The pod cost is split between containers by CPU usage share instead of reservation, so container costs and the unit prices of rightsizing projections are wrong for every multi-container pod.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/metric_assembler.py:223-264`; `src/greenkube/impact/recompute.py:105-127`; `src/greenkube/collectors/opencost_collector.py:390-393`; `src/greenkube/impact/model.py:144-202`; `src/greenkube/core/optimization/analyzers/rightsizing_cpu.py:57-63`
+
+**Problem.** OpenCost is queried per pod only ('aggregate': 'namespace,pod'). assemble_container_metrics then splits the pod row: 'cpu_weights = [max(resource_maps.container_cpu_usage_map[key], 0) ...]' (CPU usage, then memory usage, then requests only when usage is missing or zero), 'cost_cpu = (aggregate.cost_cpu or 0.0) * share', 'cost_ram = (aggregate.cost_ram or 0.0) * memory_share' with memory usage weights. OpenCost and the Impact Model both charge the reservation max(request, usage), so a container with a large request and little usage (the target of rightsizing) receives too little cost and a busy sidecar too much. The projection anchors each container sample to this cost: sample_prices divides the container cost_cpu by the container's reserved core-hours, so the unit price itself is distorted and stored in the recommendation (assumptions.unit_prices). The same split is used for modeled rows and by greenkube recompute.
+
+**Fix.** 1. Preferred: collect OpenCost at container granularity. In OpenCostCollector.collect use aggregate=namespace,pod,container (one call), build the pod CostMetric as the sum of its containers (so pod totals stay identical to today) and a container cost map keyed (namespace, pod, container) carrying cpu/ram/gpu and the sub-precision rebuild per container. Pass it to assemble_container_metrics and use the container's own cost when present; non-container components (pv, network, lb, shared) stay on the pod row and are split by reservation. 2. Fallback split (no container allocation, modeled rows, recompute): CPU cost by CPU reservation share max(cpu_request, cpu_usage) per container, RAM cost by memory reservation share max(memory_request, memory_usage); never by usage alone; equal split only when both are zero. Apply the same function in impact/recompute.py so collection and recompute agree. 3. Bump CALCULATION_VERSION (range.4) and document the rule in docs/methodology/impact-model.md (stored rows section). 4. Stored data: container rows inside raw retention are re-split by 'greenkube recompute --all' (pod rows are unchanged); hourly container aggregates and workload_usage_hourly cannot be re-split, so recommendations built on windows older than the fix must be flagged (calculation_version below range.4) or the rollup rebuilt from raw rows where they still exist. 5. Re-run the recommendation scan after the recompute so stored projections are replaced.
+
+**Acceptance.** (a) Unit test of assemble_container_metrics: pod cost_cpu C, containers app (1000m request, 50m usage) and proxy (100m, 50m): app cost_cpu = 0.909 C, proxy = 0.091 C within 1%; sum of container rows equals the pod row for total_cost, cost_cpu and cost_ram. (b) With a container-level OpenCost fixture, each container row equals OpenCost's container cpuCost and ramCost within rounding. (c) Projection test: app 1.0 -> 0.1 core projects 0.9 x unit price x hours and proxy 0.10 -> 0.05 projects 0.05 x unit price x hours, both within 2% of the OpenCost figure. (d) On the live e2e clusters the unit prices stored in recommendations of multi-container workloads are within 3% of the single-container ones. (e) recompute produces the same container rows as collection for the same pod row.
+
+### WP-03.5 · Read PersistentVolume and LoadBalancer costs from OpenCost correctly
+
+#### COST-03 · collect_pv_costs and collect_lb_costs never return a cost with a real OpenCost (wrong query parameter and response fields), so orphan PV and LoadBalancer savings always use the flat defaults and their deletion can never be measured.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/collectors/opencost_collector.py:506-587`; `src/greenkube/collectors/opencost_collector.py:589-678`; `src/greenkube/collectors/pv_collector.py:283-290`; `src/greenkube/collectors/lb_collector.py:540-546`; `src/greenkube/core/optimization/analyzers/orphaned_pv.py:59-73`; `src/greenkube/core/optimization/analyzers/orphaned_lb.py:65-103`
+
+**Problem.** Both functions send 'params = {"aggregateBy": "persistentvolume" | "service", "window": "7d"}' to three candidate paths. On OpenCost the first two paths (/api/v1/allocation/aggregate, /allocation/aggregate) do not exist (404) and /allocation ignores the unknown aggregateBy parameter (the real one is aggregate), returning un-aggregated allocations keyed cluster/node/namespace/pod/container. The parser then looks for fields OpenCost does not have: 'allocations.get(name)', 'properties.persistentVolume', 'entry.get("pvCosts")', 'entry.get("storageCost")' and 'entry.get("loadBalancerCosts")'. OpenCost reports PV cost in each allocation's 'pvs' map (key 'cluster=<id>:name=<pv>', fields byteHours, cost, adjustment) and LoadBalancer cost in 'lbAllocations' (key '<cluster>/<namespace>/<service>', fields service, cost, private, ip, hours). Both functions therefore always return {}. Consequences: orphaned_pv always falls to 'annual_cost = capacity_gib * cfg.STORAGE_COST_PER_GIB_MONTH * 12' with cost_source custom_rate, orphaned_lb to LOAD_BALANCER_COST_PER_MONTH * 12 for any LoadBalancer with an address that is not a recognised bare-metal allocator; verify/deletion.py refuses to book a custom_rate rate, so every deletion ends inconclusive. In addition 'if window_cost:' drops an observed zero, and the annualization 'window_cost * (365.0 / window_days)' assumes the asset existed for the whole 7 days.
+
+**Fix.** 1. Rewrite collect_pv_costs: call the resolved allocation endpoint (/allocation/compute, the path already used by collect) with window=<start>,<end>, aggregate=namespace, accumulate=true, includeIdle=false; iterate every allocation including __unmounted__ and sum pv['cost'] + pv['adjustment'] per PV name parsed from the 'cluster=<id>:name=<pv>' key; also return byteHours so the caller can annualize by the hours the volume existed (cost / (byteHours / capacity_bytes) x 8760) instead of 365 / window_days. Alternative source to evaluate: OpenCost /assets with filter assetType:"disk" (it lists the same volume with bytes, byteHours and cost). 2. Rewrite collect_lb_costs from lbAllocations (key '<cluster>/<namespace>/<service>', field cost and hours) with the same annualization; match on namespace/name exactly, never on the service name suffix alone (today a suffix match could attach another namespace's cost). 3. Keep observed zeros: return 0.0 for an asset OpenCost knows at zero cost, and let the analyzers treat it as an observed rate (cost_source opencost, saving 0) instead of replacing it by the flat default. 4. Flat defaults: apply STORAGE_COST_PER_GIB_MONTH and LOAD_BALANCER_COST_PER_MONTH only when the node provider is a known cloud; on unknown/on-prem providers project no cost unless the operator set the values explicitly (make the settings Optional, default None, and document them in docs/configuration.md and the Helm values). 5. Use the configured currency in the recommendation text instead of a literal dollar sign. 6. Add contract tests from payloads recorded on a real OpenCost (the files in audit/work/cost/oc_pv_live.json are a starting point) and an e2e assertion on the kind cluster. 7. Existing recommendations are recomputed by the next scan; no data migration.
+
+**Acceptance.** (a) Recorded kind payload: collect_pv_costs(['gk-waste-csi-released']) returns 0.001418 (+-1%) for the 5.18 h window and the recommendation shows about 2.40 per year with cost_source opencost. (b) lbAllocations fixture with cost 0.42 over 7 days for shop/web-lb: collect_lb_costs(['shop/web-lb']) returns 0.42 and annual_cost 21.9; a Service other/web-lb is not matched. (c) An asset known to OpenCost at cost 0 yields a projection of 0 with cost_source opencost, not the flat default. (d) Unknown provider and no explicit default: orphan PV recommendation has no cost saving and says so. (e) After apply detection confirms the PV is absent, the deletion measurement of an OpenCost-priced PV is realized with rate source allocated_rate_at_decision. (f) The 404 answers of non-existing paths are not requested any more.
+
+### WP-03.6 · Send OpenCost credentials with allocation requests and filter by cluster
+
+#### COST-06 · The OpenCost credentials (OPENCOST_BEARER_TOKEN, OPENCOST_USERNAME, OPENCOST_PASSWORD) are sent only by the discovery health probe, never by the allocation requests, so an authenticated OpenCost or Kubecost silently yields no cost.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/collectors/opencost_collector.py:354-358`; `src/greenkube/collectors/opencost_collector.py:408-415`; `src/greenkube/collectors/opencost_collector.py:490-493`; `src/greenkube/collectors/discovery/opencost.py:50-62`; `src/greenkube/core/config.py:204-206`; `helm-chart/templates/_helpers.tpl:240-243`
+
+**Problem.** config.py declares the three secrets and the Helm chart projects them into the API and controller pods. The only code that reads them is OpenCostDiscovery._probe_opencost_endpoint, which adds 'Authorization: Bearer ...' or basic auth to its /healthz probe. OpenCostCollector._get_client builds 'get_async_http_client(verify=verify)' (User-Agent only) and every request is 'client.get(u, params=params)' without headers or auth: collect, _fetch_node_prices, collect_pv_costs, collect_lb_costs and _probe. Behind an authenticating proxy the allocation call gets 401/403, collect() returns [] (see COST-01) and all cost becomes modeled, while discovery and the service health check, which do authenticate or only test /healthz, report OpenCost as reachable.
+
+**Fix.** 1. In OpenCostCollector._get_client build the client with the credentials: headers Authorization Bearer when OPENCOST_BEARER_TOKEN is set, httpx.BasicAuth when OPENCOST_USERNAME and OPENCOST_PASSWORD are set (same precedence as the Prometheus collector; reuse its helper if one exists). Recreate the client when the settings change. 2. Use the same client factory in discovery and in core/health.py, and make the health check call the allocation endpoint with a one-step window, so a 401 on /allocation is reported as unhealthy with the status code. 3. Treat 401/403 as a configuration error: log at error level once per run, set a gauge greenkube_opencost_auth_failed, and report it in GET /health/services. 4. Never forward the credentials on cross-host redirects (SafeAsyncClient already strips them). 5. Document the settings in docs/configuration.md (they are projected by the chart but not described). No data migration; windows collected while auth failed are re-priced by the reconciliation of COST-01.
+
+**Acceptance.** (a) Unit test with httpx.MockTransport: with OPENCOST_BEARER_TOKEN=abc every request of collect, _fetch_node_prices, collect_pv_costs and collect_lb_costs carries 'Authorization: Bearer abc'; with username/password it carries the basic header; with neither, no Authorization header. (b) A 401 answer makes the OpenCost health entry unhealthy and increments the auth-failure metric; the collection does not label rows as if OpenCost were absent (see COST-01). (c) Helm unit test: the three keys are still projected to the controller and API.
+
+#### COST-10 · The OpenCost query has no cluster filter and aggregates by namespace and pod only, so a multi-cluster OpenCost or Kubecost merges same-named pods of different clusters into one cost.
+
+**Severity** medium · **Evidence** likely · **Effort** S · **Where** `src/greenkube/collectors/opencost_collector.py:390-393`; `src/greenkube/collectors/opencost_collector.py:265-277`; `src/greenkube/collectors/opencost_collector.py:483-488`; `src/greenkube/core/historical_range_processor.py:576-577`
+
+**Problem.** collect() sends 'params = {"window": window, "aggregate": "namespace,pod"}' plus accumulate and includeIdle, and reads only properties.namespace and properties.pod; properties.cluster (present in every allocation, 'default-cluster' in the live installs) is ignored and CLUSTER_NAME is never sent as a filter. When the queried endpoint serves several clusters (Kubecost with federated storage, or OpenCost on a shared Thanos or Mimir), allocations of pods with the same namespace and name are summed by the aggregation: StatefulSet pods (postgres-0, prometheus-k8s-0), static pods on equally named nodes and any fixed-name pod. The node unit prices used for the sub-precision rebuild (aggregate=node) are merged the same way for equally named nodes. cost_map is keyed (namespace, pod), so the merged figure is attributed to the local pod.
+
+**Fix.** 1. Add an optional setting OPENCOST_CLUSTER_ID (Helm config.opencost.clusterId; default: auto). 2. Query with aggregate=cluster,namespace,pod and, when a cluster id is configured, add the OpenCost filter (filter=cluster:"<id>"). 3. In _allocation_to_cost_metric keep properties.cluster on CostMetric; in collect_range, when the answer contains more than one cluster and no id is configured, do not guess: log an error, set a gauge greenkube_opencost_ambiguous_cluster and return the allocations of no cluster (status unavailable under COST-01), so no merged cost is stored. 4. Apply the same filter to _fetch_node_prices (aggregate=cluster,node) and to the PV/LB lookups. 5. Document the setting.
+
+**Acceptance.** (a) Fixture with two clusters holding monitoring/prometheus-k8s-0 at cost 0.01 and 0.02: with OPENCOST_CLUSTER_ID=a the stored cost is 0.01; without an id nothing is stored as opencost and the ambiguity metric is 1. (b) Single-cluster fixture: results identical to today. (c) Node price rebuild uses only the configured cluster's node.
+
+### WP-03.7 · Price catalogs: coverage, age, and trust level
+
+#### COST-09 · The bundled price catalogs cover a small part of the fleets (GCP empty, AWS 35 families, Azure 100 sizes, missing the default AKS sizes), ignore spot and discounts, have no age check, and yet pricing_catalog is trusted to book measured savings.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** L · **Where** `scripts/generate_pricing_catalog.py:70-71`; `scripts/generate_pricing_catalog.py:376-379`; `scripts/generate_pricing_catalog.py:391-392`; `src/greenkube/data/pricing/gcp.json:11`; `src/greenkube/data/pricing/aws.json`; `src/greenkube/data/pricing/azure.json`
+
+**Problem.** (1) Coverage. The generator keeps for AWS and Azure only the instance types that have a power profile ('keep = known_instance_types(provider) if filtered'). aws.json has 257 types in us-east-1 from 35 families (m5, m6g, m6i, m7g, m7i, m8g, r5-r8g, t3, t4g, x1, x2, z1d): c5, c6i, c6a, c6g, c7g, c7i, m5a, m6a, m7a, t3a, i3 and all GPU families are absent. azure.json has 97 sizes per region: Standard_DS2_v2, Standard_D2s_v3 and Standard_D4s_v3 (common AKS defaults), Dasv5, Ddsv5 and the v6 series are absent. gcp.json has 'regions': {}. A node that is not found falls to custom_rate at the OpenCost default rates. One cluster can therefore mix trusted list prices (m5 nodes) and untrusted generic rates (c5 nodes). (2) Capacity type. NodeInfo carries no capacity type and no code reads karpenter.sh/capacity-type, eks.amazonaws.com/capacityType, cloud.google.com/gke-spot or kubernetes.azure.com/scalesetpriority, so spot and preemptible nodes are priced on-demand; reserved instances, savings plans and committed-use discounts are ignored as documented. (3) Trust. TRUSTED_COST_SOURCES contains pricing_catalog, so a saving measured on these rows is booked in the ledger at list price. (4) Age. generated_at (2026-11-07) is not read at runtime: the catalog ages with the installed release and nothing warns about it.
+
+**Fix.** 1. Decouple the catalog from the power-profile list: generate AWS and Azure with --all-instance-types for current-generation Linux types (compressed or per-region files loaded lazily if size is a concern; the index is already lazy per provider), and add a CI check that the 50 most common EKS and AKS node types resolve in the main regions. 2. GCP: ship per-family per-region vCPU and GiB prices (generated offline with an API key from the Cloud Billing Catalog API, or from the public pricing pages) and compute a node price from the machine type's family, vCPUs and memory; until then label GCP nodes explicitly (detail gcp_default_rates). 3. Capacity type: add capacity_type (on_demand, spot, unknown) to NodeInfo from the node labels listed above; for spot nodes do not use the on-demand catalog price as a trusted cost: either apply a documented spot estimate labelled untrusted (new cost_source pricing_catalog_spot_estimate) or fall to custom rates. 4. Trust: keep pricing_catalog trusted only for on-demand nodes; add an install-level switch impact.pricing.discounted (reserved, savings plans, negotiated) that makes list-price savings untrusted or scales them by a configured discount factor. 5. Age: expose generated_at in GET /api/v1/cost/pricing (COST-08), log a warning and show a UI notice when the catalog is older than 180 days; document the regeneration in the release checklist. 6. No stored-row migration; affected rows keep their label, and 'greenkube recompute' re-prices raw rows after a catalog update.
+
+**Acceptance.** (a) PricingCatalog.lookup resolves c5.large, c6i.large, c7g.large, m6a.large, t3a.medium in us-east-1 and eu-west-1 and Standard_DS2_v2, Standard_D2s_v3, Standard_D4s_v3 in westeurope and eastus. (b) A GCP e2-standard-4 node in europe-west1 gets a price within 3% of the public list price, or is labelled gcp_default_rates. (c) A node labelled karpenter.sh/capacity-type=spot never yields a row that is_cost_trusted accepts from the on-demand catalog. (d) With a catalog whose generated_at is 200 days old, the pricing endpoint reports stale true. (e) CI fails when a catalog file has an empty regions map for a provider listed in CATALOG_PROVIDERS without the explicit default-rate label.
+
+#### COST-12 · Projections read every stored positive cost as an observed cost: default-rate rows get confidence 0.7 instead of 0.5 and mixed hourly aggregates are presented as OpenCost with confidence 0.9.
+
+**Severity** low · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/impact/projector.py:175-181`; `src/greenkube/impact/model.py:43-53`; `src/greenkube/impact/model.py:163-202`; `src/greenkube/impact/types.py:38-54`
+
+**Problem.** sample_from_metric sets 'observed_cost_total=total_cost if total_cost is not None and total_cost > 0 else None' without looking at cost_source. Since rows without OpenCost now store a modeled cost, sample_prices takes the observed branch for them: 'source, raw_source = parse_cost_source(sample.observed_cost_source)', 'confidence = PRICE_CONFIDENCE.get(source, ...)' gives 0.7 for custom_rate whatever its detail, while the node-level path (price_confidence) gives 0.5 for the built-in default rates; the detail becomes observed_components and the rates are listed under observed prices. parse_cost_source maps mixed (an hourly aggregate that contains fallback or zero rows) and unknown labels to opencost, so such a sample is priced as an OpenCost observation with confidence 0.9.
+
+**Fix.** 1. In sample_from_metric set the observed_* fields only when the row's cost_source is in ALLOCATED_COST_SOURCES (opencost, opencost_derived, kubecost) or is empty on a legacy row with a positive cost (same rule as rows._is_observed_cost; share one helper). Modeled rows then use the node unit prices and price_confidence, which already distinguishes configured rates from defaults. 2. For a mixed aggregate keep the amount (it is the stored cost) but set the source to mixed with DEFAULT_RATE_CONFIDENCE, and do not report it as opencost in assumptions; add CostSource.MIXED handling to PRICE_CONFIDENCE. 3. Store the rate detail (configured or opencost_default) with modeled rows, for example in estimation_reasons or a new cost_detail column, so recompute and projections can tell them apart. 4. Re-run the recommendation scan after the change; no row migration.
+
+**Acceptance.** (a) sample_prices on a row with cost_source custom_rate returns observed False and confidence 0.5 with default rates, 0.7 with configured rates. (b) A row with cost_source mixed returns source mixed and confidence 0.5, and assumptions.observed_cost_sources does not list opencost. (c) A row with cost_source opencost_derived is unchanged (observed True, 0.9). (d) The projected amount of a modeled row is identical before and after the change.
+
+### WP-03.8 · Currency as a checked value
+
+#### COST-11 · Currencies are labels, not checked values: the USD default rates are relabelled with IMPACT_PRICING_CURRENCY, OpenCost's currency is never read, and recommendation texts print a dollar sign.
+
+**Severity** low · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/impact/pricing.py:249-262`; `src/greenkube/impact/pricing.py:360-369`; `src/greenkube/core/config.py:431-433`; `src/greenkube/api/routers/config.py:79`; `src/greenkube/core/optimization/analyzers/orphaned_pv.py:66-73`; `src/greenkube/core/optimization/analyzers/orphaned_lb.py:71-103`
+
+**Problem.** CustomRates.from_config takes the OpenCost default figures (USD) when no rate is configured and stamps them with the configured currency: 'currency = ... IMPACT_PRICING_CURRENCY', 'cpu_core_hour = cpu if cpu is not None else defaults.cpu_core_hour'. The documentation tells OVHcloud and Scaleway users to set EUR to enable their catalogs; every node that is not in the catalog (and every flat PV/LB default) is then a USD figure shown as EUR. Observed OpenCost costs are also stamped with the configured currency ('Observed costs are labeled with IMPACT_PRICING_CURRENCY'), without reading OpenCost's own currency, so a mismatch is undetectable. Because the default currency is USD, the EUR catalogs are skipped silently (debug log only) on OVHcloud and Scaleway. The PV and LoadBalancer recommendation texts contain a literal '$'.
+
+**Fix.** 1. Refuse to relabel: when IMPACT_PRICING_CURRENCY differs from the currency of the default rates and no custom rate is configured, either fail configuration validation with a clear message or keep the default rates unpriced (cost_source none) for affected nodes; never emit USD figures under another code. Same rule for STORAGE_COST_PER_GIB_MONTH and LOAD_BALANCER_COST_PER_MONTH. 2. Read OpenCost's currency once per run (its configuration endpoint exposes currencyCode for custom pricing; cloud pricing is USD) and expose a mismatch as a warning in GET /api/v1/cost/pricing, a log line and a metric. 3. On a node whose provider has a catalog in another currency than the configured one, log at warning level once and report it in the pricing endpoint ('catalog available in EUR; set impact.pricing.currency'). 4. Replace the literal '$' in orphaned_pv.py and orphaned_lb.py by the configured currency code. 5. Docs: one table of which source produces which currency.
+
+**Acceptance.** (a) Config with IMPACT_PRICING_CURRENCY=EUR and no custom rates: validation error, or modeled rows on uncatalogued nodes carry cost_source none; no UnitPrices object has currency EUR with the value 0.031611. (b) Scaleway node DEV1-L with currency USD: the pricing endpoint lists the skipped EUR catalog. (c) A fake OpenCost reporting currencyCode EUR while the setting is USD raises the mismatch warning. (d) Recommendation descriptions contain the configured currency code and no '$' when the currency is EUR.
+
+### WP-03.9 · Expose cost provenance to the API and UI
+
+#### COST-08 · Cost provenance stops at the database: the API and UI show one cost figure that mixes OpenCost costs, list prices, generic default rates and zero rows, with no indication of the share that is estimated, and the OpenCost health check does not test the allocation call.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/api/schemas.py:385`; `src/greenkube/api/routers/config.py:79`; `src/greenkube/api/metrics_endpoint.py:929-934`; `src/greenkube/core/health.py:111-131`; `src/greenkube/impact/pricing.py:61-73`; `src/greenkube/data/pricing/opencost_default.json`
+
+**Problem.** Every stored row has cost_source, but 'grep -r cost_source src/greenkube/api frontend/src' finds nothing: no router or schema returns it, the cache tables metrics_summary and metrics_timeseries_cache hold total_cost only, and the UI renders 'Cost' in the configured currency. On a cluster without OpenCost and without IMPACT_PRICING_* (the default on-prem install) every amount is the reservation priced at OpenCost's default custom pricing, described by OpenCost as GCP us-central1 prices (0.031611 per vCPU-hour, 0.004237 per GiB-hour, USD): the figure has no relation to the cost of the hardware, and nothing in the API or UI says so. With OpenCost the total silently mixes observed rows, modeled rows for pods OpenCost does not know, fallback rows (COST-01) and zero rows (COST-05). GET /health/services only probes /healthz, so it stays green while allocation calls fail or return nothing.
+
+**Fix.** 1. Storage: add to the hourly/summary/timeseries cache tables the cost split by provenance family: cost_observed (opencost, opencost_derived, kubecost), cost_list_price (pricing_catalog), cost_default_rate (custom_rate with detail opencost_default), cost_custom_rate (configured), cost_unpriced_rows (count of rows with none or zero). Fill them in summary_refresher and the compressor. 2. API: return these fields plus cost_observed_share on /metrics/summary, /metrics/timeseries and the namespace/workload endpoints, and return cost_source on row-level endpoints. Add GET /api/v1/cost/pricing describing the active tiers: OpenCost reachable and last successful allocation, catalog provider/region coverage for the current nodes, custom rates and whether they are the built-in defaults, currency. 3. UI: a provenance badge next to every cost total (Observed / List price / Default rates) with the observed share, and a blocking banner when more than a threshold (for example 20%) of the cost in the selected window comes from default rates: 'Costs use generic default rates (GCP us-central1 list prices). Set impact.pricing.* or install OpenCost.' 4. Setup: on an unknown or on-prem provider without OpenCost and without configured rates, the setup status and Helm NOTES must ask for rates. 5. Health: see COST-06 item 2. 6. Backfill: the new summary columns are derived from existing rows by one refresh; no row migration.
+
+**Acceptance.** (a) API test: a window with 3 opencost rows (cost 3), 1 pricing_catalog row (1) and 1 custom_rate default row (1) returns total_cost 5, cost_observed 3, cost_list_price 1, cost_default_rate 1, cost_observed_share 0.6. (b) Frontend test: the dashboard shows the Default rates badge and the banner when cost_default_rate / total_cost > 0.2. (c) GET /api/v1/cost/pricing on a cluster without OpenCost and without IMPACT_PRICING_* reports default_rates true with the source text of opencost_default.json. (d) The OpenCost health entry turns unhealthy when the allocation endpoint answers 401 or an empty set for a window with running pods.
+
+## WP-04 · Energy and carbon integrity
+
+**Goal.** Energy, operational and embodied CO2e use real inputs where they exist and say so where they do not.
+
+**Main files.** src/greenkube/energy/, impact/power.py, core/calculator.py, core/embodied_service.py, core/node_zone_mapper.py, collectors/boavizta_collector.py, collectors/electricity_maps_collector.py, collectors/wattnet_collector.py, collectors/dcgm_collector.py, src/greenkube/data/, models/boavizta.py
+
+**Depends on.** none
+
+### WP-04.1 · Fix the Boavizta response model so embodied emissions are real
+
+#### NRG-01 · The Boavizta response model does not match the real API (gwp.embedded/use are objects), so every lookup fails and every node gets the flat DEFAULT_EMBODIED_EMISSIONS_KG=100 kg fallback, unflagged and re-queried every cycle.
+
+**Severity** critical · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/models/boavizta.py:13-25`; `src/greenkube/collectors/boavizta_collector.py:80-98`; `src/greenkube/core/embodied_service.py:62-88`; `src/greenkube/core/embodied_service.py:101-117`; `src/greenkube/core/historical_range_processor.py:394-408`; `src/greenkube/core/metric_assembler.py:126-180`
+
+**Problem.** `BoaviztaGwp` declares `manufacture: Optional[float]` and `use: Optional[float]`, and `BoaviztaResponse.verbose: Optional[bool]`. The public API (v1.x; the repo itself ships api.boavizta.org-openapi.json version 1.3.11) answers `{'impacts':{'gwp':{'unit':'kgCO2eq','embedded':{'value':24.0,'min':13.92,'max':40.05,...},'use':{'value':200.0,...}}}` and, with verbose=true (what `prepare_embodied_data` sends), a `verbose` object. `BoaviztaResponse(**response.json())` therefore raises a pydantic ValidationError on `impacts.gwp.use`; `_get_cloud_instance_impact` catches it in `except Exception` ('Unexpected error calling Boavizta'), returns None, and `prepare_embodied_data` injects `{'gwp_manufacture': DEFAULT_EMBODIED_EMISSIONS_KG (100.0), 'lifespan_hours': 35040, 'is_fallback': True}`. Even if parsing succeeded, the code reads `gwp.manufacture`, a field the API no longer returns (the value is `gwp.embedded.value`). The fallback is not persisted, so the lookup (one HTTPS call per distinct provider/instance type) is repeated on every collection cycle forever. On-prem nodes (`cloud_provider='unknown'`, instance type 'cpu-N', both truthy) skip the HTTP call and get the same 100 kg. The `is_fallback` marker goes nowhere: `EmbodiedEmissionsService.is_embodied_fallback` has no caller, `build_estimation_flags` has no embodied reason, and there is no `embodied_source` provenance column, so rows carry a made-up constant with no flag. The existing tests pass because they mock the pre-v1 shape `{'gwp': {'manufacture': 1500.0}}`.
+
+**Fix.** 1) models/boavizta.py: model the v1 schema — `class BoaviztaImpactValue(BaseModel): value: float|None; min: float|None; max: float|None; warnings: list[str]|None` ; `class BoaviztaGwp: embedded: BoaviztaImpactValue|float|None; use: BoaviztaImpactValue|float|None; manufacture: float|None (legacy); unit: str|None`; `verbose: Any`; `model_config = ConfigDict(extra='ignore')`. Add a helper `embedded_kg()` returning `embedded.value` (or legacy `manufacture`) and checking `unit == 'kgCO2eq'`. Send `verbose=false` (the verbose tree is unused) and pass no `duration` so the value is the lifetime total (API doc: 'If no duration is given, the life_duration of the asset is used'); store Boavizta's `hours_life_time` if read, otherwise keep DEFAULT_HARDWARE_LIFESPAN_YEARS. 2) embodied_service.prepare_embodied_data: read `impact.impacts.gwp.embedded_kg()`. Persist a negative-cache entry for failures (table instance_carbon_profiles, today empty on both live clusters: add `source` = boavizta | fallback | configured, `fetched_at`, `error`) and retry at most every 24 h instead of every cycle. Do not write `embodied_emissions_kg` on NodeInfo snapshots here (see NRG-07). 3) Fallback scaling: replace the flat 100 kg by a capacity-proportional fallback (`DEFAULT_EMBODIED_KG_PER_VCPU`, default ≈ 12 kg/vCPU, the Boavizta m5 family ratio, plus optional `DEFAULT_EMBODIED_KG_PER_GIB`), and allow an operator override per node (annotation `greenkube.io/embodied-kg`, and a Helm map by instance type / node label) for on-prem hardware. 4) Provenance: add column `embodied_source` (boavizta | configured | fallback_per_vcpu | none) to combined_metrics, container_metrics, node_idle_metrics and their hourly tables (aggregate with `_source_aggregate`); when the source is a fallback append an estimation reason and expose it in API rows, summaries (`embodied_sources` breakdown) and in projection assumptions. 5) Backfill: bump IMPACT_MODEL_VERSION (embodied numbers change), document that `greenkube recompute --since <retention>` re-allocates raw rows; hourly aggregates keep the old values and must be reported as `embodied_source=legacy_fallback`. 6) Tests: replace the mocked fixtures by a recorded v1 payload (commit boavizta_m5_large.json-like fixtures for aws, azure, gcp, scaleway) and add a contract test that validates the model against the bundled OpenAPI example.
+
+**Acceptance.** a) Feeding the recorded v1 payload for aws/m5.large to BoaviztaCollector.get_server_impact returns embedded 24.0 kg; prepare_embodied_data caches gwp 24.0 without is_fallback and calls save_profile once; a second call performs 0 HTTP requests. b) With the API unreachable, a 96-vCPU node gets fallback 96 × DEFAULT_EMBODIED_KG_PER_VCPU, rows carry embodied_source=fallback_per_vcpu and an estimation reason, and only one HTTP attempt is made per 24 h. c) On-prem node annotated greenkube.io/embodied-kg=1500 -> rows allocate 1500 kg/35040 h and embodied_source=configured. d) /metrics/summary exposes the embodied source mix. e) The live kind controller no longer logs 'Fetching 1 missing Boavizta profiles' every cycle.
+
+### WP-04.2 · Fetch live intensity for the default zone and repair the defaults table
+
+#### NRG-03 · The hourly carbon-intensity job never fetches DEFAULT_ZONE: clusters whose nodes carry no mappable zone/region label (on-prem, kind, k3s, kubeadm) never get live intensity even with a valid token, and the job returns before the recompute.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/cli/start.py:64-91`; `src/greenkube/core/node_zone_mapper.py:104-110`; `src/greenkube/core/historical_range_processor.py:738-739`
+
+**Problem.** Rows of a node whose zone and region cannot be mapped are computed for `DEFAULT_ZONE` (NodeZoneMapper.map_nodes -> `mapped = self._config.DEFAULT_ZONE`; run_range: `zone = node_context.emaps_zone if node_context else self._config.DEFAULT_ZONE`). `collect_carbon_intensity_for_all_zones` builds its zone list differently: `unique_zone_region_providers = {(zone, region, provider) for nodes if node_info.zone or node_info.region}` then `get_emaps_zone_from_cloud_zone`; DEFAULT_ZONE is never added. When no node has a label the set is empty and the function logs 'No mappable Electricity Maps zones found based on node discovery.' and returns — before any provider call and before `_recompute_combined_metrics`. So `carbon_intensity_history` stays empty for the very zone every row uses, and all rows are computed with the static zone default (`intensity_source=zone_default`) forever. In a mixed cluster (some labelled nodes, some not) the unlabelled nodes' DEFAULT_ZONE is equally never fetched. The same job also returns early (`No node zones discovered`) when the node list is empty, skipping the recompute of the previous 24 h.
+
+**Fix.** In `collect_carbon_intensity_for_all_zones` derive the zones from the same resolver the rows use: `contexts = await NodeZoneMapper(node_collector, cfg).map_nodes(nodes_info)`; `emaps_zones = {c.emaps_zone for c in contexts.values()}`; additionally add `cfg.DEFAULT_ZONE` when it is not 'unknown' (rows of unresolved nodes and of nodes that left the cluster use it), and add the distinct `emaps_zone` values of combined_metrics rows of the last 24 h (so a zone whose nodes just left is still consolidated). Drop 'unknown'. Never return before `_recompute_combined_metrics`: run it in a `finally`-like step whenever at least one zone was refreshed or history exists. When the node list is empty, still fetch DEFAULT_ZONE and the recent row zones. Expose `greenkube_intensity_zones{zone, status}` (fetched / skipped_no_token / failed) and include the list in the health/config API so 'no live intensity' is visible. No data migration; after the fix the 24 h recompute corrects raw rows of the last day (older rows keep zone_default and stay labelled as such).
+
+**Acceptance.** a) sim_zone.py scenario: provider.collect is called exactly once with 'FR', save_history once, recompute once. b) Mixed cluster (node A zone eu-west-3a, node B no label, DEFAULT_ZONE=DE): zones fetched == {'FR','DE'}. c) DEFAULT_ZONE='unknown' and no labels: no provider call, one warning, recompute still runs. d) On the live kind cluster with a token, carbon_intensity_history gets FR rows within one hour and rows switch to intensity_source realtime/consolidated.
+
+#### NRG-04 · The bundled zone-default intensity table is a one-day snapshot with 251 of 349 zones empty and malformed rows (ES, SE, NO, DK, AU): 19 of the 51 zones cloud regions map to fall back to 500 gCO2e/kWh.
+
+**Severity** high · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/data/electricity_maps_default.csv:87`; `src/greenkube/data/electricity_maps_default.csv:146`; `src/greenkube/data/electricity_maps_default.csv:210-211`; `src/greenkube/data/electricity_maps_default.csv:249`; `src/greenkube/data/electricity_maps_regions_grid_intensity_default.py:8-12`; `src/greenkube/data/electricity_maps_regions_grid_intensity_default.py:24-32`
+
+**Problem.** `DEFAULT_GRID_INTENSITY_BY_ZONE` is what every install without an Electricity Maps/Wattnet credential uses (the default install), and what any install uses when the provider is down for more than INTENSITY_MAX_AGE. The CSV has 349 zone rows but only 98 carry a 'Default Grid Intensity'. Five rows are column-shifted — e.g. `ES;Spain;Spain;89;`, `SE;Sweden;Sweden;22;`, `NO;Norway;Norway;35;` (also DK, AU): the number sits in the 'Tier' column, so `_load_defaults` (which reads `row.get('Default Grid Intensity')`) finds nothing. `IT;Italy;Italy;` has neither tier nor value; NL, CH, AT, CZ, CN, ZA, NZ, AU-NSW, DK-DK1, US-CENT-SWPP, US-SW-AZPS… have a tier but no value. Cross-checking the region mapping: of the 51 distinct zones that cloud_region_electricity_maps_mapping.csv can produce, 19 have no default: AE, AT, AU-NSW, AU-SA, BH, CH, CN, ES, ID, IL, IT, MY-WM, NL, NZ, QA, SE, US-CENT-SWPP, US-SW-AZPS, ZA. These include very common regions: Azure westeurope and GCP europe-west4 (NL), AWS eu-north-1 (SE), AWS eu-south-1/-2, GCP europe-west8/europe-southwest1, Azure italynorth/spaincentral (IT/ES), GCP europe-west6 and Azure switzerlandnorth (CH), Scaleway AMS (NL). For them `_apply_defaults` falls through to `DEFAULT_INTENSITY` = 500 (`intensity_source=global_default`). Separately, the module docstring states the values are 'the values registered the 23/11/2025': a single-day reading, not an annual average (GB 67, DE 224, IE 178, BE 82 look like a windy autumn day; public annual averages are roughly GB ≈ 200, DE ≈ 350, IE ≈ 290), yet it is applied to every hour of every year. The table has no vintage/unit/source column and no test checks its completeness against the region mapping.
+
+**Fix.** 1) Regenerate the table from a documented source of ANNUAL averages (Electricity Maps yearly CSV exports or Ember yearly data), last complete calendar year, lifecycle factors, with columns `zone;country;name;intensity_g_per_kwh;year;source;emission_factor_type`; ship it as a proper comma CSV parsed with csv.DictReader and validated at load (pydantic row model; fail the build on a malformed row). 2) Fallback chain in `_apply_defaults`: zone value -> parent zone (e.g. 'US-CAL-CISO' -> 'US', 'IT-NO' -> 'IT', 'SE-SE3' -> 'SE') or, the other way round, the demand-weighted mean of sub-zones for a country code -> global default; record the fallback level in intensity_source (`zone_default`, `country_default`, `global_default`) and in estimation reasons. 3) Add a CI test: every zone produced by cloud_region_electricity_maps_mapping.csv and every Wattnet zone has a default; every value is within 5–1200; no row has a numeric tier. 4) Expose the table vintage (`intensity_defaults_year`) in the config/health API and show a UI badge when a range is computed with defaults. 5) Stored rows: rows with intensity_source in (zone_default, global_default) within raw retention can be re-priced by a `greenkube recompute --intensity-defaults` pass (co2e = joules/3.6e6 × pue × new default, also for node_idle_metrics); hourly aggregates need a one-off migration that rescales co2e_grams by new/old default when intensity_source is a default and emaps_zone is known, or must be flagged legacy.
+
+**Acceptance.** a) Loader returns a value for all 51 mapped zones and for ES, SE, NO, DK, IT, NL, CH, AT. b) calculate_emissions(zone='NL', no history) returns the NL annual mean with intensity_source=zone_default, not 500/global_default. c) zone 'US-XYZ-UNKNOWN' falls back to the US country value with intensity_source=country_default. d) CI test fails when a mapped zone loses its default or a row is column-shifted. e) GB default is within ±15% of the published annual mean of the stated year.
+
+### WP-04.3 · Use one node power model for collection and projection
+
+#### NRG-05 · Projections use a different node power model from collection: for every node without a bundled instance profile the projector assumes 1 W idle / 10 W max per core (DEFAULT_INSTANCE_*), while stored rows use the CCF per-vCPU coefficients (0.6–0.8 / 2.8–4.3 W).
+
+**Severity** high · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/impact/projector.py:100-132`; `src/greenkube/energy/node_power.py:62-80`; `src/greenkube/energy/node_power.py:93-130`; `src/greenkube/impact/recompute.py:147-151`; `docs/methodology/impact-model.md:61-67`
+
+**Problem.** Collection resolves node power with `resolve_node_power_profile` (instance profile -> capacity × provider CCF coefficients, cross-provider average 0.726/3.564 W per vCPU when the provider is unknown -> default). The projector has its own copy, `_power_profile(config, instance_type, capacity_cores)` ('Mirrors BasicEstimator profile selection'): instance profile, else `per_core_min = DEFAULT_INSTANCE_MIN_WATTS / DEFAULT_INSTANCE_VCORES` (1.0 W) and `per_core_max = DEFAULT_INSTANCE_MAX_WATTS / DEFAULT_INSTANCE_VCORES` (10.0 W) times capacity, labelled `node_capacity_derived` exactly like the collection profile. It ignores the node's provider. The two models only agree for the 740 bundled instance types (277 AWS, 307 GCP, 100 Azure, 44 OVH, 12 Scaleway — e.g. c7i.*, Standard_D4ds_v5, DEV1-M are absent). So the projected CO2e of a rightsizing (idle share released = Δcores × P_min/A) and of deletions/schedules (dynamic share (P_max−P_min)/cores) is computed with other watts than the rows that change measurement later compares it with, breaking the roadmap principle 'same model for estimate and measurement'. docs/methodology/impact-model.md documents the projector variant, docs/power_estimation_methodology.md the collection variant.
+
+**Fix.** Delete `_power_profile` from impact/projector.py and call `greenkube.energy.node_power.resolve_node_power_profile(node_name, instance_type, cpu_capacity_cores, provider, INSTANCE_PROFILES, default_profile)` in `_node_profile` (pass the node's cloud_provider; for nodes known only from rows pass provider=None as today). Map `NodePowerProfile.source` to PowerSource and `is_fallback`. Do the same wherever a default profile dict is rebuilt (impact/recompute.py already uses the shared resolver). Add a parity test that builds, for a table of (instance_type, provider, capacity) cases (known type, unknown type per provider, unknown provider, cpu-N, nothing), the collection NodeSpec and the projector NodeImpactProfile and asserts identical idle_watts/max_watts/power_source. Bump IMPACT_MODEL_VERSION (projection numbers change) and let the next scan re-project active recommendations; note in CHANGELOG that projected CO2e of open recommendations drops by up to 40%. Fix docs/methodology/impact-model.md 'Power profile' to describe the CCF coefficients.
+
+**Acceptance.** a) Parity test passes for all cases. b) For a 6-core node with provider unknown and a 0.1-core request cut over a full year, projected idle_operational == 0.1 × 8760 × 0.726/1000 × PUE × intensity (±1e-9). c) On the minikube e2e cluster the projected idle_operational of recommendation 95 becomes ≈ 1.93 g for the same capacity released. d) grep finds a single implementation of profile selection.
+
+### WP-04.4 · Account for non-pod CPU, undetected GPUs and shared hosts
+
+#### NRG-12 · Node CPU utilisation is the sum of pod CPU only: kubelet, container runtime, kernel and other non-pod CPU are ignored, so dynamic node power is under-estimated (live: pods account for 36% of the node's CPU activity on minikube).
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/impact/allocation.py:97-103`; `src/greenkube/core/historical_range_processor.py:659-690`; `docs/power_estimation_methodology.md:10-11`
+
+**Problem.** `node_totals` computes `utilization = min(Σ sample.cpu_usage_cores × hours / (capacity × hours), 1)` where the samples are the pods of the node (container cgroup series from cAdvisor). CPU spent outside pod cgroups — kubelet, containerd/dockerd, systemd, kernel threads, static daemons, host processes on shared machines — never enters the utilisation, so `dynamic_kwh = utilization × (P_max − P_min) × H` misses it. The methodology formula `node_utilization = total_node_cpu_cores / node_vcores` reads as whole-node utilisation, and the conservation claim ('pods + idle = node power × time') holds only against this reduced definition of node power. No provenance says the node utilisation was derived from pods.
+
+**Fix.** Measure node utilisation at node level and keep pods as the allocation key: add a PromQLCatalog query per node and step with a source chain (1) root cgroup `sum by (node) (rate(container_cpu_usage_seconds_total{id='/'}[w]))`, (2) node-exporter `sum by (instance) (rate(node_cpu_seconds_total{mode!~'idle|iowait|steal'}[w]))` joined to node names through `kube_node_info` (internal_ip/node labels), (3) fallback Σ pods. Pass `node_cpu_used_cores` in NodeSpec/NodeImpactProfile; `node_totals` uses `max(node value, Σ pods)` for utilisation; dynamic energy is allocated to pods by their usage share of the NODE usage (pod_i / node_used) and the remainder (system share) goes to a dedicated `__system__` component of the node idle row (new columns `system_joules`, `system_co2e_grams`) so conservation is against real node utilisation. Store `node_utilization_source` (root_cgroup | node_exporter | pod_sum) on the idle row and add it to estimation reasons when it is pod_sum. Bump the model minor version; document in both methodology files.
+
+**Acceptance.** a) Fixture: node 4 cores, pods use 1.0 core, root cgroup reports 1.4 -> utilisation 0.35, pods receive 1.0/1.4 of the dynamic energy, the idle row's system component 0.4/1.4, and Σ = node power × time. b) Without node-level series the result equals today's and node_utilization_source=pod_sum is recorded. c) On live minikube the modelled dynamic power at the sampled step is ≈ 1.58 W.
+
+#### NRG-13 · GPU energy is counted only when DCGM series exist; GPU nodes without the DCGM exporter are neither detected nor flagged, so their dominant power draw is silently missing.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/historical_range_processor.py:302-320`; `src/greenkube/collectors/dcgm_collector.py:17-18`; `src/greenkube/impact/power.py:136-155`; `src/greenkube/collectors/node_collector.py:43-105`; `docs/methodology/impact-model.md:429`
+
+**Problem.** `_collect_gpu` returns `{}` when DCGM is absent, unreachable or errors (warning only), and then no GPU power exists anywhere. Nothing in the pipeline knows that a node has GPUs: NodeCollector does not read `status.capacity['nvidia.com/gpu']` (or amd.com/gpu, gpu.intel.com/*) nor the `nvidia.com/gpu.product` / `nvidia.com/gpu.count` labels, and PodCollector does not read GPU requests. `GpuPowerModel.profile_for` is documented as matching 'a DCGM modelName or a nvidia.com/gpu.product label' but the label is never passed to it. A GPU node is therefore modelled as a CPU-only node (CCF per-vCPU watts) with `power_source=instance_profile|node_capacity_derived` and no estimation reason; the limitation is in the docs only. A DCGM query error for one window equally drops GPU energy for that window without failing or flagging it (`gpu_power_watts` NULL is indistinguishable from 'no GPU').
+
+**Fix.** 1) NodeCollector: read extended-resource capacity (`nvidia.com/gpu`, `amd.com/gpu`, `gpu.intel.com/*`) into `NodeInfo.gpu_count` and labels `nvidia.com/gpu.product`, `nvidia.com/gpu.memory` into `NodeInfo.gpu_model` (new SCD columns). PodCollector: read GPU requests per container. 2) run_range: for a node with gpu_count > 0 and no DCGM sample at a step, estimate with the TDP table: per GPU `GpuPowerModel.profile_for(gpu_model).watts(None)` (idle floor) for unrequested GPUs and a configurable assumed utilisation (default 50%) for GPUs requested by pods, attributed to the requesting pods; set a new provenance `gpu_source` on pod rows (dcgm | gpu_tdp_estimate | none) and add the reason 'GPU power estimated from TDP: DCGM exporter not available'. If the model is unknown, flag `gpu_source=unmeasured` and count the node in `greenkube_gpu_nodes_unmeasured`. 3) A DCGM query error on a cluster that previously returned GPU series must fail the window (RangeCollectionError) instead of dropping GPU power. 4) Surface `gpu_source` in the API rows and a UI badge on the node/namespace views; document.
+
+**Acceptance.** a) Node with capacity nvidia.com/gpu=4, label gpu.product=Tesla-T4, no DCGM: rows of the pod requesting 1 GPU carry gpu_power_watts = 10.5 + 0.5 × (70 − 10.5) W, gpu_source=gpu_tdp_estimate and a reason; the idle row carries 3 × 10.5 W. b) Unknown GPU model: gauge greenkube_gpu_nodes_unmeasured = 1 and rows flagged. c) With DCGM present nothing changes (gpu_source=dcgm). d) DCGM outage on a cluster with known GPU series fails the window.
+
+#### NRG-15 · Nodes that share one physical host (kind, k3d, minikube multi-node, nested clusters) are each charged the full host capacity: idle power, memory power and embodied emissions are multiplied by the node count.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/collectors/node_collector.py:81-93`; `src/greenkube/energy/node_power.py:108-123`; `src/greenkube/impact/allocation.py:97-118`
+
+**Problem.** Container-based 'nodes' report the host's CPU count and memory as their own capacity. GreenKube derives power, memory power (0.392 W/GiB × capacity) and embodied emissions per Kubernetes node, with no notion that several nodes are one machine. On the kind e2e cluster all three nodes report cpu=14, memory≈39 GiB and the same `status.nodeInfo.bootID` (same kernel), with `spec.providerID=kind://…`. The model therefore attributes 3 × (10.2 W idle + 15.3 W memory) and 3 × 100 kg embodied to a single 14-core host.
+
+**Fix.** Collect `status.nodeInfo.bootID`, `machineID`, `systemUUID` and `spec.providerID` in NodeCollector. Group nodes by bootID (fallback: providerID scheme `kind://`, `k3d://`); when a group has more than one node, treat the group as one physical host: host capacity = the (identical) reported capacity, each node's share = 1/N (or proportional to its kubelet allocatable if they differ), and scale idle watts, max watts, memory watts and embodied g/h of each node by that share before allocation. Record `power_source` detail `shared_host` and an estimation reason ('3 nodes share one host (bootID …): host power split 1/3'). Add gauge greenkube_shared_host_groups. Document the behaviour and an opt-out (`config.power.sharedHostDetection=false`). Mirror the scaling in the projector.
+
+**Acceptance.** a) Three NodeInfo with the same bootID and 14 cores each: Σ over nodes of (pod + idle joules) per step with no load == 14 × 0.726 W × step + memory power of 39 GiB once. b) Nodes with distinct bootIDs are unchanged. c) On the live kind cluster the modelled baseline power drops from ≈ 77 W to ≈ 25.5 W and rows carry the shared_host reason.
+
+### WP-04.5 · Let operators supply real server power on-prem
+
+#### NRG-14 · On-prem and bare-metal nodes are modelled with hyperscaler per-vCPU averages and the operator cannot supply real server power: DEFAULT_INSTANCE_* is dead configuration for any node whose capacity is known, and architecture is ignored.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** L · **Where** `src/greenkube/energy/node_power.py:62-80`; `src/greenkube/energy/node_power.py:108-123`; `src/greenkube/data/provider_power_estimates.csv:1-6`; `src/greenkube/data/instance_profiles.py:83-92`; `helm-chart/values.yaml:530-536`; `src/greenkube/core/config.py:277-279`
+
+**Problem.** For a node without a bundled instance profile the power profile is `cores × per_core_watts(provider)`; with provider 'unknown' this is the arithmetic mean of the five provider rows of provider_power_estimates.csv (0.726 W idle, 3.564 W max per vCPU), labelled 'cross-provider average CCF per-vCPU coefficients' although the OVH and Scaleway rows are GreenKube's own estimates, not CCF data. These coefficients describe one hardware thread of a dense, shared hyperscale server. A dedicated on-prem server is charged the same per-thread figure although it carries its whole chassis (PSU losses, fans, disks, BMC, NICs). There is no way to correct it: `config.defaults.instance` (DEFAULT_INSTANCE_VCORES/MIN_WATTS/MAX_WATTS) is only used when neither instance type nor CPU capacity is known, which never happens for a real node (the kubelet always reports capacity); no per-node annotation, node-label selector or per-instance-type override exists, and measured power (IPMI/Redfish/Kepler/Scaphandre exporters) cannot be plugged in. `NodeInfo.architecture` (arm64/amd64) is collected but unused, and the 740 'instance profiles' are the same provider average × vCPUs, so `power_source=instance_profile` (not flagged as estimated) is no more specific than `node_capacity_derived` (flagged).
+
+**Fix.** Add an explicit resolution tier above the bundled data, `power_source=configured`: (1) node annotations `greenkube.io/power-idle-watts` and `greenkube.io/power-max-watts` (whole node) ; (2) Helm `config.power.nodeProfiles: [{matchLabels|instanceType|nodeNameRegex, idleWatts, maxWatts}]` ; (3) Helm `config.power.perVcpu: {idleWatts, maxWatts}` as the cluster-wide default for unknown providers, replacing the cross-provider average when set (and replacing the dead DEFAULT_INSTANCE_* semantics — keep those names as deprecated aliases of perVcpu). Add tier `power_source=measured` for a node-level power series (configurable PromQL, e.g. Redfish/IPMI exporter or Kepler node power) used as the node total when present. Use architecture: ship per-architecture coefficients (CCF per-microarchitecture table, at least an arm64 row per provider) and select by `NodeInfo.architecture`. Rename the reason to 'average of bundled provider coefficients'. Mark `instance_profile` rows as estimated=false only if the profile is instance-specific; otherwise expose `power_profile_detail=provider_average`. Document a calibration procedure (measure idle/max with a wattmeter or BMC). Bump the model minor version when coefficients change.
+
+**Acceptance.** a) Node annotated idle=150/max=450 W: idle row + pods sum to 150 W × step at 0% utilisation and power_source=configured. b) nodeProfiles entry matching label hardware=r740 applies to matching nodes only. c) perVcpu {1.5, 6} on a 64-core unknown-provider node yields 96/384 W. d) arm64 AWS node uses the arm64 coefficient. e) projector and collection agree for all four cases (shared resolver, see NRG-05).
+
+### WP-04.6 · Wattnet resolution and methodology documents
+
+#### NRG-16 · Wattnet's 15-minute intensities are stored but only the :00 point of each hour is ever used (default hour normalisation); sub-zone proxies are unflagged and one null value aborts a zone's collection.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/calculator.py:94-101`; `src/greenkube/storage/postgres/repository.py:1586-1590`; `src/greenkube/collectors/wattnet_collector.py:104-133`; `src/greenkube/collectors/wattnet_collector.py:376-389`; `docs/wattnet.md:20`
+
+**Problem.** `CarbonCalculator._normalize` truncates the lookup time to the hour (NORMALIZATION_GRANULARITY=hour, the Helm default) and both the calculator and the recompute take 'the latest point at or before the hour start'. With Wattnet's 15-minute series the :15, :30 and :45 points are saved by `save_history` and never read: an hour is represented by its first quarter, not by its mean, while docs/wattnet.md advertises '15-minute granularity (finer than Electricity Maps' hourly data)'. `_flatten_footprints` does `float(value)` outside any try: a null in one series raises and `process_zone` drops the whole zone for that hour. Country codes are silently proxied to one bidding zone (IT->IT_NORTH, SE->SE3, NO->NO2, DK->DK1) and stored as `wattnet_complete` / later `consolidated` with no proxy marker.
+
+**Fix.** Resolve intensity as the duration-weighted mean of the provider points inside each row's own interval [timestamp, timestamp+duration) (fall back to the latest point within INTENSITY_MAX_AGE); for hourly providers this equals today's behaviour, for 15-minute providers it uses all points. Implement it identically in the calculator and in the set-based recompute (lateral AVG over points in the interval). Alternatively set NORMALIZATION_GRANULARITY=none automatically for Wattnet and document it. Skip null/non-finite values per point in `_flatten_footprints` (count them) instead of raising. Record proxies: `estimationMethod='wattnet_proxy:<zone>'`, `isEstimated=true`, and map them to a new intensity_source `proxy_zone`. Fix the doc sentence.
+
+**Acceptance.** a) History 100/200/300/400 at :00/:15/:30/:45 and a 5-minute row at 10:35 -> intensity 300 (interval mean), an hourly aggregate of the 12 rows ≈ 250. b) A null value in the payload stores the other points. c) Zone 'SE' rows carry intensity_source=proxy_zone.
+
+#### NRG-17 · Methodology docs and code disagree, and dead legacy estimator code with a different model is still shipped.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** S · **Where** `docs/methodology/impact-model.md:61-67`; `docs/methodology/impact-model.md:131-140`; `src/greenkube/energy/estimator.py:73-287`; `src/greenkube/core/embodied_service.py:136-215`; `src/greenkube/data/datacenter_pue_profiles.py:20`; `src/greenkube/data/datacenter_pue_profiles.csv:47`
+
+**Problem.** (1) impact-model.md 'Power profile' says `node_capacity_derived` uses DEFAULT_INSTANCE_MIN/MAX_WATTS per DEFAULT_INSTANCE_VCORES × capacity; collection uses provider CCF coefficients (power_estimation_methodology.md is right; the projector still implements the old text, NRG-05). (2) impact-model.md states node totals 'stay reconstructible as Σ pod rows + idle row' without saying idle rows are deleted after raw retention and never exposed (NRG-02). (3) `BasicEstimator.estimate`, `calculate_node_energy`, `_create_cpu_profile`, `EmbodiedEmissionsService.calculate_pod_embodied` and `is_embodied_fallback` have no production caller but implement the pre-1.1.0 usage-based model (1–10 W per core) and are still unit-tested, which keeps misleading tests green. (4) PUE data: datacenter_pue_profiles.py has default_azure 1.18, the CSV next to it 1.16; the CSV (59 per-site rows) and region_electricity_maps.csv are not loaded by any code. (5) Hourly aggregates store AVG(grid_intensity) and AVG(pue) unweighted, so hourly co2e ≠ hourly kWh × PUE × stored intensity whenever energy varies within the hour (display only: co2e itself is summed). (6) 'Scope 2' / 'Scope 3' UI labels cover a lifecycle emission factor and exclude the idle share. (7) An operator cannot override the PUE of a recognised provider: `get_pue_for_provider` returns the bundled provider value before DEFAULT_PUE. (8) Storage and network energy are excluded from every figure; only the docs and the asset-deletion projection note say so, the Footprint totals and API summaries carry no such notice.
+
+**Fix.** Rewrite the 'Power profile' section from energy/node_power.py; add a 'What the totals contain' section (allocated vs idle vs cluster) and the retention of idle rows. Delete the dead estimator/embodied methods and their tests (keep BasicEstimator only as the holder of instance_profiles/default profile, or move those to energy/node_power.py). Make the PUE table single-sourced (load the CSV or delete it), align default_azure, and add `config.pueOverrides: {aws: 1.1}` taking precedence over the bundled value with `pue_source` recorded. Store energy-weighted intensity in hourly rows (`SUM(co2e)/NULLIF(SUM(joules)/3.6e6 × pue,0)`) or drop the column from hourly API responses. Rename UI labels to 'Operational (electricity, location-based, life-cycle factor)' and 'Embodied (hardware)', and add a 'Not included: storage, network, GPU without DCGM' note to the Footprint page and a `not_modeled` list to the summary responses.
+
+**Acceptance.** a) A docs test extracts the coefficients table from power_estimation_methodology.md and compares it with provider_power_estimates.csv. b) grep for calculate_node_energy and calculate_pod_embodied under src returns nothing. c) hourly row: co2e_grams == joules/3.6e6 × pue × grid_intensity within 1e-6. d) pueOverrides test.
+
+## WP-05 · Rollups, idle share and read consistency
+
+**Goal.** Hourly aggregates are complete and faithful, the idle share is kept and shown, and no reader loses data at the raw/hourly seam.
+
+**Main files.** src/greenkube/core/metrics_compressor.py, core/workload_usage.py, core/summary_refresher.py, core/aggregator.py, storage/workload_usage_sql.py, the read and aggregate methods of storage/*/repository.py, summary and timeseries-cache repositories, impact/recompute.py, cli/recompute.py
+
+**Depends on.** WP-02 (same repository files; merge WP-02 first).
+
+### WP-05.1 · Split readers at the compression watermark, not at wall-clock time
+
+**Also covers.** RECON-03 (Every aggregate that spans the raw/hourly boundary uses `now - METRICS_COMPRESSION_AGE_HOURS` instead of the c...); API-03 (Every API aggregate that spans more than 24 hours reads hourly rows up to wall-clock now - 24 h and raw rows a...); MEA-18 (read_combined_metrics_smart splits raw and hourly data at a cutoff that is not hour-aligned, so each measureme...)
+
+#### ROL-01 · Every reader that combines raw and hourly tables splits at wall-clock now - METRICS_COMPRESSION_AGE_HOURS instead of the compression watermark, so data between the watermark and that cutoff is read from neither table.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/storage/base_repository.py:213-236`; `src/greenkube/storage/base_repository.py:313-343`; `src/greenkube/storage/postgres/repository.py:709-790`; `src/greenkube/storage/postgres/repository.py:836`; `src/greenkube/storage/postgres/repository.py:934-978`; `src/greenkube/storage/postgres/repository.py:1056`
+
+**Problem.** The compressor only fills *_hourly for closed hours below floor_hour(now_at_run - AGE) and records that in metrics_compression_watermarks. Readers ignore the watermark: read_combined_metrics_smart / read_container_metrics_smart and the SQL aggregations (aggregate_summary, aggregate_timeseries, aggregate_by_namespace, aggregate_top_pods, aggregate_grouped_row_count, count_*_smart, read_combined_metrics_page) compute `cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)` and read raw rows only for `timestamp >= cutoff - 1 min` and hourly rows only for `hour_bucket < cutoff`. (1) The hour H = floor_hour(cutoff) cannot be compressed yet (it needs H+1h <= floor_hour(now-AGE)), so raw rows in [H, cutoff-1min) are in neither branch: a hole of 0..59 minutes that moves as a sawtooth with the minute of the request. (2) `hour_bucket >= start_time` drops the whole first bucket when the window start is not hour-aligned (now-7d never is), although the raw rows of that partial hour exist. (3) The compressor runs once per hour, swallows its own exceptions (run() logs and continues) and stops whenever the controller is down or not leader; every hour between the watermark and the cutoff is then invisible to all readers although the raw rows are still stored. Nothing reports the gap.
+
+**Fix.** Make the compression watermark the single raw/hourly boundary. Add a helper (e.g. CombinedMetricsRepository.compression_boundary(table)) that reads metrics_compression_watermarks.compressed_until for combined_metrics / container_metrics (cache it for a few seconds; when no watermark exists, the boundary is -infinity, i.e. read everything from raw). In every reader listed above replace `cutoff` by that boundary B (hour-aligned by construction): hourly branch = hour_bucket >= floor_hour(start) AND hour_bucket < min(B, end) restricted to buckets fully inside the window; raw branch = timestamp >= max(start, B) AND timestamp < end; for the partial first hour (start not hour-aligned and start < B) either read the raw rows when they still exist (timestamp >= start AND timestamp < ceil_hour(start)) or prorate the hourly row by covered seconds, and document which. Remove the 1-minute tolerance. Because raw rows below B may already be pruned only below min(retention cutoff, B), the raw branch is always complete. Add an invariant metric greenkube_metrics_compression_lag_seconds (now - AGE - watermark) and surface it in /api/v1/health and loop health; make MetricsCompressor.run() report failures through report_loop_failure instead of only logging. No data migration is needed (stored rows are intact); metrics_summary / metrics_timeseries_cache are rebuilt on the next refresh.
+
+**Acceptance.** 1) sim1.py scenario: 3 days of 5-minute rows, compressor run once: aggregate_summary(T0, now) total_cost == SUM(total_cost) of raw rows (872), for any minute-of-hour of `now`. 2) Window start not hour-aligned (now-2d17min): summary equals the raw sum over the same interval (579). 3) Move the watermark 6 h back and delete those hourly buckets: totals unchanged (872). 4) Property test: for random (start, end, now, watermark) the union of the two branches covers every raw row exactly once (compare with a full raw sum while raw is unpruned), on SQLite and PostgreSQL. 5) Health endpoint shows a compression lag > 2 h as degraded.
+
+### WP-05.2 · Re-aggregate hours that receive late rows; bound compression by the collection watermark
+
+**Also covers.** RECON-02 (Raw rows written into an already compressed hour (late backfill, greenkube start --last, greenkube recompute, ...)
+
+#### ROL-02 · Rows written or updated in an already compressed hour never reach combined_metrics_hourly / container_metrics_hourly and are deleted by raw retention; the collection-watermark guard described in the compressor is never wired.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** L · **Where** `src/greenkube/core/metrics_compressor.py:9-14`; `src/greenkube/core/metrics_compressor.py:329-340`; `src/greenkube/core/metrics_compressor.py:365-369`; `src/greenkube/core/metrics_compressor.py:531-559`; `src/greenkube/cli/start.py:251`; `src/greenkube/core/collection.py:136-165`
+
+**Problem.** Compression is strictly forward-only: `_compression_lower_bound` returns the stored watermark, so an hour below it is never re-read. The docstring promises that compression never passes the collection watermark, but production builds `MetricsCompressor(get_db_manager())` (cli/start.py:251; demo/runner.py:180 too) without `collection_watermark_provider`, so the only protection is the 24 h age. Rows land below the compression watermark when: (a) `greenkube start --last 7d` (documented backfill, CollectionJob.run(last=...)); (b) COLLECTION_MAX_BACKFILL is raised above METRICS_COMPRESSION_AGE_HOURS, or the age is lowered (the only check is a log warning about carbon; no validator links the two settings); (c) a catch-up after an outage is still running when the hourly job passes the hour it is filling; (d) `greenkube recompute` and any upsert that rewrites raw rows older than 24 h. Those rows stay in the raw tables, are ignored by every dashboard/API reader (which read *_hourly for anything older than 24 h), and `_prune_raw` deletes them after METRICS_RAW_RETENTION_DAYS without ever aggregating them. In the meantime workload_usage_hourly DOES pick them up (id high-water marks), so the recommendation rollup and the hourly tables disagree. A late row that lands in an hour whose raw rows were already pruned makes read_hour_inputs take the 'raw' branch with only the late rows and replace the complete rollup hour with a partial one.
+
+**Fix.** 1) Track dirty hours: reuse the rollup's mechanism (max(id) high-water marks) plus an `updated_at`/xmin-independent marker for in-place updates (add a monotonically increasing `write_seq` column filled from a sequence on INSERT and on ON CONFLICT DO UPDATE in write_combined_metrics / write_container_metrics, both dialects). On each run, before advancing, list the distinct hours below the watermark that received rows with write_seq above the saved mark and re-aggregate each of them from raw with the existing upsert, but only when the raw set of that hour is still complete (hour >= raw prune cutoff); otherwise merge additively (SUM columns added, sample_count added, max columns max'ed) or reject the write upstream. 2) Wire the guard: pass a provider returning the metrics collection watermark (collection_watermarks.last_complete_end) to MetricsCompressor in cli/start.py and demo/runner.py, and keep hours raw while a `--last` run is active (lease/flag row). 3) Add a Config validator: COLLECTION_MAX_BACKFILL <= METRICS_COMPRESSION_AGE_HOURS and METRICS_COMPRESSION_AGE_HOURS >= 1 (or >= safety lag + one scheduler interval); document it in docs/configuration.md and Helm values. 4) _prune_raw must refuse to delete an hour that is dirty (received writes after its compression). 5) Make read_hour_inputs choose 'raw' only when the hour is at or above the compression watermark or the raw row count equals the hourly sample_count; else combine. 6) Backfill for existing installs: one migration-time job that re-aggregates every hour still present in raw (last 7 days) so current divergences are repaired; older losses cannot be recovered and should be listed in the release notes.
+
+**Acceptance.** 1) sim1.py step F: after writing 12 late rows for a new pod and re-writing 12 rows of an existing pod into a compressed hour, the next compressor.run() makes SUM(total_cost) of that hour in combined_metrics_hourly equal 180 and equal to workload_usage_hourly. 2) After advancing the clock 8 days, SUM over combined_metrics_hourly equals the sum of everything ever written (1040). 3) With a collection watermark provider returning T, no hour ending after T is compressed. 4) Config(COLLECTION_MAX_BACKFILL='72h', METRICS_COMPRESSION_AGE_HOURS=24) fails validation with a clear message. 5) Same tests on PostgreSQL where ON CONFLICT DO UPDATE keeps the row id.
+
+#### STO-02 · Hourly compression is not bounded by the collection watermark in production (the provider is never passed), so hours are closed before their rows are collected and the late rows are never aggregated.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/cli/start.py:251`; `src/greenkube/core/metrics_compressor.py:10`; `src/greenkube/core/metrics_compressor.py:328-340`; `src/greenkube/demo/runner.py:180`
+
+**Problem.** The module docstring of metrics_compressor.py states that only hours `<= floor_hour(min(now - METRICS_COMPRESSION_AGE_HOURS, collection_watermark))` are compressed, and `_compression_limit` implements it through `collection_watermark_provider`. The scheduled job builds `MetricsCompressor(get_db_manager())` without that argument (only tests/core/test_metrics_compressor_lossless.py:248 passes it), so the limit is `now - age` alone. When collection is behind that limit (collection stalled on a failing window, COLLECTION_MAX_BACKFILL larger than METRICS_COMPRESSION_AGE_HOURS, METRICS_COMPRESSION_AGE_HOURS lowered, or `greenkube start --last` older than the age), the compressor aggregates the hour from the rows present (possibly none), advances `metrics_compression_watermarks`, and never re-reads the hour (`_resume_point` starts at the watermark). Rows collected afterwards stay raw, are ignored by every read that uses the hourly table before the cutoff, and are deleted at METRICS_RAW_RETENTION_DAYS.
+
+**Fix.** 1. In cli/start.py `compress_metrics`, build the compressor with `collection_watermark_provider=lambda: watermark_repo.get(cluster_uid, METRICS_WATERMARK_SOURCE)` returning `last_complete_end` (use the same cluster_uid resolution as MetricsCollectionJob; when no watermark row exists, return the epoch so nothing is compressed before the first complete window). Do the same in demo/runner.py or pass an explicit `None` with a comment. 2. Make the argument mandatory (keyword-only without default) so that a new caller cannot forget it. 3. Repair path for rows already stranded and for forced `--last` ranges: add `MetricsCompressor.recompress(start, end)` that re-aggregates given closed hours from the raw rows still present, and call it from MetricsCollectionJob whenever a window with `window.start < compression_watermark` is written (same transaction as the rows). At startup run it once for every hour before the compression watermark that still has raw rows whose count differs from `combined_metrics_hourly.sample_count` (one-off repair, logged). 4. Export `greenkube_compression_lag_hours` and a warning when the collection watermark is older than `now - METRICS_COMPRESSION_AGE_HOURS`.
+
+**Acceptance.** sim_compress.py scenario as a test: with the collection watermark at 09:00, a run at D+1 10:30 leaves the compression watermark at 09:00; after the 09:00 hour is collected and the watermark advanced, the next run produces the 09:00 hourly row with sample_count=12 and aggregate_summary returns 0.24. A forced `--last` window inside an already compressed hour updates that hourly row (sample_count and sums equal to the raw rows).
+
+### WP-05.3 · Keep, roll up and expose the node idle share
+
+**Also covers.** COST-13 (Idle cost is always priced with the model, does not reconcile with OpenCost pod costs (pods + idle differ from...); API-04 (No API total, chart, breakdown, report or Prometheus series includes the node idle share (node_idle_metrics is...); RECON-13 (Node idle rows have no hourly aggregate and are deleted at raw retention, and the carbon-intensity recompute s...)
+
+#### NRG-02 · Cluster totals (API, UI Footprint page, yearly report) silently exclude the node __idle__ share; idle rows are write-only, never rolled up and deleted after raw retention.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** L · **Where** `src/greenkube/storage/postgres/repository.py:709-790`; `src/greenkube/api/routers/report.py:146-183`; `frontend/src/routes/footprint/+page.svelte:172-197`; `src/greenkube/core/metrics_compressor.py:195-207`; `src/greenkube/core/metrics_compressor.py:572-586`; `src/greenkube/storage/base_repository.py:272-282`
+
+**Problem.** Since Impact Model 1.1.0 a node's energy, operational CO2e, embodied CO2e and modeled cost are split between pod rows (by reservation/usage) and one `__idle__` row per node and step in `node_idle_metrics` (impact/rows.py `_idle_row`). The idle row holds the unreserved idle power, unreserved memory power, unattributed GPU power and the unreserved share of embodied emissions. Nothing ever reads that table except `greenkube recompute` (`read_idle_metrics` has a single caller, impact/recompute.py:218): `aggregate_summary`, the timeseries, by-namespace, top-pods and report queries select only `combined_metrics` / `combined_metrics_hourly`; `SummaryRefresher`, the Prometheus gauges (api/metrics_endpoint.py) and the frontend have no notion of idle. The Footprint page nevertheless labels the pod-only sums 'Total CO₂ (Scope 2+3)', 'Total Energy', 'Scope 2 CO₂ (electricity)', 'Scope 3 CO₂ (hardware)', and `/report/summary` + `/report/export` produce the yearly report from the same sums. In addition `MetricsCompressor` has no hourly rollup for idle rows (`TABLES` lists only combined_metrics and container_metrics) and `_delete_idle_before` deletes them with the raw pod rows after METRICS_RAW_RETENTION_DAYS (7 days), so after one week the node totals that docs/methodology/impact-model.md promises ('node totals stay reconstructible as Σ pod rows + idle row') cannot be rebuilt at all. Finally rows written before model 1.1.0 (and every hourly aggregate, never recomputed) put 100% of node power on pods, so any time series or yearly total that spans the upgrade mixes two boundaries and shows a step drop that is not a real reduction; no summary, timeseries or report response exposes the `model_version` mix or an idle/unallocated figure.
+
+**Fix.** 1) Storage: add `node_idle_metrics_hourly` (node, hour_bucket, sample_count, duration_seconds, joules, co2e_grams, embodied_co2e_grams, total_cost, cost_cpu, cost_ram, avg cpu_unreserved_cores / memory_unreserved_bytes, gpu energy, provenance columns aggregated like `_source_aggregate`) and register it in `MetricsCompressor.TABLES` so idle rows are compressed under the same watermark/transaction as combined_metrics and pruned with METRICS_AGGREGATED_RETENTION_DAYS, never just deleted. 2) Repository: add `aggregate_idle_summary(start, end)` and `aggregate_idle_timeseries(start, end, granularity)` (raw + hourly, same split rule as pod rows) for PostgreSQL and SQLite. 3) API: extend MetricsSummaryResponse, DashboardSummaryResponse, TimeseriesPoint and ReportSummaryResponse with `idle_co2e_grams`, `idle_embodied_co2e_grams`, `idle_energy_joules`, `idle_cost`, and explicit `cluster_total_*` = allocated + idle (cluster-wide scope only; when a namespace filter is set return allocated only and `idle_*: null`). Add `model_versions` (distinct versions and row share) to summary/report responses so a mixed-boundary range is visible. `/report/export` gains one `__idle__` line per node and period (namespace empty, scope=idle). Add gauges `greenkube_node_idle_co2e_grams_total` etc. 4) UI: Footprint page shows 'Allocated to workloads' and 'Unallocated (idle capacity)' with the cluster total = sum; rename the current cards accordingly; show a banner when the range contains rows of a model_version < 1.1.0. 5) Summary refresher: store the idle totals in `metrics_summary`. 6) Backfill: run the new compression over idle rows still in raw retention; older periods have no idle data — return `idle_*: null` with `idle_coverage_start` instead of 0. 7) Docs: state in impact-model.md and power_estimation_methodology.md which API fields are allocated vs cluster totals.
+
+**Acceptance.** a) Fixture: 1 node, 2 cores, 1 pod reserving 0.5 core for 1 h; GET /metrics/summary returns allocated energy = pod joules, idle_energy_joules = idle row joules, cluster_total_energy_joules = node power × 3600 within 1e-6. b) After compression + raw pruning of that hour the same request returns the same three numbers. c) Namespace-filtered summary returns idle_* = null. d) On the kind e2e cluster cluster_total_energy_joules ≈ Σ nodes (idle W + dynamic W + memory W) × covered seconds (±1%). e) /report/export contains one scope=idle row per node/period and its totals equal /report/summary cluster totals. f) A range mixing model_version NULL and 2.0.0 rows returns both versions in `model_versions`.
+
+#### ROL-07 · node_idle_metrics has no hourly aggregate and is deleted with raw retention, so node totals (pods + idle) cannot be reconstructed after 7 days and idle carbon is never consolidated.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/core/metrics_compressor.py:206-207`; `src/greenkube/core/metrics_compressor.py:538-541`; `src/greenkube/core/metrics_compressor.py:575-587`; `src/greenkube/storage/postgres/repository.py:1602`; `src/greenkube/impact/rows.py:59-66`
+
+**Problem.** The Impact Model stores the unreserved share of each node per step in node_idle_metrics so that 'sum of pod rows + idle row = node total'. The compressor only prunes this table (`_delete_idle_before`, same cutoff as combined_metrics); TABLES contains no idle entry, so nothing is aggregated. The carbon-intensity recompute loops over ('combined_metrics', 'container_metrics') only, so idle rows keep provisional/default intensity. The only reader of idle rows is `greenkube recompute`.
+
+**Fix.** Add node_idle_metrics_hourly (node, hour_bucket, sample_count, duration_seconds, SUM of joules, co2e_grams, embodied_co2e_grams, total_cost, cost_cpu, cost_ram, duration-weighted averages of cpu_unreserved_cores, memory_unreserved_bytes, gpu_power_watts, provenance aggregated like pod rows, model_version) with migrations for both dialects; add it to MetricsCompressor (same watermark and transaction as combined_metrics so pod and idle hours stay consistent), to _prune_hourly, to cli/db.py METRIC_TABLES and to the VACUUM list. Include node_idle_metrics in recompute_carbon_with_latest_intensities. Provide a reader (raw + hourly, boundary = watermark) and expose idle in summaries as a separate line so totals reconcile. Backfill: aggregate the idle rows still in raw at migration time.
+
+**Acceptance.** 1) sim1.py: after compression, SUM(total_cost) of node_idle_metrics_hourly equals the raw idle sum for compressed hours; after the 8-day run the hourly idle total is still 1744. 2) For every compressed hour and node: pod hourly sums + idle hourly sums == the same sums computed on raw rows. 3) Intensity recompute changes idle co2e_grams consistently with pod rows.
+
+#### NRG-09 · The intensity consolidation recompute updates pod and container rows but not node_idle_metrics, so idle rows keep the provisional or default intensity and node totals stop conserving.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/storage/postgres/repository.py:1567-1660`; `src/greenkube/storage/sqlite/repository.py:1269-1300`; `src/greenkube/storage/base_repository.py:609-700`; `src/greenkube/cli/start.py:120-150`; `src/greenkube/impact/rows.py:347-367`
+
+**Problem.** `recompute_carbon_with_latest_intensities` loops `for table in ('combined_metrics', 'container_metrics')` (PostgreSQL and SQLite; the Python base implementation does the same). `node_idle_metrics` has the same `grid_intensity`, `co2e_grams`, `intensity_source`, `pue`, `emaps_zone` columns (written by `_idle_row`) and is skipped. This is the BUG-06 pattern again on the table added later by B2. In normal operation with a provider the intensity of the current hour is not published yet when a step is collected, so rows are first computed with the previous hour's value (or with the zone default right after a restart/backfill, when collection runs before the first intensity fetch) and corrected by the hourly recompute — pods only. Idle rows therefore systematically carry the lagged/provisional/default intensity.
+
+**Fix.** Add `node_idle_metrics` to the recompute in all three implementations, in the same transaction: same lateral join on (emaps_zone, normalized timestamp), same max-age rule, `co2e_grams = joules / 3.6e6 × COALESCE(pue, DEFAULT_PUE) × intensity`, `grid_intensity`, `intensity_source` (the table has no estimation_reasons/namespace: skip those parts; when a namespace filter is passed, still refresh idle rows of the nodes hosting that namespace or document that idle rows are only refreshed by unfiltered runs). Return the idle count separately in the log line. Add a parametrised test over ALL tables that have a grid_intensity column (information_schema / PRAGMA) so a future table cannot be forgotten. One-off repair: run the recompute over the raw-retention window (7 days) with the stored history at upgrade; older idle rows no longer exist.
+
+**Acceptance.** a) sim_range.py b: after the recompute idle rows show intensity 30 / consolidated and (Σ pods + idle co2e) == node kWh × PUE × 30 within 1e-9. b) Test on PostgreSQL and SQLite: a pod row, its container row and the idle row of the same step always end with the same grid_intensity and intensity_source. c) The schema-driven test fails if a new table with grid_intensity is not handled.
+
+### WP-05.4 · Make hourly rows faithful for hours with pod replacement and mixed trust
+
+**Also covers.** MEA-04 (Hour buckets built from hourly rollup rows (all production data older than 24 h) take the longest single pod a...)
+
+#### ROL-03 · Change measurements built from compressed hourly rows overstate cost rate, replicas and core-hours for every hour in which the workload's pods were replaced, so the same window gives different numbers before and after compression.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** L · **Where** `src/greenkube/verify/series.py:120-126`; `src/greenkube/verify/series.py:160-186`; `src/greenkube/core/optimization/verifier.py:253-264`; `src/greenkube/verify/service.py:238-255`; `src/greenkube/core/metrics_compressor.py:126`
+
+**Problem.** hourly_buckets groups rows per timestamp and takes `coverage = max(_coverage_seconds(row) for row in members)` as the time covered by that timestamp group, then divides cost/CO2e by the covered seconds (`cost = acc.cost / acc.cost_seconds * 3600`) and computes replicas as pod_seconds / covered. For raw rows a group is one step, which is correct. After compression there is one row per pod and hour, all with timestamp = hour_bucket and duration_seconds = SUM of its samples. When no pod lived the whole hour (rollout, node drain, eviction, restart under a new name, CronJob), the group's coverage is the longest-lived pod's duration, not the union of the pods' lifetimes, because the hourly row no longer knows which steps the pod covered. The docstring claim 'raw 5-minute rows and hourly rollups mix correctly' is therefore false for churn hours. Pre-windows (7 d before the change) are read at baseline time and post-windows at decision time through read_combined_metrics_smart, so about 6/7 of every window comes from hourly rows.
+
+**Fix.** Preferred: stop deriving time coverage from per-pod hourly rows. (a) Read measurement windows from workload_usage_hourly, which already stores per target and hour `step_count` (distinct covered steps), `duration_seconds` (pod-seconds), `pod_count`, cost and CO2e: covered seconds = step_count x step (store `covered_seconds` explicitly in the rollup so that a later step change cannot corrupt it), replicas = duration_seconds / covered_seconds, cost rate = total_cost / covered_seconds x 3600. Add the trust columns the measurement needs (trusted cost seconds, trusted carbon seconds, usage source) to the rollup, or (b) add to combined_metrics_hourly the columns first_sample_at / last_sample_at and, per (workload, hour), persist `covered_seconds` in a small workload-hour table written by the compressor from raw rows (COUNT(DISTINCT timestamp) x step per owner). Then hourly_buckets must use that covered time for hourly groups instead of max(duration). Until then, mark hours whose hourly group has max(duration_seconds) < 3600 and more than one pod as `coverage unknown` and exclude them rather than inflating them. Backfill: workload_usage_hourly already has step_count for the retained lookback; older compressed hours cannot be corrected and must be treated as low-confidence (exclude from measurement). Update docs/methodology/savings-measurement.md.
+
+**Acceptance.** 1) sim2.py scenario: hourly_buckets (or its replacement) returns cost/h 12.0, replicas 1.0, core_hours 0.5 for the rollout hour both before and after compression. 2) Property test: for random pod lifetimes inside an hour, the bucket computed from compressed data equals the bucket computed from the raw rows (cost, replicas, core_hours, coverage) within 1e-9. 3) A measurement re-run after its window has been compressed yields the same estimate and verdict as before compression (regression test on a temporary database).
+
+#### MEA-05 · One untrusted cost sample makes the whole pod-hour untrusted once the hour is compressed (cost_source becomes 'mixed'), so measurements read from hourly rows lose every such hour; on the live clusters 24% (kind) and 40% (minikube) of pod-hours contain at least one such sample.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/models/provenance.py:212-222`; `src/greenkube/models/provenance.py:111-136`; `src/greenkube/core/metrics_compressor.py:139`; `src/greenkube/verify/series.py:139-141`; `src/greenkube/verify/strategy.py:388-390`
+
+**Problem.** Raw rows: a sample time counts for cost when every replica row at that time is trusted (series.py:139), so one custom_rate sample out of 12 only removes 5 minutes. The compressor aggregates cost_source with cost_source_aggregate_sql: opencost + opencost_derived stays trusted, anything else in the hour gives 'mixed' (provenance.py:216-221), which is_cost_trusted rejects. hourly_buckets then finds `all(cost_is_trusted(row))` false for the single group of that hour: cost = None, cost_coverage = 0, the hour is not in the series. In addition any untrusted pod row (for example the last samples of a terminating pod, stored with custom_rate) makes the whole workload-hour untrusted. Coverage = aligned hours / post hours must reach 0.8, otherwise the change is inconclusive.
+
+**Fix.** Keep the trusted part of an hour through compression. Add to combined_metrics_hourly (and container_metrics_hourly) the columns trusted_cost, trusted_cost_cpu, trusted_cost_ram, trusted_cost_seconds (SUM over raw rows whose cost_source is trusted and whose cost passes is_cost_trusted) next to the totals; map them in read_hourly_metrics; in hourly_buckets use them for rollup rows (cost rate = trusted_cost / trusted_cost_seconds, cost_coverage = trusted seconds / 3600). Migration: new nullable columns; backfill from raw rows for the hours still raw (7 days); older hours keep NULL and fall back to today's rule. Separately, restate custom_rate samples when OpenCost data arrives late (cost auditor's scope) so the share of untrusted samples drops. Expose the per-change share of untrusted hours in the measurement (`untrusted_cost_hours`) so an inconclusive verdict says why.
+
+**Acceptance.** Compress an hour with 11 opencost samples and 1 custom_rate sample: the bucket built from the rollup has cost equal to the raw-row bucket (0.012/h) and cost_coverage 0.917. A 7-day window with one untrusted sample in 30% of its hours keeps coverage >= 0.97.
+
+### WP-05.5 · Keep true percentiles for rightsizing
+
+**Also covers.** REC-07 (Lookback 'p95/p99' are nearest-rank percentiles of hourly percentiles (themselves nearly hourly maxima), so th...); ROL-11 (A usage-rollup hour rebuilt from compressed rows uses each pod's hourly maximum as its only point, so p50-p99 ...)
+
+#### ROL-04 · Lookback usage percentiles used for rightsizing are nearest-rank percentiles of hourly percentiles, and with a 5-minute step an hourly p95/p99 is the hourly maximum, so p95 is overstated whenever short peaks occur in more than 5% of the hours.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** L · **Where** `src/greenkube/core/workload_usage.py:62-91`; `src/greenkube/core/workload_usage.py:324-334`; `src/greenkube/core/workload_usage.py:638-667`; `src/greenkube/storage/workload_usage_sql.py:198-287`
+
+**Problem.** rollup_rows stores per hour weighted nearest-rank percentiles of the points of that hour. With one replica and a 5-minute step an hour has 12 points: nearest_rank_index(12, 95) = 11 and (12, 99) = 11, i.e. hourly p95 = hourly p99 = hourly max (p90 = second highest). summarize()/summary_sql then take the nearest-rank p-th value among the hourly p-values. The result is not the p-th percentile of the samples: one 5-minute peak per hour in more than 5% of the hours makes the lookback 'p95' equal to the peak, although the peak may be 1-3% of the samples. The value is exposed as cpu/memory p50..p99 on BaselineMetric and sizes requests.
+
+**Fix.** Store a mergeable distribution per hour instead of four scalar percentiles: e.g. a fixed log-spaced histogram (64-128 buckets, relative error <= 2-3%) or a t-digest/DDSketch serialized in one column per resource in workload_usage_hourly (cpu_hist, memory_hist), built from the raw points of the hour (per replica, warm-up points excluded as today). Lookback percentiles are then computed from the sum of the hourly histograms (in Python after a bounded read of one row per target-hour, or with an aggregate over the bucket arrays in SQL), which equals the sample percentile up to the bucket width. Keep cpu_usage_max as is. Backfill: re-roll the hours still present in raw (7 days); for older rollup hours fall back to the current hourly-percentile rule and mark the summary as `percentile_method=hourly_rank` in the recommendation evidence until the lookback is fully covered by histograms. Update docs (rightsizing methodology) to state the estimator and its error bound.
+
+**Acceptance.** 1) sim3.py (a): lookback p95 == 100 (+/- one histogram bucket) and p99 == 900. 2) Property test: for random series (1-20 replicas, steps 30 s / 5 m, 14 days) the lookback p50/p90/p95/p99 differ from numpy nearest-rank percentiles of all samples by at most the documented relative error. 3) SQL and Python reference implementations return identical values on SQLite and PostgreSQL.
+
+### WP-05.6 · Recompute and step changes must cover hourly tables
+
+#### ROL-06 · `greenkube recompute` rewrites raw rows only: hourly aggregates and (on PostgreSQL) the usage rollup keep the old model's numbers, the recomputed values vanish when raw rows are pruned, and hourly tables have no model_version column to tell versions apart.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/impact/recompute.py:12-15`; `src/greenkube/impact/recompute.py:153-162`; `src/greenkube/impact/recompute.py:269-273`; `src/greenkube/core/metrics_compressor.py:131-132`; `src/greenkube/core/migrations/scripts/postgres/0050_impact_allocation.sql:9-13`; `src/greenkube/storage/postgres/repository.py:306-316`
+
+**Problem.** MetricRecomputer re-allocates raw pod, container and idle rows hour by hour and upserts them. (1) Hours older than METRICS_COMPRESSION_AGE_HOURS are already compressed and are never re-compressed (ROL-02), and every dashboard reader takes those hours from the hourly tables: `greenkube recompute --since 7d` changes what the UI shows for the last 24 h only. (2) On PostgreSQL the upsert is ON CONFLICT DO UPDATE, the row id does not change, so WorkloadUsageRollup.hours_written_between (id ranges) does not see the hours and workload_usage_hourly keeps old cost/CO2e outside its 24 h refresh window. (3) After 7 days the recomputed raw rows are pruned and only the old-model aggregates remain. (4) model_version exists on combined_metrics, container_metrics and node_idle_metrics only; the hourly tables keep `calculation_version = MAX(calculation_version)` (a lexical max of a different field) and estimation_reasons = '[]', so a history that mixes Impact Model versions cannot be detected or filtered. The limitation is stated in the module docstring but not in the CLI output or the UI.
+
+**Fix.** 1) After a non-dry-run recompute, re-aggregate every touched hour that is below the compression watermark from its (still complete) raw rows into combined_metrics_hourly / container_metrics_hourly and re-roll workload_usage_hourly for those hours (call the dirty-hour path of ROL-02; pass the touched hours explicitly rather than relying on ids). Then refresh metrics_summary / metrics_timeseries_cache. 2) Add model_version to both hourly tables and to workload_usage_hourly (migration both dialects): single value when all samples agree, 'mixed' otherwise (same rule as _source_aggregate); backfill from raw for hours still in raw, NULL (=unknown/legacy) for older ones. 3) Expose in API/UI the model version (or 'mixed/legacy') of a window and a banner when a window mixes versions. 4) The CLI summary must state how many hours were re-aggregated and that hours older than raw retention cannot be recomputed. 5) Recompute idle rows' carbon in recompute_carbon_with_latest_intensities as well (node_idle_metrics is skipped today).
+
+**Acceptance.** 1) Temporary DB with 3 days of rows at model v-old, compress, run recompute for 3 days with a model that doubles joules: SUM(joules) in combined_metrics_hourly and workload_usage_hourly doubles for all 3 days, on SQLite and PostgreSQL. 2) Hourly rows carry model_version = new version; an hour with both versions carries 'mixed'. 3) Running recompute twice changes nothing (idempotent). 4) aggregate_summary before/after equals the raw sums.
+
+#### ROL-05 · Compressed hours read back with a larger PROMETHEUS_QUERY_RANGE_STEP are counted as covering sample_count x new step, dividing measured cost and CO2e rates by the step ratio.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/core/optimization/verifier.py:253-264`; `src/greenkube/verify/series.py:124-127`; `src/greenkube/core/workload_usage.py:251-259`; `src/greenkube/core/metrics_compressor.py:493-499`
+
+**Problem.** _coverage_seconds(row, step) returns max(sample_count * step, duration_seconds) with the step of the CURRENT configuration. A row collected at 1 m (duration_seconds 60, or an hourly row with sample_count 60 and duration 3600) read after the step was raised to 5 m gets coverage 300 s (or 18000 s): the stored duration, which is exact, is overridden by the product. Rates divide by that coverage. The rollup has the same family of problem in milder form: averages and percentiles are weighted by sample_count, so after a step change hours collected at the smaller step weigh proportionally more in lookback averages for up to RECOMMENDATION_LOOKBACK_DAYS.
+
+**Fix.** Make stored duration authoritative: in _coverage_seconds use duration_seconds when it is present and > 0, and fall back to sample_count * step only when it is missing (legacy rows). Persist the collection step on each raw row and on hourly rows (or derive covered seconds as in ROL-03) so that no reader needs the current configuration to interpret history. In the rollup, weight averages by duration_seconds (time) instead of sample_count, and store the step (or covered seconds) per rollup row. Record the step in collection_watermarks and log/emit an event when it changes. No backfill needed: duration_seconds is already stored on rows.
+
+**Acceptance.** 1) sim3.py (b): cost/h is 12.0 for both step values. 2) Legacy rows without duration_seconds still use sample_count * step. 3) Rollup test: 7 days at 5 m followed by 7 days at 1 m with usage 100 m then 900 m gives a lookback cpu avg of 500 m (time-weighted), not 767 m.
+
+### WP-05.7 · Retention, weighting and lossy fields
+
+**Also covers.** STO-14 (The hourly tables drop columns of the raw rows (ephemeral storage, grid_intensity_timestamp, model_version, pe...)
+
+#### ROL-09 · With METRICS_AGGREGATED_RETENTION_DAYS = -1 (default) three per-hour tables grow forever, including workload_usage_hourly which is only read for the recommendation lookback, with no size guard against the default 10Gi volume.
+
+**Severity** medium · **Evidence** likely · **Effort** L (split: rollup retention + validators S; gauges S; daily tier L) · **Where** `src/greenkube/core/config.py:291-295`; `src/greenkube/core/metrics_compressor.py:519-525`; `src/greenkube/core/metrics_compressor.py:589-615`; `helm-chart/values.yaml:431-437`; `helm-chart/values.yaml:1022-1024`
+
+**Problem.** _prune_hourly and _prune_usage_rollup return immediately when the retention is negative. combined_metrics_hourly (one row per pod-hour), container_metrics_hourly (one per container-hour) and workload_usage_hourly (one per target x container x node x hour, about 1 KB per row on the live database: 1152 rows = 1144 kB) are then never pruned. The rollup is read only over RECOMMENDATION_LOOKBACK_DAYS (14) and baseline windows, yet shares the 'forever' retention. There is no validator for the opposite misconfiguration either: a non-negative aggregated retention smaller than the raw retention deletes hourly rows that readers still rely on for everything older than 24 h (hole between the two retentions while raw rows exist).
+
+**Fix.** 1) Give workload_usage_hourly its own retention (default max(RECOMMENDATION_LOOKBACK_DAYS, CHANGE_MEASUREMENT_PRE_WINDOW_DAYS + POST) + margin, e.g. 35 days) independent of the hourly metric retention. 2) Add a daily tier: after N days (default 90) roll pod-hour rows into per-workload (owner) daily rows, which removes the pod-name cardinality, and prune pod-hour rows; keep additive columns exact. 3) Change the default aggregated retention to a finite documented value (e.g. 400 days) or keep -1 only with the daily tier. 4) Validator: when >= 0, METRICS_AGGREGATED_RETENTION_DAYS must be >= METRICS_RAW_RETENTION_DAYS and >= the lookback/measurement needs. 5) Export database size and per-table row counts as Prometheus gauges, alert at 80% of the PVC, and document sizing (rows per pod per year) in docs/configuration.md and Helm notes.
+
+**Acceptance.** 1) With rollup retention 35 d, rows of workload_usage_hourly older than 35 d are pruned while combined_metrics_hourly is kept. 2) Config(METRICS_AGGREGATED_RETENTION_DAYS=3, METRICS_RAW_RETENTION_DAYS=7) is rejected. 3) Daily tier: SUM(cost, joules, co2e) per workload and day equals the hourly sums before pruning. 4) /prometheus/metrics exposes table sizes.
+
+#### ROL-10 · Report/export aggregation averages CPU and memory usage with one vote per row, so a compressed hourly row weighs like one raw 5-minute row, and namespace grouping reports the maximum pod request and the mean pod usage instead of namespace totals.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/core/aggregator.py:91-92`; `src/greenkube/core/aggregator.py:139-144`; `src/greenkube/api/routers/report.py:284-289`
+
+**Problem.** aggregate_metrics receives the output of read_combined_metrics_smart (hourly rows with sample_count/duration 3600 for history older than 24 h, raw rows for the last day) and computes `agg_cpu_usage = round(sum(cpu_usages) / len(cpu_usages))` and the same for memory: an unweighted mean over rows, ignoring sample_count and duration_seconds (which it does use for PUE and grid intensity). With group_by='namespace' all pods of the namespace fall in one group: cpu_request/memory_request = max over pods, usage = mean over pods and samples, so the namespace row shows per-pod values under a namespace label. calculation_version is that of the last row, and provenance columns (cost_source, usage_source, cost breakdown) are dropped from the aggregate.
+
+**Fix.** In aggregate_metrics weight usage means by duration_seconds (fallback sample_count, then 1); for group_by='namespace' first aggregate per timestamp bucket the SUM over pods (requests and usage), then take the time-weighted mean of those sums (and the max of the sums for peak); expose cpu_usage_max. Propagate provenance with the same rule as the compressor ('mixed' when sources differ) and the cost breakdown sums. Better: build reports from workload_usage_hourly / SQL aggregations with the watermark boundary of ROL-01 instead of loading rows.
+
+**Acceptance.** 1) sim3.py (c) returns 214. 2) Namespace report for 10 pods x 500 m requests and 100 m usage each over 7 days returns cpu_request 5000 m and cpu usage 1000 m. 3) Report totals equal aggregate_summary for the same window.
+
+#### ROL-12 · Hourly compression silently drops or approximates per-row information: estimation reasons, model version, intensity timestamp, ephemeral-storage columns, and it resolves owner/node/zone and rounding differently on SQLite and PostgreSQL.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/metrics_compressor.py:71-74`; `src/greenkube/core/metrics_compressor.py:104-165`
+
+**Problem.** aggregate_columns: estimation_reasons is the literal '[]' while is_estimated is OR-ed, so an hourly row can be flagged estimated with no reason; calculation_version = MAX (lexical) and model_version is not stored; grid_intensity_timestamp, period, ephemeral_storage_request_bytes and ephemeral_storage_usage_bytes exist in combined_metrics but not in the hourly table; pue and grid_intensity are plain AVG over samples (not energy-weighted, so co2e/joules of the hour no longer equals the stored intensity); cpu_request/memory_request/limits are MAX of the hour (not time-weighted); cpu_usage_avg/memory_usage_avg are CAST(AVG AS INTEGER) on SQLite (truncation: 166.67 -> 166 in sim1.py) and AVG()::INTEGER on PostgreSQL (rounding: 167); owner_kind/owner_name/node/node_instance_type/node_zone/emaps_zone are MODE() on PostgreSQL but an arbitrary row's value on SQLite (bare column in GROUP BY); gpu_usage_millicores is MAX while CPU is an average.
+
+**Fix.** Aggregate estimation_reasons as the sorted union of reasons (json array) per hour; add model_version ('mixed' rule); add the missing storage columns (AVG/MAX like storage_*), store grid intensity as SUM(co2e)/SUM(joules*pue) derived or energy-weighted and keep MIN/MAX of grid_intensity_timestamp; use ROUND() on both dialects; implement a deterministic mode on SQLite (subquery ordered by count desc, value) or pick the value of the latest sample on both; store usage averages as REAL. Document every hourly column's aggregation rule in docs/architecture.md.
+
+**Acceptance.** Compression of the same synthetic hour on SQLite and PostgreSQL yields identical rows (all columns); an hour with reasons ['a'] and ['b'] yields ['a','b']; SUM(co2e)/SUM(joules) reproduces the stored hourly intensity.
+
+#### ROL-13 · Dashboard caches can serve stale data without saying so: the time-series cache keeps old buckets when a window becomes empty, is replaced without a transaction, and KPI windows are up to one hour old and end at the refresh time, not at 'now'.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** S · **Where** `src/greenkube/storage/postgres/timeseries_cache_repository.py:22-46`; `src/greenkube/storage/sqlite/timeseries_cache_repository.py:36-52`; `src/greenkube/core/summary_refresher.py:90-146`; `src/greenkube/cli/start.py:796-802`; `src/greenkube/core/metrics_compressor.py:621-648`
+
+**Problem.** upsert_points returns immediately when the new point list is empty, so the previous buckets of that (window, namespace) stay in metrics_timeseries_cache forever (collection stopped for more than the window, or a namespace deleted: namespace_cache rows are only ever inserted/updated, never removed, and the refresher keeps iterating over them). The DELETE and the INSERTs run outside a transaction on PostgreSQL, so a concurrent read can see an empty or partial series. The refresher runs every 3600 s; rows carry updated_at but windows are 'refresh time - delta .. refresh time'.
+
+**Fix.** upsert_points must take (window_slug, namespace, points) and delete the existing rows even when points is empty, inside one transaction; prune namespace_cache entries not seen for longer than the longest window and delete their cache rows; end KPI windows at the collection watermark (not wall clock) and store window_start/window_end in metrics_summary; return them and updated_at in the API and show 'as of' in the UI; refresh the 1h/6h/24h windows after each collection cycle (they only touch raw rows) and keep the hourly cadence for long windows.
+
+**Acceptance.** 1) After collection stops for 2 h, the 1h time-series endpoint returns no points (or zeros) instead of the last cached hour. 2) A concurrent reader never observes an empty series during refresh (transactional replace). 3) Summary rows expose window_end equal to the collection watermark and the UI displays it.
+
+#### RECON-14 · aggregate_timeseries returns CPU and memory as sums of samples: the raw part of a bucket is steps-per-bucket times larger than the hourly part (4800 versus 700 in the simulation); the values are not exposed by the API today.
+
+**Severity** low · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/storage/sqlite/repository.py:936`; `src/greenkube/storage/sqlite/repository.py:956-957`; `src/greenkube/storage/postgres/repository.py:968`; `src/greenkube/storage/postgres/repository.py:990-991`
+
+**Problem.** The method unions raw rows (cpu_usage_millicores, memory_usage_bytes per step) with hourly rows (`cpu_usage_avg AS cpu_usage_millicores`, one row per pod-hour) and returns `SUM(cpu_usage_millicores)` and `SUM(memory_usage_bytes)` per bucket. For raw rows the sum runs over every step of the bucket, for hourly rows over pods only, and a pod present 15 minutes counts with its full average. Neither figure is a usage: the correct bucket value is the duration-weighted mean over the bucket (or core-seconds). api/routers/metrics.py and core/summary_refresher.py currently ignore the two keys, so no user-facing number is wrong yet; the defect is a trap for the next consumer.
+
+**Fix.** Return duration-weighted figures from both branches: add `duration_seconds` to both selects (raw: COALESCE(duration_seconds, step); hourly: duration_seconds) and compute cpu_core_seconds = SUM(cpu_usage_millicores x duration_seconds) / 1000 and memory_byte_seconds = SUM(memory_usage_bytes x duration_seconds); expose avg_cpu_millicores = cpu_core_seconds x 1000 / bucket_seconds and avg_memory_bytes = memory_byte_seconds / bucket_seconds, and rename the keys so old callers fail loudly. Same change in the PostgreSQL method. Add them to TimeseriesPoint only with these definitions.
+
+**Acceptance.** For the e7_compress.py data every hour bucket, raw or hourly, returns avg_cpu_millicores 400 and the same memory average on SQLite and PostgreSQL; a bucket that mixes raw and hourly rows (after RECON-03) returns the same value.
+
+## WP-06 · Recommendation safety
+
+**Goal.** No recommendation is unsafe, stale or silently blocked.
+
+**Main files.** src/greenkube/core/optimization/ (engine, analyzers, eligibility, lifecycle, evidence, context_builder), core/reliability_signals.py, storage/*/recommendation_repository.py
+
+**Depends on.** none
+
+### WP-06.1 · Fail closed when reliability signals are unknown
+
+#### REC-04 · Rightsizing fails open when reliability signals are unknown: with oom_kill_count/restarts_in_window = None (no kube-state-metrics, Prometheus error or timeout) a crash-looping or OOM-killed container is offered CPU and memory decreases, although the rollup itself holds its restart count.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/core/optimization/analyzers/rightsizing.py:324-328`; `src/greenkube/core/optimization/analyzers/rightsizing.py:481-483`; `src/greenkube/core/optimization/context_builder.py:181-187`; `src/greenkube/core/reliability_signals.py:293-296`; `src/greenkube/core/reliability_signals.py:175-176`; `src/greenkube/core/optimization/risks.py:274-277`
+
+**Problem.** attach_reliability_signals() is best effort: ContextBuilder._attach_reliability_signals() catches every exception ('signals stay unknown; the scan goes on') and apply_signals() only writes oom_kill_count/restarts_in_window when kube-state-metrics answered (`if kills or signals.oom_known`). The module docstring promises 'a signal that cannot be read stays None (unknown), never healthy', but the consumers test truthiness: `if summary.oom_kill_count or summary.restarts_in_window: return None` (cpu_proposal and memory_proposal) and risks.py `if resource == "memory" and profile.oom_events:`. None therefore behaves exactly like 0: the decrease is proposed, with normal risk. The signal query itself is fragile: one instant query evaluates a subquery over the whole lookback at 5-minute resolution for every container (`sum_over_time((... )[1209600s:5m])`), which can exceed the Prometheus query timeout or max-samples limit on a large cluster; any failure of any of the six queries discards all signals of that scan. The hourly rollup already stores restart_count per target container hour (WorkloadUsageSummary.restart_count, and its increase over the window is derivable) but rightsizing never uses it as a fallback.
+
+**Fix.** 1) Fail closed: in cpu_proposal()/memory_proposal() a decrease requires `summary.oom_kill_count == 0 and summary.restarts_in_window == 0` (explicit zeros). When either is None, fall back to the rollup: compute restarts in window as (max - min) of restart_count over the summary's hours plus restart-count resets (add `restart_increase` to summary_sql/summarize()); if that is > 0 or also unknown, do not propose the decrease and record a skip reason `reliability_signals_unknown` (same mechanism as analyzer.skipped) that the API/UI shows ('decrease withheld: restart/OOM history could not be read'). 2) risks.py: treat oom_events None as at least MEDIUM for memory decreases and add factor `oom_history_unknown`; eligibility must block automation on it. 3) Make the signal read robust: query per signal independently (one failing query must not drop the others), split the lookback into daily chunks or use `increase(kube_pod_container_status_restarts_total[window])` joined with `kube_pod_container_status_last_terminated_reason` over shorter subqueries, apply an explicit timeout, and record the outcome per signal in the source run so the UI can show 'OOM signal unavailable'. 4) Mark the scan's rightsizing source as incomplete when signals are unknown so reconciliation does not replace a previous OOM-driven increase by a decrease (engine._preserve_last_known already keeps the safer value for incomplete sources).
+
+**Acceptance.** sim_gates.py case 1 returns no proposal and a skip reason. Unit: summary(oom_kill_count=None, restarts_in_window=None, restart_increase=0, low usage, 14 d coverage) -> decrease allowed only if the rollup restart fallback is 0; with restart_increase=3 -> None. Integration with a fake Prometheus that returns HTTP 503 for the OOM query: no active decrease for a container whose rollup restart_count grew, source run status reports the missing signal, a previously active increase for that container is retained.
+
+### WP-06.2 · Never drop a later recommendation for a container whose rightsizing was applied
+
+#### REC-01 · Once a rightsizing recommendation of a container is in status 'applied', every later recommendation of the same type for that container is silently discarded by upsert_recommendations (even a different proposal such as an OOM-driven increase after a GreenKube decrease), for as long as the row stays 'applied', which is permanent after an inconclusive or not_realized verdict.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/storage/sqlite/recommendation_repository.py:348-385`; `src/greenkube/storage/postgres/recommendation_repository.py:203-216`; `src/greenkube/storage/postgres/recommendation_repository.py:285-323`; `src/greenkube/core/recommendation_realization.py:12-17`; `src/greenkube/core/recommendation_realization.py:52-80`; `src/greenkube/core/optimization/engine.py:431-448`
+
+**Problem.** upsert_recommendations() first looks for an ACTIVE row with the same fingerprint/identity. When there is none it selects the most recent row of the same identity (scope, namespace, pod_name, container_name, target_node, type) whose status is pr_open or in RECORDED_CHANGE_STATUSES (applied, verifying, verified, rollback_review). For verifying/verified/rollback_review it calls absorbs_regenerated_recommendation(), which only absorbs a restatement of the recorded change within ROLLUP_LAG_WINDOW (6 h). But when the row's status is exactly 'applied', the code goes to `if applied_row: refreshed = refresh_applied_recommendation(...); UPDATE ... SET updated_at ...; count += 1; continue` with no comparison at all: refresh_applied_recommendation() starts with `del observed_record`. The incoming recommendation is neither inserted nor queued, whatever its current/proposed values and however old the applied change is. A row stays 'applied' between detection and the start of measurement and, more importantly, returns to 'applied' permanently when the measurement ends inconclusive or not_realized (lifecycle.mark_inconclusive and mark_not_realized both transition to RecommendationStatus.APPLIED, lifecycle.py:855-920; live: all 6 applied rows on minikube are status applied / verification_status inconclusive, 11 hours after their verdict). The engine counts the swallowed record as written (the method returns 1), _persist() returns it in `kept`, and compute_diff() reports it as `new` on every scan because it is never in the active snapshot.
+
+**Fix.** In both repositories treat status 'applied' like the other recorded statuses: call absorbs_regenerated_recommendation(recorded, incoming, now) and only when it returns True (same baseline as the recorded change, or proposal equal to the landed value, within ROLLUP_LAG_WINDOW of applied_at) refresh the applied row and skip; otherwise INSERT the incoming record as a new active recommendation (new id, same fingerprint), carrying `previous_change_id`/`previous_recommendation_id` so the UI and the ledger can relate them. Additionally require for absorption that incoming.current_* equals recorded.current_* (pre-change baseline) or incoming.recommended_* equals the landed value; anything whose current_* equals the landed value is new advice by definition. Make upsert_recommendations return the list of (fingerprint, action) so that engine._persist() reports only rows really written and compute_diff() does not report swallowed records as new; log swallowed records at INFO with the reason. Backfill: none needed, the next scan inserts the missing recommendations.
+
+**Acceptance.** sim_applied_swallow.py prints 'active recommendations for the container: 1' in both cases, with current 308Mi and proposed 616Mi. A regenerated pre-change advice (current 1024Mi, proposed 308Mi) within 6 h of applied_at is still absorbed; the same after 7 h is inserted. Repository contract test runs against SQLite and PostgreSQL. Run diff: a swallowed record is not counted in new_count or recommendation_count.
+
+#### REC-06 · Ignoring a recommendation does not survive the next scan: upsert_recommendations only matches rows in status 'active' (then pr_open/applied family), so the same advice is inserted again as a new active row while the ignored row stays behind; un-ignoring later yields two active rows with one fingerprint.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/storage/sqlite/recommendation_repository.py:283-290`; `src/greenkube/storage/sqlite/recommendation_repository.py:332-400`; `src/greenkube/storage/postgres/recommendation_repository.py:186-198`; `src/greenkube/storage/postgres/recommendation_repository.py:285-331`; `src/greenkube/core/optimization/lifecycle.py:71-76`; `docs/recommendation.md:62`
+
+**Problem.** The docstring of upsert_recommendations() says 'Ignored recommendations are left untouched', and the repository calls ignored rows 'permanently ignored'. The implementation looks up an existing row by identity with status 'active', then a pr_open row, then a row in RECORDED_CHANGE_STATUSES; an 'ignored' row matches none of them, so the incoming recommendation falls through to the INSERT. The engine (_persist) does not filter on ignored fingerprints either. Result: the next scan (hourly by default) re-creates the recommendation as a new active record with a new id; the user's decision and reason remain on a row nobody reads. The lifecycle allows ignored -> active (un-ignore), which then produces two active rows for the same fingerprint (the active lookup uses `ORDER BY id LIMIT 1`, so only the older one is refreshed and the other goes stale/expired later).
+
+**Fix.** In upsert_recommendations (both backends), before inserting, look for a row of the same identity/fingerprint in status 'ignored': if it exists, do not insert; refresh its updated_at/expires_at and, when the new proposal differs materially (outside REVISION_HYSTERESIS or opposite direction, or a reliability increase with OOM evidence), record a `changed_while_ignored` event and surface it in the ignored list ('advice changed since you ignored it'); add an optional ignore expiry (ignore_until) after which the recommendation is offered again. Add a partial unique index on (fingerprint) WHERE status IN ('active','ignored','pr_open') to make duplicates impossible, with a migration that merges existing duplicates (keep the ignored row, mark active twins stale with reason superseded_by_ignored). Update docs/recommendation.md.
+
+**Acceptance.** sim_ignore.py: after the next scan the table holds exactly one row, status ignored. Un-ignore then scan -> exactly one active row. Changed advice while ignored -> still one row, with an event. Same contract test on PostgreSQL.
+
+### WP-06.3 · Check decreases against the increase trigger and the observed peak
+
+#### REC-03 · The decrease target is not checked against the engine's own increase trigger: a decrease to max(p95,(avg+max)/2)x1.2 lands below p99/0.9 for any workload with an occasional peak, so GreenKube proposes a decrease, then an increase, then the same decrease again, forever, and memory decreases go below the observed peak.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/core/optimization/analyzers/rightsizing.py:330-340`; `src/greenkube/core/optimization/analyzers/rightsizing.py:485-498`; `src/greenkube/core/optimization/statistics.py:105-108`; `src/greenkube/core/optimization/analyzers/rightsizing.py:257-262`; `src/greenkube/core/optimization/analyzers/rightsizing.py:239-254`
+
+**Problem.** cpu_proposal()/memory_proposal() size a decrease with balanced_rightsizing_target(): `int(max(p95_usage, (avg_usage + observed_max) / 2.0) * RIGHTSIZING_HEADROOM)`. The increase rule triggers when `stats.p99 > request * RIGHTSIZING_INCREASE_THRESHOLD (0.9)` and sizes to p99 x 1.2. The decrease branch only verifies that the increase trigger is not met for the CURRENT request (`if evidence or _cpu_increase_triggered(config, summary): return None`), never for the request it proposes. Because the lookback p99 is the nearest-rank p99 of the hourly p99s (close to the window maximum, see the percentile finding), any workload whose peak hours are fewer than 5% of hours (p95 stays low) and whose peak exceeds about 1.17x its average gets a decrease target T=0.6x(avg+max) with p99 > 0.9T. After the decrease is applied the next scan proposes an increase to p99x1.2; at that request avg/request is again below 0.3, so the following scan proposes the same decrease. Hysteresis (dedup.py REVISION_HYSTERESIS) only holds proposals against the same current request and direction, and the automation cooldown only delays the cycle. For memory the decrease target is also below the observed maximum working set (only the memory_equals_request policy adds max(raw, max x 1.1)); with the default `keep` policy and no memory limit the pod becomes Burstable below its real peak and is the first eviction candidate under node pressure.
+
+**Fix.** Make the two rules consistent in rightsizing.py: (1) a decrease target must never satisfy the increase trigger: decrease_target = max(balanced target, ceil(p99 / RIGHTSIZING_INCREASE_THRESHOLD) + margin) for CPU, and for memory additionally max(..., round_up_mib(observed_max x MEMORY_MAX_FACTOR)) under every limits policy (memory is incompressible: never request less than the observed peak plus headroom). (2) Add a dead band: propose a decrease only if the resulting request, re-evaluated with the same summary, yields no proposal (call cpu_proposal/memory_proposal recursively on a copy of the summary with the proposed request and assert None; add this as an invariant test too). (3) Symmetric guard for increases: an increase target must not satisfy the decrease threshold (avg/proposed < RIGHTSIZING_*_THRESHOLD) unless OOM-backed; if it does, mark the workload as 'bursty: request cannot satisfy both rules' and emit an autoscaling/limit advice instead of a request change. (4) Document the formula in docs/recommendation.md. (5) Existing active decrease recommendations must be recomputed by the next scan (no migration); already applied decreases that are now followed by an increase should be linked (increase.reason mentions the previous GreenKube change) so the ledger can net them.
+
+**Acceptance.** Property test over random usage distributions (avg, p95, p99, max, any request): applying the proposal and re-running the proposal function with unchanged usage returns None (fixed point in one step, at most two for capped increases). The two profiles of sim_flap.py end with 'stable' at scan 1. Memory decrease: proposed >= round_up_mib(max x 1.1) for every profile (400Mi peak -> at least 440Mi).
+
+#### IMP-13 · The 5% revision hysteresis is a one-step relative band without memory: proposals that alternate between two nearby values create a new revision at every flip.
+
+**Severity** low · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/core/optimization/dedup.py:468-508`
+
+**Problem.** within_hysteresis() compares the new proposal with the stored one only: abs(proposed - previous) <= 0.05 x previous. For small integers (millicores) 5% is less than the natural step of a percentile-based proposal: 56m and 60m differ by 7%, so a workload whose p99 alternates between two samples flips the stored advice on every flip, each time superseding the previous revision, resetting the description and re-arming eligibility/warm-up logic that keys on the revision. Inside the band the opposite problem applies (projection frozen, see the first finding).
+
+**Fix.** Use a deadband with an absolute floor and with memory: hold when abs(new - stored) <= max(5% x stored, RECOMMENDATION_MIN_CPU_MILLICORES for CPU, 16 MiB for memory); when outside the band, require the new value to be confirmed by K consecutive scans (default 3) or to move in the safer direction (a higher request is accepted at once) before creating a revision; quantize analyzer proposals to a geometric grid (for example round up to the next 5% step, minimum 5m) so jitter maps to the same value. Do not create revisions for targets whose coverage is below 1 h (keep the record as 'warming up' with no projection). Always refresh the projection for the held value (first finding).
+
+**Acceptance.** Sequence of scan proposals 56, 60, 56, 60, 56 for a 200m request -> one revision (56 or 60, the higher under 'safest'), projection refreshed at each scan. Sequence 56, 80, 80, 80 -> second revision created at the third 80.
+
+### WP-06.4 · Count OOM kills only since the current limit
+
+**Also covers.** MEA-11 (The OOM-kill baseline rate of a reliability increase divides kills counted over the whole scan window by an ex...)
+
+#### REC-02 · OOM kills are counted over the whole lookback regardless of request/limit changes, so after an OOM fix is applied the old kills keep 'proving' that the NEW limit was passed and drive a further unjustified memory increase on every scan.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/reliability_signals.py:167-202`; `src/greenkube/core/reliability_signals.py:149-164`; `src/greenkube/core/optimization/analyzers/rightsizing.py:393-417`; `src/greenkube/core/optimization/analyzers/rightsizing.py:448-461`; `src/greenkube/core/optimization/analyzers/rightsizing.py:501-520`
+
+**Problem.** read_prometheus_signals() counts OOM kills with a PromQL window equal to the full lookback (window_seconds=(end-start), 14 days by default) and _per_container() sums every pod name that maps to the target, including the pods of ReplicaSets that ran with the previous request/limit. apply_signals() stores that sum as summary.oom_kill_count. memory_proposal() then treats any non-zero count as proof about the CURRENT limit: `floor = min(oom_proven_usage(summary) * step, request * max_increase_factor(config))` where oom_proven_usage() returns the summary's latest memory_limit (the value after the fix). The step is uncapped ('OOM kills are proof that the request is too low: no cap on that step') and needs_limit_headroom() also returns 'oom_headroom', so the limit is raised again as well. Nothing relates the kill timestamps to the time the request/limit last changed (the hourly rollup knows the request per hour, change_events knows the apply time). The same stale count also blocks every memory AND CPU decrease for the container for the whole lookback (rightsizing.py:324 and :481); restarts_in_window (in-place container restarts over the lookback) blocks them in the same way and is equally blind to the configuration the restarts happened under.
+
+**Fix.** 1) Make OOM evidence relative to the configuration it happened under. In read_prometheus_signals() return kills per (pod, container) with the time of the last kill (e.g. query the subquery as a range, or `max_over_time(timestamp(...))`), and in apply_signals() keep only kills of pods that ran with the summary's current memory limit/request: simplest robust rule: ignore kills older than the last hour in which the rollup's memory_limit or memory_request for that target container differs from the current one (read_usage_snapshot can return `request_changed_at`/`limit_changed_at` = first hour_bucket of the trailing run of identical request+limit), and additionally ignore kills that predate the latest change_events apply time for the target. 2) Expose both numbers on the summary (oom_kill_count = kills under the current limit; oom_kill_count_before_change) and say so in the reason text. 3) Do the same for restarts_in_window: only restarts of pods running the current pod template count against a decrease. 4) After a memory increase is applied, hold further OOM-driven increases for the target until at least one kill is observed under the new limit. 5) Existing active recommendations created from stale kills (reason contains 'OOM kills prove' and no kill since the last change) must be recomputed on the next scan and resolved; no stored-data migration beyond that.
+
+**Acceptance.** Unit: summary with memory_request=64Mi, limit=71Mi, max=37Mi, p99=36Mi, kills=[(t0-2h, under limit 32Mi)] and request change at t0-1h -> memory_proposal() returns None. Same summary with one kill after the change -> increase with basis oom_limit. Integration (fake Prometheus + SQLite): apply a 32->64Mi fix, run two scans with the old kills still in the window -> no new RIGHTSIZING_MEMORY recommendation, and the reason of no active recommendation mentions a limit the kills did not happen at. Decrease test: a container with an OOM kill 10 days ago under a previous limit and 7 clean days under the current one is eligible for a decrease again.
+
+### WP-06.5 · Retire recommendations of workloads that no longer exist
+
+#### REC-05 · Recommendations are generated for workloads and containers that no longer exist: any target with one hour of usage inside the lookback gets a summary, there is no 'still running' check, so deleted/renamed Deployments, removed containers and finished Jobs keep active (and re-refreshed) rightsizing recommendations for up to the whole lookback.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/storage/workload_usage_sql.py:198-288`; `src/greenkube/core/optimization/context.py:129-132`; `src/greenkube/core/optimization/context_builder.py:140-150`; `src/greenkube/core/optimization/analyzers/rightsizing_cpu.py:39-54`; `src/greenkube/core/optimization/analyzers/rightsizing_memory.py:118-133`; `src/greenkube/core/workload_usage.py:705-747`
+
+**Problem.** summary_sql()/summarize() return one summary per (namespace, target_kind, target_name, container) that has at least one hourly row in [now - RECOMMENDATION_LOOKBACK_DAYS, now]. The only liveness filter is on namespaces that no longer exist (get_active_k8s_namespaces). OptimizationContext.iter_container_summaries() yields every summary and the CPU/memory analyzers never look at summary.last_hour, at the workload's existence, or at whether the container is still in the pod spec. 'Current request' is the request of the target's last observed hour, which may be days old. Each scan re-emits the recommendation, so it stays `active`, its updated_at and expires_at are pushed forward (TTL never elapses), and reconciliation never marks it stale until the last hour of the dead target leaves the lookback (14 days by default). Increases need no coverage at all, so a finished Job or a pod that lived one step can produce one (sim: one sample at 950m of a 1000m request for Job report-28391234 -> 'cpu increase 1000 -> 1140').
+
+**Fix.** 1) In the summary (SQL and summarize()) keep last_hour and add `last_sample_at`; in ContextBuilder.build_from_rollup() drop from the analyzers every target container whose last sample is older than max(2 collection steps, 2 hours) before `end` (configurable RECOMMENDATION_TARGET_MAX_STALENESS), unless the workload still exists and is scaled to zero. 2) Cross-check with the cluster: the scan already lists all pods (reliability_signals._list_pods) and HPA targets; build the set of live (namespace, owner kind, owner name, container) from pod specs plus Deployments/StatefulSets/DaemonSets/CronJobs with replicas=0, and skip targets and containers not in it (fail closed when the Kubernetes API cannot be read: keep previous records via the incomplete-source mechanism instead of emitting). 3) Never emit request recommendations for kinds Job and bare Pod that have completed; for CronJobs aggregate runs under the CronJob (owner of the Job) so that the recommendation targets the CronJob template. 4) Recommendations whose target disappeared must be reconciled to `stale` (reason target_gone) by the next scan. No migration needed; the next scan resolves existing ghosts.
+
+**Acceptance.** Integration (SQLite): workload A has 10 days of hourly rows ending 5 hours ago and no live pod -> the scan emits nothing for A and an existing active recommendation for A becomes stale. Workload B scaled to zero 5 hours ago but still present as a Deployment -> existing recommendation kept, flagged 'not running'. A Job with 1-3 samples -> no recommendation. A container removed from the pod template -> no recommendation for it. Live check query above returns no rows.
+
+### WP-06.6 · Refresh evidence and savings under revision hysteresis
+
+#### IMP-01 · Revision hysteresis freezes a recommendation's projected savings (impact, potential_savings_*, evidence) at the values of an earlier scan for as long as the proposal moves by 5% or less.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/optimization/dedup.py:470-486`; `src/greenkube/core/optimization/dedup.py:489-540`; `src/greenkube/core/optimization/engine.py:428-431`
+
+**Problem.** engine._persist calls apply_revision_hysteresis(kept, previous) before the upsert. When the new proposal differs from the stored one by at most REVISION_HYSTERESIS (5%) and the current request is unchanged, the new recommendation is overwritten with the stored record's _HELD_FIELDS: ('recommended_*', 'description', 'reason', 'priority', 'potential_savings_cost', 'potential_savings_co2e_grams', 'impact', 'evidence', 'proposal', 'consensus'). Holding the proposed value is the intent (no new revision for jitter), but the projection and the evidence are functions of the whole lookback (prices, hours observed, coverage, realization factor, grid intensity), not only of the proposed value, and they are held too. within_hysteresis() returns False only when the new proposal is exactly equal to the stored one or moved by more than 5%; a proposal that settles 1-5% away from the stored value (the normal case once more data arrives, e.g. first scan 135 MiB, later scans 137 MiB) is held on every scan, forever. The stored row is then refreshed (updated_at = now) with a projection computed at the revision's creation: typically the first scan after install or after the workload appeared, when the target had seconds or minutes of data, annualized under MIN_COVERAGE_HOURS with confidence 0.225, and possibly with the 'unobserved' realization factor 1.0. Fields that are not held (confidence, value, ranking_score, ranking_factors) are computed from the fresh projection before the hold, so value.components.cost_annual no longer matches impact.expected_billable_cost_annual of the same record.
+
+**Fix.** 1. In dedup.py split _HELD_FIELDS in two: the advice (recommended_cpu_request_millicores, recommended_memory_request_bytes, proposal, description, reason, priority, consensus) stays held; potential_savings_cost, potential_savings_co2e_grams, impact and evidence must be recomputed for the HELD value from the current scan. 2. Give apply_revision_hysteresis a 'reproject' callable (the existing consensus_refiner(context) does exactly this: ImpactProjector.for_context(context).container_resources(ref, context.container_rows(target, container), <resource>=(current, held_value))) and call it for every held recommendation; rebuild evidence with enrich._enrich_one and re-score (score_recommendations) after the hold so value/ranking_score derive from the persisted impact. engine._persist must therefore receive the scan context (today it only gets the recommendations). 3. The revision logic must ignore impact-only changes (no new revision when only the projection moved); check storage upsert/revision comparison (recommendation_revisions) so a refreshed projection does not bump 'revision'. 4. Add an invariant in the upsert path: impact.assumptions.window_hours of a record written by scan S must come from scan S (e.g. persist impact.assumptions.window_end / scan run id and assert it equals the run). 5. Backfill: none needed, the next scan rewrites every active record; applied/verifying records keep the projection they were applied with (see the separate finding on baselines if measurement reads them).
+
+**Acceptance.** Unit: stored record (memory 1 GiB -> 300 MiB, impact projected from one 30 s sample) + fresh recommendation 310 MiB projected from 14 days of hourly rows -> persisted record has recommended 300 MiB, unchanged revision, impact.assumptions.window_hours == 336, potential_savings_cost within 1% of the projection of (1 GiB -> 300 MiB) over the 14-day rows, and value.components.cost_annual == impact.expected_billable_cost_annual. Integration (SQLite): run three scans with proposals 300, 310, 305 MiB while rows accumulate; after each scan impact.assumptions.coverage_hours equals the scan's coverage; recommendation_revisions has one row.
+
+#### REC-12 · Revision hysteresis freezes the whole record (evidence, sample count, coverage, description statistics, projected savings, impact, priority) at the first proposal while updated_at keeps advancing, so active recommendations show and are gated on statistics that can be many scans old (live: a recommendation still backed by 'sample_count 1' twelve hours and 729 samples later).
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/optimization/dedup.py:468-486`; `src/greenkube/core/optimization/dedup.py:489-508`; `src/greenkube/core/optimization/dedup.py:511-540`; `src/greenkube/core/optimization/engine.py:427-431`; `src/greenkube/automation/policy.py:905-957`
+
+**Problem.** apply_revision_hysteresis() replaces, for every recommendation whose new proposed request differs from the stored one by more than 0 and at most 5% (same current request, same direction), all `_HELD_FIELDS` by the stored values: recommended_*, description, reason, priority, potential_savings_cost, potential_savings_co2e_grams, impact, evidence, proposal, consensus. The record is then upserted as a 'refresh': updated_at and expires_at move forward, nothing else. As long as each later scan lands within 5% of the stored value (but not exactly on it: `proposed == previous` returns False and refreshes), the record never changes. Evidence therefore keeps the sample_count, coverage_ratio, observation window, usage percentiles, OOM count and cost/CO2 projections of the scan that created the value. Downstream consumers read these as current: confidence scoring (risks._base_confidence uses evidence.sample_count/coverage_ratio), the automation policy gate `sample_count_coverage` (min_samples 36, min_coverage 0.5) and the UI. Because increases are created without any minimum evidence, they are typically created on the first scans after a workload appears, with a handful of samples, and then frozen.
+
+**Fix.** Hold only what must stay stable for the action: the proposed request value (and the typed action/limit changes derived from it). In apply_revision_hysteresis() keep `recommended_*` (and `proposal.value`) from the stored record but take evidence, usage statistics, sample_count/coverage, confidence inputs, impact and potential savings from the new scan, recomputed for the HELD value (re-run the Impact projection and planned_limit_changes with the held request; regenerate description/reason from the fresh statistics with the held target, adding 'value held since <date>: new estimate X within 5%'). Add `held_since` and `fresh_estimate` to the consensus/proposal block. Do not create a revision when only evidence changes (compare proposal_signature only). Also bound the hold: release it when the cumulative drift from the value at hold start exceeds the threshold or after N days. No data migration: the next scan refreshes held records.
+
+**Acceptance.** Unit: stored record (proposed 191Mi, evidence.sample_count=1) + new recommendation (proposed 199Mi, evidence.sample_count=729) -> result has recommended 191Mi, evidence.sample_count 729, impact recomputed for 191Mi, no new revision row. Integration: two scans one day apart with 3% drift -> evidence.observation_window_end of the stored record equals the second scan's window end. Live query above returns 0 stale-evidence rows.
+
+#### IMP-09 · Minimum-request clamping is applied after the projection, so a clamped recommendation stores one value and the projection (and description) of another.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/core/optimization/dedup.py:455-458`; `src/greenkube/core/optimization/thresholds.py:12-57`; `src/greenkube/core/optimization/analyzers/rightsizing.py:305-306`
+
+**Problem.** finalize_entries() projects consolidated values (analyzer projection, or materialize -> refine) and then runs apply_minimum_thresholds(rec, config), which raises recommended_cpu_request_millicores / recommended_memory_request_bytes to RECOMMENDATION_MIN_* and appends '(Floored to minimum ...)' to the description, but leaves potential_savings_*, impact and impact.assumptions.change untouched. The native analyzers floor decreases before projecting, but not increases (rightsizing.py: proposed = max(_capped(raw, request, factor), request + 1)); VPA, Goldilocks, KRR, Kubecost and pushed signals are not floored either. The stored record then proposes the minimum while its projection, its description ('Recommend increasing to 6m') and the baseline used later for projection accuracy describe another value. For a decrease from a request below the minimum, the clamp turns the advice into an increase that keeps a positive saving.
+
+**Fix.** Clamp before projecting. (1) In analyzers/rightsizing.py floor increase proposals too (proposed = max(proposed, RECOMMENDATION_MIN_*)) and build the description from the floored value. (2) In dedup, apply the minimum inside materialize() on consensus.value, before refine, so a changed value is always re-projected and re-described; keep apply_minimum_thresholds only as an assertion. (3) Drop the recommendation when the clamped value equals the current request, and when a clamped decrease becomes an increase without a reliability trigger. (4) Invariant at RecommendationRecord creation: impact.assumptions.change proposed value == recommended_* (unit-converted, 1m / 1 MiB tolerance); reject or re-project otherwise. No migration: the next scan rewrites active records.
+
+**Acceptance.** Analyzer increase 4m -> 6m with minimum 10m: stored recommended 10m, description 'increasing to 10m', impact.assumptions.change.cpu_request_cores == [0.004, 0.010] and allocated_cost_annual equal to the projection of 4m -> 10m. VPA signal 100m -> 2m: stored 10m with change [0.1, 0.01]. VPA signal 8m -> 5m: no recommendation. A query for records whose change differs from recommended_* returns no row after a scan.
+
+### WP-06.7 · Coverage gates and HPA awareness
+
+#### REC-08 · The decrease coverage gate measures the span between the first and last observed hour, not how much of it was observed: 24 samples in two hours 8 days apart pass the 7-day requirement, and RECOMMENDATION_MIN_SAMPLES is not enforced by any analyzer.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/models/workload_usage.py:186-191`; `src/greenkube/core/optimization/statistics.py:99-102`; `src/greenkube/core/optimization/analyzers/rightsizing.py:172-182`; `src/greenkube/core/optimization/analyzers/zombie.py:32-36`; `src/greenkube/core/optimization/analyzers/idle_namespace.py:83-89`; `src/greenkube/core/optimization/risks.py:160-176`
+
+**Problem.** WorkloadUsageSummary.coverage_seconds is `(last_hour - first_hour) + 3600`. _coverage_ok() compares it with RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS. hours_observed, sample_count and step_count are available on the summary but unused by the gate, so collection outages, a controller that was down, a workload scaled to zero most of the week, or a freshly re-created pod name all count as observed time. The same span is used as 'unused for N days' evidence by the zombie and idle-namespace analyzers (observed_span). RECOMMENDATION_MIN_SAMPLES (36) only feeds the confidence score in risks.py (+0.25) and the setup page; no analyzer blocks on it. Increases have no evidence requirement at all (by design, but one sample is enough).
+
+**Fix.** Replace the span by observed coverage: add to the summary `observed_hours` (already hours_observed) and `expected_steps` and define coverage_ratio = step_count / (span_seconds / step_seconds) per replica. _coverage_ok() must require (a) span >= RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS, (b) hours_observed >= 0.8 x span hours (configurable RECOMMENDATION_MIN_COVERAGE_RATIO), (c) every weekday observed at least once when the requirement is >= 7 days, and (d) sample_count >= RECOMMENDATION_MIN_SAMPLES. Use the same helper in zombie.py and idle_namespace.py (the 'unused for N days' statement must be 'observed idle in X of Y hours'). For increases require at least RECOMMENDATION_MIN_SAMPLES samples or two distinct hours unless OOM-backed. Expose hours_observed/expected in the evidence and the description.
+
+**Acceptance.** sim_gates.py case 2 -> no proposal, skip reason insufficient_coverage. A summary with 7.5 days span and 95% of hours observed -> decrease allowed; 7.5 days span and 50% of hours -> blocked. Zombie/idle namespace: 2 observed hours over 8 days -> no recommendation.
+
+#### REC-13 · Evidence coverage_ratio divides replica-samples by single-series expected steps, so a workload with N replicas reports N times its real coverage (capped at 1.0), and a computed coverage of 0 is stored as 1.0; confidence and the automation minCoverage gate rely on it.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/core/optimization/evidence.py:82-90`; `src/greenkube/core/optimization/evidence.py:322-326`; `src/greenkube/core/optimization/evidence.py:335`; `src/greenkube/core/optimization/risks.py:160-178`; `src/greenkube/automation/policy.py:905-957`
+
+**Problem.** _utilization_stats() sums `sample_count` over every row of the target's series (all replicas, all nodes) and computes `coverage = min(1.0, sample_count / (window_seconds // step_seconds))`: the denominator is the number of steps one replica can have. Two replicas observed half of the time give 1.0. build_evidence() then stores `coverage_ratio=coverage or 1.0`, turning a computed 0.0 into full coverage. risks._base_confidence adds +0.15 when coverage_ratio >= 0.9 and +0.25 when sample_count >= RECOMMENDATION_MIN_SAMPLES (also replica-inflated), and AutomationPolicy's sample_count_coverage check compares the same fields with minSamples/minCoverage.
+
+**Fix.** Compute coverage per replica-time: coverage = observed steps / expected steps where observed steps = summary.step_count (distinct collection steps with at least one sample of the target; already in the rollup) and expected = window_seconds / step_seconds since the target's first observation; or duration_seconds / (replicas_avg x window). Report both `sample_count` (replica-samples) and `step_count`. Replace `coverage or 1.0` by the computed value (0.0 stays 0.0; None when unknown, which gates must treat as failing). Use the per-step count for the minSamples gate and the confidence bonus. Recompute on the next scan (see the held-evidence finding so that it actually refreshes).
+
+**Acceptance.** Evidence for a 2-replica workload observed in 50% of steps -> coverage_ratio 0.5 (+-0.02), same as a 1-replica workload with the same gaps. Series with no usable samples -> coverage_ratio 0.0 or None, never 1.0. Policy check rejects a 10-replica workload observed 10% of the time with minCoverage 0.5.
+
+#### REC-15 · Native rightsizing ignores HorizontalPodAutoscalers: a CPU/memory request change on an HPA-scaled workload moves the HPA's utilisation ratio (usage / request), the scan only knows 'an HPA exists' (metrics unknown, risk unchanged), and savings are projected as if the replica count stayed constant.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/optimization/enrich.py:66-84`; `src/greenkube/core/optimization/risks.py:288-293`; `src/greenkube/collectors/hpa_collector.py:25-50`; `src/greenkube/core/optimization/analyzers/rightsizing.py:282-340`; `docs/recommendation.md:182`
+
+**Problem.** HPACollector.collect() returns only the set of scale targets. build_risk_profile() therefore sets hpa_resources = {'*'} and risks.py adds the factor `hpa_present` without raising the level ('An HPA with unknown metrics is only reported'). cpu_proposal()/memory_proposal() never look at context.hpa_targets. For a resource-utilisation HPA the per-replica usage is regulated to targetUtilization x request: (a) lowering the request by a factor k multiplies utilisation by k, the HPA scales out by up to k, and total requested CPU stays about constant: the projected saving (request delta x current replicas) does not materialise; (b) with the workload at minReplicas the per-replica usage observed is low by construction, so the engine keeps proposing decreases; (c) raising the request (the 'p99 > 90% of request' increase) lowers utilisation and makes the HPA scale in, which raises per-replica usage again: the increase rule fights the autoscaler.
+
+**Fix.** 1) Extend HPACollector to return, per scale target, minReplicas, maxReplicas and resource metrics (resource name, target type Utilization/AverageValue, target value, container for ContainerResource metrics). 2) In the rightsizing analyzers: when an HPA scales on Utilization of the resource being changed, do not emit a request change by default; emit instead an advisory that states the coupling and, if wanted, a coupled proposal (new request r' together with a new target utilisation u' = u x r / r' so that the scaling threshold in absolute millicores is unchanged) marked manual-only. For AverageValue or non-resource metrics proceed normally. 3) When the HPA scales on another resource (e.g. CPU HPA, memory change), size per-replica statistics as today but project savings with the observed replica distribution (replica-hours), not the latest replica count. 4) Set risk at least MEDIUM for `hpa_present` with unknown metrics and HIGH for `hpa_scales_on_resource` at scan time (not only from GitOps discovery evidence). 5) Update docs/recommendation.md.
+
+**Acceptance.** Fixture with HPA(cpu Utilization 70%) on a Deployment: scan emits no automatic RIGHTSIZING_CPU change; evidence carries the HPA metrics; RIGHTSIZING_MEMORY is still emitted with risk factor hpa_present. Fixture with HPA on an external metric: both resources emitted. Risk assessment unit test: hpa_resources={'cpu'} and a CPU decrease -> level high, not eligible for auto-approval.
+
+#### REC-17 · The minimum-request floor is applied to increases after the step cap, so containers with tiny requests get 'reliability' increases straight to 10m / 16Mi (beyond the 2x cap) for a few millicores of usage.
+
+**Severity** low · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/core/optimization/thresholds.py:12-57`; `src/greenkube/core/optimization/analyzers/rightsizing.py:300-320`; `src/greenkube/core/optimization/analyzers/rightsizing_cpu.py:72-83`
+
+**Problem.** cpu_proposal() caps an increase at RIGHTSIZING_MAX_INCREASE_FACTOR x request ('one step is always capped'). apply_minimum_thresholds() later raises any recommended value below RECOMMENDATION_MIN_CPU_MILLICORES / RECOMMENDATION_MIN_MEMORY_BYTES to the floor, whatever the direction. For a request below the floor the trigger `p99 > 0.9 x request` fires on 1-2m of usage and the final proposal is the floor, with priority 'high' when p99 > request.
+
+**Fix.** Apply the floors only to decreases. For increases, do not trigger when both the current request and p99 x headroom are below the floor (the absolute shortfall is below RECOMMENDATION_MIN_* : add a minimum absolute delta, e.g. 10m / 16Mi, for increases), and never exceed the step cap except for OOM-backed memory steps.
+
+**Acceptance.** Summary request 4m, p99 5m -> no proposal. Request 4m, p99 40m -> increase capped at 8m (2x). Decrease to 3m -> floored to 10m only if 10m < current request.
+
+### WP-06.8 · Advisory analyzers: static pods, idle, off-peak, autoscaling, nodes
+
+#### REC-09 · Static (mirror) control-plane pods are merged into one fake workload 'Node/<node name>' and receive rightsizing and 'use an HPA' recommendations; the pod-level statistics of that target mix etcd, kube-apiserver, scheduler and controller-manager as if they were replicas.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/core/optimization/targeting.py:21-36`; `src/greenkube/collectors/pod_collector.py:111-136`; `src/greenkube/core/workload_usage.py:518-525`; `src/greenkube/core/optimization/analyzers/autoscaling.py:30-52`; `src/greenkube/core/optimization/analyzers/rightsizing.py:199-236`; `src/greenkube/core/optimization/targeting.py:10-18`
+
+**Problem.** The pod collector stores the controller ownerReference of a pod as owner_kind/owner_name. Mirror pods of static manifests are owned by `Node/<node>`, so resolve_target() returns (kube-system, 'Node', '<node>') for etcd-<node>, kube-apiserver-<node>, kube-controller-manager-<node> and kube-scheduler-<node>. The rollup groups them as one target: its pod-level summary has pod_count 4 and percentiles/CV computed across four unrelated pods, which (a) feeds AutoscalingAnalyzer (CV across pods of 3m and 70m is high -> 'Node X has highly variable CPU usage ... Consider using HPA'), (b) is the 'pod' bound used by bounded_by_pod() for each container, and (c) yields container rightsizing recommendations labelled "Node 'minikube' container 'etcd'" whose manifests live in /etc/kubernetes/manifests on the node, not in any GitOps repository. Lowering kube-apiserver/etcd requests is not advice GreenKube can deliver or should give by default. Related weakness in the same function: when a pod row has no owner (5% of pod rows on the live minikube database), infer_deployment_target() applies `^(.+)-[a-z0-9]{8,10}-[a-z0-9]{5}$`, which also matches CronJob pods (`report-28391234-x7k2p` -> Deployment 'report') and DaemonSet/Job pods whose name ends with an 8-10 character word (`kps-prometheus-node-exporter-x7k2p` -> Deployment 'kps-prometheus-node').
+
+**Fix.** 1) In resolve_target() (and target_for_pod) treat owner kind 'Node' as 'no controller': the target is the pod itself (kind 'Pod', name = pod name, plus a `static_pod=True` flag carried on the summary). 2) Exclude static pods from rightsizing/autoscaling/off-peak by default (they are not deliverable through Git); offer them only when RECOMMEND_SYSTEM_NAMESPACES explicitly includes control-plane pods, as manual-only advice. 3) Restrict workload-level analyzers to kinds that have a scale subresource (Deployment, StatefulSet, ReplicaSet, Rollout); never emit AUTOSCALING_CANDIDATE for other kinds. 4) Replace the name regex fallback by owner resolution from the Kubernetes API or from other rows of the same pod across hours (persist a pod->owner map), and when the owner is unknown keep kind 'Pod' and mark the summary `owner_unknown` (no workload recommendation). 5) Migration: delete or re-key workload_usage_hourly rows with target_kind='Node' (re-roll the retention window) and mark the existing Node-owned recommendations stale.
+
+**Acceptance.** resolve_target('kube-system','etcd-cp1','Node','cp1') == ('kube-system','Pod','etcd-cp1'). A scan over a kubeadm-like fixture emits no recommendation with owner_kind 'Node' and no AUTOSCALING_CANDIDATE for kinds other than scalable workloads. infer fallback: pod 'report-28391234-x7k2p' without owner is not attributed to Deployment 'report'.
+
+#### REC-10 · Zombie and idle-namespace detection compare an absolute energy total over a variable window (1000 J) instead of a rate, so they almost never fire with 7+ days of dense data and fire for every namespace when data are sparse or short; the 'unused for N days' evidence is a first-to-last span.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/optimization/analyzers/zombie.py:56-72`; `src/greenkube/core/optimization/analyzers/idle_namespace.py:66-89`; `src/greenkube/core/config.py:402-408`; `src/greenkube/core/optimization/analyzers/zombie.py:32-36`
+
+**Problem.** ZombieAnalyzer flags a target when `total_cost > ZOMBIE_COST_THRESHOLD (0.01) and joules < ZOMBIE_ENERGY_THRESHOLD (1000.0)`; IdleNamespaceAnalyzer when `joules < IDLE_NAMESPACE_ENERGY_THRESHOLD (1000) and cost > 0`. Both sums are totals over whatever part of the lookback has rows (all replicas, all hours). 1000 J over the required 7 days is an average of 1.65 mW; over 14 days 0.83 mW. An idle `sleep` container is attributed about 11 mW in the live clusters (570 J in 14 h), so with dense data the condition is false for any running pod after roughly one day: the analyzers are effectively dead in steady state. Conversely the total is small whenever few samples exist: the span gate (`last_hour - first_hour + 1h >= DELETION_MIN_UNUSED_DAYS`) is satisfied by two observed hours a week apart, so after a collection outage or on clusters that are switched off between sessions, busy namespaces whose few samples sum to less than 1000 J are reported as 'appears idle: consumed only N J over 8.0 days', with an annualized saving equal to the whole namespace cost. The texts state the span as if it were continuously observed.
+
+**Fix.** Define idleness as a rate with a coverage requirement: (1) compute average power per replica = joules / duration_seconds (the summary has duration_seconds as replica-seconds) and average CPU usage; flag when average power per replica < ZOMBIE_POWER_THRESHOLD_WATTS (new setting, default e.g. 0.05 W, to be calibrated against the idle allocation of the energy model) AND cpu p95 < a few millicores AND no network activity when available; (2) require hours_observed >= 0.8 x required hours (see the coverage finding) and that the last sample is recent (target still exists); (3) keep the old settings as deprecated aliases converted to a rate (threshold / (lookback seconds)) and document the change in docs/recommendation.md and docs/configuration.md; (4) word the evidence as 'observed idle in X of Y hours since <first>'.
+
+**Acceptance.** Fixture A: one replica, 14 days dense data at 0.01 W and 0-1m CPU -> zombie + idle namespace reported. Fixture B: 5 W workload with 3 minutes of data at day 0 and day 8 -> not reported. Fixture C: fixture A with 2, 7 and 14 days of lookback gives the same verdict. Text contains observed/expected hours.
+
+#### REC-11 · Off-peak 'scale to zero N h/day' recommendations are issued from a single day of data (6 samples in total suffice): each hour of day needs only one observation, unobserved hours silently cut the idle run, and a one-off startup spike is the 'peak', so always-idle workloads, a database and a Git server were told to scale to zero at night.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/optimization/analyzers/off_peak.py:20`; `src/greenkube/core/optimization/analyzers/off_peak.py:69-87`; `src/greenkube/core/optimization/analyzers/off_peak.py:124-132`; `src/greenkube/core/workload_usage.py:693-695`; `src/greenkube/core/workload_usage.py:749-752`
+
+**Problem.** OffPeakAnalyzer reads snapshot.hour_profiles: the sample-weighted average CPU per UTC hour of day over the lookback. The only evidence gate is `hour_profile_samples >= MIN_PROFILE_SAMPLES (6)`. There is no requirement on days observed per hour of day, on coverage of the 24 hours, or on the absolute level of the peak. `peak_usage = max(hourly_avg.values())` can be the hour in which the pod started once; hours with no data are None and are simply absent, so the 'longest consecutive idle run' is bounded by where data collection happened to stop. Stateful workloads are not excluded (_unsafe_to_stop only excludes DaemonSet/Pod/Job/CronJob, HPA targets, infrastructure namespaces and operator-like names), although scaling a StatefulSet/database to zero daily is not a rightsizing action.
+
+**Fix.** 1) Carry per hour of day the number of distinct days observed (add `days` to the hour profile SQL: count(distinct date(hour_bucket)) per hour_of_day) and require all 24 hours observed on at least max(7, RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS) distinct days, covering both weekdays and weekend. 2) Require the idle condition to hold on at least 90% of those days for each idle hour (store per hour-of-day the share of days below threshold, or the p90 of the hourly averages) rather than on the average. 3) Require a meaningful peak: peak hourly average >= max(10m, 5% of the request) so that a flat-zero workload is routed to the zombie analyzer instead. 4) Exclude StatefulSets (or require an explicit opt-in annotation) and workloads with PVCs. 5) Evidence text must list days observed. Existing active OFF_PEAK_SCALING records are recomputed by the next scan.
+
+**Acceptance.** Fixture with 14 h of data -> no OFF_PEAK_SCALING. Fixture with 14 days where nights 00-06 are below 5% of peak on 13 of 14 days -> recommendation with schedule 00:00-06:00 and evidence '14 days observed'. Always-idle fixture -> no off-peak recommendation. StatefulSet fixture -> none.
+
+#### REC-14 · AUTOSCALING_CANDIDATE is driven by relative noise on near-zero CPU: 3 samples suffice, there is no minimum absolute usage, warm-up spikes count, and any kind is eligible, so idle workloads (0.01-1m average), single-replica databases and operators are told to 'use an HPA'; each threshold crossing also inserts a new history row.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/core/optimization/analyzers/autoscaling.py:32-58`; `src/greenkube/core/workload_usage.py:268-276`; `src/greenkube/core/workload_usage.py:654-657`; `src/greenkube/core/config.py:404-405`
+
+**Problem.** AutoscalingAnalyzer computes `cv = stddev / mean` and `spike_ratio = max / mean` from the pod-level summary and emits when cv > 0.7 and spike_ratio > 3. Gates: `stats.sample_count >= 3`, request != 0, mean != 0. There is no floor on mean usage or on max relative to the request, so integer-millicore quantisation of an idle pod (samples of 0 and 1-2m) produces huge ratios. The variance uses every point including the warm-up after a (re)start (cpu_sum/cpu_sq_sum are accumulated before the warm-up split) and `max` keeps the startup spike by design. The pod-level summary pools all replicas and, for kind 'Node', different static pods. Only existing HPA targets are excluded; StatefulSets, operators/controllers and infrastructure namespaces are not (unlike zombie/off-peak). The condition sits on a noisy boundary without hysteresis: when it flips, reconciliation marks the record stale and the next crossing inserts a new recommendation_history row with the same fingerprint.
+
+**Fix.** In AutoscalingAnalyzer: (1) require a meaningful load: p95 per-replica CPU >= max(50m, 30% of the request) and max >= 80% of the request (the workload actually needs more than one replica's worth at peak), with at least RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS of coverage and RECOMMENDATION_MIN_SAMPLES samples; (2) compute variability on warm-up-excluded points (add warm-up-excluded sum/sq-sum to the rollup or use p95/p50 instead of CV); (3) restrict to Deployments (and StatefulSets only with opt-in), exclude infrastructure namespaces and event-driven names via deletion_safety helpers, exclude kind Node/Pod/Job; (4) add hysteresis (enter at cv>0.7, leave at cv<0.5) and reactivate the existing stale row of the same fingerprint instead of inserting a new one (general rule for advisory types in upsert_recommendations: a stale row younger than the TTL with the same fingerprint is revived, with an event). Add retention for stale/expired recommendation_history rows.
+
+**Acceptance.** Fixture: pod with samples in {0,1,2}m and request 100m over 14 days -> no AUTOSCALING_CANDIDATE. Fixture: Deployment with p95 600m / p50 100m of a 500m request over 14 days -> candidate. Kind StatefulSet/Node -> none. Condition toggling across 10 scans -> one row in recommendation_history for the fingerprint.
+
+#### REC-16 · OVERPROVISIONED_NODE compares only pod usage with capacity: it ignores requests, has no coverage requirement, flags control-plane and single nodes, and in a namespaced scan the node usage is computed from that namespace's pods only while the cluster-scoped record is still written.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** S · **Where** `src/greenkube/core/optimization/analyzers/nodes.py:41-66`; `src/greenkube/storage/workload_usage_sql.py:303-321`; `src/greenkube/core/optimization/context_builder.py:145-147`; `src/greenkube/core/optimization/engine.py:445-448`
+
+**Problem.** OverprovisionedNodeAnalyzer flags a node when average pod CPU usage / capacity < NODE_UTILIZATION_THRESHOLD (0.2) and the same for memory. NodeUsageSummary.cpu_request_avg/memory_request_avg are computed but unused: a node whose capacity is 90% requested cannot be consolidated even at 5% usage. The only evidence gate is `usage.hours_observed > 0`. Usage is the sum of pod-level usage (kubelet, system daemons and unobserved pods excluded). node_sql() applies the scan's namespace filter, so `POST /api/v1/optimization/runs` with a namespace computes each node's utilisation from that namespace alone and the analyzer still emits cluster-scoped OVERPROVISIONED_NODE records, which _persist() upserts (the comment in engine.py acknowledges cluster-scoped records emitted by a namespaced scan).
+
+**Fix.** Skip node analysis when context.namespace is set (or always read node usage cluster-wide: pass namespace=None to node_sql). Flag a node only when both usage and requests are below thresholds (max(usage, request)/allocatable < threshold), with at least DELETION_MIN_UNUSED_DAYS of observed hours, excluding control-plane nodes (node-role.kubernetes.io/control-plane label or taints) and clusters where removing the node leaves fewer nodes than required by the remaining requests; state requested and used shares in the text.
+
+**Acceptance.** Namespaced scan -> no OVERPROVISIONED_NODE record written or modified. Node at 5% usage and 85% requested -> not flagged. Control-plane node -> not flagged. Single-node cluster -> not flagged.
+
+#### IMP-10 · The native node analyzer emits OVERPROVISIONED_NODE without any projection (and for control-plane nodes), although node removal is the only change that lowers the bill on fixed nodes and the projector can price it.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/optimization/analyzers/nodes.py:23-91`; `src/greenkube/impact/projector.py:579-583`; `src/greenkube/impact/model.py:555-609`
+
+**Problem.** NodesAnalyzer builds its Recommendation without impact_fields(): potential_savings_cost, potential_savings_co2e_grams and impact stay NULL, so the record has value_annual 0 and a negative EV (node scope: blast radius x3). ImpactProjector.node_removal() / NodePoolChange exist and are used only by the Karpenter provider. The analyzer also flags every under-used node independently, including control-plane nodes, so a 3-node cluster gets three 'consolidate' records that cannot all be applied. On fixed-node clusters this is the one recommendation kind whose saving is fully billable (realization 1 by construction: the action is the node removal), and it is the one shown without a number, while request cuts show 0.
+
+**Fix.** Rework NodesAnalyzer into a pool-level consolidation estimate: (1) exclude control-plane nodes (node-role.kubernetes.io/control-plane label or NoSchedule taint) and unschedulable nodes; (2) compute how many schedulable nodes are needed for the pool's summed reservations (max of CPU and memory request utilization, plus a configurable headroom, the logic of providers/karpenter._removable_nodes) and emit ONE recommendation per pool/cluster naming the removable nodes (cheapest first), not one per node; (3) project it with ImpactProjector.node_removal(removed_nodes, action_is_consolidation=True) and attach impact_fields(delta); (4) in the UI and PR text cross-reference it from request-cut records on fixed nodes ('billable only once N nodes are removed: see recommendation #x'); (5) the de-duplicated total (separate finding) must not add this figure to pod-level billable savings of the same pool. Node price must come from the node's resolved UnitPrices with its tier recorded; on-prem without configured rates label it custom_rate/opencost_default with confidence 0.5.
+
+**Acceptance.** 3 identical workers at 5% request utilization and one control-plane node -> exactly one OVERPROVISIONED_NODE record, removed_nodes = 2 workers, impact.kind 'node_pool', expected_billable_cost_annual == 2 x node hourly price x 8760, realization_factor_source 'consolidation_action'; no record names the control-plane node.
+
+## WP-07 · Measurement validity
+
+**Goal.** A verdict is statistically defensible, says the true reason when it cannot decide, and is not moved by unrelated events.
+
+**Main files.** src/greenkube/verify/ except verify/ledger/, storage/change_repository.py, storage/measurement_repository.py, core/optimization/verifier.py
+
+**Depends on.** WP-01 task 1 and WP-05 task 4 for correct inputs; can start in parallel on the statistics.
+
+### WP-07.1 · Make the verdict statistics valid
+
+#### MEA-01 · A change verdict compares one baseline week with one post week, and the block bootstrap only sees within-week noise, so week-to-week variation yields false 'realized' (and false 'not_realized') verdicts far above the nominal 5%.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** L · **Where** `src/greenkube/verify/statistics.py:66-106`; `src/greenkube/verify/statistics.py:109-122`; `src/greenkube/verify/counterfactual.py:64-98`; `src/greenkube/verify/strategy.py:336-393`; `src/greenkube/verify/regression.py:314-354`
+
+**Problem.** With the default windows (7 days before, 7 days after) every hour of the week has exactly one baseline value (HourOfWeekCounterfactual.fit, counterfactual.py:70-73). The hourly saving is baseline(hour of week) - post(hour). moving_block_bootstrap (statistics.py:87-97) resamples 24-hour blocks of those 168 differences: `size = max(1, min(block, n - 1)); starts = n - size + 1` and takes the 5th/95th percentile of the resampled means. This interval only measures how much the difference varies from day to day INSIDE the pair of weeks. Anything that shifts the level of a whole week (traffic or replica level, a spot or reserved price move, usage-driven allocation, grid carbon intensity, a holiday) is a constant offset in all 168 differences, so it has zero bootstrap variance and is read as a certain effect. outcome_rule then returns `realized` as soon as `ci_low > 0` (statistics.py:118). Other weaknesses of the same routine: only 7 independent blocks, a percentile interval (no studentisation or bias correction), non-circular blocks (`rng.randrange(starts)`: the first and last 23 hours are under-sampled), and one test per quantity (allocated_cost, co2e_g, cost_cpu, cost_ram are each tested at 90% with no multiplicity control; the per-recommendation outcome is then taken from a component interval, service.py:1227-1236). The OLS path (regression.py) adds a baseline-residual bootstrap but has the same single-week structure.
+
+**Fix.** 1) Make the interval reflect between-week uncertainty. Preferred: lengthen the default baseline to 28 days (CHANGE_MEASUREMENT_PRE_WINDOW_DAYS=28, keep 7 as the validated minimum) and estimate the counterfactual of each hour of the week from 4 observations; compute the standard error of the mean saving from the week-level means (a between-week variance term added to the block-bootstrap variance), and when fewer than 2 baseline weeks exist add a configured prior week-to-week coefficient of variation (for example 5% of the counterfactual, stored in counterfactual_params) instead of zero. 2) In statistics.py use a circular block bootstrap (wrap around the series) and a studentised or BCa interval; require at least 5 complete days in the post-window. 3) Verdict rule: `realized` needs ci_low > epsilon (see the noise-floor finding) and the between-week term. 4) Use a control: subtract the same-period change of an untouched reference (cluster-wide unit price, per-replica cost of unchanged workloads in the same namespace/pool) - a difference-in-differences - so a common level shift cancels. 5) Apply a multiplicity rule: the change verdict uses the primary quantity only; component and CO2e claims need their own interval AND the primary realized. 6) Record `interval_method`, `baseline_weeks` and `between_week_cv` in counterfactual_params and bump strategy version. No migration of stored measurements: keep them, flagged with their strategy_version; offer re-measurement for realized changes decided with version <= 2.2 that have a non-deterministic baseline.
+
+**Acceptance.** Monte-Carlo test in the test-suite (seeded, 400 trials, true saving 0): false-realized rate <= 7% for iid, AR(1) 0.9 and a 5% week-level shift; power test: a true 30% saving with 5% week-level noise is realized in >= 90% of trials. A deterministic series (constant before, constant lower after) is still realized with CI width ~0.
+
+#### MEA-09 · A saving is declared 'realized' as soon as its interval is above zero, without having to exceed the noise floor, while 'not_realized' uses the floor: a 0.3% drift below the 2% floor is a verified saving.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/verify/statistics.py:109-122`; `src/greenkube/verify/strategy.py:387-393`
+
+**Problem.** outcome_rule: `if ci_low > 0: return REALIZED; if ci_high <= epsilon: return NOT_REALIZED` with epsilon = CHANGE_MEASUREMENT_EPSILON_RATIO (0.02) x |counterfactual|. The REALIZED branch is tested first and ignores epsilon. Allocated cost of a fixed-request workload is deterministic, so the interval has near-zero width and any positive difference, however small (rounding of OpenCost prices, a price refresh, a token request change), is 'realized'. The interim verifier required `delta > MIN_RELATIVE_CHANGE * abs(before)` (verifier.py:1493); the new rule lost it.
+
+**Fix.** outcome_rule(ci_low, ci_high, epsilon): REALIZED when ci_low > epsilon; NOT_REALIZED when ci_high <= epsilon; INCONCLUSIVE otherwise (interval straddles epsilon). Update _reason texts ('is above the noise floor') and docs section 5. Add a 'negligible' note when 0 < ci_low <= epsilon. Stored measurements are immutable: no migration.
+
+**Acceptance.** outcome_rule(0.0001, 0.0001, 0.0008) -> not_realized (the whole interval is below the floor); outcome_rule(0.0005, 0.002, 0.0008) -> inconclusive; outcome_rule(0.02, 0.02, 0.0008) -> realized; sim D1 is no longer realized.
+
+### WP-07.2 · Give health gates a baseline and a tolerance
+
+#### MEA-07 · Health gates of the final decision have no baseline comparison and a zero restart tolerance over the whole 7-day post-window, so one unrelated container restart or pre-existing CPU throttling sends a correctly realized change to rollback_review and stops its savings.
+
+**Severity** high · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/optimization/verifier.py:1042-1144`; `src/greenkube/core/optimization/verifier.py:362-385`; `src/greenkube/verify/service.py:1022-1027`; `src/greenkube/verify/service.py:1241-1243`; `src/greenkube/core/config.py:498-502`; `src/greenkube/cli/start.py:384-399`
+
+**Problem.** _measure evaluates the gates over [post.start, post.end) = 7 days for all pods of the workload (service.py:1023-1027). `restarts`: restart_increase sums the per-pod increases of the restart counter over the window and fails when it exceeds VERIFICATION_MAX_RESTART_DELTA = 0, i.e. any single restart of any replica in a week. `cpu_throttling`: fails above 5% of CFS periods, an absolute level that depends on the CPU limit (which a request change does not touch) and is common before any change. `readiness` < 0.99 likewise. None is compared with the same signal in the baseline window. A failed gate overrides the outcome: `outcome = MeasurementOutcome.ROLLBACK_REVIEW` (service.py:1241-1243), and the lifecycle job then supersedes the recommendation's savings (start.py:384-399). The thresholds were designed for the 72-hour interim verifier and are now applied to a window 2.3x longer.
+
+**Fix.** Compare with the baseline. (1) Freeze the same health signals for the pre-window in the baseline snapshot (restart rate per replica-day, OOM kills, throttling ratio, readiness) - WorkloadHealthCollector.collect over plan.pre at snapshot time. (2) Gates fail on a significant worsening, not on an absolute level: restarts per replica-day in the post-window above the baseline rate with a Poisson test (p <= 0.05) and at least max(1, MAX_RESTART_DELTA) more than expected; throttling ratio above baseline + 0.05 absolute; readiness below baseline - 0.01. Keep the absolute rule only when the baseline signal is missing, labelled `baseline_missing`. (3) Scale the restart tolerance with replica-days. (4) Record both values (`value`, `baseline_value`) in HealthGateResult. Update docs section 7 and Helm values descriptions (verification.*).
+
+**Acceptance.** Fixture: baseline 3 restarts/week and 8% throttling, post 3 restarts and 8% -> all gates passed, outcome realized. Baseline 0 restarts, post 6 restarts on 1 replica -> restarts gate failed -> rollback_review. Baseline missing -> current behaviour with detail 'baseline_missing'.
+
+### WP-07.3 · Normalise price and grid-intensity moves between windows
+
+#### MEA-02 · Price moves between the two windows are booked as savings (or erase them) whenever the change resized both CPU and memory and the nodes carry no pool label: the measurement values requests at the prices of each window instead of at constant prices.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/verify/confounders.py:384-415`; `src/greenkube/verify/service.py:272-295`; `src/greenkube/verify/strategy.py:279-310`; `src/greenkube/verify/service.py:1422-1438`
+
+**Problem.** The claimed quantity is the difference of trusted allocated cost (requests x unit price of each window). The only workload-level price control is ConfounderDetector._price_change: it compares the unit price of a resource only when 'the change did not touch' it (`abs(requested_after / requested_before - 1.0) > PRICE_CHANGE_TOLERANCE: continue`, confounders.py:393-400). A rightsizing change normally resizes CPU and memory together, so neither resource is a control. The pool-wide price card needs `node.node_pool` (service.py:286-295: `if not pools: return None`), which on-prem clusters (kubeadm, k3s, kind, minikube, bare metal) do not have. In that case no confounder is raised and the confidence stays 0.9. The baseline snapshot stores a `price_card` (service.py:663, 1422-1438) but nothing reads it.
+
+**Fix.** Measure the request effect at constant prices and report the price effect separately. In RequestRightsizingStrategy: (a) compute the saving as (baseline per-replica core_hours - post per-replica core_hours) x baseline cpu unit price + the same for memory, x post replica-hours, using the unit prices of the frozen snapshot price_card (already stored); (b) keep the observed cost delta as a second, reported quantity `allocated_cost_observed`; (c) record `price_effect = observed - constant_price` in counterfactual_params and raise `price_card_change` (moderate above 5%, severe above 20%) from the ratio post unit price / baseline unit price computed on the workload's OWN rows as cost_cpu/core_hours - this works for a resized resource because it is a price per requested unit, unless the allocator charges max(request, usage): in that case use cluster-wide rows. (d) When no pool label exists, build the price control from all pods on the nodes the workload ran on (same code as pool_unit_prices, keyed by node instead of pool) rather than skipping. Docs: savings-measurement.md sections 3 and 6. No backfill; bump strategy version.
+
+**Acceptance.** sim_measure.py C1/C2 after the fix: claimed saving 175.32/yr +-1% in both cases, a price_card_change confounder present with the +-30% deviation, confidence reduced or outcome contaminated above 20%. C0 unchanged.
+
+#### MEA-03 · The measured CO2e saving is the raw difference of two weeks' emissions with no normalisation for grid carbon intensity (or PUE), so a windier or calmer post week is booked as a carbon saving or loss of the change.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/verify/strategy.py:271-277`; `src/greenkube/verify/series.py:149-151`; `src/greenkube/verify/series.py:220-226`; `src/greenkube/verify/confounders.py:228-256`; `src/greenkube/verify/service.py:1180-1186`
+
+**Problem.** co2e_g per hour is `sum(co2e_grams)` of the rows (series.py:150) = energy x PUE x grid intensity of that hour. The strategy fits the same hour-of-week counterfactual on it (strategy.py:275-276) and claims the difference (`QuantitySpec('co2e_g', 'gCO2e', True, ...)`). No confounder looks at intensity, PUE, emaps zone or intensity source between the windows (ConfounderDetector.detect has price, replica, instance-type and pool checks only), and the snapshot keeps only the dominant `intensity_source` string. The claimed value becomes `measured_co2e_saved_grams` of the recommendation (service.py:1180-1186) and feeds the ledger.
+
+**Fix.** Measure energy, value it at one intensity. (1) Add `energy_kwh` (already in HourBucket) as a measured quantity with its own counterfactual. (2) Define the claimed CO2e saving as sum over post hours of (counterfactual_energy(t) - actual_energy(t)) x PUE(t) x intensity(t) using the POST hour's intensity for both terms (what the grid actually emitted for the avoided energy), plus the embodied delta. This requires storing per-hour `grid_intensity` and `pue` (energy-weighted means) in HourBucket for both windows (add optional fields; keep them out of the snapshot digest when unset, like _OPTIONAL_BUCKET_FIELDS). (3) Add an `intensity_shift` confounder (moderate above 10%, reported with before/after means) and record `co2e_basis: energy_delta_at_post_intensity`. (4) Snapshots frozen before the fix have no intensity: fall back to the current method and flag `co2e_basis: raw_delta` with a moderate confounder. Update savings-measurement.md section 3.
+
+**Acceptance.** sim_co2e.py G1 and G2 return the energy saving valued at the post intensity (0.010 kWh/h x 200 = 2.0 g/h and x 400 = 4.0 g/h), both realized, with an intensity_shift confounder; G0 unchanged at 3.0 g/h.
+
+### WP-07.4 · Do not let unrelated pod-template changes end a measurement
+
+#### MEA-08 · Any pod-template change that leaves the requests untouched (an image deployment, an env change, a rollout restart) contaminates a running measurement and, once the change is realized, closes it and marks its recommendations 'regressed', so savings on actively deployed workloads are never verified or stop accruing at the next release.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/verify/digest.py:53-78`; `src/greenkube/verify/confounders.py:321-339`; `src/greenkube/verify/drift.py:259-290`; `src/greenkube/verify/drift.py:362-374`; `src/greenkube/verify/drift.py:492-536`; `src/greenkube/verify/drift.py:659-667`
+
+**Problem.** The change is identified by pod_template_digest: SHA-256 of the whole normalised pod template ('an image bump, an environment change or a kubectl rollout restart annotation is a different spec', digest.py:13-14). (1) During the measurement, ConfounderDetector._spec_changes raises `spec_change` with severity severe for the first observation after the rollout whose digest differs from spec_digest_after (confounders.py:321-339): the outcome becomes contaminated and the recommendations inconclusive. (2) After a realized verdict, DriftMonitor._watch calls detect_spec_drift; `_differs` returns 'spec_drift' on any digest difference; two hours later _close_on_spec_drift moves the change realized -> closed with accrual_end at the first differing observation and _end_members marks every verified recommendation regressed ('the measured saving no longer describes what runs'). Neither check looks at whether the resource requests of the measured containers changed, which is the only thing the measured saving depends on (allocated cost = requests x unit price).
+
+**Fix.** Track what the measurement depends on. (1) Add a second digest to WorkloadSpecObservation and ChangeEvent: `resources_digest` = SHA-256 of the per-container (and init/sidecar) requests and limits, plus replicas-relevant fields if desired (migration: nullable column on workload_spec_observations and change_events; computed by the applied detector next to spec_digest). (2) Confounders: `spec_change` is severe only when resources_digest differs from the change's; a template change with identical resources is `template_change` with severity mild (or moderate when the image changed, because usage may move). (3) Drift: detect_spec_drift closes the change only when resources_digest differs (requests reverted or changed) or the workload UID changed AND the new object's resources differ; an image-only change records an informational event. (4) For observations stored before the migration (resources_digest NULL) read the live requests from the workload snapshot before closing. (5) Re-open changes closed with event spec_drift whose current live requests still equal the applied ones (one-off repair job with a ledger restatement entry). Update savings-measurement.md sections 6 and 9.
+
+**Acceptance.** sim_specdrift.py after the fix: day-3 image deployment -> confounder template_change (mild), not contaminated; day-12 image deployment -> no spec drift, change stays realized and keeps accruing; a deployment that restores the old CPU request -> spec_drift, closed, recommendations regressed.
+
+### WP-07.5 · Make the accelerated settings able to decide, and report the true reason
+
+#### MEA-10 · The accelerated end-to-end settings can never produce a decided verdict, so the statistics, attribution, drift and ledger-accrual code of the Prove step has never run against a real cluster; all 5 live changes are inconclusive for that reason and the stored reason text misnames the cause.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/verify/series.py:41-51`; `src/greenkube/verify/series.py:207`; `src/greenkube/verify/series.py:229-239`; `src/greenkube/verify/counterfactual.py:84-98`; `src/greenkube/verify/strategy.py:327-335`; `src/greenkube/core/config.py:509-526`
+
+**Problem.** Buckets are UTC clock hours; an hour counts for a quantity only when >= 50% of it has qualifying data (MIN_HOUR_COVERAGE), and a post hour is aligned only when the baseline holds the same hour of the week. With the live settings (pre 0.25 d, post 0.025-0.05 d, warm-up 0.05 h) the baseline holds six consecutive hours of one day and the post-window the next one or two hours: no hour of the week can match, so the result is inconclusive by construction (the methodology doc admits 'usually inconclusive'). Config validation only bounds the PRE window (config.py:1030-1040); the post-window has no minimum, so 36 minutes is accepted although no clock hour can reach 50% coverage unless the window happens to straddle it by 30 minutes. Hand recomputation of the live measurements: minikube oversized-worker (change 0335c712): the only baseline hour with data, 21:00, has 59 samples x 30 s = 1770 s = 0.4917 coverage (< 0.5) -> excluded -> 'no trusted allocated cost in the baseline window'; recomputed cost (0.0014935 + 0.0001338) / 1770 x 3600 = 0.0033098/h and core_hours 17 x 0.3 / 59 = 0.0864, both equal to the stored snapshot. kind oversized-worker (change 5ee15bd2): baseline hour 21:00 has 28 samples = 840 s = 0.2333 coverage; cost 28 x 8.848e-05 / 840 x 3600 = 0.010618/h vs stored 0.0106114. In both cases OpenCost cost WAS trusted; the hour was dropped for coverage, but the reason says 'no trusted allocated cost' (and even 'no trusted requested CPU cores').
+
+**Fix.** (1) Give accelerated mode its own time grid: when CHANGE_MEASUREMENT_ACCELERATED is on, bucket by the collection step grouped into N-minute slots and use a flat (non-seasonal) counterfactual = baseline mean, labelled `model: flat_mean_accelerated`, so a 30-minute baseline and post-window give a decided outcome and exercise the whole chain; mark such measurements `representative: false` and keep them out of realized totals unless a demo flag allows. (2) Validate CHANGE_MEASUREMENT_POST_WINDOW_DAYS >= 1 (>= 2 clock hours in accelerated mode) in config.py. (3) Make reasons truthful: distinguish 'no rows', 'rows but untrusted cost', 'hours below 50% coverage (n hours, best coverage x%)', 'no post hour matches a baseline hour of the week'; do not say 'trusted' for request quantities. (4) Add a nightly e2e with real 7+7 day data or a time-shifted fixture database replayed through run_due.
+
+**Acceptance.** On the accelerated e2e cluster the oversized-worker change is decided `realized` with a saving within 5% of the hand value 0.0102/h (kind) and a non-zero confidence; an install with POST_WINDOW_DAYS=0.025 without the accelerated flag fails config validation.
+
+### WP-07.6 · One verification system with one vocabulary
+
+#### MEA-16 · Two verification systems with different rules write the same 'verified' / 'not_realized' labels: recommendations applied by hand (PATCH /apply) or with CHANGE_MEASUREMENT_ENABLED=false are judged by the interim verifier (72 h before/after means, no counterfactual, no interval, no confounders).
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/cli/start.py:355-379`; `src/greenkube/core/optimization/verifier.py:620-668`; `src/greenkube/core/optimization/verifier.py:680-704`; `src/greenkube/core/optimization/verifier.py:1462-1505`
+
+**Problem.** The lifecycle job runs `verifier.verify_due()` and then `changes.run_due()` on every pass (start.py:378-379). verify_due handles every applied record without a change_id (`_change_managed`), i.e. manual applies and all records when change measurement is disabled. Its windows are VERIFICATION_WINDOW_HOURS (72 h) after the apply and the same length before; the outcome is `delta > 0 and delta > 0.02 * before` on two window means (_estimate), with no hour-of-week alignment, no load driver, no replica basis, no confounder detection and no interval. Both paths call apply_stored_measurement, write savings_measurements rows and feed the same ledger and API fields, distinguished only by created_by/strategy_key.
+
+**Fix.** Route manual applies through the change pipeline: PATCH /apply creates a ChangeEvent (application_method manual, rollout_completed_at = declared or detected time, baseline_window_end = that time) and a baseline snapshot, then the record is change-managed. Keep the interim verifier only behind CHANGE_MEASUREMENT_ENABLED=false, mark its measurements `method=interim_before_after` in API/UI/ledger and exclude them from 'measured' totals by default. Remove the parallel call once no unmanaged applied records remain (migration: create change events for applied, undecided records).
+
+**Acceptance.** After PATCH /apply on an active recommendation a change_events row exists and verify_due returns nothing for it; savings API reports interim-method amounts in a separate block.
+
+#### MEA-14 · A reliability increase that works is still reported as 'not_realized' (recommendation verification 'failed'), because the change outcome is the cost outcome and a request increase always costs more.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/verify/strategy.py:239-247`; `src/greenkube/verify/service.py:1033-1037`; `src/greenkube/verify/service.py:1223`; `src/greenkube/core/optimization/verifier.py:1413-1422`
+
+**Problem.** RequestRightsizingStrategy.estimate sets `outcome = primary.outcome` where primary is allocated_cost. For a memory increase the saving is negative, ci_high <= epsilon, so the change is NOT_REALIZED. The reliability outcome (OOM rate dropped) is only appended to the reasons and to counterfactual_params.reliability (service.py:1033-1037). The recommendation is moved with mark_not_realized (verification_status failed). The doc states this on purpose ('The savings outcome of the change is unchanged'), but the user-facing verdict of a successful fix is a failure, and not_realized counters include it.
+
+**Fix.** Add an `objective` to the change (savings | reliability) derived from is_reliability_increase of its members. For reliability changes the change outcome is the reliability outcome (realized when the OOM rate dropped and the gates pass), the cost is reported as `cost_of_fix` (signed, booked in the ledger as a negative measured_allocated entry), and the recommendation moves to verified with verification detail 'reliability'. API/UI: show 'Fix confirmed, costs +X/yr'. Mixed changes (a decrease and an increase): keep the savings objective, show both.
+
+**Acceptance.** Fixture: memory increase with 12 OOM kills in 7 days before and 0 after -> change state realized, objective reliability, cost estimate negative and unclaimed as saving, recommendation verified; same with 12 kills after -> not_realized and rollback_review.
+
+### WP-07.7 · Partial-hour workloads, deletions and baseline timing
+
+#### MEA-13 · Hours are rated per covered time and hours without rows are dropped, so a workload that runs part of each hour (batch, scale-to-zero) is annualised as if it ran continuously, and the projection it is compared with uses a different annualisation (observed replica-hours x 8760 vs rate x 8766).
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/verify/series.py:165-181`; `src/greenkube/verify/series.py:229-239`; `src/greenkube/verify/strategy.py:42`; `src/greenkube/verify/strategy.py:394-412`; `src/greenkube/verify/service.py:1488`; `src/greenkube/verify/attribution.py:63-73`
+
+**Problem.** `cost = acc.cost / acc.cost_seconds * 3600` extrapolates the covered part of an hour to the full hour. That is right for a collection gap and wrong when the pod was simply not running (no cost). The code cannot tell the two apart. An hour with >= 50% presence is kept at the full-hour rate; an hour with less, or with no pod, is removed from the series instead of counting as zero cost. The annualised saving is `interval.mean * HOURS_PER_YEAR` with 8766 h. The projection (impact.allocated_cost_annual) is built from observed replica-hours scaled to the year with annualization_factor 8760 and the presence observed in the lookback. projection_accuracy = annualized / projected therefore compares two different bases whenever the workload is not present 100% of the time or is young.
+
+**Fix.** (1) Separate 'no data' from 'not running': use the collection coverage of the hour (steps actually collected for the cluster, from collection_watermarks or any row of the namespace at that step). Hour cost = sum of cost over collected steps / collected seconds x 3600; steps collected with no pod of the workload count as zero cost and zero replicas. Drop an hour only when collection itself covered < 50%. (2) Use one annualisation constant everywhere (8760 or 365.25 x 24) shared by the Impact Model and verify. (3) Define projection_accuracy on the same basis: compare the measured per-replica-hour saving x the replica-hours assumed by the projection, or re-annualise the projection with the post-window presence; store both `projected_annual` and `projected_annual_at_measured_presence`.
+
+**Acceptance.** sim E1 returns 0.007/h; a workload present 35 min/h with a 50% request cut gets annualized = 0.0035 x hours-per-year; live kind change: projection_accuracy between 0.9 and 1.1 once decided.
+
+#### MEA-15 · A deletion is 'measured' by restating its projection: the pre-window cost of a Service or PersistentVolume cannot be read from pod metrics, so the realized amount, its zero-width interval and coverage 1.0 are the projected rate, and absence is checked once and never again.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/verify/deletion.py:96-181`; `src/greenkube/verify/service.py:239-256`; `src/greenkube/verify/service.py:497-501`; `src/greenkube/verify/drift.py:800-826`
+
+**Problem.** The deletion target is WorkloadRef(namespace, kind=Service|PersistentVolume, name). _read_workload filters combined_metrics rows (pods) with target_key(row) == target.key; a pod row resolves to its owner, an inferred Deployment or ('Pod', pod_name), never to a Service or PersistentVolume (and PVs have an empty namespace). pre_costs and observed_after are therefore always empty: the 'pre_window_mean' method and the 'still observed in n post-change hours' check are unreachable. The estimate becomes rate = projected / HOURS_PER_YEAR with ci_low = ci_high = rate, coverage 1.0, aligned_hours = len(post), projection_accuracy 1.0 (deletion.py:155-173). Absence is the detector's single observation (rollout_completed_source == 'resource_absent'); the drift monitor's probe only knows Deployment/StatefulSet/DaemonSet (drift.py:810-817), so a LoadBalancer recreated by GitOps drift or an operator keeps accruing 'measured' savings.
+
+**Fix.** (1) Label the result honestly: method `allocated_rate_at_decision` is a `projected_released_rate`, not a measurement: set basis/ledger quantity to a distinct kind (e.g. measured_absence_x_projected_rate), no CI, confidence from the rate source. (2) Read the asset's own cost before the change from the source that prices it (OpenCost assets/PV and LB cost API, already used in opencost_collector for PVs) at snapshot time and store it in the snapshot (asset_rate, source, window). (3) Re-verify absence at decision time and daily afterwards (extend the probe to Service and PersistentVolume via CoreV1); a resource present again ends the accrual from its creationTimestamp (state regressed/closed, reason resource_recreated). (4) Remove or fix the unreachable pre/post pod-row logic.
+
+**Acceptance.** Fixture: deleted LoadBalancer with OpenCost asset rate 0.025/h in the baseline -> realized, rate_source observed, 219/yr; the Service recreated on day 3 -> accrual ends at its creationTimestamp and the change is closed with reason resource_recreated.
+
+#### MEA-17 · The baseline snapshot is frozen in the detection pass, before the last baseline samples are written and before provisional values are restated, and the recorded rollout start equals the rollout completion when the GitOps sync is observed late.
+
+**Severity** low · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/verify/service.py:508-513`; `src/greenkube/verify/service.py:551-564`; `src/greenkube/verify/service.py:585`; `src/greenkube/verify/service.py:635-668`
+
+**Problem.** Live minikube: pull request merged_at 21:47:36, Deployment rollout completed 21:47:38, sync observed 21:47:51, change recorded 21:48:05 with baseline_window_end = 21:47:38 and rollout_started_source = 'rollout_completed'. The baseline end at completion instead of merge is explained by the image: the clamp to merged_at (service.py:555-557, commit 38b6c884, 2026-11-14 22:11 UTC) is newer than the live controller (created 21:38 UTC), so the clamp itself has not run live. What remains at HEAD: because the GitOps sync is observed by polling after a fast rollout, `synced_at <= completed` is false and rollout_started_at falls back to the completion time (service.py:559-564), so the stored rollout duration is zero. The snapshot is built in the same pass as detection: on kind it holds 28 of the 29 baseline samples (the 21:52:00 sample was written after 21:52:49) and is immutable afterwards (UNIQUE change_id), so late-arriving or later-restated rows (OpenCost lag, carbon-intensity consolidation) never reach the baseline while the post-window uses final values.
+
+**Fix.** Record the candidate decision times in change details (merged_at, approval time, completion) and the chosen `baseline_end_source`, and re-run the e2e on an image that contains commit 38b6c884 to confirm the clamp. Use merged_at as the rollout start when the sync is observed after completion. Freeze the snapshot only once the collection watermark has passed baseline_window_end + one step (and, for CO2e, re-freeze a `final` revision of the snapshot after the intensity consolidation horizon, keeping the first revision and both digests).
+
+**Acceptance.** For the live sequence the change stores baseline_window_end = 21:47:36 with baseline_end_source = pr_merged and rollout_started_at = 21:47:36; the snapshot contains every raw row with timestamp < baseline_window_end.
+
+## WP-08 · Projection, released capacity and fixed-capacity clusters
+
+**Goal.** Projections are consistent with measurement, and on-prem clusters get a real result.
+
+**Main files.** src/greenkube/impact/projector.py, impact/realization.py, impact/types.py, core/recommendation_ranking.py, core/optimization/scoring.py
+
+**Depends on.** none for projection; the measured side of released capacity needs WP-01 task 1.
+
+### WP-08.1 · Released capacity as a third quantity, projected and measured
+
+Add released capacity next to cost and CO2e, projected and measured (maintainer decision, 2026-11-15).
+
+- **Scope.** CPU requests (cores, core-hours) and memory requests (GiB, GiB-hours) for request changes. Storage (GiB) and LoadBalancer count only for deletion or resize actions. No network figure.
+- **Already there.** `impact.capacity_released` (`cpu_core_hours`, `mem_gib_hours`, `replica_hours`, `node_hours`) is computed and stored on every recommendation. The UI does not show it.
+- **Projected.** Surface `capacity_released` in the API contract, UI, pull-request text and exports, with its period stated. Also show the instantaneous figure `(current request - proposed request) x replicas` in cores and GiB.
+- **Measured.** Record per-container requests and limits with each workload spec observation (`workload_spec_observations` holds digests only today). Measure requested capacity over the post-window minus the baseline, per replica and in total, so a replica change is reported separately and not booked as a release.
+- **Verdict.** Decide a capacity verdict (`released`, `partially_released`, `not_released`) from specs alone. It must be available when the cost verdict is `inconclusive`.
+- **Ledger.** Accrue core-hours and GiB-hours as their own quantities, projected and measured kept apart.
+- **Rules.** Never convert released capacity to money silently, never add it to cost savings; increases are negative releases and are not shown in a savings lane.
+- **Acceptance.** On a cluster without autoscaler and without OpenCost, a merged request decrease reaches a `released` verdict and accrues core-hours and GiB-hours. A replica change during the post-window is reported separately. API, UI, pull-request text and exports show the figure with its unit and its projected or measured label.
+
+### WP-08.2 · Fixed-capacity clusters: consistent realization factors and lanes
+
+**Also covers.** API-12 (On clusters without a node autoscaler every rightsizing recommendation has potential_savings_cost = 0 and pote...)
+
+#### IMP-03 · On clusters without a detected autoscaler every rightsizing projection is 0 cost and 0 CO2e, reliability increases are classified in the 'savings' lane, and every expected value is negative, so ranking and the savings totals carry no information.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/impact/realization.py:55`; `src/greenkube/impact/realization.py:494-500`; `src/greenkube/impact/projector.py:633-635`; `src/greenkube/core/optimization/scoring.py:189-200`; `src/greenkube/core/optimization/scoring.py:276-302`; `src/greenkube/core/optimization/eligibility.py:714-717`
+
+**Problem.** With no Cluster Autoscaler ConfigMap and no Karpenter NodePool, resolve_realization gives the cluster pool FACTOR_NO_AUTOSCALER = 0.0. impact_fields() writes potential_savings_cost = expected_billable_cost_annual = allocated x 0 and potential_savings_co2e_grams = co2e_expected_annual_g = allocated x 0. Consequences: (1) every request change of every size shows 0 (the list and the dashboard hide falsy values, so nothing is shown at all); the allocated value (what chargeback/showback and the change measurement will actually report) is only in impact.allocated_cost_annual. (2) scoring.compute_value takes cost and CO2e from the expected fields, so value_annual = 0 for all of them and EV = -(1 - p) x incident_cost - effort: always negative, and ordered only by risk class and blast radius, never by the size of the change. (3) lane = 'reliability' if value_annual < 0: an increase has allocated cost < 0 but expected cost -0.0, so on fixed nodes it is put in the 'savings' lane, gets no incident_cost_avoided, no 'reliability_change' eligibility warning, and is counted in the savings opportunity. (4) The default RECOMMENDATION_INCIDENT_COST = 100 (a one-off amount) is compared with one year of saving: with p about 0.62 a medium-risk singleton needs more than 23/yr of expected saving to reach EV > 0, which most single-container changes do not reach on any cluster. The projection confidence (impact.confidence, which carries the short-coverage and price-tier penalties) is not used by p_success either.
+
+**Fix.** 1. Decide the lane from the direction of the change, not from the sign of a realization-scaled number: in scoring.compute_value use impact.allocated_cost_annual < 0 (or proposed > current for request kinds) for 'reliability'. 2. Rank by a value that exists on fixed nodes: value_annual = expected billable cost + carbon value + ALLOCATED_VALUE_WEIGHT x (allocated - expected) where the released-capacity value is a documented, configurable weight (default 1.0 for showback users on fixed nodes is defensible: freed capacity is reusable; expose RECOMMENDATION_CAPACITY_VALUE_WEIGHT in config/Helm/docs), and keep both numbers in value.components. 3. Expose two explicit API fields on every recommendation and stop overloading potential_savings_cost: projected_allocated_cost_annual / projected_allocated_co2e_annual_g (always shown, label 'allocated: capacity released') and projected_billable_cost_annual (shown with the realization factor and its reason). The UI list, the dashboard top list and the PR body must show the allocated figure with the note 'fixed nodes: frees capacity, bill unchanged until nodes are removed' instead of hiding a 0. 4. Units of EV: amortize the incident cost or state the horizon explicitly (value over RECOMMENDATION_VALUE_HORIZON_YEARS, default 1) and document it; add a test that a 20m CPU cut and a 2-core cut on the same workload do not get the same EV. 5. Multiply the Beta prior confidence by impact.confidence (or carry it as a separate factor in value.components). 6. Add the 'reliability_change' warning from the change direction. Migration: scores are recomputed at every scan and on read (decide_records); no stored data to migrate, but ranking_score history changes: note it in CHANGELOG.
+
+**Acceptance.** With RealizationContext = fixed nodes: (a) memory increase 1 GiB -> 2 GiB with oom_history -> lane 'reliability', incident_cost_avoided > 0, eligibility warning 'reliability_change'; (b) CPU cut 2000m -> 200m ranks above CPU cut 20m -> 10m on identical workloads; (c) API returns projected_allocated_cost_annual = 236.52 and projected_billable_cost_annual = 0 for the SIM 4 workload and the UI row shows the allocated figure with the fixed-nodes note; (d) opportunityOf() does not count increases.
+
+#### IMP-05 · Workload deletions (zombie pods, idle namespaces) are projected with a realization factor of 1 even on fixed nodes, so their 'expected billable' saving is overstated and they outrank every rightsizing.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/impact/model.py:370-373`; `src/greenkube/impact/model.py:466-515`; `src/greenkube/core/optimization/analyzers/zombie.py:77-79`; `src/greenkube/core/optimization/analyzers/idle_namespace.py:91-94`; `docs/methodology/impact-model.md:265-269`
+
+**Problem.** ReservationAwareImpactModel.project() calls _project_sample_removal(..., realization_factor=1.0, realization_source='deletion') for WorkloadDeletion, while a request cut and a replica schedule on the same samples use pool.realization_for(samples) (0.0 on fixed nodes, 0.6 with Cluster Autoscaler, 0.8 with Karpenter). Deleting pods releases reserved capacity exactly like cutting their requests to zero: the bill only falls when a node goes away. The released idle-power share and embodied share are not saved on a fixed node either; only the dynamic (usage-based) energy really disappears, and that is the smallest part for an idle workload. The documentation states the rule ('Realization factor: 1') without justification.
+
+**Fix.** In ReservationAwareImpactModel.project() resolve the factor of WorkloadDeletion like ReplicaScheduleChange: factor, source, reasons, pools = pool.realization_for(baseline.samples); pass them to _project_sample_removal and _record_realization. For CO2e apply the factor per component in _finalize: dynamic_operational and gpu_operational of a removed workload are saved at factor 1 (the energy is no longer consumed), idle_operational, memory_operational and embodied at the pool factor; expose co2e_expected_annual_g = sum(component x its factor) and keep co2e_measurable_expected_annual_g consistent (types.ImpactDelta.co2e_measurable_expected_annual_g currently multiplies everything by one factor). Storage/LB cost components of the deleted workload's observed cost (cost_storage, cost_lb, cost_network in observed_cost_breakdown) are billed per asset and keep factor 1. Update docs/methodology/impact-model.md (Workload deletion, Realization factor) and bump IMPACT_MODEL_VERSION.
+
+**Acceptance.** Fixed-node context: deletion of a workload with allocated 297.84/yr -> expected_billable_cost_annual 0, realization_factor_source 'realization_context', co2e_expected_annual_g == annualized dynamic CO2e only. Cluster Autoscaler context: expected = 0.6 x (cpu + ram) + 1.0 x (storage + lb + network). A CPU cut to the usage level and a deletion of the same idle workload differ only by the usage-based terms.
+
+#### IMP-12 · The realization factor silently defaults to 1.0 until the controller process has completed a first autoscaler read (or when that read fails), and to 0.0 for any autoscaler that is not detected.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/impact/realization.py:70`; `src/greenkube/impact/realization.py:335-354`; `src/greenkube/impact/realization.py:640-659`; `src/greenkube/impact/projector.py:378-387`; `src/greenkube/core/historical_range_processor.py:588-593`; `src/greenkube/collectors/autoscaler_collector.py:258-270`
+
+**Problem.** The realization context is a process-local cache (_STATE) filled only inside HistoricalRangeProcessor's collection window, after the OpenCost read. It is not persisted. After every controller restart, if the first collection window fails before that line (Prometheus unreachable at start-up) or the Kubernetes read returns None, the forced initial scan projects with UNOBSERVED_FACTOR = 1.0 (expected = allocated). A pool whose autoscaler input cannot be read (RBAC, timeout) and has no previous observation also gets 1.0. Combined with the revision hysteresis finding, a projection made with 1.0 can then be kept on the record for a long time. In the other direction, detection only knows the kube-system/cluster-autoscaler-status ConfigMap and karpenter.sh NodePools: a Cluster Autoscaler run with another --status-config-map-name or namespace, or a managed control-plane autoscaler that publishes neither, is classified 'none' and gets 0.0 (plausible; not verified on a cloud provider).
+
+**Fix.** Persist the resolved RealizationContext (table realization_context: observed_at, pools JSON) at each refresh and load it at process start (current_realization_context falls back to the stored one when the process cache is empty and it is younger than 24 h). Refresh it before, and independently of, the Prometheus/OpenCost reads. When no context exists, project expected = None (unknown) instead of 1.0 and render 'billable saving unknown: cluster not observed yet'. Add IMPACT_AUTOSCALER_HINT (none | cluster_autoscaler | karpenter) and the Cluster Autoscaler ConfigMap name/namespace to the configuration and Helm values; log the detected autoscaler per pool at start-up and expose it in /api/v1/health.
+
+**Acceptance.** Controller restarted with Prometheus down and a stored fixed-node context: the initial scan projects expected_billable_cost_annual 0 with realization_factor_source 'realization_context'. With no stored context: expected billable is null, allocated 236.52, and the UI shows the 'not observed yet' note. IMPACT_AUTOSCALER_HINT=cluster_autoscaler yields factor 0.6 without the ConfigMap.
+
+### WP-08.3 · Cost verdicts without OpenCost
+
+#### MEA-06 · Without OpenCost or Kubecost no change can ever get a cost verdict: rows priced with configured rates (custom_rate) or the default are never trusted, so every on-prem measurement ends 'inconclusive' with the reason 'no trusted allocated cost in the baseline window'.
+
+**Severity** high · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/optimization/verifier.py:103`; `src/greenkube/models/provenance.py:111-124`; `src/greenkube/verify/series.py:139-141`; `src/greenkube/verify/strategy.py:327-335`; `src/greenkube/verify/deletion.py:72-74`
+
+**Problem.** TRUSTED_COST_SOURCES = {opencost, opencost_derived, kubecost, pricing_catalog}. A cluster without OpenCost writes cost_source custom_rate (configured rates) or none. hourly_buckets only accumulates cost for trusted groups, so both series are empty and _fit_basis returns inconclusive (strategy.py:327-335). The same rule blocks deletions (is_trusted_rate_source). The Prove step and the ledger therefore never record anything measured on-prem unless OpenCost is installed, even though a request cut valued at the operator's own configured rate is a well-defined allocated saving. The live clusters show the mechanism on single samples: the e2e-oom baseline hour has coverage 0.65 but cost_coverage 0.358 because its custom_rate samples are discarded.
+
+**Fix.** Decide the verdict on the physical quantity and value it with a declared price basis. (1) Make requested capacity (core_hours, gib_hours per replica) a first-class, always-available verdict: `realized` when the per-replica request reduction is observed over the post-window. (2) Value it at constant unit prices with an explicit `price_basis`: opencost | kubecost | pricing_catalog | configured_rate. Treat configured rates as trusted for a measurement labelled `price_basis=configured_rate` (new CostSource handling: allowed set extended for measurements, kept out of 'billed' claims), and show the basis in API/UI/ledger (quantity `measured_allocated`, attribute price_basis). (3) Keep `none`/default-priced rows untrusted, and say so in the reason ('no cost source: install OpenCost or configure rates'). Docs: savings-measurement.md section 3 and configuration.md.
+
+**Acceptance.** On a SQLite fixture with 14 days of rows priced only with cost_source=custom_rate and a request cut at day 7, run_due decides `realized` with price_basis=configured_rate, saving = delta requests x configured rates +-1%; with cost_source=none it is inconclusive with the explicit reason.
+
+### WP-08.4 · Annualisation that is not biased by collection gaps
+
+#### IMP-04 · Projections are annualized over the span since the target's first observed hour, so collection gaps and the hour-floor of the first observation bias every projection low (live: -49%).
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/impact/model.py:319-356`; `src/greenkube/impact/model.py:627-631`; `src/greenkube/impact/projector.py:484-525`; `src/greenkube/impact/projector.py:199-227`; `docs/methodology/impact-model.md:224-240`
+
+**Problem.** annual = window_total x 8760 / window_hours, where window_total is the sum over the target's samples and window_hours = window_end - first_observed (ObservedCoverage). Two biases: (1) hours in which the collector produced no rows (controller down longer than Prometheus retention can backfill, Prometheus outage or missing series, host suspended, rows dropped) stay in the denominator but contribute nothing to the numerator. The model cannot tell 'the workload did not run' (CronJob: intended, documented at impact-model.md:235) from 'nobody was looking'. (2) first_observed comes from the usage summary's first_hour, an hour bucket: a target first sampled at hh:35 gets a coverage that starts at hh:00, so up to one hour without samples is added to the denominator (dominant for young targets, where MIN_COVERAGE_HOURS = 1 also applies). No assumption field reports the observed sample hours, so the bias is invisible in the API, the UI and the PR body.
+
+**Fix.** Annualize over the hours the collector actually observed the cluster during the target's coverage: window_hours = sum over collection steps within [first_observed, window_end] of the step duration, taken from a cluster-level source that is independent of the target (the distinct step timestamps of combined_metrics / the rollup's per-hour step_count maximum over all targets, or collection_watermarks). Implementation: (a) add to UsageSnapshot an 'observed_seconds_by_hour' map (per hour bucket: max step_count over targets x step seconds, capped at 3600) computed by one extra SQL aggregate in workload_usage_sql; (b) ImpactProjector.coverage() returns ObservedCoverage with observed_hours = sum of that map from the target's first sample to window_end (so a CronJob keeps its real duty cycle, and a cluster-wide gap is excluded for every target); (c) store first_sample_at (not only first_hour) in workload_usage_hourly/summary, or derive the first hour's observed seconds from the same map, to remove the hour-floor bias; (d) report assumptions.sample_hours, assumptions.collected_hours and assumptions.collection_gap_hours, and lower impact.confidence when collected_hours / coverage < 0.9; (e) update docs/methodology/impact-model.md (Annualization) and bump IMPACT_MODEL_VERSION (numbers change). No stored-data migration: projections are recomputed at each scan.
+
+**Acceptance.** One always-on replica, 1000m -> 100m at 0.03/core-h: with 24 hourly rows -> 236.52/yr; with rows missing for 12 of the 24 hours for ALL targets -> 236.52/yr +-1% and assumptions.collection_gap_hours = 12; a CronJob with rows 1 h per day while other targets have rows all day -> annualized at 1/24 duty cycle (unchanged from today). Target first sampled at hh:35 and scanned at hh+1:30 -> projection within 2% of the continuous value. capacity_released.replica_hours of an always-on single replica is 8760 +-1% in all three cases.
+
+### WP-08.5 · One basis for projected and measured savings; no overlapping totals
+
+#### IMP-06 · The 'projected' savings of applied changes and the user-declared bound use the realization-scaled (billable) projection, while measurement and the ledger use allocated values, so pending and realized panels are on different bases.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/core/recommendation_realization.py:31-47`; `src/greenkube/core/optimization/lifecycle.py:381-391`; `src/greenkube/core/savings_attributor.py:150-165`; `src/greenkube/core/savings_attributor.py:236-255`; `src/greenkube/impact/projector.py:633-635`
+
+**Problem.** When a recommendation is applied, lifecycle stores cost_saved / carbon_saved_co2e_grams = estimate_realized_savings() = potential_savings_* x share, i.e. the expected billable projection (allocated x realization factor). savings_attributor._projection_components accrues these as method 'projected' (projected_annual, projected_to_date / prorated_* of GET /recommendations/savings) until the change is measured; the measurement and the ledger then report allocated savings (measured_basis 'measured_allocated', compared with impact.allocated_cost_annual per docs/methodology/savings-measurement.md). The same quantity therefore changes basis when it moves from 'projected' to 'measured'. validate_user_declared_savings() bounds a declared saving by 10x potential_savings_* and rejects any declaration when the projection is 0, which is every rightsizing on fixed nodes.
+
+**Fix.** Carry both bases explicitly and never mix them: (1) at apply time store projected_allocated_cost_annual / projected_allocated_co2e_annual_g (from impact.allocated_cost_annual and comparison.measurable_co2e_projection(impact, allocated=True), scaled by _realized_share) and projected_billable_* (allocated x realization factor) in the record baseline; (2) _projection_components accrues the allocated projection for the 'projected' panels that sit next to 'measured allocated', and the realization block of /recommendations/savings derives the billable expectation from it (it already does so for measured values); (3) validate_user_declared_savings bounds against the allocated projection and accepts a declaration when only the billable projection is 0; (4) label the API fields with their basis (basis: 'allocated' | 'billable'). Backfill: recompute cost_saved / carbon_saved_co2e_grams of records in applied/verifying from their stored impact (one migration, idempotent); ledger entries with method 'projected' written on the billable basis must be restated by an appended correction entry, not edited (hash chain).
+
+**Acceptance.** Fixed-node cluster, CPU cut with impact.allocated_cost_annual 236.52 applied in full -> /recommendations/savings.projected_annual.cost == 236.52 with basis 'allocated' and realization.realized_billed_cost_annual_expected == 0; after a 'realized' measurement of 230/yr the projected block drops to 0 and run_rate_annual.cost == 230 (same basis, no jump larger than the projection error). PATCH /apply with cost_saved=200 is accepted on a fixed-node cluster; 3000 is rejected.
+
+#### IMP-07 · The UI sums the projected savings of overlapping recommendations (namespace deletion, workload deletion, off-peak, rightsizing, node consolidation) and the two totals disagree on negative values.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** M · **Where** `frontend/src/routes/recommendations/+page.svelte:380-381`; `frontend/src/routes/recommendations/+page.svelte:2204-2213`; `frontend/src/lib/overview.js:55-79`
+
+**Problem.** 'Potential CO2 Savings' and 'Potential Cost Savings' on the recommendations page are actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_* ?? 0), 0): every active record is added, including request increases (negative values) and records whose targets overlap. overview.js opportunityOf() adds only positive values and skips the reliability lane, so the dashboard and the recommendations page show different totals for the same set. Overlaps that are added: IDLE_NAMESPACE (all workloads of the namespace, factor 1) + ZOMBIE_POD / RIGHTSIZING_* / OFF_PEAK_SCALING of workloads in that namespace; OFF_PEAK_SCALING + RIGHTSIZING_* of the same workload (the rightsizing is annualized over all hours, including those the schedule removes); OVERPROVISIONED_NODE (node removal at factor 1) + the realization-scaled rightsizing of the pods on those nodes, which is the same node-hours counted twice. CPU and memory records of one container are additive (different resources) and are not a problem.
+
+**Fix.** Compute the opportunity server side, once, as a de-duplicated total and return it from GET /recommendations/active (or /recommendations/summary): group active records by target containment (namespace > workload > container; node pool > node) and for each compute scope keep max(parent, sum of children) for allocated and for billable separately; treat OFF_PEAK + RIGHTSIZING of one workload as max(); never add OVERPROVISIONED_NODE to pod-level billable savings of the same pool (report 'billable via consolidation' = max of the two); exclude the reliability lane and report its cost apart. Both pages must render that one figure with the label 'Projected (not additive across overlapping recommendations)' and show allocated and billable separately. Add a frontend unit test and an API test.
+
+**Acceptance.** Fixture: IDLE_NAMESPACE ns1 (100/yr) + two RIGHTSIZING_CPU in ns1 (20/yr, 30/yr) + one RIGHTSIZING_MEMORY increase in ns2 (-5/yr) + one RIGHTSIZING_CPU in ns2 (10/yr) -> opportunity = 110, reliability cost = 5, identical on the dashboard and on the recommendations page.
+
+### WP-08.6 · Feedback loop from measured outcomes to projections
+
+**Also covers.** LED-07 (The 'compare realized to projected to refine the projection model' loop is not implemented: only a binary real...)
+
+#### IMP-08 · There is no feedback loop from measured outcomes to projections: realization factors, the incident cost and the annualization are constants, and the measured projection accuracy is never used.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** XL · **Where** `src/greenkube/impact/realization.py:55-59`; `src/greenkube/core/optimization/track_record.py:1-15`; `src/greenkube/core/optimization/scoring.py:203-222`; `src/greenkube/core/optimization/dedup.py:194-207`; `docs/roadmap.md:2381`; `docs/roadmap.md:2490`
+
+**Problem.** The documented target is a median measured / projected (allocated) ratio of 0.7-1.3, then 0.8-1.2 with 90% CI coverage >= 85% (docs/roadmap.md:2490) and 'within 20%' on the quickstart (2381). The only feedback that exists is binary: TrackRecordBook counts realized / not_realized outcomes per (source family, capability) and moves p_success and the weighted consensus. The measured projection_accuracy stored in change_measurements.estimates is not read by anything that produces a projection; the realization factors (0.0 / 0.3 / 0.6 / 0.8, x0.5 with blockers) are unreferenced constants that no observation ever corrects (node-hours actually removed after a change are never compared with the released capacity); the projection's own confidence is not validated against outcomes. A systematic bias such as the -49% gap bias or the container price error above is therefore invisible to the product: no metric, no alert, no API field reports the running accuracy of projections.
+
+**Fix.** Add a ProjectionCalibration component (new module greenkube/impact/calibration.py + table projection_calibration). (1) Inputs: every decided, non-contaminated measurement with a claimed allocated_cost / co2e estimate and a projection: ratio r = measured_annual / projected_allocated_annual, keyed by (impact model version, change kind, capability, source family, cost tier, coverage bucket <1d / 1-7d / >7d). (2) Statistic: robust log-ratio estimate per key (median and MAD of ln r, shrunk toward 0 with a prior worth 10 observations; require n >= 5 before use). (3) Use: do NOT silently rescale the point estimate; attach to every projection impact.calibration = {ratio_median, ci80_low, ci80_high, n, key} and report projected_low / projected_high = projection x CI bounds; use the calibrated median in value_annual for ranking only when n >= 20, with the factor recorded in value.components. (4) Realization: per pool, estimate the realized factor = (node-hours removed attributable to released capacity over the 30 days after changes) / (capacity released in node-hour equivalents), from node_snapshots_scd and applied changes; report it next to the constant and replace the constant once n >= 10 changes (realization_factor_source 'measured'). (5) Observability: Prometheus gauges greenkube_projection_accuracy_ratio{kind,capability,quantile} and greenkube_projection_accuracy_samples, an API block in GET /recommendations/track-record, and an alert rule in the chart when the median leaves 0.7-1.3 with n >= 10. (6) Invariant checks at projection time (cheap, no measurement needed): replica_hours of an always-on target within 5% of 8760 x replicas; observed unit price within 2x of the node price; allocated saving <= observed workload cost. Violations set impact.assumptions.anomalies and lower impact.confidence. Docs: add 'Calibration' to docs/methodology/impact-model.md and savings-measurement.md.
+
+**Acceptance.** Seed 30 measurements with measured / projected = 0.5 for (container_resources, cpu_rightsizing, greenkube, opencost, >7d): new projections of that key carry impact.calibration.ratio_median in [0.45, 0.55], n = 30, the gauge reports 0.5 and the alert fires; with 3 measurements no calibration is applied and impact.calibration.n == 3. A projection whose replica_hours is 4454 for a single always-on replica carries assumptions.anomalies ['replica_hours_below_expected'].
+
+### WP-08.7 · Orphan volume pricing
+
+#### IMP-11 · Orphaned PersistentVolumes on non-cloud CSI or NFS storage are projected at the cloud default rate as an expected billable saving, and OpenCost PV/LB costs are annualized over the whole lookback.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/core/optimization/analyzers/orphaned_pv.py:57-86`; `src/greenkube/collectors/pv_collector.py:283-289`; `src/greenkube/collectors/lb_collector.py:540-546`; `src/greenkube/impact/model.py:517-549`
+
+**Problem.** orphaned_pv.py prices a Released/Failed PV without an OpenCost cost at capacity_gib x STORAGE_COST_PER_GIB_MONTH (default 0.10) x 12 and projects it through asset_deletion with realization factor 1 ('expected billable'). Local and hostPath volumes are excluded by the collector, but NFS, Ceph/Rook, Longhorn, OpenEBS and other on-prem CSI volumes are not billed per GiB; the LoadBalancer analyzer has an explicit bare-metal branch (cost 0, CostSource.NONE), the PV analyzer has none. When OpenCost does return a cost, enrich_orphaned_pv_costs / enrich_orphaned_lb_costs compute annual_cost = window_cost x 365 / RECOMMENDATION_LOOKBACK_DAYS: an asset (or an OpenCost install) younger than the lookback is annualized as if its cost were spread over the whole window, the bias that model 2.0.0 removed for workloads. The PV cost is read from the OpenCost allocation API aggregated by persistentvolume, which reports volumes mounted by pods; a Released volume is unlikely to appear there, so the default rate is probably always used (not verified live).
+
+**Fix.** (1) Classify the volume's billing in pv_collector: cloud CSI drivers and in-tree cloud volume sources (ebs.csi.aws.com, pd.csi.storage.gke.io, disk.csi.azure.com, cinder.csi.openstack.org, Scaleway, OVH...) are billable; anything else is 'self_hosted': project allocated = capacity x configured rate but expected billable = 0 with cost_source NONE and a note 'self-hosted storage: capacity released, no bill', unless the operator sets STORAGE_COST_PER_GIB_MONTH explicitly (then CUSTOM_RATE 'configured'). AssetDeletion needs a realization_factor field instead of the hard-coded 1.0. (2) Annualize OpenCost asset costs over min(lookback, asset age, OpenCost data span): use the per-asset 'minutes' / start-end returned by OpenCost (annual = window_cost x 525600 / minutes). (3) Read orphan PV cost from the OpenCost assets API (/assets?filter type=Disk) rather than allocation. (4) Document in docs/recommendation.md.
+
+**Acceptance.** Released 100 GiB PV with csi.driver rook-ceph.rbd.csi.ceph.com and no configured rate -> expected_billable_cost_annual 0, allocated 120, note present; same PV with ebs.csi.aws.com -> 120 billable at confidence 0.5. OpenCost returns 0.10 for a LoadBalancer observed 2880 minutes in a 14d window -> annual 18.25, not 2.61.
+
+## WP-09 · Savings ledger
+
+**Goal.** The ledger accounts on one basis, users read the ledger, and tampering is detectable.
+
+**Main files.** src/greenkube/verify/ledger/, storage/ledger_repository.py, core/savings_attributor.py, core/savings_report.py, storage/*/savings_repository.py, api/routers/ledger.py
+
+**Depends on.** WP-08 task 5 for the accounting basis.
+
+### WP-09.1 · Accrue projected and measured savings on the same basis
+
+#### LED-01 · The ledger accrues 'projected' savings on the expected-billable basis (allocated x realization factor, 0 on fixed-capacity clusters) and 'measured' savings on the allocated basis, so the two methods are not comparable, nothing accrues before verification on-prem, and restatement cannot credit the pre-verification period.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** L · **Where** `src/greenkube/impact/projector.py:634`; `src/greenkube/core/savings_attributor.py:150-164`; `src/greenkube/core/savings_attributor.py:167-192`; `src/greenkube/verify/service.py:1167-1186`; `src/greenkube/verify/service.py:1244`; `src/greenkube/verify/ledger/projector.py:276-282`
+
+**Problem.** (1) The recommendation columns potential_savings_cost / cost_saved (and the CO2e columns) are filled from the Impact Model's expected_billable_cost_annual = allocated_cost_annual x realization_factor (impact/projector.py:634 `"potential_savings_cost": delta.expected_billable_cost_annual`). (2) SavingsAttributor._projection_components accrues record.cost_saved / carbon_saved_co2e_grams under method 'projected'. (3) After a REALIZED measurement, ChangeMeasurementService stores measured_cost_saved = cost.claimed_annualized, where the cost estimate is the member's share of the measured ALLOCATED cost delta (service.py:1244 compares it with allocated_projection(member)); the attributor accrues it as 'measured' (v2: measured_allocated). (4) The v2 projector skips zero amounts (`if value == 0.0: continue`), and _restate only restates existing projected entries. Consequences: on any cluster whose realization factor is 0 (single node, fixed bare-metal capacity, no autoscaler: minikube, kind, most on-prem) the projection is exactly 0, so NOTHING accrues between applied_at and verified_at, projected_annual and projected_to_date are 0, and the restatement has no projected entry to replace: the saving of the whole measurement window (default 72 h, up to weeks when extended) is never booked although the measurement proved it. Where the factor is between 0 and 1, 'projected' and 'measured' totals differ by 1/factor for a perfectly accurate projection, greenkube_savings_measured_vs_projected_ratio and the report's side-by-side blocks compare different bases, and a restatement replaces a billable-basis amount with an allocated-basis amount without saying so. The ledger entry carries no 'basis' field, and method 'projected' is documented only as 'projection of an applied change that is not measured yet'.
+
+**Fix.** Make the basis explicit and keep one basis per method. (a) Add a `basis` column to recommendation_savings_ledger and savings_ledger_entries (values allocated | billable_expected | billed; part of the canonical hash payload for new entries, via a new method_version so old hashes stay valid) and expose it in /api/v2/ledger/entries, /summary totals, CSV and FOCUS exports, and in SavingsBlock. (b) Accrue the projection on the ALLOCATED basis: in SavingsAttributor._projection_components use impact.allocated_cost_annual (fallback potential_savings_cost when the impact has none) and the matching allocated/measurable CO2e component (the same value verify/attribution.py allocated_projection and _measurable_co2e use), so 'projected' and 'measured_allocated' are the same quantity before and after measurement and restatement is like for like. Keep the billable expectation as a derived, clearly labelled figure (allocated x realization_factor) in the report (realization block) and never store it as an accrual. (c) Restatement must not depend on a non-zero projected entry: for each verified recommendation, generate restatement entries for every grid slot in [applied_at, verified_at) (entry_key restatement:slot:{rec}:{slot}:{quantity}); when a projected entry exists for the slot, reverse it as today. (d) Rename/re-document greenkube_savings_measured_vs_projected_ratio, or compute it on the allocated basis only. (e) Migration: existing v1 projected rows keep basis billable_expected (backfill the column from the recommendation's impact); do not rewrite them; on upgrade run one pass that writes the missing slot restatements for already verified recommendations. (f) Update docs/methodology/savings-measurement.md section 12 and the UI vocabulary (frontend/src/lib/savingsVocabulary.js) to state the basis of each block.
+
+**Acceptance.** 1. Record with impact.allocated_cost_annual=87.66 (0.01/h), realization_factor=0, applied 96 h ago, pending: after accrue() the ledger holds 96 projected rows summing 0.96 with basis=allocated; report.realization shows billable expected 0. 2. Same record verified 24 h ago with measured 0.01/h: v2 restated measured_allocated = 0.96, restated projected = 0, and the v1-compatible report shows realized_to_date 0.96 (see LED-04). 3. Factor 0.3 and an exact projection: projected accrued over 72 h equals measured restated over the same 72 h (ratio 1.0, not 0.3). 4. Every entry returned by /api/v2/ledger/entries has a non-null basis; the FOCUS export carries x_greenkube_basis.
+
+### WP-09.2 · Serve user-facing numbers from ledger v2
+
+#### LED-04 · The numbers users actually see (GET /recommendations/savings, overview hero, Prometheus counters and dashboard gauges) come from the mutable v1 ledger and never include restatements, so they disagree with the hash-chained v2 ledger and understate realized savings by the whole pre-verification period.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** L · **Where** `src/greenkube/api/routers/recommendations.py:327-360`; `src/greenkube/core/savings_report.py:113-169`; `src/greenkube/api/metrics_endpoint.py:433-492`; `src/greenkube/api/metrics_endpoint.py:722-756`; `frontend/src/lib/api.js:450`; `frontend/src/lib/overview.js:81`
+
+**Problem.** Restatement (BUG-39) exists only in the v2 'restatement' book. The v1 table recommendation_savings_ledger is still the source of realized_to_date / projected_to_date, of the greenkube_*_savings_attributed/reversed counters, of greenkube_dashboard_savings_* and of the UI hero. In v1 the projected rows of a verified change stay 'projected' for ever and the measured rows start at verified_at. Two official figures therefore exist for the same question: v1 'realized_to_date' and v2 measured_allocated 'restated'. In addition the v1 table has no append-only trigger and no hash chain (only savings_ledger_entries has), and its `superseded` flag is mutable, so the tamper evidence built in v2 does not protect the headline numbers.
+
+**Fix.** Make v2 the single read model. 1. assemble_savings_report must take its *_to_date blocks from LedgerRepository.summary(cluster_uid, start, end, namespace): realized_to_date = measured_allocated restated (accrued + restatement), projected_to_date = projected restated, user_declared_to_date likewise; add fields `accrued_only` for transparency during the transition. 2. Lifetime counters and dashboard gauges: compute from savings_ledger_entries (accrued = sum of positive entries, reversed = sum of negative entries, per method) so reversals/restatements are visible to Prometheus. 3. Keep v1 as a write-ahead staging table only, add the same append-only triggers (UPDATE allowed only for superseded FALSE -> TRUE) and document that it is not a reporting source; plan its removal (accrual should write v2 drafts directly: entry_key accrual:{rec}:{method}:{slot}:{quantity}). 4. Add a reconciliation invariant in the ledger-chain loop: sum(v2 accrued book) == sum(v1 non-superseded) per method within 1e-9 relative, exported as greenkube_ledger_reconciliation_ok and alerted.
+
+**Acceptance.** SIM2 rerun: GET /recommendations/savings realized_to_date.cost = 0.96 and projected_to_date.cost = 0 for the verified change; equals /api/v2/ledger/summary totals[measured_allocated].restated; reconciliation gauge = 1; an UPDATE of cost_saved_dollars on recommendation_savings_ledger is rejected by the database.
+
+### WP-09.3 · Reverse projected accruals on a negative or undecided verdict; book measured losses
+
+#### LED-03 · Projected savings accrued before a NOT REALIZED or INCONCLUSIVE verdict stay in the ledger for ever (never reversed, superseded or restated), and a measured loss is never booked.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/core/savings_attributor.py:187-192`; `src/greenkube/verify/ledger/projector.py:84`; `src/greenkube/verify/ledger/projector.py:351-390`; `src/greenkube/core/optimization/lifecycle.py:855-915`; `src/greenkube/cli/start.py:387-401`; `docs/methodology/savings-measurement.md:331`
+
+**Problem.** BUG-30 was fixed only going forward: accrual_components returns [] once verification_status is failed/inconclusive, so no new row is written. The rows written between applied_at and the verdict are kept: mark_not_realized and mark_inconclusive leave the status at 'applied' and call nothing on the ledger; supersede_for_recommendation is only called for rollback_review (start.py) and phantom repair; the projector restates only RESTATED_STATUSES = ('verified', 'regressed'). For not_realized the signed measured value (possibly negative: the change costs more) is stored on the recommendation but never reaches the ledger. docs/methodology/savings-measurement.md documents this as a 'restatement limit', but neither the API nor the UI flags it: projected_to_date, the v2 'projected' totals (both books), greenkube_*_savings_attributed_*{method=projected} and the exports keep presenting, as savings to date, projections that a measurement has refuted.
+
+**Fix.** Derive corrections from the recommendation state in the projector instead of one-shot side effects. In LedgerProjector add a step 'refuted projections': load recommendations whose latest decided measurement is not_realized (status applied, verification_status failed) or that are failed/reverted; for every unreversed projected accrual of such a recommendation with period_end <= decided_at of that measurement write (a) a reversal (reason 'not_realized', book restatement) and (b) when the measurement has a signed measured value, a restatement entry at that measured annual rate (method measured_allocated, may be negative, linked to measurement_id). For inconclusive verdicts keep the projection but tag it: add reason/flag 'unverified' in the summary (a separate total `projected_unverified`), and stop presenting it inside projected_to_date without that label. Mirror in v1 so the legacy report agrees: either set superseded on those v1 rows or (preferred, see LED-04) serve the report from the v2 restated totals. A later successful re-measurement (request_remeasure -> verified) must restate from the new measurement: allow a second restatement keyed by measurement_id (entry_key restatement:{projection}:{measurement_id}) that reverses the previous restatement first. Add REASONS 'not_realized'. Backfill: the step is idempotent and state-derived, so the first pass after upgrade corrects existing rows.
+
+**Acceptance.** SIM1 after the fix: v2 restated projected cost = 0.72 only for the inconclusive change and reported under projected_unverified; change 1 shows projected restated 0 and measured_allocated restated -0.36; GET /recommendations/savings projected_to_date excludes the refuted change; running the pass twice writes nothing new; chain verification passes.
+
+#### LED-08 · Ledger corrections on rollback are a one-shot best-effort side effect: a failed supersede call is never retried, late accrual rows written after it stay counted, and dismissing a false-positive rollback review leaves the whole earlier history reversed.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/cli/start.py:387-401`; `src/greenkube/storage/postgres/savings_repository.py:131-144`; `src/greenkube/core/optimization/lifecycle.py:604-652`; `src/greenkube/storage/ledger_repository.py:411-444`
+
+**Problem.** run_recommendation_lifecycle supersedes v1 rows only for records returned as rollback_review by that very run: `try: await savings_repo.supersede_for_recommendation(rec_id) except Exception: logger.warning(...)`. If the UPDATE fails (database restart, lock timeout) or the process stops between the status transition and the call, nothing retries: the recommendation is already rollback_review, so it is not in a later `verified` list, and all its accruals stay counted. The attribution loop runs concurrently with the lifecycle loop on a list of records loaded earlier, so it can insert one more slot after the supersession; that row is never flagged. In the other direction, dismiss_rollback_review returns the record to applied/pending, but the rows superseded at review time stay superseded (v2: reversed by 'supersession' entries) and the accrual floor (MAX(period_end) including superseded rows) prevents re-accrual: a false-positive review permanently deletes the savings accrued before it.
+
+**Fix.** Move supersession into the state-derived projector/reconciler: on every ledger-chain tick, select recommendations with status in (rollback_review, reverted, failed) that still have non-superseded v1 rows (or unreversed v2 entries) and supersede them; and select recommendations that are applied/verifying/verified again after a ROLLBACK_DISMISSED event and write 'reinstatement' entries (new reason) re-crediting the entries reversed by that review (v1: new rows, since superseded cannot be unset in an append-only model). Remove the one-shot call from cli/start.py or keep it as a fast path. Add greenkube_ledger_unreconciled_recommendations gauge and an alert.
+
+**Acceptance.** 1. Test: make supersede_for_recommendation raise once; after the next ledger-chain tick the v2 net of the recommendation is 0. 2. Test: an accrual row inserted after the supersession is reversed by the next tick. 3. Test: rollback_review then dismiss -> v2 net equals the accruals before the review plus those after the dismissal.
+
+### WP-09.4 · Anchor the hash chain
+
+#### LED-05 · The hash chain is not tamper-evident against anyone who can write to the database: there is no secret or external anchor, the verified head is stored in the same database, and a full re-chain plus an edit of ledger_chain_status passes every verification.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** L · **Where** `src/greenkube/verify/ledger/model.py:194-199`; `src/greenkube/verify/ledger/verification.py:126-161`; `src/greenkube/verify/ledger/verification.py:164-227`; `src/greenkube/storage/ledger_repository.py:676-694`; `src/greenkube/core/migrations/scripts/postgres/0079_savings_ledger_entries.sql:62-77`; `docs/methodology/savings-measurement.md:321-323`
+
+**Problem.** hash = sha256(prev_hash || canonical_json(entry)) uses no key, so anyone able to modify rows can recompute the chain. The triggers are ordinary triggers the table owner (the GreenKube database role itself) can drop or bypass (ALTER TABLE ... DISABLE TRIGGER, session_replication_role). Tail truncation and rewrite are only detected against ledger_chain_status.head_seq/head_hash, a plain updatable row in the same database (the documentation even tells operators to delete it to reset). The in-process checkpoint is lost at restart. verify_chain checks structure only: it does not check that a reversal's value is the negative of the entry it reverses, that source rows exist, or that totals reconcile. After a backup restore or a failover that lost the last commits, the chain and the status row go back together, so the loss of entries is silent as well (the v1 rows are lost with them and re-accrued with new created_at).
+
+**Fix.** State the real guarantee and add an anchor outside the database. 1. Chain with an HMAC: hash = HMAC-SHA256(key, prev_hash || canonical) with a key from a Kubernetes Secret (LEDGER_CHAIN_KEY, generated by the chart, never stored in the database); keep 'ledger/1' entries verifiable with the old rule and switch by method_version/chain_version column. 2. Publish the head outside the database on every verification: (a) Prometheus gauge greenkube_ledger_chain_head_seq{cluster_uid} and an info metric with the head hash (Prometheus retention becomes an independent witness); (b) optional signed checkpoint written to a ConfigMap/annotation or committed to the GitOps repository (LEDGER_CHECKPOINT_TARGET). Verification compares the database with the last external checkpoint and fails with reason 'checkpoint_mismatch'. 3. PostgreSQL: run the application with a role that does not own savings_ledger_entries (owner = migration role; app role has INSERT/SELECT only), document it in the chart. 4. Add semantic checks to verify_chain: reversal.value == -target.value and same quantity/unit; restatement has a reversal of the same projection; entry cluster_uid equals the chain's. 5. Document backup-restore behaviour: after a restore the external checkpoint is ahead; the operator must acknowledge with an explicit, logged command (greenkube ledger accept-head) instead of deleting the status row. 6. Fix the docs sentence that presents the chain as tamper detection without qualification.
+
+**Acceptance.** 1. SIM4 rerun with a chain key: verification fails with hash_mismatch (the attacker cannot recompute HMACs). 2. Deleting the tail and editing ledger_chain_status: verification fails with checkpoint_mismatch against the external checkpoint. 3. With the app role, DROP TRIGGER and ALTER TABLE on savings_ledger_entries are denied on PostgreSQL. 4. A reversal whose value was inserted with the wrong sign fails verification with reason 'reversal_mismatch'.
+
+### WP-09.5 · Clock jumps, growth, exports and provenance
+
+#### LED-06 · A forward clock jump makes the attributor accrue up to 168 future hourly slots per run and then freezes all accrual until real time catches up; rows are written with the current status for periods that have not happened.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/core/savings_attributor.py:311-318`; `src/greenkube/core/savings_attributor.py:409-470`; `src/greenkube/core/savings_attributor.py:72`
+
+**Problem.** accrue() takes `now` from the wall clock, builds every slot from the watermark to floor_to_slot(now) (capped at MAX_SLOTS_PER_RUN = 168) and advances the watermark to the last slot. There is no check that `now` is plausible (no comparison with the database clock, the previous run or the newest collected metric). With a wrong clock each run (every collection step, 5 min by default) writes one more week of accruals in the future. Once the clock is right, _slots() is empty until real time passes the watermark, so `if not slots: return` skips everything, including the catch-up of newly applied changes and the stop of changes that were refuted meanwhile: the future rows stay as written.
+
+**Fix.** In SavingsAttributor.accrue: (1) read the database time in the same transaction (SELECT now() / strftime) and refuse to run (counter greenkube_attribution_errors_total{reason=clock_skew}, log error) when |process now - database now| > 5 min; (2) never accrue a slot whose end is later than the newest complete collection watermark (collection_watermarks) + one slot: savings can only be earned for hours the collector has seen; (3) when the stored watermark is in the future of the trusted now, expose greenkube_accrual_watermark_ahead_seconds and alert; provide a repair command that supersedes rows with period_start > now and resets the watermark. (4) Process never-accrued records (catch-up) even when there is no new slot.
+
+**Acceptance.** Rerun sim_clock.py: the bad-clock runs write 0 rows and increment the clock_skew counter; watermark unchanged; after the clock is fixed accrual continues normally and the change applied at +1 h accrues from its applied_at.
+
+#### LED-09 · The ledger grows without bound at one v1 row and two v2 entries per accruing recommendation per hour, with full-table anti-join sweeps, an all-time summary scan per API call and a daily full re-hash; there is no rollup or archival design.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** L · **Where** `src/greenkube/core/savings_attributor.py:347-385`; `src/greenkube/verify/ledger/projector.py:202-241`; `src/greenkube/storage/ledger_repository.py:354-409`; `src/greenkube/storage/ledger_repository.py:622-670`; `src/greenkube/verify/ledger/verification.py:43-44`; `src/greenkube/verify/ledger/projector.py:351-368`
+
+**Problem.** Every accruing recommendation writes one v1 row per hour and method and the projector turns it into one entry per non-zero quantity (cost, CO2e); verified changes accrue for ever (until drift, deletion or regression). Restatement adds two more entries per projected entry. Nothing is ever compressed (by design), yet: the full sweep (every ledger-chain tick and once an hour per attributor) runs `NOT EXISTS (SELECT 1 FROM savings_ledger_entries ...)` over the whole v1 table; GET /api/v2/ledger/summary and the savings report aggregate all rows on every call; the full chain verification re-hashes every entry in Python once a day and at every controller start; _restate loads all verified/regressed recommendations on every pass. The savings_ledger_daily_rollup view is computed at read time.
+
+**Fix.** Keep the append-only guarantee but change the grain and the read path. 1. Accrue per recommendation per UTC day once a slot day is complete and stable (keep hourly only for the current day in a staging table), or keep hourly v1 rows but project one v2 entry per (recommendation, method, quantity, day) with entry_key day-based; partial days at apply/verification boundaries keep exact period bounds. 2. Maintain a materialized ledger_totals(cluster_uid, day, namespace, method, quantity, unit, book, entry_kind) updated in the append transaction; summary and report read it (windows prorate only boundary days from entries). 3. Sweep by an indexed 'projected' marker (a projection watermark per v1 id plus a small pending table) instead of a full anti-join. 4. Verification: checkpoint signed heads every N entries (LED-05) so the daily full verification can run in segments and be resumed; bound per-tick work. 5. PostgreSQL: partition savings_ledger_entries by month on period_start. 6. Document expected growth and a cold-archive export.
+
+**Acceptance.** Load test with 1,000 recommendations x 365 days: summary p95 < 200 ms, ledger-chain tick < 60 s, table growth < 1.5 GB/yr; totals identical (1e-9) to the hourly-grain implementation on the same inputs.
+
+#### LED-10 · The FOCUS export books projected and user-declared amounts as negative EffectiveCost 'Credit' rows, so summing the standard cost column mixes methods and subtracts unverified projections from spend.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** S · **Where** `src/greenkube/api/routers/ledger.py:460-509`; `src/greenkube/api/routers/ledger.py:512-543`; `docs/methodology/savings-measurement.md:337`
+
+**Problem.** _focus_row writes EffectiveCost = -saving for every entry whatever its method (projected, user_declared, measured_allocated) and ChargeCategory 'Credit' for accruals. A FOCUS consumer (FinOps tool, BI) aggregates EffectiveCost without knowing the x-greenkube-method extension, so projected, user-declared and measured-allocated amounts are summed together and netted against real spend, which is exactly what product principle 3 forbids; measured_allocated savings are not on the bill either. The extension columns use the `x-greenkube-` prefix although FOCUS 1.0 requires `x_` (documented as a known gap). When only a CO2e entry exists for a group the row has an empty BillingCurrency. Groups evicted from the 5,000-group buffer before their second quantity arrives are emitted as two rows.
+
+**Fix.** EffectiveCost and BilledCost must be 0 for every method except realized_billed; carry the amount in x_greenkube_saving with x_greenkube_method and x_greenkube_basis. Offer `format=focus&methods=measured_allocated` only as an explicit opt-in that sets ChargeDescription 'allocated saving (not billed)'. Rename extension columns to the x_ prefix (keep the old names behind `compat=1` for one release). Fill BillingCurrency from the entry unit/currency of the group or the cluster pricing currency. Flush incomplete groups by group_key order (entries of one v1 row are adjacent) instead of the eviction heuristic. Add a FOCUS validator test in CI.
+
+**Acceptance.** Export of a ledger with projected, user_declared and measured_allocated entries: sum(EffectiveCost) = 0 and sum(BilledCost) = 0; sum(x_greenkube_saving) grouped by x_greenkube_method equals /ledger/summary; the official FOCUS 1.0 validator reports no column-name error.
+
+#### LED-11 · Ledger entries cannot be reproduced from their own provenance: price_card_version, intensity_g_per_kwh and intensity_source are never filled, projected entries carry only a generic method_version, and the v1 ledger has no currency.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/verify/ledger/projector.py:283-313`; `src/greenkube/verify/ledger/projector.py:432-456`; `src/greenkube/verify/ledger/model.py:132-134`; `src/greenkube/storage/ledger_repository.py:493-542`; `src/greenkube/core/savings_report.py:96-110`
+
+**Problem.** LedgerEntryDraft has price_card_version, intensity_g_per_kwh and intensity_source, and the CSV export has the columns, but no code path sets them (the projector never passes them), so every entry has NULL. Projected entries get method_version 'ledger/1:projected' (no Impact Model version, no recommendation revision). Provenance is resolved at projection time as the LATEST change and measurement of the recommendation, so a row projected late (catch-up after an outage, re-measurement in between) can be linked to a measurement that did not produce its rate. The v1 rows store amounts in a column named cost_saved_dollars without currency; the v2 currency is taken from the recommendation's impact.currency at projection time, and GET /recommendations/savings sums v1 amounts across currencies if the pricing currency was changed.
+
+**Fix.** At accrual time store on the v1 row (new columns) and copy into the entry: annual_rate, currency, basis, impact_model_version, recommendation revision id, measurement_id (the one whose rate is used, taken from baseline.latest_measurement_id at accrual time, not at projection time), price card id/version and the intensity value and source used by the projection or the measurement snapshot (baseline_snapshots.price_card / intensity_source). Add annual_rate to the hash payload under a new method_version. Group v1 report totals by currency.
+
+**Acceptance.** For any entry: value == annual_rate x (period_end - period_start) / 31557600 within 1e-12; price_card_version and intensity_source are non-null for cost and CO2e entries respectively; a measured entry's measurement_id equals the measurement whose claimed_annualized equals annual_rate.
+
+#### LED-12 · Minor ledger inconsistencies: drift reversals with mixed signs are projected as accruals, zero-length periods are dropped from windowed summaries, and a record that errors or is skipped for some runs loses those slots for good.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/verify/ledger/projector.py:129-135`; `src/greenkube/storage/ledger_repository.py:636-651`; `src/greenkube/api/routers/ledger.py:261-270`; `src/greenkube/core/savings_attributor.py:437-447`; `src/greenkube/verify/drift.py:746-786`
+
+**Problem.** (a) _is_drift_reversal requires co2e <= 0 and cost <= 0; a verified recommendation with a positive cost saving and a negative CO2e saving (or the reverse) produces a reversal row with mixed signs, which is then projected as two 'accrual' entries created_by 'savings-attributor' with reason 'accrual' instead of a 'reversal' with reason 'drift' (totals stay right, classification and reverses_entry_id are lost; the v1 lifetime counters count the positive part as newly 'accrued'). (b) In LedgerRepository.summary a window divides by NULLIF(period length, 0): an entry with period_start == period_end gets a NULL share and vanishes from SUM, while the export's window_share returns 1.0 or 0.0 for the same entry. (c) accrue() advances the global watermark even when a record raised (errors += 1): once the record is valid again it has a floor, so the catch-up (only for floor is None) does not run and the slots of the failing runs are never accrued. (d) The drift reversal amount is rate x (floor - start) and assumes measured accruals exist for the whole interval; with gaps from (c) it reverses more than was accrued.
+
+**Fix.** (a) Mark drift reversals explicitly: add a `kind`/`reason` column on v1 rows written by DriftMonitor._reversal ('drift_reversal') and use it in the projector instead of the sign heuristic. (b) Use the same rule in SQL and Python (zero-length entry inside the window -> share 1). (c) Track a per-recommendation accrual cursor (last accrued slot per recommendation and method) instead of one global watermark plus floor, and backfill from the cursor. (d) Compute the reversal from the measured rows actually present in [start, floor): reversal = -SUM(rows).
+
+**Acceptance.** (a) reversal row with cost -1, co2e +2 -> two v2 entries entry_kind reversal, reason drift. (b) summary(window) == sum(export window_value). (c) a record invalid for 3 runs then fixed has no missing slot. (d) net of a regressed recommendation over the reversed interval == 0 exactly, with a gap in accruals.
+
+## WP-10 · API, exports and Prometheus exposition
+
+**Goal.** Every published figure has a unit, a period, a freshness indication, and one value whichever endpoint is asked.
+
+**Main files.** src/greenkube/api/routers/metrics.py, dashboard.py, report.py, nodes.py, api/metrics_endpoint.py, api/schemas.py, core/sustainability_score.py, dashboards/
+
+**Depends on.** WP-05 for the idle share and seam fixes it must surface.
+
+### WP-10.1 · Aggregate report exports over the whole range
+
+#### API-01 · An aggregated report export (aggregate=true) is aggregated per 7-day read chunk, so the file holds several rows for the same (namespace, pod, period) key and the preview row count is wrong.
+
+**Severity** high · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/api/routers/report.py:276-291`; `src/greenkube/api/routers/report.py:189-208`; `src/greenkube/core/aggregator.py:70-172`
+
+**Problem.** report_export streams the range in windows of chunk_days=7 (`_iter_metrics_chunks`). When aggregate=true it calls `aggregate_metrics(batch, **granularity_flags, group_by=group_by)` on EACH 7-day batch and yields the result, so the grouping key (namespace, pod, period) is only unique inside one chunk. Any period longer than, or not aligned with, a 7-day chunk is emitted once per chunk: monthly, yearly and 'no granularity' always; weekly because ISO weeks and the chunks start on different days; daily and hourly whenever the range start is not on a day/hour boundary (every `last=` range). /report/summary computes `total_rows` with `aggregate_grouped_row_count` (COUNT DISTINCT over the whole range), so the preview announces fewer rows than the file contains. Each partial row also carries a `timestamp` (first sample of the chunk), `duration_seconds` and averaged usage of its chunk only. The aggregated rows are also semantically wrong for group_by=namespace (`aggregate_metrics`): `cpu_request` and `memory_request` are `max(...)` over the rows of all pods (one pod's request, not the namespace's), `duration_seconds` is the sum over pods (the simulation shows 1,209,600 s = 14 days for a 7-day chunk of 2 pods), usage is an unweighted mean over rows, and the cost components (cost_cpu, cost_ram...), `cost_source` and the other provenance fields are not carried, so an aggregated export has no cost breakdown and no provenance at all (see also ROL-10).
+
+**Fix.** Aggregate in the database, not per chunk. Add a repository method `aggregate_report_rows(start, end, namespace, granularity, group_by)` on CombinedMetricsRepository (PostgreSQL and SQLite) that runs one GROUP BY over the raw+hourly union (same split rule as the other aggregates, i.e. the compression watermark once that fix lands) with the bucket expression in UTC and returns one row per (group key, bucket): SUM of cost, cost_* components, co2e, embodied, joules; duration-weighted grid_intensity and pue; time-weighted average usage; for group_by=namespace the request columns must be the time-weighted average of the per-step SUM over pods (not MAX over rows). report_export streams these rows (they are bounded by groups x buckets) and /report/summary counts the same query so `total_rows` equals the number of exported rows by construction. If a streaming Python fallback is kept, carry an accumulator dict keyed by (namespace, pod, period) across chunks and emit a key only when the chunk cursor has passed the end of its period. Remove `aggregate_metrics` from the export path or restrict it to the CLI. No data migration.
+
+**Acceptance.** 1) Seed 2 pods x 20 days of 5-minute rows with cost 1.0, compress, call /report/export?aggregate=true&granularity=monthly&group_by=namespace&start=D0&end=D17&format=json: exactly one row per (namespace, month); row costs equal the SQL sums; 2) the number of rows equals /report/summary total_rows for granularity in hourly, daily, weekly, monthly, yearly and none, for group_by pod and namespace, for `last=30d`, a custom range and `years=`; 3) no two exported rows share (namespace, pod_name, period).
+
+#### API-05 · The report export loses the rows stamped exactly on the first 7-day chunk boundary (a whole hour of every pod for date-aligned ranges), so the file total is lower than the /report/summary preview of the same range.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/api/routers/report.py:280-291`; `src/greenkube/api/routers/report.py:42-49`
+
+**Problem.** The chunk loop reads `[cursor, window_end)` (the repositories are half-open: `timestamp >= $1 AND timestamp < $2`, `hour_bucket >= $1 AND hour_bucket < $2`) and then advances with `cursor = window_end + timedelta(seconds=1)`. The code was written for inclusive ends; with half-open reads the interval `[window_end, window_end + 1s)` is never read. Ranges built from dates or years start at 00:00:00, so the first boundary is exactly start + 7 days 00:00:00, which is the timestamp of an hourly row (hour_bucket) of every pod, or of a raw 5-minute step. Later boundaries drift by one second per chunk (00:00:01, 00:00:02...) and only hit rows stamped on those seconds. Separately, calendar years and date-only ends use 23:59:59.999999 as an exclusive end, which is harmless for aligned rows but is one more inclusive/exclusive mismatch.
+
+**Fix.** In `_iter_metrics_chunks` use half-open chunks: `while cursor < range_end: window_end = min(range_end, cursor + delta); read [cursor, window_end); cursor = window_end`. Make every range half-open at the source: `_get_calendar_year_range` returns (Jan 1 year, Jan 1 year+1); a date-only `end` means the start of the next day; document `end` as exclusive for full datetimes. Add an invariant test that sums the export and compares it with aggregate_summary.
+
+**Acceptance.** For a seeded database, for ranges start=2026-10-26&end=2026-11-12, years=2026 and last=30d: sum(total_cost), sum(co2e_grams), sum(joules) and the row count of /report/export (aggregate=false) equal /report/summary exactly; a row stamped at start + 7 days 00:00:00 is present in the file.
+
+#### API-16 · CSV/JSON export details: negative numbers are written as text with a leading apostrophe, a failure in the middle of a stream produces a truncated file after HTTP 200, and the UI formats negative CO2e amounts in milligrams.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** S · **Where** `src/greenkube/api/routers/report.py:365-370`; `src/greenkube/api/routers/report.py:276-335`; `frontend/src/lib/utils/format.js:10-15`
+
+**Problem.** `_sanitize_cell` prefixes every cell whose text starts with '=', '+', '-' or '@' with an apostrophe, including numeric cells: a negative value (for example a negative cost delta or a negative float after a correction) becomes the string '-0.5 and is no longer summed by a spreadsheet. The export is a StreamingResponse: a database error after the first chunk cannot change the status code, the CSV simply ends (the JSON variant ends without the closing bracket). `formatCO2` tests `grams >= 1000` and `grams >= 1` only, so any negative amount falls to the last branch and is printed as `grams * 1000` mg (-1200 g is shown as '-1200000.0 mg').
+
+**Fix.** Sanitise only string-typed fields (pod_name, namespace, node, owner_name, labels), never numbers. End the CSV with a trailer line `# rows=<n> sha256=<digest>` (or send the totals in a first comment line) and the JSON with a final metadata object so a truncated file is detectable; alternatively build the file to a temporary object and send it with Content-Length. In format.js use `Math.abs(grams)` for the unit choice.
+
+**Acceptance.** A row with total_cost -0.5 is exported as -0.5; a repository that raises on the second chunk yields a file without the trailer and the client helper reports an incomplete download; formatCO2(-1200) returns '-1.20 kg'.
+
+### WP-10.2 · Publish rates or true counters, with units, from a consistent snapshot
+
+#### API-02 · The Prometheus exposition publishes the cost, CO2e and energy of ONE collection step as unit-less gauges named *_total, so every greenkube_pod_*, greenkube_namespace_*_total and greenkube_cluster_*_total value scales with the collection step and the bundled Grafana panels show them as 'Cost' and 'CO2e'.
+
+**Severity** high · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/api/metrics_endpoint.py:61-84`; `src/greenkube/api/metrics_endpoint.py:151-210`; `src/greenkube/api/metrics_endpoint.py:853-856`; `src/greenkube/api/metrics_endpoint.py:906-923`; `src/greenkube/api/metrics_endpoint.py:1260-1275`; `dashboards/greenkube-grafana.json`
+
+**Problem.** `refresh_metrics_from_db` reads `read_latest_per_pod(now - 20 min, now)` (one row per pod: its most recent step) and `update_cluster_metrics` copies `m.total_cost`, `m.co2e_grams`, `m.embodied_co2e_grams`, `m.joules` of that single row into `greenkube_pod_cost_dollars`, `greenkube_pod_co2e_grams`, `greenkube_pod_energy_joules`, then sums them into `greenkube_namespace_*_total` and `greenkube_cluster_*_total`. A stored row is the amount of one collection step (PROMETHEUS_QUERY_RANGE_STEP, 5 minutes by default), so the gauge is 'dollars per step' with no step in the name, the help text ('Cloud cost per pod in dollars', 'Total cost across all pods in dollars') or a label. The `_total` suffix announces a counter but the series is a gauge that never accumulates: rate(), increase() and sum_over_time() all give meaningless results (sum_over_time depends on scrape interval / step). The bundled Grafana dashboard plots them directly: 'Cost by Namespace' = `sum by (namespace) (greenkube_namespace_cost_dollars_total)` with unit currencyUSD, 'Top 15 Pods - Cost', 'CO2e by Namespace', and uses `greenkube_cluster_cost_dollars_total` as the `or` fallback of the windowed 'Footprint & Cost Mix' stat when the summary series is absent, so a per-step amount is shown where a 24h/7d/30d total is expected. The latest-row set also mixes timestamps: a pod deleted up to 20 minutes ago still contributes its last row, and a pod whose last row came from a catch-up chunk contributes a row of a different duration.
+
+**Fix.** Expose rates and real counters instead of per-step amounts. (1) Replace the per-step gauges by rate gauges with the unit in the name, computed as amount / duration_seconds of the row: greenkube_pod_cost_dollars_per_hour, greenkube_pod_co2e_grams_per_hour, greenkube_pod_power_watts (joules / duration), and the same at namespace and cluster level (sum of pod rates of ONE common timestamp: the latest completely collected step, taken from the collection watermark, not 'latest row per pod in 20 minutes'). (2) If cumulative series are wanted, publish true counters (CounterMetricFamily fed from SUM over all stored history per namespace, or from a persisted cumulative table) so increase() over any range equals the stored total. (3) Keep the old names for one release as deprecated aliases with the help text 'amount of the last collection step (N seconds)' and a `step_seconds` gauge, then remove them. (4) Update dashboards/greenkube-grafana.json: per-namespace and top-pod panels use the hourly rate or the windowed greenkube_dashboard_summary_* series; remove the `or greenkube_cluster_*_total` fallbacks. (5) Update docs/prometheus-grafana.md with units.
+
+**Acceptance.** With the same stored data re-collected at 30 s and 5 min steps, every exposed cost/CO2e/energy series differs by less than 1%; `greenkube_cluster_cost_dollars_per_hour * 24` over a steady day equals SUM(total_cost) of that day within 1%; promtool check metrics reports no counter/gauge naming violation; no Grafana panel shows a per-step amount under a currency or gram unit.
+
+#### API-09 · The exposition is rebuilt inside each scrape by clearing shared gauges and refilling them across awaits, so overlapping scrapes (an HA Prometheus pair) or a UI request to /metrics/dashboard-summary return a partial set of series.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/api/metrics_endpoint.py:1344-1354`; `src/greenkube/api/metrics_endpoint.py:1318-1331`; `src/greenkube/api/metrics_endpoint.py:672-689`; `src/greenkube/api/routers/dashboard.py:49-51`; `src/greenkube/api/routers/dashboard.py:121-125`; `src/greenkube/api/app.py:432-454`
+
+**Problem.** All gauges live in one process-wide registry. `refresh_metrics_from_db` does `update_dashboard_summary_metrics(rows, reset=True)` (clears every namespace) and then awaits `summary_repo.get_rows(namespace)` once per namespace before setting that namespace; the savings block does `clear_dashboard_savings_metrics()` and then awaits one ledger query per window. Any other coroutine that runs during those awaits sees or causes a partial registry: a second scrape clears what the first one filled and the first one then serialises the registry; `GET /api/v1/metrics/dashboard-summary` without a namespace also calls `update_dashboard_summary_metrics(rows, reset=True)` from the request handler, and the refresh POST does it from a background task. The savings TTL does not protect: `_mark_savings_refreshed` is only called after the fill. The refresh also runs N+7 sequential queries on every 30-second scrape with a 10-second scrape timeout.
+
+**Fix.** Build each scrape from an immutable snapshot. Replace the module-level Gauge objects by a custom collector whose `collect()` yields metric families from a snapshot object; `refresh_metrics_from_db` builds a new snapshot in local variables and swaps the reference in one assignment at the end. Guard the refresh with an asyncio.Lock and a short TTL (for example 15 s) so concurrent scrapes share one refresh. Remove the gauge writes from the API handlers in routers/dashboard.py (reading the summary must not mutate the exposition). Read all namespaces' summary rows in one query.
+
+**Acceptance.** Concurrency test: 10 overlapping calls of the scrape handler plus 10 calls of GET /metrics/dashboard-summary with a repository that sleeps 5 ms per query: every scrape output contains all 20 namespaces and all 7 windows; the number of summary queries per scrape is 1; two scrapes inside the TTL trigger one refresh.
+
+#### API-15 · Prometheus exposition naming and labels: gauges named *_total, a currency unit hard-coded as dollars, measured values inside label values, rank labels, and 'implemented' counts that include changes that were not realized.
+
+**Severity** low · **Evidence** confirmed-code · **Effort** M · **Where** `src/greenkube/api/metrics_endpoint.py:151-210`; `src/greenkube/api/metrics_endpoint.py:242-296`; `src/greenkube/api/metrics_endpoint.py:335-340`; `src/greenkube/api/metrics_endpoint.py:948-968`; `src/greenkube/api/metrics_endpoint.py:407-417`; `src/greenkube/api/metrics_endpoint.py:516-533`
+
+**Problem.** (1) `greenkube_*_total` families are Gauges (namespace, cluster, dashboard summary, dashboard savings, recommendations_total, recommendations_implemented_total, cluster_*_saved_*_total, which is an annual rate): promtool and any rate()/increase() user are misled. (2) `greenkube_zone_grid_intensity_gco2_kwh` puts the rounded intensity and the node list in the labels `bubble_label` and `map_label`, so each change of intensity creates a new series per zone (about 24 per day per zone) and range queries return several bubbles for one zone. (3) `greenkube_top_recommendations` exposes every active recommendation four times with a `rank` label that changes whenever the order changes. (4) Pod series carry `node` and `region`, so a pod that moves produces new series while the old ones stay until the next clear. (5) Names end in `_dollars` although the pricing currency is configurable. (6) `greenkube_recommendations_implemented_total` counts status applied, verifying, verified and rollback_review, including inconclusive and not-realized changes, and the 'GreenKube Impact' panel shows it as implemented actions. (7) The bundled dashboard uses `sum by (namespace) (greenkube_namespace_cost_dollars_total)` and `avg by (...)` without de-duplication, so two API replicas or two releases in one Prometheus double the per-namespace panels (live kind: two releases scraped, values summed).
+
+**Fix.** Rename gauges without `_total` (keep aliases for one release), put the currency in a label of a `greenkube_pricing_info` series and name amounts `_cost`, move display strings out of labels (Grafana can build them from `zone` and the value), drop `rank` in favour of topk() in the query, publish implemented counts by outcome (`outcome=realized|not_realized|inconclusive|pending`), and wrap every dashboard expression in `max by (cluster, ...)` before summing. Add a promtool check metrics step to CI.
+
+**Acceptance.** promtool check metrics passes on the exposition; the dashboard totals are unchanged when a second API replica is scraped; the map gauge has one series per zone over a 24-hour range query.
+
+### WP-10.3 · Coverage and freshness on every read endpoint; no zeros when collection stalls
+
+#### API-13 · Read endpoints carry no coverage or freshness information: no collected-until time, no hole indicator, no estimated share, partial first and last buckets, and health and setup checks stay 'ok' when collection has stopped.
+
+**Severity** medium · **Evidence** confirmed-code · **Effort** L · **Where** `src/greenkube/api/schemas.py:337-368`; `src/greenkube/api/schemas.py:406-442`; `src/greenkube/api/routers/metrics.py:122-176`; `src/greenkube/api/routers/config.py:21-55`; `src/greenkube/api/routers/setup.py:143-148`; `src/greenkube/api/routers/setup.py:570-640`
+
+**Problem.** MetricsSummaryResponse, TimeseriesPoint, NamespaceBreakdownItem, TopPodItem and ReportSummaryResponse contain amounts only. A request for last=7d on an install that has 13 hours of data, or that lost a day of collection, returns a plausible total with nothing that says which part of the window is covered. Buckets without rows are omitted from /metrics/timeseries (live minikube: 11 hourly buckets for a 14-hour span) and the first and last buckets are partial without a flag, so charts dip at both ends. Rows flagged `is_estimated`, or priced by the default rate (`cost_source`), or computed with the default intensity (`intensity_source`) are summed with measured rows and the share is not returned (COST-08 covers cost). No route returns the collection watermark. GET /api/v1/health only checks the schema and an in-process loop; the setup 'Evidence warm-up' check uses the earliest input time only (`earliest + required <= now` -> 'ok'), so it stays green after collection stops. `list_namespaces` returns [] with HTTP 200 on a database error. `last=5m` is parsed as 5 months (see the low finding on durations).
+
+**Fix.** Add a `coverage` object to every aggregate response and to the cached rows: `requested_start`, `requested_end`, `data_start`, `data_end` (collection watermark), `covered_seconds` (sum of distinct collected steps), `expected_seconds`, `coverage_ratio`, `estimated_cost_ratio`, `estimated_intensity_ratio`, `default_power_profile_ratio` (cost- and energy-weighted shares by provenance). Zero-fill missing buckets with `complete: false` and mark partial edge buckets. UI: show 'based on N hours of data' when coverage_ratio < 0.95 and a provenance badge. Add GET /api/v1/metrics/freshness (watermark, lag, last hole) and include collection lag in /api/v1/health/services and in the setup evidence check (latest input time, not only earliest). `list_namespaces` must raise on a database error.
+
+**Acceptance.** Install with 13 h of data: /metrics/summary?last=7d returns coverage_ratio = 13/168 +- 0.01 and the UI shows the notice; a seeded 6-hour hole yields coverage_ratio 0.75 for 24h and six buckets with complete=false and value 0; with collection stopped for 1 hour the setup evidence check and /health/services report a collection lag.
+
+#### API-08 · When no metric row is younger than 20 minutes, /prometheus/metrics publishes cluster cost, CO2e, energy and pod count as 0 and a sustainability score of 50 instead of dropping the series; when a refresh step fails, the previous values are served again with HTTP 200.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** S · **Where** `src/greenkube/api/metrics_endpoint.py:808-821`; `src/greenkube/api/metrics_endpoint.py:1250-1277`; `src/greenkube/api/metrics_endpoint.py:1279-1354`; `src/greenkube/core/config.py:907-921`
+
+**Problem.** `refresh_metrics_from_db` reads the latest row per pod in `[now - 20 min, now)`. If the result is empty, `update_cluster_metrics([])` sets `greenkube_cluster_*_total`, `greenkube_cluster_pod_count`, `greenkube_cluster_namespace_count`, `greenkube_metrics_total` and `greenkube_carbon_intensity_score` to 0 and `greenkube_sustainability_score` to 50, and leaves `greenkube_last_collection_timestamp_seconds` at its old value. This happens whenever collection is late by 20 minutes (controller down, Prometheus down, a catch-up after an outage) and permanently between collections when PROMETHEUS_QUERY_RANGE_STEP is 30m or 1h (allowed: any divisor of 24 h). In the other direction every block is wrapped in `except Exception: logger.warning(...)`: when the database read fails the gauges keep the values of the last successful scrape and the endpoint still answers 200, so a broken API replica exports frozen numbers indefinitely.
+
+**Fix.** Never publish a value that was not read. (1) Select the rows of the latest completely collected step (collection watermark) instead of a fixed 20-minute window; if that step is older than max(3 x step, 15 min), clear the pod, namespace, cluster and score gauges (no series) and keep only `greenkube_last_collection_timestamp_seconds` and a new `greenkube_collection_lag_seconds`. (2) When a refresh block raises, clear the gauges it owns and increment `greenkube_exposition_refresh_errors_total{block=...}`; return 503 when the cluster block cannot be read. (3) Ship an alert rule in the chart on collection lag.
+
+**Acceptance.** Test with fake repositories: last row 25 minutes old and step 5m -> the output contains no greenkube_cluster_*, greenkube_pod_* or greenkube_sustainability_score sample and contains greenkube_collection_lag_seconds >= 1500; step 1h and last row 40 minutes old -> the values of that row are still exposed; a repository that raises -> HTTP 503 or the affected families absent, never the previous values.
+
+### WP-10.4 · Consistent figures between cached and live paths; correct counts and pagination
+
+#### API-11 · The Footprint page mixes KPI cards read from an hourly cache with breakdowns computed live, and the cache keeps rows that are no longer refreshed, so figures shown together cover different periods.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `frontend/src/routes/footprint/+page.svelte:27`; `frontend/src/routes/footprint/+page.svelte:72-92`; `src/greenkube/core/summary_refresher.py:96-117`; `src/greenkube/storage/postgres/timeseries_cache_repository.py:22-25`; `src/greenkube/storage/postgres/summary_repository.py:91-135`; `src/greenkube/api/metrics_endpoint.py:672-689`
+
+**Problem.** For the 24h, 7d, 30d, 1y and YTD ranges the cards and the chart come from `metrics_summary` / `metrics_timeseries_cache`, refreshed once per hour by the controller with `end = refresh time`; the namespace donut and the top-pods chart on the same page call /metrics/by-namespace and /metrics/top-pods with `end = now`. The two halves of the page therefore describe windows shifted by up to one hour (the page prints 'Summary last refreshed ...' but not that the breakdown is from another period). Stale entries (see also ROL-13): `upsert_points` returns without deleting when the new point list is empty, so a namespace or window that has no data any more keeps its old buckets; `metrics_summary` rows of a namespace that left `namespace_cache` are never deleted nor refreshed and `get_rows(namespace=X)` still serves them; a new namespace gets no row until the next hourly compression has added it to `namespace_cache` and the next hourly refresh has run. The `greenkube_dashboard_summary_*` Prometheus series carry no refresh timestamp, so Grafana cannot tell a one-hour-old cache from a three-day-old one (controller down).
+
+**Fix.** One time base per page: store `window_start` and `window_end` in metrics_summary and return them; the UI passes the cached `window_end` as `end` to /metrics/by-namespace and /metrics/top-pods (add `start`/`end` parameters to these endpoints), or all four blocks are served by one endpoint that reads one snapshot. In `upsert_points` always delete the (window, namespace) rows, inside one transaction with the inserts, and add `delete_missing(namespaces)` to both cache repositories so the refresher removes rows of namespaces it no longer computes. Refresh the cache at the end of each collection cycle (it is seven aggregates per namespace) instead of hourly. Expose `greenkube_dashboard_summary_updated_timestamp_seconds{window,namespace}` and return `stale: true` from the API when updated_at is older than twice the refresh interval.
+
+**Acceptance.** With a frozen clock and a refresh 40 minutes old, the sum of the namespace breakdown equals the card total exactly; after a namespace stops producing rows for longer than a window, its cached chart for that window is empty and its summary row is zero or absent; the Prometheus output contains the refresh timestamp series.
+
+#### API-10 · pod_count is the number of distinct pod names seen in the whole window, but the UI shows it as 'Active Pods' and divides the footprint by it for 'Avg CO2/Pod'.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/storage/postgres/repository.py:785-786`; `src/greenkube/core/summary_refresher.py:171-172`; `frontend/src/routes/footprint/+page.svelte:180`; `frontend/src/routes/footprint/+page.svelte:203-205`; `src/greenkube/api/routers/report.py:141-142`; `src/greenkube/api/routers/metrics.py:172-173`
+
+**Problem.** `aggregate_summary` returns `COUNT(DISTINCT pod_name)` over all rows of the window (and ignores the namespace, see STO-13). Every pod that existed at any time in the window counts once: each rollout, job run or restart of a ReplicaSet adds names. The Footprint page shows the value under 'Active Pods' and computes 'Avg CO2/Pod (Scope 2+3)' as total / pod_count, which mixes a cumulative head count with a cumulative amount. For multi-year reports `_aggregate_summary_for_ranges` takes the maximum of the per-range counts ('slightly conservative'), which is neither a union nor a current count. /metrics/timeseries returns `pod_count: 0` and `namespace_count: 0` for every bucket (hard-coded, 'not aggregated at timeseries level') although the schema describes them as 'Number of unique pods in this bucket'.
+
+**Fix.** Return two explicit figures from aggregate_summary: `active_pods` (distinct (namespace, pod_name) in the latest collected step) and `pods_seen` (distinct (namespace, pod_name) over the window), plus `pod_hours` (sum of duration_seconds / 3600). Store them in metrics_summary (migration: add columns; keep pod_count as a deprecated alias of pods_seen). The UI card 'Active Pods' uses active_pods; replace 'Avg CO2/Pod' by CO2e per pod-hour. For several ranges compute the union in SQL. In TimeseriesPoint either compute the per-bucket counts or remove the two fields.
+
+**Acceptance.** Seed 10 pods replaced every day for 7 days (70 names, 10 alive at any time): /metrics/summary?last=7d returns active_pods 10, pods_seen 70, pod_hours 1680; the UI shows 10 active pods; two namespaces with a pod of the same name count 2.
+
+#### API-07 · GET /api/v1/metrics pages with LIMIT/OFFSET ordered by timestamp only, and its cursor mode reads a different data set (raw table only) that no response ever hands a cursor for.
+
+**Severity** medium · **Evidence** confirmed-sim · **Effort** M · **Where** `src/greenkube/api/routers/metrics.py:82-119`; `src/greenkube/storage/postgres/repository.py:1506-1512`; `src/greenkube/storage/postgres/repository.py:1196-1257`; `src/greenkube/storage/sqlite/repository.py:609-690`; `src/greenkube/storage/base_repository.py:366-391`
+
+**Problem.** Offset mode: `read_combined_metrics_page` runs `SELECT * FROM (raw UNION ALL hourly) ORDER BY timestamp LIMIT $n OFFSET $m`. All pods of a step share one timestamp, so the order inside a step is not defined; PostgreSQL may return ties in a different order for each page query, and rows inserted or compressed between two page requests shift the offsets. A client that pages through and sums gets duplicated and missing pod rows. The SQLite backend does not override the method, so it loads the whole range in memory for every page (the log says 'using Python fallback; override in SQL backend to avoid OOM'). Cursor mode: only entered when the client sends `cursor`, but the offset response never returns `next_cursor`, so the first cursor cannot be obtained from the API. If used, `read_combined_metrics_cursor` reads `combined_metrics` only: `total` and the rows cover the raw table (raw retention, 7 days by default) instead of the raw + hourly union of offset mode, and anything older than raw retention is silently absent while `total` looks complete. The page size is also silently capped to 1000 in cursor mode although `limit` accepts 10000.
+
+**Fix.** One pagination mode: keyset on (timestamp, namespace, pod_name) over the same raw + hourly union used by the aggregates. The first page (no cursor) must return `next_cursor`; `offset` stays accepted for compatibility but uses the same ordered query `ORDER BY timestamp, namespace, pod_name`. Implement the SQL page for SQLite. `total` must be computed on the same union as the rows. Reject `limit` above the real maximum with 422 instead of capping silently. Add a `resolution` field per row (raw step or 1h) so a client knows what a row represents.
+
+**Acceptance.** Seed 3 pods x 10 days, compress; page through /metrics?last=10d&limit=100 following next_cursor: the union of pages has no duplicate (timestamp, namespace, pod_name), its length equals `total`, and the sum of total_cost equals /metrics/summary?last=10d for the same instant (frozen clock); same result on PostgreSQL and SQLite.
+
+#### API-14 · The duration suffix 'm' means months: last=5m returns 150 days of data, and the parser's own docstring presents '5m' as a dashboard duration.
+
+**Severity** low · **Evidence** confirmed-live · **Effort** S · **Where** `src/greenkube/utils/time.py:51-66`; `src/greenkube/api/routers/metrics.py:61`
+
+**Problem.** `parse_duration` accepts `(\d+)(min|[hdwmy])` and maps `m` to `timedelta(days=amount * 30)` and `y` to 365 days. The docstring says 'Parse dashboard durations such as 5m', and Prometheus, Grafana and Kubernetes users read 5m as five minutes. The API accepts it silently and the response does not echo the resolved window.
+
+**Fix.** Accept `m` as minutes (and keep `min`), use `mo` for months, or reject bare `m` with a 400 that lists the valid units; return `window_start` and `window_end` in every aggregate response. Update docs/api.md and the frontend range selector if it sends `1m`.
+
+**Acceptance.** last=5m returns the same as last=5min (or 400); last=1mo returns 30 days; responses echo the resolved window.
+
+### WP-10.5 · Sustainability score
+
+#### API-06 · The sustainability score is computed from one row per pod without node or HPA data: three of its seven dimensions are constants (50, 50, 100), two depend on the collection step, and an empty database scores 50.
+
+**Severity** medium · **Evidence** confirmed-live · **Effort** M · **Where** `src/greenkube/api/metrics_endpoint.py:970-982`; `src/greenkube/api/metrics_endpoint.py:818`; `src/greenkube/core/sustainability_score.py:101-103`; `src/greenkube/core/sustainability_score.py:216-254`; `src/greenkube/core/sustainability_score.py:266-267`; `src/greenkube/core/sustainability_score.py:325-328`
+
+**Problem.** The only caller is `update_cluster_metrics`, which runs `SustainabilityScorer().compute(metrics)` on the latest row of each pod, with no `node_infos` and no `hpa_targets`. Consequences, dimension by dimension: node_efficiency (15%) returns `_NEUTRAL` = 50 because `node_infos` is None; scaling_practices (10%) needs `len(usages) >= 3` per pod and gets 1, so it returns 50; carbon_aware_scheduling (10%) compares each pod's average intensity with its zone average over the same single instant, so the ratio is 1 and the score is always 100; stability (5%) uses the lifetime restart counter. waste_elimination (15%) applies ZOMBIE_COST_THRESHOLD=0.01, ZOMBIE_ENERGY_THRESHOLD=1000 J and IDLE_NAMESPACE_ENERGY_THRESHOLD=1000 J to the amounts of ONE step: a namespace is 'idle' below 3.3 W with a 5-minute step and below 33 W with a 30-second step, and a pod must cost more than $0.01 per step ($2.88 per day at 5 minutes) to be a zombie. resource_efficiency (25%) caps usage/request at 1 (a pod above its request is 'perfect') and skips pods without requests, which removes the least governed pods from the score. With no metrics the score is published as 50, and per-namespace scores are published the same way. The documentation describes time windows and HPA and node inputs that the running code never receives.
+
+**Fix.** Either remove the score from the default dashboard until it is defined on real inputs, or compute it in the controller once per hour over a fixed window (for example the last 24 h read from the hourly rollup), with node snapshots and HPA targets passed in, and store the result (overall, dimensions, window, inputs available) in a table that the API exposes. A dimension without its input must be published as absent (no series) and its weight redistributed, never as 50. Express the waste thresholds as rates (watts, dollars per hour). Use restarts inside the window, not the lifetime counter. Do not cap usage/request at 1 without also penalising pods above their request, and include pods without requests in a 'governance' dimension. With no metrics publish no series. Align docs/sustainability-score.md with the code.
+
+**Acceptance.** Unit tests: the same 24 h of data scored at 30 s and 5 min steps gives the same score (+-1); a cluster with nodes at 10% utilisation scores lower on node_efficiency than one at 60%; with node data missing the dimension is absent and the response lists it under `missing_inputs`; an empty database yields no greenkube_sustainability_score series.
+
