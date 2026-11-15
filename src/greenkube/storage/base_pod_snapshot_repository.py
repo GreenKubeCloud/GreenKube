@@ -23,6 +23,10 @@ from typing import Any, Iterable, Sequence
 
 from greenkube.models.metrics import PodMetric
 
+#: Owners whose pods get a generated name (a recreated pod has a new name), so a version
+#: observed after a sample still describes the pod that ran then.  StatefulSet and bare
+#: pods reuse their names.
+GENERATED_NAME_OWNERS: frozenset[str | None] = frozenset({"Deployment", "ReplicaSet", "DaemonSet", "Job"})
 #: PodMetric fields stored per container in ``pod_snapshots.containers``.
 CONTAINER_FIELDS: tuple[str, ...] = (
     "container_name",
@@ -130,8 +134,14 @@ def snapshot_uncertain(
     The sample lies in an unobserved gap after ``version`` (later than its
     ``last_seen`` plus ``tolerance``) and the next version is another pod
     incarnation: a different UID, or no UID to tell (the pod may have been
-    recreated with a new spec during the gap).
+    recreated with a new spec during the gap).  Or the sample precedes the
+    pod's first observation by more than ``tolerance`` and its owner reuses
+    pod names (StatefulSet, bare pod), see :data:`GENERATED_NAME_OWNERS`.
     """
+    if timestamp < version.first_seen - tolerance:
+        # Sample before the pod's first observation (first-install backfill,
+        # downtime): a name reused by its owner may have had another spec.
+        return version.owner_kind not in GENERATED_NAME_OWNERS
     if timestamp <= version.last_seen + tolerance:
         return False
     following = next((candidate for candidate in versions if candidate.first_seen > version.first_seen), None)

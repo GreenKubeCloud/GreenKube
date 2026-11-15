@@ -177,3 +177,18 @@ def _degraded(resource: str) -> float:
     from greenkube.core.collection_telemetry import DEGRADED_WINDOWS
 
     return DEGRADED_WINDOWS.labels(list=resource)._value.get()
+
+
+@pytest.mark.asyncio
+async def test_failure_budget_counts_attempts_per_window_start(storage):
+    """Second review 5: a window retried with a longer end is the same window."""
+    cfg, snapshots = storage
+    cfg = cfg.model_copy(update={"COLLECTION_K8S_LIST_MAX_FAILURES": 2})
+    processor = build_range_processor(cfg, None, _prometheus(), FakeOpenCost(), pod_snapshot_repository=snapshots)
+    processor.pod_collector = _failing_pod_collector()
+
+    with pytest.raises(RangeCollectionError, match="pod list"):
+        await processor.run_range(BASE, BASE + timedelta(seconds=STEP))
+    rows = await processor.run_range(BASE, BASE + timedelta(seconds=2 * STEP))
+
+    assert any("k8s_list_failed" in row.estimation_reasons for row in rows)

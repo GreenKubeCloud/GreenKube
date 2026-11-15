@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, Sequence
 
 CONTAINER_FILTER = 'container!="",container!="POD"'
 POD_CGROUP_FILTER = 'container="",pod!=""'
@@ -189,19 +189,38 @@ class PromQLCatalog:
         selector = _selector('node!=""', *self.extra_matchers)
         return f"max(kube_pod_info{selector}) by (namespace,pod,node)"
 
-    def pod_container_requests(self) -> str:
-        """kube-state-metrics CPU (cores) and memory (bytes) requests per container (WP-01.1 step 2)."""
-        selector = _selector('resource=~"cpu|memory"', *self.extra_matchers)
-        return f"max(kube_pod_container_resource_requests{selector}) by (namespace,pod,container,resource)"
+    def _ksm_selector(self, pods: Sequence[str], *matchers: str) -> str:
+        """Selector of kube-state-metrics series restricted to ``pods`` (no filter when empty)."""
+        names = "|".join(sorted({pod.replace(".", "[.]") for pod in pods}))
+        return _selector(*matchers, f'pod=~"{names}"' if names else "", *self.extra_matchers)
 
-    def pod_container_limits(self) -> str:
+    def pod_container_requests(self, pods: Sequence[str] = (), *, init: bool = False) -> str:
+        """kube-state-metrics CPU (cores) and memory (bytes) requests per container (WP-01.1 step 2).
+
+        ``init`` reads init containers (native sidecars are kept by the caller).
+        """
+        metric = "kube_pod_init_container_resource_requests" if init else "kube_pod_container_resource_requests"
+        selector = self._ksm_selector(pods, 'resource=~"cpu|memory"')
+        return f"max({metric}{selector}) by (namespace,pod,container,resource)"
+
+    def pod_container_limits(self, pods: Sequence[str] = (), *, init: bool = False) -> str:
         """kube-state-metrics CPU (cores) and memory (bytes) limits per container (WP-01.1 step 2)."""
-        selector = _selector('resource=~"cpu|memory"', *self.extra_matchers)
-        return f"max(kube_pod_container_resource_limits{selector}) by (namespace,pod,container,resource)"
+        metric = "kube_pod_init_container_resource_limits" if init else "kube_pod_container_resource_limits"
+        selector = self._ksm_selector(pods, 'resource=~"cpu|memory"')
+        return f"max({metric}{selector}) by (namespace,pod,container,resource)"
 
-    def pod_owner(self) -> str:
+    def pod_container_info(self, pods: Sequence[str] = ()) -> str:
+        """Every container of each pod, with or without requests (kube-state-metrics)."""
+        return f"max(kube_pod_container_info{self._ksm_selector(pods)}) by (namespace,pod,container)"
+
+    def pod_sidecar_info(self, pods: Sequence[str] = ()) -> str:
+        """Native sidecars: init containers with ``restartPolicy: Always`` (kube-state-metrics 2.10+)."""
+        selector = self._ksm_selector(pods, 'restart_policy="Always"')
+        return f"max(kube_pod_init_container_info{selector}) by (namespace,pod,container)"
+
+    def pod_owner(self, pods: Sequence[str] = ()) -> str:
         """kube-state-metrics controller owner of each pod (WP-01.1 step 2)."""
-        selector = _selector('owner_is_controller="true"', *self.extra_matchers)
+        selector = self._ksm_selector(pods, 'owner_is_controller="true"')
         return f"max(kube_pod_owner{selector}) by (namespace,pod,owner_kind,owner_name)"
 
     def pod_running(self) -> str:

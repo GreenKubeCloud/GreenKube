@@ -14,7 +14,6 @@ a window have been written.  Re-running a window is an idempotent upsert.
 
 from __future__ import annotations
 
-import inspect
 import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -177,8 +176,8 @@ class RangeProcessor(Protocol):
 
 
 class MetricsWriter(Protocol):
-    async def write_combined_metrics(self, metrics: list[CombinedMetric]) -> int:
-        """Upsert combined and container rows (implementations may take ``replace_containers``)."""
+    async def write_combined_metrics(self, metrics: list[CombinedMetric], *, replace_containers: bool = False) -> int:
+        """Upsert combined and container rows; ``replace_containers`` rewrites the container rows of each pod."""
         ...
 
 
@@ -274,14 +273,7 @@ class MetricsCollectionJob:
 
     async def _write_rows(self, rows: list[CombinedMetric]) -> int:
         """Write a collected window; its container rows replace the stored ones of its pods (review 4)."""
-        write = self.metrics_repository.write_combined_metrics
-        try:
-            accepts_flag = "replace_containers" in inspect.signature(write).parameters
-        except (TypeError, ValueError):
-            accepts_flag = False
-        if accepts_flag:
-            return await write(rows, replace_containers=True)  # type: ignore[call-arg]
-        return await write(rows)
+        return await self.metrics_repository.write_combined_metrics(rows, replace_containers=True)
 
     async def _write_idle_metrics(self) -> None:
         """Commits the ``__idle__`` rows of the window just collected (roadmap B2).

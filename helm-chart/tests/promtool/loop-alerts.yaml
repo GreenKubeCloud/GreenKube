@@ -219,3 +219,35 @@ tests:
             exp_annotations:
               summary: Savings accruals are missing from the GreenKube savings ledger v2
               description: 2 row(s) of recommendation_savings_ledger have no savings ledger v2 entry after full sweeps for 3 hours; the v2 totals do not reconcile with GET /api/v1/recommendations/savings. See greenkube_ledger_write_errors_total and the controller logs.
+
+  # ---------------------------------------------------------------------------
+  # Collection windows stored in degraded mode (failed Kubernetes lists)
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # The pod list keeps failing: one degraded window every 5 minutes.
+      - series: 'greenkube_collection_degraded_windows_total{job="c",instance="leader:9102",list="pods"}'
+        values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GreenKubeCollectionDegraded
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: GreenKubeCollectionDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              list: pods
+            exp_annotations:
+              summary: GreenKube stores collection windows without a working Kubernetes list
+              description: "The Kubernetes pods list failed COLLECTION_K8S_LIST_MAX_FAILURES times in a row for collection windows stored in the last hour: their rows carry the reason k8s_list_failed (missing owner and requests, or default node attributes). Check the controller RBAC (list pods and nodes) and the API server latency."
+
+  - interval: 1m
+    input_series:
+      # No degraded window: no alert.
+      - series: 'greenkube_collection_degraded_windows_total{job="c",instance="leader:9102",list="nodes"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: GreenKubeCollectionDegraded
+        exp_alerts: []

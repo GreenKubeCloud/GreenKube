@@ -73,6 +73,8 @@ POD_METADATA_MISSING = "pod_metadata_missing"
 POD_METADATA_UNCERTAIN = "pod_metadata_uncertain"
 #: Estimation reason of a row stored after COLLECTION_K8S_LIST_MAX_FAILURES failed Kubernetes list attempts (review 5).
 K8S_LIST_FAILED = "k8s_list_failed"
+#: Pod names per kube-state-metrics query (``pod=~"..."`` filter), so URLs stay bounded.
+_KSM_POD_FILTER_CHUNK = 50
 #: Failure counters kept per window; older entries are dropped (windows that became gaps).
 _MAX_TRACKED_LIST_FAILURES = 256
 #: Estimation reason of a pod row without CPU sample at its step (memory or Running phase only, COL-03).
@@ -141,7 +143,7 @@ class HistoricalRangeProcessor:
         self._promql = PromQLCatalog.from_config(self._config)
         self._allocator = MetricRowAllocator(self._config)
         #: Consecutive failed Kubernetes list attempts per (list, window start, window end) (review 5).
-        self._list_failures: dict[tuple[str, datetime, datetime], int] = {}
+        self._list_failures: dict[tuple[str, datetime], int] = {}
         self._gpu_model = GpuPowerModel()
         #: Idle rows (``__idle__`` per node and step) of the last ``run_range`` call.
         self.last_idle_metrics: List[NodeIdleMetric] = []
@@ -501,35 +503,70 @@ class HistoricalRangeProcessor:
         """Owner, requests, limits and containers of ``pods`` per step, from kube-state-metrics.
 
         KSM series are exact per step, so an in-place resize or a pod that
-        lived between two collection ticks gets its real metadata.  KSM is
-        optional: a failed query logs a warning and the pods fall through to
-        the next source (rows stay flagged ``pod_metadata_missing`` when none
-        has them).  A ReplicaSet owner is mapped to its Deployment like the
-        live pod collector does.
+        lived between two collection ticks gets its real metadata.  Queries
+        are restricted to ``pods`` (by name, in chunks) and cover containers
+        without requests (``kube_pod_container_info``) and native sidecars
+        (init containers with ``restartPolicy: Always``).  KSM is optional: a
+        failed query logs a warning and the pods fall through to the next
+        source.  A ReplicaSet owner is mapped to its Deployment like the live
+        pod collector does.
         """
         if not pods:
             return {}
         promql = self._promql
-        try:
-            requests, limits, owners = await asyncio.gather(
-                self._query_range(chunk, promql.pod_container_requests()),
-                self._query_range(chunk, promql.pod_container_limits()),
-                self._query_range(chunk, promql.pod_owner()),
-            )
-        except Exception as error:
-            logger.warning("kube-state-metrics pod metadata unavailable for %d pod(s): %s", len(pods), error)
-            return {}
-        containers: dict[tuple[str, str, int], dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(dict))
-        for results, suffix in ((requests, "request"), (limits, "limit")):
-            for series in results or []:
+        names = sorted({pod for _namespace, pod in pods})
+        series_by_query: dict[str, list] = defaultdict(list)
+        for index in range(0, len(names), _KSM_POD_FILTER_CHUNK):
+            chunk_names = names[index : index + _KSM_POD_FILTER_CHUNK]
+            queries = {
+                "requests": promql.pod_container_requests(chunk_names),
+                "limits": promql.pod_container_limits(chunk_names),
+                "info": promql.pod_container_info(chunk_names),
+                "init_requests": promql.pod_container_requests(chunk_names, init=True),
+                "init_limits": promql.pod_container_limits(chunk_names, init=True),
+                "sidecars": promql.pod_sidecar_info(chunk_names),
+                "owners": promql.pod_owner(chunk_names),
+            }
+            try:
+                results = await asyncio.gather(*(self._query_range(chunk, query) for query in queries.values()))
+            except Exception as error:
+                logger.warning("kube-state-metrics pod metadata unavailable for %d pod(s): %s", len(pods), error)
+                return {}
+            for name, query_result in zip(queries, results, strict=True):
+                series_by_query[name].extend(query_result or [])
+
+        sidecars: set[tuple[str, str, str]] = set()
+        for series in series_by_query["sidecars"]:
+            namespace, pod, container, _node = self._series_identity(series)
+            if (namespace, pod) in pods and container:
+                sidecars.add((namespace, pod, container))
+
+        containers: dict[tuple[str, str, int], dict[tuple[str, str], dict[str, float]]] = defaultdict(
+            lambda: defaultdict(dict)
+        )
+        sources = (
+            ("info", "container", None),
+            ("requests", "container", "request"),
+            ("limits", "container", "limit"),
+            ("init_requests", "sidecar", "request"),
+            ("init_limits", "sidecar", "limit"),
+        )
+        for name, kind, suffix in sources:
+            for series in series_by_query[name]:
                 namespace, pod, container, _node = self._series_identity(series)
+                if (namespace, pod) not in pods or not container:
+                    continue
+                if kind == "sidecar" and (namespace, pod, container) not in sidecars:
+                    continue  # classic init containers are not part of the steady state
                 resource = (series.get("metric", {}) or {}).get("resource")
-                if (namespace, pod) not in pods or not container or resource not in ("cpu", "memory"):
+                if suffix is not None and resource not in ("cpu", "memory"):
                     continue
                 for sample_start, value in self._iter_window_samples(series, chunk):
-                    containers[(namespace, pod, sample_start)][container][f"{resource}_{suffix}"] = value
+                    values = containers[(namespace, pod, sample_start)][(container, kind)]
+                    if suffix is not None:
+                        values[f"{resource}_{suffix}"] = value
         owner_at: dict[tuple[str, str, int], tuple[str, str]] = {}
-        for series in owners or []:
+        for series in series_by_query["owners"]:
             metric = series.get("metric", {}) or {}
             namespace, pod, _container, _node = self._series_identity(series)
             kind, name = metric.get("owner_kind"), metric.get("owner_name")
@@ -544,12 +581,13 @@ class HistoricalRangeProcessor:
         for key in set(containers) | set(owner_at):
             namespace, pod, _sample = key
             owner_kind, owner_name = owner_at.get(key, (None, None))
-            by_container = containers.get(key) or {"": {}}
+            by_container = containers.get(key) or {("", "container"): {}}
             result[key] = [
                 PodMetric(
                     pod_name=pod,
                     namespace=namespace,
                     container_name=container,
+                    kind=kind,
                     cpu_request=int(round(values.get("cpu_request", 0.0) * 1000)),
                     memory_request=int(values.get("memory_request", 0.0)),
                     cpu_limit=int(round(values["cpu_limit"] * 1000)) if "cpu_limit" in values else None,
@@ -557,7 +595,7 @@ class HistoricalRangeProcessor:
                     owner_kind=owner_kind,
                     owner_name=owner_name,
                 )
-                for container, values in sorted(by_container.items())
+                for (container, kind), values in sorted(by_container.items())
             ]
         return result
 
@@ -571,7 +609,8 @@ class HistoricalRangeProcessor:
         ``k8s_list_failed``, logged at ERROR and counted in
         ``greenkube_collection_degraded_windows_total``.
         """
-        key = (resource, start, end)
+        # Keyed on the window start: a retried window may end later (catch-up), it is the same window.
+        key = (resource, start)
         attempts = self._list_failures.get(key, 0) + 1
         self._list_failures[key] = attempts
         while len(self._list_failures) > _MAX_TRACKED_LIST_FAILURES:
@@ -659,10 +698,21 @@ class HistoricalRangeProcessor:
                 merged = {(v.first_seen, v.spec_hash, v.pod_uid): v for v in (*pod_history.get(key, ()), *versions)}
                 pod_history[key] = [merged[version_key] for version_key in sorted(merged, key=lambda k: k[0])]
         unseen = {key for key in pod_keys if key not in pod_history and key not in live_pods}
+        # Pods first observed after the chunk started: kube-state-metrics is
+        # preferred for their earlier samples (second review 3).
+        observed_late = {
+            key
+            for key in pod_keys
+            if key in pod_history
+            and pod_history[key][0].first_seen > chunk.start + timedelta(seconds=2 * chunk.step_seconds)
+        }
+        if ksm_metadata is not None and (unseen or observed_late):
+            ksm_metadata.update(await self._ksm_pod_metadata(chunk, unseen | observed_late))
+        # Stored rows are read only for pods kube-state-metrics did not resolve.
+        resolved = {(namespace, pod) for namespace, pod, _sample in (ksm_metadata or {})}
+        unseen -= resolved
         if not unseen:
             return
-        if ksm_metadata is not None:
-            ksm_metadata.update(await self._ksm_pod_metadata(chunk, unseen))
         try:
             stored_rows = await self.combined_metrics_repository.read_combined_metrics(chunk.start, chunk.end)
             read_containers = getattr(self.combined_metrics_repository, "read_container_metrics", None)
@@ -692,26 +742,31 @@ class HistoricalRangeProcessor:
         for row in stored_rows:
             if row.timestamp is None or row.container_name or (row.namespace, row.pod_name) not in unseen:
                 continue
-            if row.metadata_source == MetadataSource.MISSING.value:
+            # NULL: written before range.4 from the collection-time state (second review 2).
+            if row.metadata_source in (None, MetadataSource.MISSING.value):
                 continue
             if not (row.owner_kind or (row.cpu_request or 0) > 0 or (row.memory_request or 0) > 0):
                 continue
             key = (row.namespace, row.pod_name, int(ensure_utc(row.timestamp).timestamp()))
-            containers = containers_by_row.get(key)
-            if not containers or sum(c.cpu_request for c in containers) != (row.cpu_request or 0):
-                # Without matching container rows the pod row carries its own
-                # requests; it then gets no container rows (stale ones are deleted on write).
-                containers = [
+            # The stored container rows are kept as they are; requests of the pod
+            # row they do not cover (init containers) ride on an unnamed entry,
+            # which yields no container row (second review 1a).
+            containers = list(containers_by_row.get(key, ()))
+            cpu_rest = max((row.cpu_request or 0) - sum(c.cpu_request for c in containers), 0)
+            memory_rest = max((row.memory_request or 0) - sum(c.memory_request for c in containers), 0)
+            if cpu_rest or memory_rest or not containers:
+                containers.append(
                     PodMetric(
                         pod_name=row.pod_name,
                         namespace=row.namespace,
                         container_name="",
-                        cpu_request=row.cpu_request or 0,
-                        memory_request=row.memory_request or 0,
+                        kind="init",
+                        cpu_request=cpu_rest,
+                        memory_request=memory_rest,
                         owner_kind=row.owner_kind,
                         owner_name=row.owner_name,
                     )
-                ]
+                )
             stored_metadata[key] = containers
 
     # ------------------------------------------------------------------
@@ -826,7 +881,7 @@ class HistoricalRangeProcessor:
             if not self._list_failure_budget_spent("pods", start_dt, end_dt, pod_list_error):
                 await self._require_recent_pod_history(pod_list_error, now, chosen_step_sec, start_dt, end_dt)
         else:
-            self._list_failures.pop(("pods", start_dt, end_dt), None)
+            self._list_failures.pop(("pods", start_dt), None)
         live_pods: dict[tuple[str, str], list[PodMetric]] = defaultdict(list)
         for pod_metric in pod_metrics_list:
             live_pods[(pod_metric.namespace, pod_metric.pod_name)].append(pod_metric)
@@ -855,6 +910,11 @@ class HistoricalRangeProcessor:
                 version = snapshot_at(versions, timestamp)
                 if version is not None:
                     uncertain = snapshot_uncertain(versions, version, timestamp, gap_tolerance)
+                    if uncertain or timestamp < version.first_seen - gap_tolerance:
+                        # Not observed at the sample: kube-state-metrics is exact per step.
+                        ksm = ksm_metadata.get((pod_key[0], pod_key[1], int(timestamp.timestamp())))
+                        if ksm is not None:
+                            return ksm, MetadataSource.KUBE_STATE_METRICS, False
                     return version.pod_metrics(), MetadataSource.K8S_SNAPSHOT, uncertain
             live = live_pods.get(pod_key)
             if live:
@@ -873,7 +933,7 @@ class HistoricalRangeProcessor:
         node_list_degraded = False
         try:
             nodes_info = await _list_strictly(self.node_collector.collect) or {}
-            self._list_failures.pop(("nodes", start_dt, end_dt), None)
+            self._list_failures.pop(("nodes", start_dt), None)
         except Exception as error:  # KubernetesListError, or any failure of another collector
             collection_telemetry.record_k8s_list_error("nodes")
             if not node_timeline and self._list_failure_budget_spent("nodes", start_dt, end_dt, error):

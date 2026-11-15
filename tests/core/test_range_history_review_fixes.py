@@ -185,3 +185,129 @@ async def test_recollection_without_metadata_reuses_stored_requests_and_rewrites
     assert stored.joules == pytest.approx(expected.joules)
     assert sorted(row.container_name for row in stored_containers) == ["app", "side"]
     assert sum(row.joules for row in stored_containers) == pytest.approx(stored.joules)
+
+
+# --- Second review -----------------------------------------------------------------------------------------------
+
+RANGE = (BASE, BASE + timedelta(seconds=STEP))
+
+
+async def _stored_containers(repo, pod="p"):
+    return sorted(row.container_name for row in await repo.read_container_metrics(*RANGE) if row.pod_name == pod)
+
+
+@pytest.mark.asyncio
+async def test_recollection_from_a_stored_row_keeps_its_container_rows_despite_an_init_container(storage):
+    """Second review 1a: the pod request includes an init container that has no container row."""
+    cfg, repo, snapshots = storage
+    live = [_pod(300), _pod(200, container="init-db").model_copy(update={"kind": "init"}), _pod(100, container="q")]
+    live[2] = live[2].model_copy(update={"pod_name": "q", "container_name": "app"})
+    first = await _build(cfg, repo, snapshots, pod_list=live).run_range(*RANGE)
+    await repo.write_combined_metrics(first, replace_containers=True)
+    assert await _stored_containers(repo) == ["app"]
+
+    second = await _build(cfg, repo, None, pod_list=[]).run_range(*RANGE)
+    recollected = _pod_row(second)
+    await repo.write_combined_metrics(second, replace_containers=True)
+
+    assert recollected.metadata_source == "stored_row"
+    assert recollected.cpu_request == _pod_row(first).cpu_request
+    assert await _stored_containers(repo) == ["app"]
+
+
+@pytest.mark.asyncio
+async def test_recollection_without_container_usage_keeps_the_stored_container_rows(storage):
+    """Second review 1b: one container series is missing in Prometheus, so no container row is built."""
+    cfg, repo, snapshots = storage
+    live = [_pod(300), _pod(200, container="side"), _pod(100).model_copy(update={"pod_name": "q"})]
+    first = await _build(cfg, repo, snapshots, pod_list=live, containers=("app", "side")).run_range(*RANGE)
+    await repo.write_combined_metrics(first, replace_containers=True)
+
+    second = await _build(cfg, repo, snapshots, pod_list=live, containers=("app",)).run_range(*RANGE)
+    await repo.write_combined_metrics(second, replace_containers=True)
+
+    assert await _stored_containers(repo) == ["app", "side"]
+
+
+@pytest.mark.asyncio
+async def test_rows_without_provenance_are_not_reused_as_stored_metadata(storage):
+    """Second review 2: rows written before range.4 (metadata_source NULL) carry the collection-time state."""
+    cfg, repo, snapshots = storage
+    first = await _build(
+        cfg, repo, snapshots, pod_list=[_pod(500), _pod(100).model_copy(update={"pod_name": "q"})]
+    ).run_range(*RANGE)
+    legacy = [row.model_copy(update={"metadata_source": None, "node_source": None}) for row in first]
+    await repo.write_combined_metrics(legacy)
+
+    second = await _build(cfg, repo, None, pod_list=[]).run_range(*RANGE)
+
+    assert _pod_row(second).metadata_source == "missing"
+
+
+def _ksm(prom: FakePrometheus, cpu: float = 0.5) -> FakePrometheus:
+    base = {"namespace": "ns", "pod": "p"}
+    prom.add("kube_pod_container_resource_requests", {**base, "container": "app", "resource": "cpu"}, cpu)
+    prom.add("kube_pod_container_info", {**base, "container": "app"}, 1.0)
+    prom.add(
+        "kube_pod_owner", {**base, "owner_kind": "StatefulSet", "owner_name": "db", "owner_is_controller": "true"}, 1.0
+    )
+    return prom
+
+
+@pytest.mark.asyncio
+async def test_sample_before_the_first_observation_is_flagged(storage):
+    """Second review 3: first observed 3 hours after the sample, a StatefulSet pod may have had another spec."""
+    cfg, repo, snapshots = storage
+    await snapshots.save_pods([_pod(900, uid="uid-2")], BASE + timedelta(hours=3))
+
+    rows = await _build(cfg, repo, snapshots, pod_list=[]).run_range(*RANGE)
+
+    row = _pod_row(rows)
+    assert row.is_estimated
+    assert "pod_metadata_uncertain" in row.estimation_reasons
+
+
+@pytest.mark.asyncio
+async def test_sample_before_the_first_observation_prefers_kube_state_metrics(storage):
+    cfg, repo, snapshots = storage
+    await snapshots.save_pods([_pod(900, uid="uid-2")], BASE + timedelta(hours=3))
+    processor = _build(cfg, repo, snapshots, pod_list=[])
+    _ksm(processor.prometheus_collector)
+
+    row = _pod_row(await processor.run_range(*RANGE))
+
+    assert (row.metadata_source, row.cpu_request) == ("kube_state_metrics", 500)
+    assert "pod_metadata_uncertain" not in row.estimation_reasons
+
+
+@pytest.mark.asyncio
+async def test_kube_state_metrics_queries_are_filtered_and_include_sidecars_and_containers_without_requests(storage):
+    """Second review 4."""
+    cfg, repo, snapshots = storage
+    processor = _build(cfg, repo, snapshots, pod_list=[], containers=("app", "side", "bare"))
+    prom = _ksm(processor.prometheus_collector)
+    base = {"namespace": "ns", "pod": "p"}
+    prom.add("kube_pod_init_container_resource_requests", {**base, "container": "side", "resource": "cpu"}, 0.2)
+    prom.add("kube_pod_init_container_info", {**base, "container": "side", "restart_policy": "Always"}, 1.0)
+    prom.add("kube_pod_init_container_resource_requests", {**base, "container": "init", "resource": "cpu"}, 0.9)
+    prom.add("kube_pod_init_container_info", {**base, "container": "init", "restart_policy": "Never"}, 1.0)
+    prom.add("kube_pod_container_info", {**base, "container": "bare"}, 1.0)
+    prom.add("kube_pod_container_info", {"namespace": "ns", "pod": "q", "container": "app"}, 1.0)
+    reads = []
+    original = repo.read_combined_metrics
+
+    async def spy(*args, **kwargs):
+        reads.append(args)
+        return await original(*args, **kwargs)
+
+    repo.read_combined_metrics = spy  # type: ignore[method-assign]
+
+    rows = await processor.run_range(*RANGE)
+
+    row = _pod_row(rows)
+    assert (row.metadata_source, row.cpu_request) == ("kube_state_metrics", 700)
+    containers = sorted((r.container_name, r.cpu_request) for r in rows if r.pod_name == "p" and r.container_name)
+    assert containers == [("app", 500), ("bare", 0), ("side", 200)]
+    ksm_queries = [query for query, *_rest in prom.queries if "kube_pod_container_resource" in query]
+    assert ksm_queries and all('pod=~"' in query for query in ksm_queries)
+    assert reads == []

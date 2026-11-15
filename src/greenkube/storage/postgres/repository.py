@@ -416,7 +416,10 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         """Delete container rows of re-written pod rows that the new batch no longer produces.
 
         Pod rows without metadata (``missing``) are skipped: the stored pod row
-        and its containers are kept when they had metadata (review 4).
+        and its containers are kept when they had metadata (review 4).  A pod
+        row without any container row in the batch (no container usage in this
+        pass, for example a missing container series) keeps its stored
+        container rows: they are never deleted for lack of data (second review 1b).
         """
         new_containers: dict[tuple[str, str, datetime], list[str]] = defaultdict(list)
         for row in container_rows:
@@ -430,7 +433,9 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 new_containers.get((row.namespace, row.pod_name, row.timestamp), []),
             )
             for row in pod_rows
-            if row.timestamp is not None and row.metadata_source != "missing"
+            if row.timestamp is not None
+            and row.metadata_source != "missing"
+            and new_containers.get((row.namespace, row.pod_name, row.timestamp))
         ]
         if targets:
             await conn.executemany(

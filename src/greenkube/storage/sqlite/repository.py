@@ -481,7 +481,10 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         """Delete container rows of re-written pod rows that the new batch no longer produces.
 
         Pod rows without metadata (``missing``) are skipped: the stored pod row
-        and its containers are kept when they had metadata (review 4).
+        and its containers are kept when they had metadata (review 4).  A pod
+        row without any container row in the batch (no container usage in this
+        pass, for example a missing container series) keeps its stored
+        container rows: they are never deleted for lack of data (second review 1b).
         """
         new_containers: dict[tuple[str, str, str], set[str]] = defaultdict(set)
         for row in container_rows:
@@ -492,10 +495,12 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 continue
             key = (row.namespace, row.pod_name, to_iso_z(row.timestamp))
             keep = sorted(new_containers.get(key, ()))
+            if not keep:
+                continue
             placeholders = ", ".join("?" for _ in keep)
             await conn.execute(
                 "DELETE FROM container_metrics WHERE namespace = ? AND pod_name = ? AND timestamp = ?"
-                + (f" AND container_name NOT IN ({placeholders})" if keep else ""),
+                f" AND container_name NOT IN ({placeholders})",
                 (*key, *keep),
             )
 
