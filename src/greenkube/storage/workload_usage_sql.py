@@ -241,6 +241,9 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
                 MAX(CASE WHEN row_offset = hour_offset THEN cpu_limit END) AS cpu_limit,
                 MAX(CASE WHEN row_offset = hour_offset THEN memory_limit END) AS memory_limit,
                 MAX(restart_count) AS restart_count,
+                SUM(restart_increase) AS restart_increase,
+                MAX(CASE WHEN restart_count IS NOT NULL AND restart_increase IS NULL THEN 1 ELSE 0 END)
+                    AS restart_increase_unknown,
                 SUM(total_cost) AS total_cost,
                 SUM(co2e_grams) AS co2e_grams,
                 SUM(embodied_co2e_grams) AS embodied_co2e_grams,
@@ -254,7 +257,6 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
         ranked AS (
             SELECT hourly.*,
                 MAX(hour_bucket) OVER ({partition}) AS last_hour,
-                LAG(restart_count) OVER ({partition} ORDER BY hour_bucket) AS previous_restart_count,
                 SUM(CASE WHEN cpu_n > 0 THEN 1 ELSE 0 END) OVER ({partition}) AS cpu_hours,
                 SUM(CASE WHEN mem_n > 0 THEN 1 ELSE 0 END) OVER ({partition}) AS mem_hours,
                 {", ".join(ranks)}
@@ -276,11 +278,9 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
             MAX(CASE WHEN hour_bucket = last_hour THEN cpu_limit END) AS latest_cpu_limit,
             MAX(CASE WHEN hour_bucket = last_hour THEN memory_limit END) AS latest_memory_limit,
             MAX(restart_count) AS restart_count,
-            CASE WHEN COUNT(restart_count) = 0 THEN NULL ELSE SUM(
-                CASE WHEN restart_count IS NULL OR previous_restart_count IS NULL THEN 0
-                    WHEN restart_count >= previous_restart_count THEN restart_count - previous_restart_count
-                    ELSE restart_count END
-            ) END AS restart_increase,
+            CASE WHEN COUNT(restart_count) = 0 AND COUNT(restart_increase) = 0 THEN NULL
+                WHEN MAX(restart_increase_unknown) = 1 THEN NULL
+                ELSE SUM(COALESCE(restart_increase, 0)) END AS restart_increase,
             SUM(total_cost) AS total_cost,
             SUM(co2e_grams) AS co2e_grams,
             SUM(embodied_co2e_grams) AS embodied_co2e_grams,
@@ -573,4 +573,5 @@ def hour_from_values(values: Mapping[str, Any], decode_time: Callable[[Any], Opt
     for column in ("cpu_limit", "memory_limit", "restart_count"):
         data[column] = _i(data[column])
     data["latest_sample_offset_seconds"] = _f(data["latest_sample_offset_seconds"])
+    data["restart_increase"] = _i(data["restart_increase"])
     return WorkloadUsageHour(**data)

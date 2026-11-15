@@ -66,6 +66,7 @@ ROLLUP_COLUMNS: Tuple[str, ...] = (
     "node_instance_type",
     "source",
     "latest_sample_offset_seconds",
+    "restart_increase",
 )
 
 

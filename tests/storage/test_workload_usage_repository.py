@@ -25,6 +25,7 @@ from greenkube.models.workload_usage import BaselineMetric, UsageSnapshot
 from greenkube.storage.base_workload_usage_repository import create_workload_usage_repository
 from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
+from greenkube.utils.time import to_iso_z
 
 MIB = 1024 * 1024
 
@@ -492,3 +493,82 @@ async def test_cost_source_rollups_keep_opencost_and_derived_rows_trusted(db, se
     snapshot = await repository.read_usage_snapshot(*window)
     _, containers = await repository.read_baseline_rows(*window, snapshot=snapshot)
     assert containers and {row.cost_source for row in containers} == {expected}
+
+
+def _per_pod_rows(start: datetime, per_pod: dict[str, list[Any]]) -> list[CombinedMetric]:
+    """Twelve 5-minute pod rows per hour for each pod, with the given hourly restart counts."""
+    return [
+        _row(start + timedelta(hours=hour, minutes=5 * step), pod_name=pod, restart_count=count)
+        for pod, counts in per_pod.items()
+        for hour, count in enumerate(counts)
+        for step in range(12)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("per_pod", "expected"),
+    [
+        # One replica steady at 5 while another goes 0 -> 2 -> 4: 4 restarts, not 0 (max is no counter).
+        ({"api-1": [5, 5, 5], "api-2": [0, 2, 4]}, 4),
+        # A replaced pod whose count equals the old pod's: the new pod restarted 3 times.
+        ({"api-1": [3, 3, None], "api-2": [None, None, 3]}, 3),
+        # A pod recreated under the same name (StatefulSet): the reset adds the new count.
+        ({"api-1": [4, 4, 1]}, 1),
+        # Control: steady replicas never restarted in the window.
+        ({"api-1": [0, 0, 0], "api-2": [3, 3, 3]}, 0),
+    ],
+    ids=["two-replicas", "replaced-pod", "reset", "control"],
+)
+async def test_restart_history_is_a_per_pod_counter_on_sql_and_python(db, per_pod, expected):
+    """REC-04 review: the restart fallback sums per-pod increases, never the max across replicas."""
+    start = _base_hour()
+    hours = len(next(iter(per_pod.values())))
+    repository, _ = await _rolled(db, _per_pod_rows(start, per_pod), start, hours=hours)
+
+    window = (start - timedelta(hours=1), start + timedelta(hours=hours + 2))
+    snapshot = await repository.read_usage_snapshot(*window)
+    reference = summarize(await repository.read_hours(*window))
+
+    api = ("shop", "Deployment", "api")
+    assert snapshot.summaries[api][""].restart_increase == reference.summaries[api][""].restart_increase == expected
+
+
+async def test_restart_history_skips_an_hour_without_count_alike_on_sql_and_python(db):
+    """REC-04 review: an hour without restart count gives the same answer in SQL and in Python.
+
+    Counts 2, unknown, 5: the pod's count before the 5 is unknown, so its whole
+    count is restarts (fail closed, at least the 3 that really happened).
+    """
+    start = _base_hour()
+    repository, _ = await _rolled(db, _per_pod_rows(start, {"api-1": [2, None, 5]}), start, hours=3)
+
+    window = (start - timedelta(hours=1), start + timedelta(hours=5))
+    snapshot = await repository.read_usage_snapshot(*window)
+    reference = summarize(await repository.read_hours(*window))
+
+    api = ("shop", "Deployment", "api")
+    got = snapshot.summaries[api][""].restart_increase
+    assert got == reference.summaries[api][""].restart_increase
+    assert got is not None and got >= 3
+
+
+async def test_hours_rolled_before_the_per_pod_increase_make_the_restart_history_unknown(db):
+    """Rows rolled before migration 0130 carry a restart count without increase: unknown, never 0."""
+    start = _base_hour()
+    repository, _ = await _rolled(db, _per_pod_rows(start, {"api-1": [1, 1, 1]}), start, hours=3)
+    table = "workload_usage_hourly"
+    bucket = start if db.db_type == "postgres" else to_iso_z(start)
+    async with db.connection_scope() as conn:
+        if db.db_type == "postgres":
+            await conn.execute(f"UPDATE {table} SET restart_increase = NULL WHERE hour_bucket = $1", bucket)
+        else:
+            await conn.execute(f"UPDATE {table} SET restart_increase = NULL WHERE hour_bucket = ?", (bucket,))
+            await conn.commit()
+
+    window = (start - timedelta(hours=1), start + timedelta(hours=5))
+    snapshot = await repository.read_usage_snapshot(*window)
+    reference = summarize(await repository.read_hours(*window))
+
+    api = ("shop", "Deployment", "api")
+    assert snapshot.summaries[api][""].restart_increase is None
+    assert reference.summaries[api][""].restart_increase is None
