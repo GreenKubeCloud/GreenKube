@@ -247,6 +247,31 @@ def cost_source_aggregate_sql(column: str = "cost_source") -> str:
     )
 
 
+#: Quality order of cost sources, best first (STO-01): an allocation engine, OpenCost's rebuilt
+#: cost, list prices, configured rates, then nothing. A re-collected row never replaces the cost
+#: of a stored row with a strictly worse source. ``mixed`` (hourly rollups only) ranks with rates.
+COST_SOURCE_RANK: dict[str, int] = {
+    CostSource.OPENCOST.value: 5,
+    CostSource.KUBECOST.value: 5,
+    CostSource.OPENCOST_DERIVED.value: 4,
+    CostSource.PRICING_CATALOG.value: 3,
+    CostSource.CUSTOM_RATE.value: 2,
+    CostSource.MIXED.value: 2,
+    CostSource.NONE.value: 1,
+}
+
+
+def cost_source_rank(source: Optional[str]) -> int:
+    """Rank of a cost source in :data:`COST_SOURCE_RANK` (0 when unknown or NULL)."""
+    return COST_SOURCE_RANK.get(_normalized(source) or "", 0)
+
+
+def cost_source_rank_sql(expression: str) -> str:
+    """SQL form of :func:`cost_source_rank` (SQLite and PostgreSQL)."""
+    cases = " ".join(f"WHEN '{source}' THEN {rank}" for source, rank in COST_SOURCE_RANK.items())
+    return f"(CASE LOWER({expression}) {cases} ELSE 0 END)"
+
+
 def cost_source_for(cost_found: bool) -> CostSource:
     """Provenance of an OpenCost-or-default cost lookup.
 

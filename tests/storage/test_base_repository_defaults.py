@@ -37,7 +37,7 @@ class DummyCombinedMetricsRepository(CombinedMetricsRepository):
         self.read_calls = []
         self.hourly_calls = []
 
-    async def write_combined_metrics(self, metrics, *, replace_containers=False):
+    async def write_combined_metrics(self, metrics, *, replace_containers=False, window=None, run_id=None):
         self.written.extend(metrics)
         return len(metrics)
 

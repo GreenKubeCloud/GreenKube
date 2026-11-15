@@ -1,2 +1,7 @@
+### Added
+- Raw pod, container and idle rows record the collection pass that wrote them (`collection_run_id`, `collected_at`, migration 0146; NULL on rows written before). Counter `greenkube_collection_recollect_skipped_total{source,reason}` counts re-collected windows left as stored (STO-01).
+
 ### Fixed
 - PostgreSQL stores the additive measures of the metric tables (`joules`, `co2e_grams`, `embodied_co2e_grams`, `total_cost`, `pue`, `grid_intensity` of the raw, container and hourly tables) in double precision (migration 0145): sums over millions of rows no longer drift or saturate. Tables above 256 MB are converted online by the controller (batched backfill of a shadow column, then a short swap with a 5 s lock timeout); stored values keep their 7 significant digits (NRG-06, STO-11).
+- A re-collected window no longer degrades stored rows (STO-01): a pod, container or idle row keeps its stored cost when the new pass prices it with a worse source (OpenCost > OpenCost rebuilt > list prices > configured rates > none); a re-collection with fewer pod rows at a step, or without any OpenCost cost where the stored rows had one, leaves the window as stored; otherwise the window is replaced as one generation and stored pod, container and idle rows of its steps that the new pass no longer produces are deleted. Rows degraded by earlier re-collections cannot be repaired.
+- SQLite looks up the stored container rows of a collected window in one query per 300 pods instead of one per pod (cri-dockerd backfills have no container row at all).

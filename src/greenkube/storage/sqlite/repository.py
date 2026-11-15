@@ -2,15 +2,21 @@ import json
 import logging
 import sqlite3
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, List, Mapping, Optional
 
 import aiosqlite
 
 from greenkube.core.observability import record_metric_provenance
 from greenkube.models.metrics import CombinedMetric
-from greenkube.models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
+from greenkube.models.provenance import ALLOCATED_COST_SOURCES, INTENSITY_FALLBACK_REASON_PREFIX
 from greenkube.storage.container_rows import complete_container_rows, container_rows_of
+from greenkube.storage.write_guards import (
+    IDLE_COST_COLUMNS,
+    cost_guard_assignments,
+    produced_idle_keys,
+    produced_pod_keys,
+)
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
 from ...core.exceptions import QueryError
@@ -72,6 +78,10 @@ IDLE_METRIC_COLUMNS: tuple[str, ...] = (
     "intensity_source",
     "model_version",
 )
+
+
+#: Keys per batched lookup (three parameters each, below SQLite's historical 999-parameter limit).
+_KEY_CHUNK = 300
 
 
 def _quote_idle(column: str) -> str:
@@ -325,12 +335,23 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         """
         self.db_manager = db_manager
 
-    async def write_combined_metrics(self, metrics: List[CombinedMetric], *, replace_containers: bool = False) -> int:
+    async def write_combined_metrics(
+        self,
+        metrics: List[CombinedMetric],
+        *,
+        replace_containers: bool = False,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+    ) -> int:
         """See :meth:`CombinedMetricsRepository.write_combined_metrics`."""
         container_metrics = [metric for metric in metrics if metric.container_name]
         metrics = [metric for metric in metrics if not metric.container_name]
+        collected_at = to_iso_z(datetime.now(timezone.utc)) if run_id else None
         if not metrics:
-            return await self.write_container_metrics(container_metrics) if container_metrics else 0
+            if not container_metrics:
+                return 0
+            return await self.write_container_metrics(container_metrics, run_id=run_id, collected_at=collected_at)
+        produced = produced_pod_keys(metrics)
 
         saved_count = 0
         try:
@@ -363,17 +384,18 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                   calculation_version,
                                   cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                                   cost_source, usage_source, power_source, intensity_source,
-                                  model_version, gpu_power_watts, node_source, metadata_source)
+                                  model_version, gpu_power_watts, node_source, metadata_source,
+                                  collected_at, collection_run_id)
                             VALUES (
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?
+                                ?, ?, ?, ?,
+                                ?, ?
                             )
                             ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
-                                total_cost = excluded.total_cost,
                                 co2e_grams = excluded.co2e_grams,
                                 pue = excluded.pue,
                                 grid_intensity = excluded.grid_intensity,
@@ -401,18 +423,16 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 estimation_reasons = excluded.estimation_reasons,
                                 embodied_co2e_grams = excluded.embodied_co2e_grams,
                                 calculation_version = excluded.calculation_version,
-                                cost_cpu = excluded.cost_cpu,
-                                cost_ram = excluded.cost_ram,
-                                cost_storage = excluded.cost_storage,
-                                cost_network = excluded.cost_network,
-                                cost_lb = excluded.cost_lb,
-                                cost_source = excluded.cost_source,
                                 usage_source = excluded.usage_source,
                                 power_source = excluded.power_source,
                                 intensity_source = excluded.intensity_source,
                                 model_version = excluded.model_version,
                                 gpu_power_watts = excluded.gpu_power_watts,
+                                collected_at = excluded.collected_at,
+                                collection_run_id = excluded.collection_run_id,
                         """
+                            + cost_guard_assignments("combined_metrics", excluded="excluded")
+                            + ",\n"
                             + _metadata_upsert("combined_metrics")
                             + ";",
                             (
@@ -454,6 +474,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 *_provenance_values(metric),
                                 *_allocation_values(metric),
                                 *_row_source_values(metric),
+                                collected_at,
+                                run_id,
                             ),
                         )
                         saved_count += cursor.rowcount
@@ -466,7 +488,11 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 # transaction, so pod and container rows of a step agree (review 4).
                 if replace_containers:
                     await self._delete_stale_container_rows(conn, metrics, container_metrics)
-                saved_count += await self._upsert_container_rows(conn, container_metrics)
+                saved_count += await self._upsert_container_rows(
+                    conn, container_metrics, run_id=run_id, collected_at=collected_at
+                )
+                if window is not None:
+                    await self._delete_rows_not_produced(conn, window, produced)
                 await conn.commit()
         except sqlite3.Error as e:
             logging.error("Failed to commit transaction for combined_metrics: %s", e)
@@ -478,6 +504,31 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         if container_metrics:
             record_metric_provenance(container_metrics)
         return saved_count
+
+    @staticmethod
+    async def _delete_rows_not_produced(conn, window: tuple[datetime, datetime], produced: set[tuple]) -> int:
+        """Delete pod and container rows of ``window`` that the new pass did not produce (STO-01).
+
+        Only steps where the pass produced at least one pod row are touched: a
+        step without any row in the pass (no scrape data) keeps what is stored.
+        """
+        async with conn.execute(
+            'SELECT namespace, pod_name, "timestamp" FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ?',
+            (to_iso_z(window[0]), to_iso_z(window[1])),
+        ) as cursor:
+            stored = await cursor.fetchall()
+        steps = {key[2] for key in produced}
+        stale = [
+            (row[0], row[1], row[2])
+            for row in stored
+            if ensure_utc(row[2]) in steps and (row[0], row[1], ensure_utc(row[2])) not in produced
+        ]
+        for table in ("container_metrics", "combined_metrics"):
+            if stale:
+                await conn.executemany(
+                    f'DELETE FROM {table} WHERE namespace = ? AND pod_name = ? AND "timestamp" = ?', stale
+                )
+        return len(stale)
 
     @staticmethod
     async def _without_rows_over_stored_containers(
@@ -494,21 +545,26 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
             for row in container_rows
             if row.timestamp is not None
         }
-        kept = []
-        for row in pod_rows:
-            if row.timestamp is None:
-                kept.append(row)
-                continue
-            key = (row.namespace, row.pod_name, to_iso_z(row.timestamp))
-            if key not in with_containers:
-                async with conn.execute(
-                    "SELECT 1 FROM container_metrics WHERE namespace = ? AND pod_name = ? AND timestamp = ? LIMIT 1",
-                    key,
-                ) as cursor:
-                    if await cursor.fetchone() is not None:
-                        continue
-            kept.append(row)
-        return kept
+        candidates = sorted(
+            {(row.namespace, row.pod_name, to_iso_z(row.timestamp)) for row in pod_rows if row.timestamp is not None}
+            - with_containers
+        )
+        covered: set[tuple] = set()
+        # One query per chunk of keys, not one per pod (cri-dockerd backfills have no container row at all).
+        for offset in range(0, len(candidates), _KEY_CHUNK):
+            chunk = candidates[offset : offset + _KEY_CHUNK]
+            values = ", ".join("(?, ?, ?)" for _ in chunk)
+            async with conn.execute(
+                "SELECT DISTINCT namespace, pod_name, timestamp FROM container_metrics"
+                f" WHERE (namespace, pod_name, timestamp) IN (VALUES {values})",
+                [value for key in chunk for value in key],
+            ) as cursor:
+                covered.update(tuple(found) for found in await cursor.fetchall())
+        return [
+            row
+            for row in pod_rows
+            if row.timestamp is None or (row.namespace, row.pod_name, to_iso_z(row.timestamp)) not in covered
+        ]
 
     @staticmethod
     async def _delete_stale_container_rows(
@@ -539,6 +595,22 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 f" AND container_name NOT IN ({placeholders})",
                 (*key, *keep),
             )
+
+    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, tuple[int, int]]:
+        """See :meth:`CombinedMetricsRepository.stored_window_profile`."""
+        allocated = ", ".join(f"'{source}'" for source in sorted(ALLOCATED_COST_SOURCES))
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                async with conn.execute(
+                    f"""SELECT "timestamp", COUNT(*),
+                        SUM(CASE WHEN cost_source IN ({allocated}) THEN 1 ELSE 0 END)
+                    FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ? GROUP BY 1""",
+                    (to_iso_z(start), to_iso_z(end)),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+        except sqlite3.Error as e:
+            raise QueryError(f"Could not read the stored rows of a window: {e}") from e
+        return {ensure_utc(row[0]): (row[1], row[2] or 0) for row in rows}
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         try:
@@ -1164,12 +1236,19 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
             logging.error("Could not read hourly metrics: %s", e)
             raise QueryError(f"Could not read hourly metrics: {e}") from e
 
-    async def write_container_metrics(self, metrics: List[CombinedMetric]) -> int:
+    async def write_container_metrics(
+        self,
+        metrics: List[CombinedMetric],
+        *,
+        run_id: Optional[str] = None,
+        collected_at: Optional[str] = None,
+    ) -> int:
+        """Upsert container rows in one transaction."""
         if not metrics:
             return 0
         try:
             async with self.db_manager.connection_scope() as conn:
-                saved_count = await self._upsert_container_rows(conn, metrics)
+                saved_count = await self._upsert_container_rows(conn, metrics, run_id=run_id, collected_at=collected_at)
                 await conn.commit()
             record_metric_provenance(metrics)
             return saved_count
@@ -1178,7 +1257,13 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
             raise QueryError(f"Could not write container metrics: {e}") from e
 
     @staticmethod
-    async def _upsert_container_rows(conn, metrics: List[CombinedMetric]) -> int:
+    async def _upsert_container_rows(
+        conn,
+        metrics: List[CombinedMetric],
+        *,
+        run_id: Optional[str] = None,
+        collected_at: Optional[str] = None,
+    ) -> int:
         """Upsert container rows on ``conn`` without committing."""
         saved_count = 0
         for metric in metrics:
@@ -1197,13 +1282,12 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                     cost_source, usage_source, power_source, intensity_source,
                     emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
-                    node_source, metadata_source
+                    node_source, metadata_source, collected_at, collection_run_id
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(namespace, pod_name, container_name, timestamp) DO UPDATE SET
-                    total_cost = excluded.total_cost,
                     co2e_grams = excluded.co2e_grams,
                     embodied_co2e_grams = excluded.embodied_co2e_grams,
                     pue = excluded.pue,
@@ -1221,12 +1305,6 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     is_estimated = excluded.is_estimated,
                     estimation_reasons = excluded.estimation_reasons,
                     calculation_version = excluded.calculation_version,
-                    cost_cpu = excluded.cost_cpu,
-                    cost_ram = excluded.cost_ram,
-                    cost_storage = excluded.cost_storage,
-                    cost_network = excluded.cost_network,
-                    cost_lb = excluded.cost_lb,
-                    cost_source = excluded.cost_source,
                     usage_source = excluded.usage_source,
                     power_source = excluded.power_source,
                     intensity_source = excluded.intensity_source,
@@ -1236,8 +1314,11 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     model_version = excluded.model_version,
                     gpu_power_watts = excluded.gpu_power_watts,
                     node_source = excluded.node_source,
-                    metadata_source = excluded.metadata_source
-                """,
+                    metadata_source = excluded.metadata_source,
+                    collected_at = excluded.collected_at,
+                    collection_run_id = excluded.collection_run_id,
+                """
+                + cost_guard_assignments("container_metrics", excluded="excluded"),
                 (
                     metric.pod_name,
                     metric.namespace,
@@ -1267,35 +1348,82 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     metric.memory_limit,
                     *_allocation_values(metric),
                     *_row_source_values(metric),
+                    collected_at,
+                    run_id,
                 ),
             )
             saved_count += cursor.rowcount
         return saved_count
 
-    async def write_idle_metrics(self, metrics: List[Any]) -> int:
-        """Upserts ``__idle__`` rows (one per node and step) into ``node_idle_metrics`` (B2)."""
+    async def write_idle_metrics(
+        self,
+        metrics: List[Any],
+        *,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+        conn: Any = None,
+    ) -> int:
+        """Upserts ``__idle__`` rows (one per node and step) into ``node_idle_metrics`` (B2).
+
+        With ``window``, idle rows of the window's steps that the pass did not
+        produce (a node gone since the first pass) are deleted (STO-01). On
+        ``conn`` (inside the caller's transaction, not committed) when given.
+        """
         if not metrics:
             return 0
         columns = IDLE_METRIC_COLUMNS
-        placeholders = ", ".join("?" for _ in columns)
+        placeholders = ", ".join("?" for _ in range(len(columns) + 2))
         updates = ", ".join(
-            f"{column} = excluded.{column}" for column in columns if column not in ("node", "timestamp")
+            f"{column} = excluded.{column}"
+            for column in columns
+            if column not in ("node", "timestamp") and column not in IDLE_COST_COLUMNS
         )
+        updates += ", collected_at = excluded.collected_at, collection_run_id = excluded.collection_run_id"
+        updates += ", " + cost_guard_assignments("node_idle_metrics", IDLE_COST_COLUMNS, excluded="excluded")
         query = (
-            f"INSERT INTO node_idle_metrics ({', '.join(_quote_idle(c) for c in columns)}) VALUES ({placeholders}) "
-            f'ON CONFLICT(node, "timestamp") DO UPDATE SET {updates}'
+            f"INSERT INTO node_idle_metrics ({', '.join(_quote_idle(c) for c in columns)}, collected_at, "
+            f'collection_run_id) VALUES ({placeholders}) ON CONFLICT(node, "timestamp") DO UPDATE SET {updates}'
         )
+        collected_at = to_iso_z(datetime.now(timezone.utc)) if run_id else None
+        rows = []
+        for metric in metrics:
+            values = [getattr(metric, column) for column in columns]
+            values[columns.index("timestamp")] = to_iso_z(metric.timestamp)
+            rows.append((*values, collected_at, run_id))
+
+        async def write(connection) -> None:
+            await connection.executemany(query, rows)
+            if window is not None:
+                await self._delete_idle_not_produced(connection, window, produced_idle_keys(metrics))
+
+        if conn is not None:
+            await write(conn)
+            return len(rows)
         try:
-            async with self.db_manager.connection_scope() as conn:
-                for metric in metrics:
-                    values = [getattr(metric, column) for column in columns]
-                    values[columns.index("timestamp")] = to_iso_z(metric.timestamp)
-                    await conn.execute(query, values)
-                await conn.commit()
-            return len(metrics)
+            async with self.db_manager.transaction(immediate=True) as scoped:
+                await write(scoped)
+            return len(rows)
         except sqlite3.Error as e:
             logging.error("Could not write node idle metrics: %s", e)
             raise QueryError(f"Could not write node idle metrics: {e}") from e
+
+    @staticmethod
+    async def _delete_idle_not_produced(conn, window: tuple[datetime, datetime], produced: set[tuple]) -> int:
+        """Delete idle rows of the pass's steps in ``window`` whose node the pass did not produce (STO-01)."""
+        async with conn.execute(
+            'SELECT node, "timestamp" FROM node_idle_metrics WHERE "timestamp" >= ? AND "timestamp" < ?',
+            (to_iso_z(window[0]), to_iso_z(window[1])),
+        ) as cursor:
+            stored = await cursor.fetchall()
+        steps = {key[1] for key in produced}
+        stale = [
+            (row[0], row[1])
+            for row in stored
+            if ensure_utc(row[1]) in steps and (row[0], ensure_utc(row[1])) not in produced
+        ]
+        if stale:
+            await conn.executemany('DELETE FROM node_idle_metrics WHERE node = ? AND "timestamp" = ?', stale)
+        return len(stale)
 
     async def read_idle_metrics(self, start_time: datetime, end_time: datetime) -> List[Any]:
         """Reads ``__idle__`` rows whose timestamp is in ``[start_time, end_time)``."""

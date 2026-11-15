@@ -452,3 +452,64 @@ async def test_intensity_lookup_error_does_not_advance_the_watermark(stack):
     assert recovered.succeeded
     rows = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
     assert [r.timestamp for r in rows if r.pod_name == "p"] == [BASE, BASE + STEP]
+
+
+async def _generations(stack, start: datetime, end: datetime) -> set:
+    connection = stack["metrics_repo"].db_manager.connection
+    found = set()
+    for table in ("combined_metrics", "container_metrics", "node_idle_metrics"):
+        async with connection.execute(
+            f'SELECT DISTINCT collection_run_id, collected_at IS NOT NULL FROM {table} WHERE "timestamp" >= ? '
+            'AND "timestamp" < ?',
+            (start.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")),
+        ) as cursor:
+            found.update(tuple(row) for row in await cursor.fetchall())
+    return found
+
+
+def _skipped(reason: str) -> float:
+    return collection_telemetry.RECOLLECT_SKIPPED.labels(source=METRICS_WATERMARK_SOURCE, reason=reason)._value.get()
+
+
+@pytest.mark.asyncio
+async def test_recollected_window_holds_one_generation_with_the_same_totals(stack):
+    """STO-01 c): after a re-collection every pod, container and idle row of W carries the same run id."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    await _run_scheduled(stack, BASE + 2 * STEP + timedelta(minutes=1))
+    first = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    first_idle = await stack["metrics_repo"].read_idle_metrics(BASE, BASE + 2 * STEP)
+    before = await _generations(stack, BASE, BASE + 2 * STEP)
+
+    stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+    report = await stack["job"]().run(last=timedelta(minutes=10))
+
+    assert report.succeeded and report.rows_written > 0
+    after = await _generations(stack, BASE, BASE + 2 * STEP)
+    assert len(after) == 1 and after != before
+    (run_id, stamped) = next(iter(after))
+    assert run_id and stamped
+    second = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    second_idle = await stack["metrics_repo"].read_idle_metrics(BASE, BASE + 2 * STEP)
+    total = sum(r.joules for r in first) + sum(r.joules for r in first_idle)
+    assert sum(r.joules for r in second) + sum(r.joules for r in second_idle) == pytest.approx(total, rel=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_recollection_without_opencost_leaves_the_stored_window(stack):
+    """STO-01 a): a re-collection while OpenCost has no data keeps the OpenCost rows and counts the skip."""
+    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
+    await _run_scheduled(stack, BASE + 2 * STEP + timedelta(minutes=1))
+    first = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    assert {r.cost_source for r in first} == {"opencost"}
+    skipped = _skipped("cost_unavailable")
+
+    stack["opencost"].pods = []
+    stack["clock"].current = BASE + 2 * STEP + timedelta(minutes=1)
+    report = await stack["job"]().run(last=timedelta(minutes=10))
+
+    assert report.succeeded and report.rows_written == 0
+    second = await _pod_rows(stack["metrics_repo"], BASE, BASE + 2 * STEP)
+    assert [(r.pod_name, r.cost_source, r.total_cost, r.cpu_request) for r in second] == [
+        (r.pod_name, r.cost_source, r.total_cost, r.cpu_request) for r in first
+    ]
+    assert _skipped("cost_unavailable") == skipped + 1

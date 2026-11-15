@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, Protocol
+from uuid import uuid4
 
 from ..collectors.promql import parse_duration_seconds
 from ..models.metrics import CombinedMetric
+from ..models.provenance import ALLOCATED_COST_SOURCES
 from ..storage.base_collection_watermark_repository import CollectionWatermark, CollectionWatermarkRepository
 from ..storage.base_collection_window_repository import (
     REASON_BEYOND_BACKFILL,
@@ -210,7 +212,14 @@ class RangeProcessor(Protocol):
 
 
 class MetricsWriter(Protocol):
-    async def write_combined_metrics(self, metrics: list[CombinedMetric], *, replace_containers: bool = False) -> int:
+    async def write_combined_metrics(
+        self,
+        metrics: list[CombinedMetric],
+        *,
+        replace_containers: bool = False,
+        window: tuple[datetime, datetime] | None = None,
+        run_id: str | None = None,
+    ) -> int:
         """Upsert combined and container rows; ``replace_containers`` rewrites the container rows of each pod."""
         ...
 
@@ -351,11 +360,46 @@ class MetricsCollectionJob:
         )
         return CollectionWatermark(self.cluster_uid, self.source, resume_at, now)
 
-    async def _write_rows(self, rows: list[CombinedMetric]) -> int:
-        """Write a collected window; its container rows replace the stored ones of its pods (review 4)."""
-        return await self.metrics_repository.write_combined_metrics(rows, replace_containers=True)
+    async def _write_rows(self, rows: list[CombinedMetric], window: CollectionWindow, run_id: str) -> int:
+        """Write a collected window as one generation (STO-01).
 
-    async def _write_idle_metrics(self) -> None:
+        Its container rows replace the stored ones of its pods (review 4), and
+        stored pod rows of its steps that this pass did not produce are deleted.
+        """
+        return await self.metrics_repository.write_combined_metrics(
+            rows, replace_containers=True, window=(window.start, window.end), run_id=run_id
+        )
+
+    async def _recollection_degradation(self, window: CollectionWindow, rows: list[CombinedMetric]) -> str | None:
+        """Why a re-collection of ``window`` must not replace its stored rows, or ``None`` (STO-01).
+
+        A step of the new pass with fewer pod rows than stored (pods gone from
+        Prometheus or from the cluster), or without any allocated cost where the
+        stored rows had one (OpenCost unavailable), is worse than what is
+        stored: the window is then left as stored. Steps the pass has no row
+        for are never replaced and are not compared.
+        """
+        profile = getattr(self.metrics_repository, "stored_window_profile", None)
+        if profile is None:
+            return None
+        stored: dict[datetime, tuple[int, int]] = await profile(window.start, window.end)
+        if not stored:
+            return None
+        produced: dict[datetime, list[CombinedMetric]] = {}
+        for row in rows:
+            if row.timestamp is not None and not getattr(row, "container_name", None):
+                produced.setdefault(ensure_utc(row.timestamp), []).append(row)
+        for step, (pods, allocated) in stored.items():
+            step_rows = produced.get(step)
+            if not step_rows:
+                continue
+            if len(step_rows) < pods:
+                return collection_telemetry.RECOLLECT_REASON_FEWER_PODS
+            if allocated and not any(row.cost_source in ALLOCATED_COST_SOURCES for row in step_rows):
+                return collection_telemetry.RECOLLECT_REASON_COST_UNAVAILABLE
+        return None
+
+    async def _write_idle_metrics(self, window: CollectionWindow, run_id: str) -> None:
         """Commits the ``__idle__`` rows of the window just collected (roadmap B2).
 
         Called after the fence check, like the pod rows. A failed write raises,
@@ -367,7 +411,7 @@ class MetricsCollectionJob:
         if not isinstance(idle_rows, (list, tuple)) or not idle_rows or write is None:
             return
         try:
-            await write(list(idle_rows))
+            await write(list(idle_rows), window=(window.start, window.end), run_id=run_id)
         except Exception as error:
             raise RuntimeError(f"Could not store {len(idle_rows)} node idle row(s): {error}") from error
 
@@ -398,12 +442,24 @@ class MetricsCollectionJob:
         started = monotonic()
         fence.check("collect metrics")
         rows = await self.processor.run_range(start=window.start, end=window.end)
-        records = await self._window_records(window, rows)
-        fence.check("write metrics")
-        written = await self._write_rows(rows) if rows else 0
-        await self._write_idle_metrics()
-        await self._store_records(records, report)
-        report.rows_written += written or 0
+        degraded = await self._recollection_degradation(window, rows) if rows else None
+        if degraded is not None:
+            # The stored rows of this window come from a better pass: keep them as they are.
+            logger.warning(
+                "Re-collection of %s -> %s is worse than the stored rows (%s); the window is left as stored.",
+                window.start.isoformat(),
+                window.end.isoformat(),
+                degraded,
+            )
+            collection_telemetry.record_recollect_skipped(self.source, degraded)
+        else:
+            records = await self._window_records(window, rows)
+            run_id = uuid4().hex
+            fence.check("write metrics")
+            written = await self._write_rows(rows, window, run_id) if rows else 0
+            await self._write_idle_metrics(window, run_id)
+            await self._store_records(records, report)
+            report.rows_written += written or 0
         report.windows_collected += 1
         if rows:
             # Dashboard gauges describe "now": keep only the most recent sample.
@@ -583,8 +639,9 @@ class MetricsCollectionJob:
                 records = await self._window_records(window, rows)
                 fence.check("write retried window")
                 if rows:
-                    report.rows_written += await self._write_rows(rows) or 0
-                    await self._write_idle_metrics()
+                    run_id = uuid4().hex
+                    report.rows_written += await self._write_rows(rows, window, run_id) or 0
+                    await self._write_idle_metrics(window, run_id)
                 failed_before = report.failed_steps
                 await self._store_records(records, report)
                 still_failed = report.failed_steps - failed_before

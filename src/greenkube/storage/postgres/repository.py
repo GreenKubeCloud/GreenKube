@@ -7,7 +7,8 @@ from typing import Any, List, Mapping, Optional
 from ...core.exceptions import QueryError
 from ...core.observability import record_metric_provenance
 from ...models.metrics import CombinedMetric
-from ...models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
+from ...models.provenance import ALLOCATED_COST_SOURCES, INTENSITY_FALLBACK_REASON_PREFIX
+from ...utils.time import ensure_utc
 from ..base_repository import (
     CarbonIntensityRepository,
     CombinedMetricsRepository,
@@ -17,6 +18,7 @@ from ..base_repository import (
     measured_intensity_sql,
 )
 from ..container_rows import complete_container_rows, container_rows_of
+from ..write_guards import IDLE_COST_COLUMNS, cost_guard_assignments, produced_idle_keys, produced_pod_keys
 
 logger = logging.getLogger(__name__)
 
@@ -254,12 +256,23 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
-    async def write_combined_metrics(self, metrics: List[CombinedMetric], *, replace_containers: bool = False) -> int:
+    async def write_combined_metrics(
+        self,
+        metrics: List[CombinedMetric],
+        *,
+        replace_containers: bool = False,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+    ) -> int:
         """See :meth:`CombinedMetricsRepository.write_combined_metrics`."""
         container_metrics = [metric for metric in metrics if metric.container_name]
         metrics = [metric for metric in metrics if not metric.container_name]
+        collected_at = datetime.now(timezone.utc) if run_id else None
         if not metrics:
-            return await self.write_container_metrics(container_metrics) if container_metrics else 0
+            if not container_metrics:
+                return 0
+            return await self.write_container_metrics(container_metrics, run_id=run_id, collected_at=collected_at)
+        produced = produced_pod_keys(metrics)
 
         saved_count = 0
         try:
@@ -282,7 +295,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         calculation_version,
                         cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                         cost_source, usage_source, power_source, intensity_source,
-                        model_version, gpu_power_watts, node_source, metadata_source
+                        model_version, gpu_power_watts, node_source, metadata_source,
+                        collected_at, collection_run_id
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8,
@@ -300,10 +314,10 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         $35,
                         $36, $37, $38, $39, $40,
                         $41, $42, $43, $44,
-                        $45, $46, $47, $48
+                        $45, $46, $47, $48,
+                        $49, $50
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
-                        total_cost = EXCLUDED.total_cost,
                         co2e_grams = EXCLUDED.co2e_grams,
                         pue = EXCLUDED.pue,
                         grid_intensity = EXCLUDED.grid_intensity,
@@ -331,19 +345,15 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         is_estimated = EXCLUDED.is_estimated,
                         embodied_co2e_grams = EXCLUDED.embodied_co2e_grams,
                         calculation_version = EXCLUDED.calculation_version,
-                        cost_cpu = EXCLUDED.cost_cpu,
-                        cost_ram = EXCLUDED.cost_ram,
-                        cost_storage = EXCLUDED.cost_storage,
-                        cost_network = EXCLUDED.cost_network,
-                        cost_lb = EXCLUDED.cost_lb,
-                        cost_source = EXCLUDED.cost_source,
                         usage_source = EXCLUDED.usage_source,
                         power_source = EXCLUDED.power_source,
                         intensity_source = EXCLUDED.intensity_source,
                         model_version = EXCLUDED.model_version,
                         gpu_power_watts = EXCLUDED.gpu_power_watts,
+                        collected_at = EXCLUDED.collected_at,
+                        collection_run_id = EXCLUDED.collection_run_id,
                 """
-                query += _metadata_upsert("combined_metrics") + ";"
+                query += cost_guard_assignments("combined_metrics") + ",\n" + _metadata_upsert("combined_metrics") + ";"
 
                 if replace_containers:
                     complete = complete_container_rows(container_metrics)
@@ -394,6 +404,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             *_provenance_values(metric),
                             *_allocation_values(metric),
                             *_row_source_values(metric),
+                            collected_at,
+                            run_id,
                         )
                     )
 
@@ -404,7 +416,11 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     if replace_containers:
                         await self._delete_stale_container_rows(conn, metrics, container_metrics)
                     saved_count = len(metrics)
-                    saved_count += await self.write_container_metrics(container_metrics, conn=conn)
+                    saved_count += await self.write_container_metrics(
+                        container_metrics, conn=conn, run_id=run_id, collected_at=collected_at
+                    )
+                    if window is not None:
+                        await self._delete_rows_not_produced(conn, window, produced)
                 logger.info("Saved %s combined metrics to Postgres.", len(metrics))
             record_metric_provenance(metrics)
             if container_metrics:
@@ -413,6 +429,33 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             logger.error("Error writing combined metrics to Postgres: %s", e)
             raise QueryError(f"Error writing combined metrics: {e}") from e
         return saved_count
+
+    @staticmethod
+    async def _delete_rows_not_produced(conn: Any, window: tuple[datetime, datetime], produced: set[tuple]) -> int:
+        """Delete pod and container rows of ``window`` that the new pass did not produce (STO-01).
+
+        Only steps where the pass produced at least one pod row are touched: a
+        step without any row in the pass (no scrape data) keeps what is stored.
+        """
+        start, end = window
+        stored = await conn.fetch(
+            "SELECT namespace, pod_name, timestamp FROM combined_metrics WHERE timestamp >= $1 AND timestamp < $2",
+            ensure_utc(start),
+            ensure_utc(end),
+        )
+        steps = {key[2] for key in produced}
+        stale = [
+            (row["namespace"], row["pod_name"], row["timestamp"])
+            for row in stored
+            if ensure_utc(row["timestamp"]) in steps
+            and (row["namespace"], row["pod_name"], ensure_utc(row["timestamp"])) not in produced
+        ]
+        for table in ("container_metrics", "combined_metrics"):
+            if stale:
+                await conn.executemany(
+                    f"DELETE FROM {table} WHERE namespace = $1 AND pod_name = $2 AND timestamp = $3", stale
+                )
+        return len(stale)
 
     @staticmethod
     async def _without_rows_over_stored_containers(
@@ -484,6 +527,22 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 WHERE namespace = $1 AND pod_name = $2 AND timestamp = $3 AND NOT (container_name = ANY($4::text[]))""",
                 targets,
             )
+
+    async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, tuple[int, int]]:
+        """See :meth:`CombinedMetricsRepository.stored_window_profile`."""
+        allocated = ", ".join(f"'{source}'" for source in sorted(ALLOCATED_COST_SOURCES))
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                rows = await conn.fetch(
+                    f"""SELECT timestamp, COUNT(*) AS pods,
+                        COUNT(*) FILTER (WHERE cost_source IN ({allocated})) AS allocated
+                    FROM combined_metrics WHERE timestamp >= $1 AND timestamp < $2 GROUP BY timestamp""",
+                    ensure_utc(start),
+                    ensure_utc(end),
+                )
+        except Exception as e:
+            raise QueryError(f"Error reading the stored rows of a window: {e}") from e
+        return {ensure_utc(row["timestamp"]): (row["pods"], row["allocated"]) for row in rows}
 
     async def read_combined_metrics(self, start_time: datetime, end_time: datetime) -> List[CombinedMetric]:
         """
@@ -565,7 +624,14 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             logger.error("Error reading hourly metrics from Postgres: %s", e)
             raise QueryError(f"Error reading hourly metrics: {e}") from e
 
-    async def write_container_metrics(self, metrics: List[CombinedMetric], conn: Any = None) -> int:
+    async def write_container_metrics(
+        self,
+        metrics: List[CombinedMetric],
+        conn: Any = None,
+        *,
+        run_id: Optional[str] = None,
+        collected_at: Optional[datetime] = None,
+    ) -> int:
         """Upsert container rows; on ``conn`` (inside the caller's transaction) when given."""
         if not metrics:
             return 0
@@ -580,16 +646,15 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                 cost_source, usage_source, power_source, intensity_source,
                 emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
-                node_source, metadata_source
+                node_source, metadata_source, collected_at, collection_run_id
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
                 $10, $11, $12, $13, $14, $15, $16, $17,
                 $18, $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31,
-                $32, $33, $34, $35, $36, $37, $38
+                $32, $33, $34, $35, $36, $37, $38, $39, $40
             )
             ON CONFLICT (namespace, pod_name, container_name, timestamp) DO UPDATE SET
-                total_cost = EXCLUDED.total_cost,
                 co2e_grams = EXCLUDED.co2e_grams,
                 embodied_co2e_grams = EXCLUDED.embodied_co2e_grams,
                 pue = EXCLUDED.pue,
@@ -607,12 +672,6 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 is_estimated = EXCLUDED.is_estimated,
                 estimation_reasons = EXCLUDED.estimation_reasons,
                 calculation_version = EXCLUDED.calculation_version,
-                cost_cpu = EXCLUDED.cost_cpu,
-                cost_ram = EXCLUDED.cost_ram,
-                cost_storage = EXCLUDED.cost_storage,
-                cost_network = EXCLUDED.cost_network,
-                cost_lb = EXCLUDED.cost_lb,
-                cost_source = EXCLUDED.cost_source,
                 usage_source = EXCLUDED.usage_source,
                 power_source = EXCLUDED.power_source,
                 intensity_source = EXCLUDED.intensity_source,
@@ -622,8 +681,10 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 model_version = EXCLUDED.model_version,
                 gpu_power_watts = EXCLUDED.gpu_power_watts,
                 node_source = EXCLUDED.node_source,
-                metadata_source = EXCLUDED.metadata_source
-        """
+                metadata_source = EXCLUDED.metadata_source,
+                collected_at = EXCLUDED.collected_at,
+                collection_run_id = EXCLUDED.collection_run_id,
+        """ + cost_guard_assignments("container_metrics")
         rows = []
         for metric in metrics:
             container_name = metric.container_name
@@ -660,6 +721,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     metric.memory_limit,
                     *_allocation_values(metric),
                     *_row_source_values(metric),
+                    collected_at,
+                    run_id,
                 )
             )
         if conn is not None:
@@ -674,27 +737,73 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             logger.error("Error writing container metrics to Postgres: %s", e)
             raise QueryError(f"Error writing container metrics: {e}") from e
 
-    async def write_idle_metrics(self, metrics: List[Any]) -> int:
-        """Upserts ``__idle__`` rows (one per node and step) into ``node_idle_metrics`` (B2)."""
+    async def write_idle_metrics(
+        self,
+        metrics: List[Any],
+        *,
+        window: Optional[tuple[datetime, datetime]] = None,
+        run_id: Optional[str] = None,
+        conn: Any = None,
+    ) -> int:
+        """Upserts ``__idle__`` rows (one per node and step) into ``node_idle_metrics`` (B2).
+
+        With ``window``, idle rows of the window's steps that the pass did not
+        produce (a node gone since the first pass) are deleted (STO-01). On
+        ``conn`` (inside the caller's transaction) when given.
+        """
         if not metrics:
             return 0
         columns = IDLE_METRIC_COLUMNS
-        placeholders = ", ".join(f"${index}" for index in range(1, len(columns) + 1))
+        placeholders = ", ".join(f"${index}" for index in range(1, len(columns) + 3))
         updates = ", ".join(
-            f"{column} = EXCLUDED.{column}" for column in columns if column not in ("node", "timestamp")
+            f"{column} = EXCLUDED.{column}"
+            for column in columns
+            if column not in ("node", "timestamp") and column not in IDLE_COST_COLUMNS
         )
+        updates += ", collected_at = EXCLUDED.collected_at, collection_run_id = EXCLUDED.collection_run_id"
+        updates += ", " + cost_guard_assignments("node_idle_metrics", IDLE_COST_COLUMNS)
         query = (
-            f"INSERT INTO node_idle_metrics ({', '.join(columns)}) VALUES ({placeholders}) "
-            f"ON CONFLICT (node, timestamp) DO UPDATE SET {updates}"
+            f"INSERT INTO node_idle_metrics ({', '.join(columns)}, collected_at, collection_run_id) "
+            f"VALUES ({placeholders}) ON CONFLICT (node, timestamp) DO UPDATE SET {updates}"
         )
-        rows = [tuple(getattr(metric, column) for column in columns) for metric in metrics]
+        collected_at = datetime.now(timezone.utc) if run_id else None
+        rows = [(*(getattr(metric, column) for column in columns), collected_at, run_id) for metric in metrics]
+
+        async def write(connection: Any) -> None:
+            await connection.executemany(query, rows)
+            if window is not None:
+                await self._delete_idle_not_produced(connection, window, produced_idle_keys(metrics))
+
+        if conn is not None:
+            await write(conn)
+            return len(rows)
         try:
-            async with self.db_manager.connection_scope() as conn:
-                await conn.executemany(query, rows)
+            async with self.db_manager.connection_scope() as scoped:
+                async with scoped.transaction():
+                    await write(scoped)
             return len(rows)
         except Exception as e:
             logger.error("Error writing node idle metrics to Postgres: %s", e)
             raise QueryError(f"Error writing node idle metrics: {e}") from e
+
+    @staticmethod
+    async def _delete_idle_not_produced(conn: Any, window: tuple[datetime, datetime], produced: set[tuple]) -> int:
+        """Delete idle rows of the pass's steps in ``window`` whose node the pass did not produce (STO-01)."""
+        start, end = window
+        stored = await conn.fetch(
+            "SELECT node, timestamp FROM node_idle_metrics WHERE timestamp >= $1 AND timestamp < $2",
+            ensure_utc(start),
+            ensure_utc(end),
+        )
+        steps = {key[1] for key in produced}
+        stale = [
+            (row["node"], row["timestamp"])
+            for row in stored
+            if ensure_utc(row["timestamp"]) in steps and (row["node"], ensure_utc(row["timestamp"])) not in produced
+        ]
+        if stale:
+            await conn.executemany("DELETE FROM node_idle_metrics WHERE node = $1 AND timestamp = $2", stale)
+        return len(stale)
 
     async def read_idle_metrics(self, start_time: datetime, end_time: datetime) -> List[Any]:
         """Reads ``__idle__`` rows whose timestamp is in ``[start_time, end_time)``."""
