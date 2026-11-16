@@ -536,7 +536,7 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 - `GET /api/v1/health/services/{name}` — Health status for a single data source
 - `POST /api/v1/auth/login`, `/auth/logout`, `GET /api/v1/auth/me` — Account sign-in with server-side sessions (see [Authentication](authentication.md))
 - `GET|POST|DELETE /api/v1/auth/api-keys` — Scoped API keys for machines
-- `GET /api/v1/config` — Current configuration (sanitized secrets)
+- `GET /api/v1/config` — Current configuration (sanitized secrets), including `intensity_defaults_year`, the year of the bundled annual grid intensities
 - `GET /api/v1/metrics` — Per-pod metrics with filtering
 - `GET /api/v1/metrics/summary` — Aggregated totals (on-demand, full scan)
 - `GET /api/v1/metrics/timeseries` — Time-series data with granularity (on-demand, full scan)

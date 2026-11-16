@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from greenkube import __version__
 from greenkube.api.schemas import ConfigResponse, HealthResponse, VersionResponse
 from greenkube.core.config import get_config
+from greenkube.data.electricity_maps_regions_grid_intensity_default import DEFAULT_INTENSITY_YEAR
 
 logger = logging.getLogger(__name__)
 
@@ -105,4 +106,5 @@ async def get_config_endpoint():
         api_host=cfg.API_HOST,
         api_port=cfg.API_PORT,
         currency=str(getattr(cfg, "IMPACT_PRICING_CURRENCY", "USD") or "USD"),
+        intensity_defaults_year=DEFAULT_INTENSITY_YEAR,
     )
