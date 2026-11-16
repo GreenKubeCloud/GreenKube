@@ -158,7 +158,7 @@ async def test_idle_rows_follow_the_raw_retention_of_pod_rows(metrics_db, clock)
     await repo.write_idle_metrics([_idle(index) for index in range(steps)])
 
     clock.now = T0 + timedelta(days=DAYS, minutes=37)
-    stats = await MetricsCompressor(metrics_db, Config()).run()
+    stats = await MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None).run()
 
     retention_cutoff = (clock.now - timedelta(days=7)).replace(minute=0)
     (pod_min,) = (await _fetch(metrics_db, 'SELECT MIN("timestamp") FROM combined_metrics'))[0]
@@ -177,7 +177,7 @@ async def test_idle_rows_are_kept_while_pod_rows_are_not_compressed(metrics_db, 
 
     # Nothing was compressed (no pod rows, no watermark): idle rows stay, like raw pod rows would.
     clock.now = T0 + timedelta(days=DAYS, minutes=37)
-    await MetricsCompressor(metrics_db, Config()).run()
+    await MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None).run()
     assert (await _fetch(metrics_db, "SELECT COUNT(*) FROM node_idle_metrics"))[0][0] == steps
 
 
@@ -192,7 +192,7 @@ async def test_hourly_tables_keep_the_gpu_energy_of_raw_rows(metrics_db, clock):
     await repo.write_container_metrics(containers)
 
     clock.now = T0 + timedelta(hours=hours + 24, minutes=37)
-    compressor = MetricsCompressor(metrics_db, Config(), rollup_enabled=False)
+    compressor = MetricsCompressor(metrics_db, Config(), rollup_enabled=False, collection_watermark_provider=None)
     await compressor.run()
 
     for table in ("combined_metrics_hourly", "container_metrics_hourly"):

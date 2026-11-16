@@ -1029,6 +1029,26 @@ class Config(BaseSettings):
     # ------------------------------------------------------------------ #
 
     @model_validator(mode="after")
+    def _validate_backfill_against_compression(self) -> "Config":
+        """Keep the collection backfill inside the raw part of the metric tables (ROL-02).
+
+        An hour older than ``METRICS_COMPRESSION_AGE_HOURS`` is compressed; a
+        backfill that reaches further would write most of its rows into hours
+        already compressed.
+        """
+        age = int(self.METRICS_COMPRESSION_AGE_HOURS)
+        if age < 1:
+            raise ValueError("METRICS_COMPRESSION_AGE_HOURS must be at least 1.")
+        backfill = str(self.COLLECTION_MAX_BACKFILL)
+        seconds = int(backfill[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[backfill[-1]]
+        if seconds > age * 3600:
+            raise ValueError(
+                f"COLLECTION_MAX_BACKFILL ({backfill}) must not exceed METRICS_COMPRESSION_AGE_HOURS ({age}h): "
+                "older windows would land in hours that are already compressed."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _compute_and_validate(self) -> "Config":
         self.ENVIRONMENT = self.ENVIRONMENT.lower()
         self.API_AUTH_MODE = self.API_AUTH_MODE.lower()

@@ -344,7 +344,9 @@ async def test_rollup_falls_back_to_hourly_tables_after_raw_pruning(db, monkeypa
     rows = _workload_rows(start, hours=2)
     await _metrics_repo(db).write_combined_metrics(rows)
     monkeypatch.setenv("METRICS_RAW_RETENTION_DAYS", "1")
-    await MetricsCompressor(db, Config(), rollup_enabled=False).run(now=datetime.now(timezone.utc))
+    await MetricsCompressor(db, Config(), rollup_enabled=False, collection_watermark_provider=None).run(
+        now=datetime.now(timezone.utc)
+    )
 
     repository = create_workload_usage_repository(db, db.db_type)
     pods, containers, source = await repository.read_hour_inputs(start)
@@ -387,7 +389,7 @@ async def test_compression_rolls_hours_written_behind_the_rollup(db):
     hole = range(30, 72)  # hours ago, all older than the 24h refresh window
     repo = _metrics_repo(db)
     await repo.write_combined_metrics([_row(base - timedelta(hours=h)) for h in range(96, 0, -1) if h not in hole])
-    compressor = MetricsCompressor(db, Config())
+    compressor = MetricsCompressor(db, Config(), collection_watermark_provider=None)
     await compressor.refresh_usage_rollup(now)
 
     usage = create_workload_usage_repository(db, db.db_type)
@@ -613,7 +615,9 @@ async def test_restarts_across_a_missing_hour_are_counted_from_the_hourly_tables
     start = floor_hour(datetime.now(timezone.utc) - timedelta(days=10))
     await _metrics_repo(db).write_combined_metrics(_timed_rows(start, _MISSING_HOUR))
     monkeypatch.setenv("METRICS_RAW_RETENTION_DAYS", "1")
-    await MetricsCompressor(db, Config(), rollup_enabled=False).run(now=datetime.now(timezone.utc))
+    await MetricsCompressor(db, Config(), rollup_enabled=False, collection_watermark_provider=None).run(
+        now=datetime.now(timezone.utc)
+    )
     repository = create_workload_usage_repository(db, db.db_type)
     assert (await repository.read_hour_inputs(start + timedelta(hours=2)))[2] == "hourly"
 
@@ -712,7 +716,7 @@ async def test_legacy_reroll_from_hourly_tables_keeps_the_raw_usage(db, monkeypa
     assert before.source == "raw" and before.restart_increase == 2
     await _null_increase(db, target)
     monkeypatch.setenv("METRICS_RAW_RETENTION_DAYS", "1")
-    await MetricsCompressor(db, Config(), rollup_enabled=False).run(now=now)
+    await MetricsCompressor(db, Config(), rollup_enabled=False, collection_watermark_provider=None).run(now=now)
     assert (await repository.read_hour_inputs(target))[2] == "hourly"
 
     await WorkloadUsageRollup(repository, backfill_hours=14 * 24).refresh(now=now)

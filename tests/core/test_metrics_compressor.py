@@ -9,7 +9,7 @@ MetricsCompressor is critical for production data management:
 """
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -33,7 +33,7 @@ async def db():
 
 @pytest.fixture
 def compressor(db):
-    return MetricsCompressor(db_manager=db)
+    return MetricsCompressor(db_manager=db, collection_watermark_provider=None)
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ class TestMetricsCompressorRun:
             yield  # noqa: unreachable
 
         bad_db.connection_scope = _bad_scope
-        compressor = MetricsCompressor(db_manager=bad_db)
+        compressor = MetricsCompressor(db_manager=bad_db, collection_watermark_provider=None)
 
         # Must not raise
         stats = await compressor.run()
@@ -165,6 +165,7 @@ class TestMetricsCompressorRun:
             "rows_compressed": 2,
             "raw_rows_pruned": 3,
             "hourly_rows_pruned": 0,
+            "hours_reaggregated": 0,
         }
 
 
@@ -330,7 +331,7 @@ class TestSQLiteRawPruning:
 
         cfg = Config()
         cfg.METRICS_RAW_RETENTION_DAYS = 7  # 7-day retention
-        compressor = MetricsCompressor(db_manager=db, config=cfg)
+        compressor = MetricsCompressor(db_manager=db, config=cfg, collection_watermark_provider=None)
 
         old_metric = _metric(hours_ago=8 * 24)  # 8 days old
         recent_metric = _metric(pod="pod-b", hours_ago=1)
@@ -348,7 +349,7 @@ class TestSQLiteRawPruning:
 
         cfg = Config()
         cfg.METRICS_RAW_RETENTION_DAYS = -1
-        compressor = MetricsCompressor(db_manager=db, config=cfg)
+        compressor = MetricsCompressor(db_manager=db, config=cfg, collection_watermark_provider=None)
 
         await _insert_raw(db, [_metric(hours_ago=365 * 24)])  # Very old
 
@@ -375,7 +376,7 @@ class TestSQLiteHourlyPruning:
         cfg.METRICS_COMPRESSION_AGE_HOURS = 1  # Compress anything > 1h old
         cfg.METRICS_RAW_RETENTION_DAYS = -1  # Don't prune raw
         cfg.METRICS_AGGREGATED_RETENTION_DAYS = 30  # Prune hourly older than 30 days
-        compressor = MetricsCompressor(db_manager=db, config=cfg)
+        compressor = MetricsCompressor(db_manager=db, config=cfg, collection_watermark_provider=None)
 
         # Insert and compress a row that is 60 days old
         old_metric = _metric(hours_ago=60 * 24)
@@ -400,7 +401,7 @@ class TestSQLiteHourlyPruning:
         cfg.METRICS_COMPRESSION_AGE_HOURS = 1
         cfg.METRICS_RAW_RETENTION_DAYS = -1
         cfg.METRICS_AGGREGATED_RETENTION_DAYS = -1
-        compressor = MetricsCompressor(db_manager=db, config=cfg)
+        compressor = MetricsCompressor(db_manager=db, config=cfg, collection_watermark_provider=None)
 
         old_metric = _metric(hours_ago=60 * 24)
         await _insert_raw(db, [old_metric])
@@ -479,7 +480,7 @@ class TestPostgresCompressionBranches:
         conn = type("Conn", (), {})()
         conn.fetchval = AsyncMock(return_value=None)
         conn.execute = AsyncMock(return_value="DELETE 4")
-        compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg)
+        compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg, collection_watermark_provider=None)
 
         assert await compressor._prune_raw() == 0
         conn.execute.assert_not_awaited()
@@ -494,14 +495,18 @@ class TestPostgresCompressionBranches:
         watermark = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
         conn = type("Conn", (), {})()
         conn.fetchval = AsyncMock(return_value=watermark)
-        # combined_metrics, then its node_idle_metrics rows (same cutoff), then container_metrics.
-        conn.execute = AsyncMock(side_effect=["DELETE 4", "DELETE 1", "DELETE 2"])
-        compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg)
+        conn.fetch = AsyncMock(return_value=[])  # no dirty hour
+        conn.transaction = MagicMock(return_value=AsyncMock())
+        # combined_metrics (raw_pruned_until, delete), its node_idle_metrics rows (same cutoff),
+        # then container_metrics (raw_pruned_until, delete).
+        conn.execute = AsyncMock(side_effect=["UPDATE 1", "DELETE 4", "DELETE 1", "UPDATE 1", "DELETE 2"])
+        compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg, collection_watermark_provider=None)
 
         assert await compressor._prune_raw(now) == 7
-        cutoffs = {call.args[1] for call in conn.execute.await_args_list}
+        deletes = [call for call in conn.execute.await_args_list if call.args[0].startswith("DELETE")]
+        cutoffs = {call.args[1] for call in deletes}
         assert cutoffs == {datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)}
-        assert "node_idle_metrics" in conn.execute.await_args_list[1].args[0]
+        assert "node_idle_metrics" in deletes[1].args[0]
 
     @pytest.mark.asyncio
     async def test_postgres_hourly_pruning_parses_deleted_row_counts(self):
@@ -511,7 +516,7 @@ class TestPostgresCompressionBranches:
         cfg.METRICS_AGGREGATED_RETENTION_DAYS = 30
         conn = type("Conn", (), {})()
         conn.execute = AsyncMock(side_effect=["DELETE 1", "DELETE 3"])
-        compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg)
+        compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg, collection_watermark_provider=None)
 
         assert await compressor._prune_hourly() == 4
         assert conn.execute.await_count == 2
@@ -522,7 +527,7 @@ class TestPostgresCompressionBranches:
 
         conn = type("Conn", (), {})()
         conn.execute = AsyncMock(side_effect=["INSERT 0 3"])
-        compressor = MetricsCompressor(FakePostgresDb(conn))
+        compressor = MetricsCompressor(FakePostgresDb(conn), collection_watermark_provider=None)
 
         assert await compressor.refresh_namespace_cache() == 3
         assert _status_count("") == 0
@@ -540,7 +545,7 @@ async def test_short_compression_age_warns_once_about_the_carbon_recompute(db, c
     monkeypatch.setattr(MetricsCompressor, "_short_age_warned", False)
     cfg = Config()
     cfg.METRICS_COMPRESSION_AGE_HOURS = 6
-    compressor = MetricsCompressor(db_manager=db, config=cfg)
+    compressor = MetricsCompressor(db_manager=db, config=cfg, collection_watermark_provider=None)
 
     with caplog.at_level(logging.WARNING, logger="greenkube.core.metrics_compressor"):
         await compressor.run()
@@ -556,6 +561,6 @@ async def test_default_compression_age_does_not_warn(db, caplog, monkeypatch):
 
     monkeypatch.setattr(MetricsCompressor, "_short_age_warned", False)
     with caplog.at_level(logging.WARNING, logger="greenkube.core.metrics_compressor"):
-        await MetricsCompressor(db_manager=db).run()
+        await MetricsCompressor(db_manager=db, collection_watermark_provider=None).run()
 
     assert not [record for record in caplog.records if "METRICS_COMPRESSION_AGE_HOURS" in record.getMessage()]

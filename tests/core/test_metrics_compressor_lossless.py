@@ -125,7 +125,7 @@ async def test_sim_compress_keeps_every_sample_of_closed_hours(metrics_db, clock
     samples += [_sample(i, container="app") for i in range(samples_per_hour * 24 * 9)]
     await repo.write_combined_metrics(samples)
 
-    compressor = MetricsCompressor(metrics_db, Config())
+    compressor = MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None)
     start = T0 + timedelta(days=7, hours=2, minutes=37)
     for hour in range(30):
         clock.now = start + timedelta(hours=hour)
@@ -160,7 +160,7 @@ async def test_compression_conserves_sums_with_random_job_offsets(metrics_db, cl
         bucket = sample.timestamp.replace(minute=0, second=0, microsecond=0)
         raw_by_bucket.setdefault(bucket, []).append(sample.total_cost)
 
-    compressor = MetricsCompressor(metrics_db, Config())
+    compressor = MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None)
     clock.now = T0 + timedelta(days=1, minutes=rng.randint(0, 59), seconds=rng.randint(0, 59))
     while clock.now < T0 + timedelta(days=5):
         await compressor.run()
@@ -214,7 +214,7 @@ async def test_legacy_partially_pruned_first_hour_keeps_its_complete_aggregate(m
             await conn.commit()
 
     clock.now = T0 + timedelta(days=2, minutes=13)
-    await MetricsCompressor(metrics_db, Config()).run()
+    await MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None).run()
 
     rows = await _fetch(metrics_db, "SELECT sample_count, total_cost FROM combined_metrics_hourly ORDER BY hour_bucket")
     assert rows == [(12, pytest.approx(12.0)), (12, pytest.approx(12.0)), (12, pytest.approx(12.0))]
@@ -227,7 +227,7 @@ async def test_raw_retention_never_deletes_uncompressed_hours(metrics_db, clock,
     cfg.METRICS_RAW_RETENTION_DAYS = 0
     clock.now = T0 + timedelta(hours=30, minutes=21)
 
-    stats = await MetricsCompressor(metrics_db, cfg).run()
+    stats = await MetricsCompressor(metrics_db, cfg, collection_watermark_provider=None).run()
 
     # Only the six closed hours older than 24h were compressed, then pruned.
     assert stats["hours_compressed"] == 6

@@ -81,7 +81,9 @@ async def test_hours_rerolled_from_compressed_tables_exclude_the_warmup(db, monk
             )
     await _metrics_repo(db).write_combined_metrics(rows)
     monkeypatch.setenv("METRICS_RAW_RETENTION_DAYS", "1")
-    await MetricsCompressor(db, Config(), rollup_enabled=False).run(now=datetime.now(timezone.utc))
+    await MetricsCompressor(db, Config(), rollup_enabled=False, collection_watermark_provider=None).run(
+        now=datetime.now(timezone.utc)
+    )
 
     repository = create_workload_usage_repository(db, db.db_type)
     second_hour = start + timedelta(hours=1)

@@ -120,6 +120,27 @@ def _parse(value: Any) -> Optional[datetime]:
     return _utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
 
 
+async def raw_hour_is_complete(db_manager: Any, raw_table: str, hour: datetime) -> bool:
+    """Whether the raw rows of ``hour`` are still all there (the hour is not below ``raw_pruned_until``).
+
+    Raw pruning deletes whole hours and records how far it went (ROL-02); a
+    row written later into a pruned hour does not make its raw set complete.
+    """
+    async with db_manager.connection_scope() as conn:
+        if db_manager.db_type == "postgres":
+            value = await conn.fetchval(
+                "SELECT raw_pruned_until FROM metrics_compression_watermarks WHERE table_name = $1", raw_table
+            )
+        else:
+            async with conn.execute(
+                "SELECT raw_pruned_until FROM metrics_compression_watermarks WHERE table_name = ?", (raw_table,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            value = row[0] if row else None
+    pruned_until = _parse(value)
+    return pruned_until is None or floor_hour(hour) >= pruned_until
+
+
 async def read_compression_boundary(db_manager: Any, raw_table: str, hourly_table: str) -> datetime:
     """Return the raw/hourly boundary of ``raw_table``: its compression watermark.
 

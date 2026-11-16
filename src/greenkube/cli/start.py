@@ -250,9 +250,11 @@ async def compress_metrics() -> None:
     logger.info("--- Starting metrics compression task ---")
     try:
         from ..core.db import get_db_manager
-        from ..core.metrics_compressor import MetricsCompressor
+        from ..core.metrics_compressor import MetricsCompressor, collection_limit_provider
 
-        compressor = MetricsCompressor(get_db_manager())
+        db_manager = get_db_manager()
+        # Never compress an hour the collection has not completely written (STO-02).
+        compressor = MetricsCompressor(db_manager, collection_watermark_provider=collection_limit_provider(db_manager))
         stats = await compressor.run()
         # Also refresh the namespace cache
         await compressor.refresh_namespace_cache()

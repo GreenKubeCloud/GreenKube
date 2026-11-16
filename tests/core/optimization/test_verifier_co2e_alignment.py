@@ -85,7 +85,7 @@ async def _verify(database, *, model_version: Optional[str]) -> RecommendationRe
     applied_at = now - timedelta(hours=80)
     combined = SQLiteCombinedMetricsRepository(database)
     await combined.write_combined_metrics(_rows(now, applied_at, model_version=model_version))
-    await MetricsCompressor(database, cfg).run()
+    await MetricsCompressor(database, cfg, collection_watermark_provider=None).run()
     reco = SQLiteRecommendationRepository(database)
     await reco.save_recommendations(
         [

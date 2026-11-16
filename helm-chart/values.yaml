@@ -494,6 +494,7 @@ config:
   # Metric collection catch-up. Each window [start, end) is collected once it is
   # older than safetyLag; after downtime the controller backfills missing windows
   # up to maxBackfill in the past (older windows are reported as gaps).
+  # maxBackfill must not exceed metricsCompressionAgeHours.
   collection:
     safetyLag: 1m
     maxBackfill: 24h

@@ -16,7 +16,13 @@ past their retention are pruned. The job is lossless by construction:
   (bounded to one day of buckets per transaction);
 * raw pruning uses an **hour-aligned** cutoff and never deletes rows at or
   after the compression watermark, so an hour is either fully raw or fully
-  deleted — never half pruned.
+  deleted — never half pruned;
+* the scheduled job passes :func:`collection_limit_provider`: the collection
+  watermark, lowered to the first failed or cost-pending step (STO-02);
+* a raw row inserted, updated or deleted below the watermark marks its hour
+  in ``metrics_dirty_hours`` (database triggers, migration 0170); each run
+  rebuilds the hourly rows of those hours from their raw rows while they are
+  complete (not below ``raw_pruned_until``), before pruning (ROL-02).
 
 The same job keeps the ``workload_usage_hourly`` rollup up to date (roadmap
 E3, BUG-12): it re-rolls the last day of hours from their raw rows (or their
@@ -222,16 +228,19 @@ class MetricsCompressor:
         db_manager,
         config: Config | None = None,
         *,
-        collection_watermark_provider: CollectionWatermarkProvider | None = None,
+        collection_watermark_provider: CollectionWatermarkProvider | None,
         rollup_enabled: bool = True,
     ):
         """
         Args:
             db_manager: The database manager.
             config: Optional configuration override.
-            collection_watermark_provider: Optional coroutine returning the end
-                of the last completely collected window. Compression never
-                passes it, so hours that are still being (back)filled stay raw.
+            collection_watermark_provider: Coroutine returning the end of the
+                last completely collected window (lowered to the first failed
+                or cost-pending step, see :func:`collection_limit_provider`).
+                Compression never passes it, so hours that are still being
+                (back)filled stay raw. Mandatory (STO-02): pass ``None``
+                explicitly only where no collection job writes the tables.
             rollup_enabled: Refresh and prune the ``workload_usage_hourly``
                 rollup in the same cycle (roadmap E3).
         """
@@ -275,6 +284,8 @@ class MetricsCompressor:
         if self._rollup_enabled:
             await step("Workload usage rollup", lambda: self.refresh_usage_rollup(now))
 
+        reaggregated = await step("Dirty hour re-aggregation", self._reaggregate_dirty_hours)
+        stats["hours_reaggregated"] = reaggregated or 0
         compressed = await step("Metrics compression", lambda: self._compress_to_hourly(now))
         if compressed:
             stats["hours_compressed"] = compressed["hours"]
@@ -504,6 +515,127 @@ class MetricsCompressor:
                 return await cursor.fetchone() is not None
 
     # ------------------------------------------------------------------
+    # Late rows: re-aggregate dirty hours (ROL-02, STO-02)
+    # ------------------------------------------------------------------
+
+    async def _reaggregate_dirty_hours(self) -> int:
+        """Rebuild the hourly rows of every compressed hour whose raw rows changed after compression.
+
+        Database triggers (migration 0170) mark an hour in ``metrics_dirty_hours``
+        when a raw row below the compression watermark is inserted, updated or
+        deleted. An hour whose raw rows are still complete (at or after the
+        table's ``raw_pruned_until``) is rebuilt from them in one transaction:
+        its hourly rows are deleted and aggregated again. An hour already pruned
+        keeps its complete aggregate: the late rows alone would replace it with
+        a partial one, so they are left out with a warning and pruned.
+
+        Returns the number of hours rebuilt.
+        """
+        rebuilt = 0
+        for table in TABLES:
+            hours = await self._dirty_hours(table)
+            if not hours:
+                continue
+            watermark = await self.get_watermark(table.raw)
+            pruned_until = await self._raw_pruned_until(table)
+            stranded = 0
+            for hour in hours:
+                if watermark is None or hour >= watermark:
+                    await self._clear_dirty(table, hour)  # not compressed yet: read and compressed from raw rows
+                elif pruned_until is not None and hour < pruned_until:
+                    stranded += 1
+                    await self._clear_dirty(table, hour)
+                else:
+                    await self._rebuild_hour(table, hour)
+                    rebuilt += 1
+            if stranded:
+                logger.warning(
+                    "%d hour(s) of %s received rows after their raw rows were pruned; their hourly "
+                    "aggregates are kept and the late rows are left out (ROL-02).",
+                    stranded,
+                    table.raw,
+                )
+        if rebuilt:
+            logger.info("Re-aggregated %d compressed hour(s) that received late rows.", rebuilt)
+        return rebuilt
+
+    async def _dirty_hours(self, table: _MetricsTable) -> list[datetime]:
+        async with self._db.connection_scope() as conn:
+            if self._db.db_type == "postgres":
+                rows = await conn.fetch(
+                    "SELECT hour_bucket FROM metrics_dirty_hours WHERE table_name = $1 ORDER BY hour_bucket", table.raw
+                )
+                return [_parse_utc(row[0]) for row in rows]
+            async with conn.execute(
+                "SELECT hour_bucket FROM metrics_dirty_hours WHERE table_name = ? ORDER BY hour_bucket", (table.raw,)
+            ) as cursor:
+                return [_parse_utc(row[0]) for row in await cursor.fetchall()]
+
+    async def _clear_dirty(self, table: _MetricsTable, hour: datetime) -> None:
+        async with self._db.connection_scope() as conn:
+            if self._db.db_type == "postgres":
+                await conn.execute(
+                    "DELETE FROM metrics_dirty_hours WHERE table_name = $1 AND hour_bucket = $2", table.raw, hour
+                )
+                return
+            await conn.execute(
+                "DELETE FROM metrics_dirty_hours WHERE table_name = ? AND hour_bucket = ?", (table.raw, to_iso_z(hour))
+            )
+            await conn.commit()
+
+    async def _raw_pruned_until(self, table: _MetricsTable) -> Optional[datetime]:
+        async with self._db.connection_scope() as conn:
+            if self._db.db_type == "postgres":
+                value = await conn.fetchval(
+                    "SELECT raw_pruned_until FROM metrics_compression_watermarks WHERE table_name = $1", table.raw
+                )
+                return _parse_utc(value) if value is not None else None
+            async with conn.execute(
+                "SELECT raw_pruned_until FROM metrics_compression_watermarks WHERE table_name = ?", (table.raw,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        return _parse_utc(row[0]) if row and row[0] else None
+
+    async def _rebuild_hour(self, table: _MetricsTable, hour: datetime) -> None:
+        """Replace the hourly rows of ``hour`` by the aggregate of its raw rows, in one transaction.
+
+        The dirty mark is removed first: a raw write committed after the
+        aggregate read marks the hour again for the next run.
+        """
+        end = hour + timedelta(hours=1)
+        backend = self._db.db_type
+        sql = table.compress_sql(backend)
+        if backend == "postgres":
+            async with self._db.connection_scope() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        "DELETE FROM metrics_dirty_hours WHERE table_name = $1 AND hour_bucket = $2", table.raw, hour
+                    )
+                    await conn.execute(f"DELETE FROM {table.hourly} WHERE hour_bucket = $1", hour)
+                    await conn.execute(sql, hour, end)
+            return
+        async with self._db.connection_scope() as conn:
+            try:
+                await conn.execute(
+                    "DELETE FROM metrics_dirty_hours WHERE table_name = ? AND hour_bucket = ?",
+                    (table.raw, to_iso_z(hour)),
+                )
+                await conn.execute(f"DELETE FROM {table.hourly} WHERE hour_bucket = ?", (to_iso_z(hour),))
+                await conn.execute(
+                    sql,
+                    (
+                        to_iso_z(hour - timedelta(seconds=1)),
+                        to_iso_z(end + timedelta(seconds=1)),
+                        to_iso_z(hour),
+                        to_iso_z(end),
+                    ),
+                )
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+
+    # ------------------------------------------------------------------
     # Workload usage rollup (roadmap E3)
     # ------------------------------------------------------------------
 
@@ -574,6 +706,9 @@ class MetricsCompressor:
             if watermark is None:
                 continue
             cutoff = min(retention_cutoff, watermark)
+            dirty = await self._dirty_hours(table)
+            if dirty:
+                cutoff = min(cutoff, dirty[0])  # never delete raw rows a re-aggregation still needs
             total += await self._delete_raw_before(table, cutoff)
             if table.pod_scope:
                 total += await self._delete_idle_before(cutoff)
@@ -582,17 +717,38 @@ class MetricsCompressor:
         return total
 
     async def _delete_raw_before(self, table: _MetricsTable, cutoff: datetime) -> int:
+        """Delete the raw rows of the hours before ``cutoff`` and advance ``raw_pruned_until``.
+
+        Both happen in one transaction, the mark first, so the dirty-hour
+        triggers ignore the pruning deletes (ROL-02).
+        """
         backend = self._db.db_type
         ts = table.timestamp_column(backend)
         async with self._db.connection_scope() as conn:
             if backend == "postgres":
-                status = await conn.execute(f"DELETE FROM {table.raw} WHERE {ts} < $1", cutoff)
+                async with conn.transaction():
+                    await conn.execute(
+                        "UPDATE metrics_compression_watermarks SET raw_pruned_until = $2 "
+                        "WHERE table_name = $1 AND (raw_pruned_until IS NULL OR raw_pruned_until < $2)",
+                        table.raw,
+                        cutoff,
+                    )
+                    status = await conn.execute(f"DELETE FROM {table.raw} WHERE {ts} < $1", cutoff)
                 return _status_count(status)
-            cursor = await conn.execute(
-                f"DELETE FROM {table.raw} WHERE {ts} < ? AND {table.hour_expr(backend)} < ?",
-                (to_iso_z(cutoff + timedelta(seconds=1)), to_iso_z(cutoff)),
-            )
-            await conn.commit()
+            try:
+                await conn.execute(
+                    "UPDATE metrics_compression_watermarks SET raw_pruned_until = ? "
+                    "WHERE table_name = ? AND (raw_pruned_until IS NULL OR raw_pruned_until < ?)",
+                    (to_iso_z(cutoff), table.raw, to_iso_z(cutoff)),
+                )
+                cursor = await conn.execute(
+                    f"DELETE FROM {table.raw} WHERE {ts} < ? AND {table.hour_expr(backend)} < ?",
+                    (to_iso_z(cutoff + timedelta(seconds=1)), to_iso_z(cutoff)),
+                )
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
             return max(cursor.rowcount, 0)
 
     async def _delete_idle_before(self, cutoff: datetime) -> int:
@@ -714,6 +870,54 @@ def _status_count(status: Any) -> int:
         return int(status.split()[-1])
     except (ValueError, IndexError):
         return 0
+
+
+def collection_limit_provider(db_manager: Any, config: Config | None = None) -> CollectionWatermarkProvider:
+    """Build the compression limit of the scheduled job from the metric collection (STO-02).
+
+    The coroutine returns the collection watermark (``last_complete_end`` of
+    ``combined_metrics``), lowered to the start of the earliest step that is
+    still ``failed`` or whose cost is ``opencost_pending`` within the retry
+    horizon (``COLLECTION_MAX_BACKFILL`` before the watermark): those steps are
+    rewritten later and their hour stays raw until then. Without a watermark it
+    returns the epoch, so nothing is compressed before the first complete window.
+    """
+    cfg = config or get_config()
+
+    async def provider() -> Optional[datetime]:
+        from ..storage.base_collection_watermark_repository import create_collection_watermark_repository
+        from ..storage.base_collection_window_repository import (
+            COST_STATUS_PENDING,
+            STATUS_FAILED,
+            create_collection_window_repository,
+        )
+        from ..storage.installation_repository import create_installation_repository
+        from ..utils.date_utils import parse_duration
+        from .cluster_identity import cached_installation_identity
+        from .collection import METRICS_WATERMARK_SOURCE, collection_cluster_key
+
+        cached = cached_installation_identity()
+        if cached is not None:
+            cluster_uid = cached.cluster_uid
+        else:
+            stored = await create_installation_repository(db_manager, db_manager.db_type).get()
+            cluster_uid = stored.cluster_uid if stored is not None else collection_cluster_key(cfg)
+        watermark = await create_collection_watermark_repository(db_manager, db_manager.db_type).get(
+            cluster_uid, METRICS_WATERMARK_SOURCE
+        )
+        if watermark is None:
+            return datetime(1970, 1, 1, tzinfo=timezone.utc)
+        limit = watermark.last_complete_end
+        horizon = limit - parse_duration(str(getattr(cfg, "COLLECTION_MAX_BACKFILL", "24h") or "24h"))
+        records = await create_collection_window_repository(db_manager, db_manager.db_type).list_overlapping(
+            cluster_uid, METRICS_WATERMARK_SOURCE, horizon, limit
+        )
+        for record in records:
+            if record.status == STATUS_FAILED or record.cost_status == COST_STATUS_PENDING:
+                limit = min(limit, record.window_start)
+        return limit
+
+    return provider
 
 
 def _parse_utc(value: Any) -> datetime:
