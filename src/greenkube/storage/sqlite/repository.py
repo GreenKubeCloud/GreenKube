@@ -144,6 +144,22 @@ def _allocation_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {column: row[column] for column in ALLOCATION_COLUMNS if column in keys}
 
 
+#: Hourly rollup columns of migration 0172 (ROL-03, MEA-05).
+ROLLUP_COLUMNS = (
+    "first_sample_at",
+    "last_sample_at",
+    "trusted_cost",
+    "trusted_cost_cpu",
+    "trusted_cost_ram",
+    "trusted_cost_seconds",
+)
+
+
+def _rollup_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    keys = set(row.keys())
+    return {column: row[column] for column in ROLLUP_COLUMNS if column in keys}
+
+
 def _row_source_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
     keys = set(row.keys())
     return {column: row[column] for column in ROW_SOURCE_COLUMNS if column in keys}
@@ -1218,6 +1234,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 calculation_version=row["calculation_version"],
                                 **_provenance_from_row(row),
                                 **_allocation_from_row(row),
+                                **_rollup_from_row(row),
                             )
                         )
                     return metrics

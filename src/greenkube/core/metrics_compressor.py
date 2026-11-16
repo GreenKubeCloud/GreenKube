@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from ..core.config import Config, get_config
-from ..models.provenance import cost_source_aggregate_sql
+from ..models.provenance import TRUSTED_COST_SOURCES, cost_source_aggregate_sql
 from ..utils.date_utils import to_iso_z
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,18 @@ _GPU_POWER_AVERAGE = (
     "WHEN SUM(COALESCE(duration_seconds, 0)) > 0 THEN "
     "SUM(COALESCE(gpu_power_watts, 0) * COALESCE(duration_seconds, 0)) * 1.0 / SUM(COALESCE(duration_seconds, 0)) "
     "ELSE SUM(COALESCE(gpu_power_watts, 0)) * 1.0 / COUNT(*) END"
+)
+
+
+#: SQL form of :func:`greenkube.models.provenance.is_cost_trusted` for one raw row (MEA-05):
+#: an allocated cost source and a non-negative cost, never a zero cost on a row that
+#: requested or used CPU or memory (a missing price, COST-05).
+_TRUSTED_COST = (
+    "(LOWER(TRIM(COALESCE(cost_source, ''))) IN ("
+    + ", ".join(f"'{source}'" for source in sorted(str(getattr(s, "value", s)) for s in TRUSTED_COST_SOURCES))
+    + ") AND (total_cost IS NULL OR (total_cost >= 0 AND NOT (total_cost = 0 AND ("
+    "COALESCE(cpu_request, 0) > 0 OR COALESCE(memory_request, 0) > 0 "
+    "OR COALESCE(cpu_usage_millicores, 0) > 0 OR COALESCE(memory_usage_bytes, 0) > 0)))))"
 )
 
 
@@ -150,6 +162,15 @@ class _MetricsTable:
             ("intensity_source", _source_aggregate("intensity_source")),
             ("emaps_zone", _mode("emaps_zone", backend)),
             ("gpu_power_watts", _GPU_POWER_AVERAGE),
+            # ROL-03: the covered interval of each pod in the hour, so a measurement can take the
+            # union of the pods' lifetimes instead of the longest one.
+            ("first_sample_at", f"MIN({self.timestamp_column(backend)})"),
+            ("last_sample_at", f"MAX({self.timestamp_column(backend)})"),
+            # MEA-05: the trusted part of the hour survives one untrusted sample.
+            ("trusted_cost", f"SUM(CASE WHEN {_TRUSTED_COST} THEN total_cost END)"),
+            ("trusted_cost_cpu", f"SUM(CASE WHEN {_TRUSTED_COST} THEN cost_cpu END)"),
+            ("trusted_cost_ram", f"SUM(CASE WHEN {_TRUSTED_COST} THEN cost_ram END)"),
+            ("trusted_cost_seconds", f"SUM(CASE WHEN {_TRUSTED_COST} THEN COALESCE(duration_seconds, 0) ELSE 0 END)"),
         ]
         if self.pod_scope:
             columns += [

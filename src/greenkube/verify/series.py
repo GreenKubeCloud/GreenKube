@@ -7,8 +7,13 @@ trust rules as the verifier: cost only from rows with trusted cost provenance
 (C0.3), carbon only from rows with measured intensity and a profiled node.
 Rows are grouped per timestamp (the replicas of one sample); a timestamp
 group counts towards cost (or carbon) only when every row in it is trusted.
-Rates divide by the covered time, so raw 5-minute rows and hourly rollups
-mix correctly. Embodied CO2e (``embodied_co2e_grams``, allocated by
+Rates divide by the covered time. For hourly rollup rows (one per pod and
+hour) the covered time is the union of the pods' sample spans
+(``first_sample_at``/``last_sample_at``), not the longest pod, and the cost
+comes from the trusted part of each pod-hour (``trusted_cost*``), so an hour
+gives the same bucket before and after compression (ROL-03, MEA-05). Older
+rollup rows without sample bounds are left out when several pods each covered
+part of the hour. Embodied CO2e (``embodied_co2e_grams``, allocated by
 reservation) is aggregated apart from the operational CO2e: it needs no
 measured intensity.
 
@@ -132,6 +137,91 @@ def _number(value: Any) -> Optional[float]:
     return number if number == number and number not in (float("inf"), float("-inf")) else None
 
 
+def _is_rollup_group(members: Sequence[Any]) -> Optional[bool]:
+    """``True`` for hourly rows with sample bounds, ``None`` for older hourly rows, ``False`` for raw rows."""
+    if any(getattr(row, "first_sample_at", None) is not None for row in members):
+        return True
+    if any(int(getattr(row, "sample_count", 1) or 1) > 1 for row in members):
+        return None
+    return False
+
+
+def _rollup_coverage(members: Sequence[Any], step_seconds: int, slot: datetime, slot_seconds: int) -> float:
+    """Covered seconds of a group of hourly rows: the union of the pods' sample spans (ROL-03).
+
+    Each pod covers ``[first_sample_at, last_sample_at + step)`` inside the slot,
+    capped by its own covered seconds (a pod with a missing scrape covers less
+    than its span). Exact for pods whose samples are contiguous in the hour.
+    """
+    slot_end = slot + timedelta(seconds=slot_seconds)
+    spans: List[tuple[datetime, datetime]] = []
+    for row in members:
+        first = getattr(row, "first_sample_at", None)
+        last = getattr(row, "last_sample_at", None)
+        if first is None or last is None:
+            continue
+        begin = max(ensure_utc(first), slot)
+        finish = min(ensure_utc(last) + timedelta(seconds=step_seconds), slot_end)
+        if finish > begin:
+            spans.append((begin, finish))
+    union = 0.0
+    current_start: Optional[datetime] = None
+    current_end: Optional[datetime] = None
+    for begin, finish in sorted(spans):
+        if current_end is None or begin > current_end:
+            if current_start is not None and current_end is not None:
+                union += (current_end - current_start).total_seconds()
+            current_start, current_end = begin, finish
+        elif finish > current_end:
+            current_end = finish
+    if current_start is not None and current_end is not None:
+        union += (current_end - current_start).total_seconds()
+    seconds = [_coverage_seconds(row, step_seconds) for row in members]
+    return min(union, sum(seconds)) if union > 0 else max(seconds)
+
+
+def _add_trusted_rollup_cost(acc: "_Accumulator", members: Sequence[Any], coverage: float, step_seconds: int) -> bool:
+    """Add the trusted cost of a group of hourly rows (MEA-05); ``False`` when it cannot be known.
+
+    Each pod's trusted cost is extrapolated over its covered seconds at its
+    trusted rate, and the group counts for the trusted share ``f`` of its
+    pod-seconds: the bucket's cost rate is the pods' cost per covered hour and
+    its cost coverage drops by the untrusted share only, as with raw rows.
+    """
+    trusted_seconds = [_number(getattr(row, "trusted_cost_seconds", None)) for row in members]
+    trusted_costs = [_number(getattr(row, "trusted_cost", None)) for row in members]
+    if any(value is None for value in trusted_seconds):
+        return False
+    durations = [_coverage_seconds(row, step_seconds) for row in members]
+    if any(d > 0 and (t or 0.0) <= 0 for d, t in zip(durations, trusted_seconds)):
+        return False  # a pod without any trusted sample: the instants it covers are untrusted
+    total_duration = sum(durations)
+    if total_duration <= 0:
+        return False
+    share = sum(t or 0.0 for t in trusted_seconds) / total_duration
+
+    def extrapolated(values: List[Optional[float]]) -> Optional[float]:
+        if any(value is None for value in values):
+            return None
+        return sum((v or 0.0) * d / (t or 1.0) for v, d, t in zip(values, durations, trusted_seconds) if d > 0)
+
+    cost = extrapolated([value if value is not None else 0.0 for value in trusted_costs])
+    acc.cost += share * (cost or 0.0)
+    acc.cost_seconds += share * coverage
+    cpu = extrapolated([_number(getattr(row, "trusted_cost_cpu", None)) for row in members])
+    ram = extrapolated([_number(getattr(row, "trusted_cost_ram", None)) for row in members])
+    if cpu is None or ram is None:
+        acc.components = False
+    else:
+        acc.cost_cpu += share * cpu
+        acc.cost_ram += share * ram
+    for row, seconds in zip(members, trusted_seconds):
+        basis = cost_basis_family(getattr(row, "cost_source", None))
+        if basis is not None:
+            acc.cost_bases[basis] += seconds or 0.0
+    return True
+
+
 def hourly_buckets(
     rows: Iterable[Any], window: TimeWindow, step_seconds: int, *, slot_seconds: int = 3600
 ) -> List[HourBucket]:
@@ -157,8 +247,20 @@ def hourly_buckets(
 
     accumulators: Dict[datetime, _Accumulator] = defaultdict(_Accumulator)
     for moment, members in groups.items():
-        acc = accumulators[floor_slot(moment, slot_seconds)]
-        coverage = max(_coverage_seconds(row, step_seconds) for row in members)
+        slot = floor_slot(moment, slot_seconds)
+        rollup = _is_rollup_group(members)
+        if rollup is None:
+            # Hourly rows without their sample bounds (written before migration 0172) of several
+            # pods that each lived part of the hour: the covered time is unknown, and the longest
+            # pod would inflate the rates. The hour is left out (ROL-03).
+            if len(members) > 1 and max(_coverage_seconds(row, step_seconds) for row in members) < slot_seconds:
+                continue
+            coverage = max(_coverage_seconds(row, step_seconds) for row in members)
+        elif rollup:
+            coverage = _rollup_coverage(members, step_seconds, slot, slot_seconds)
+        else:
+            coverage = max(_coverage_seconds(row, step_seconds) for row in members)
+        acc = accumulators[slot]
         acc.covered += coverage
         for row in members:
             seconds = _coverage_seconds(row, step_seconds)
@@ -184,7 +286,8 @@ def hourly_buckets(
             instance_type = getattr(row, "node_instance_type", None)
             if instance_type:
                 acc.instance_types[str(instance_type)] += seconds / 3600.0
-        if all(cost_is_trusted(row) for row in members):
+        rollup_cost = bool(rollup) and _add_trusted_rollup_cost(acc, members, coverage, step_seconds)
+        if not rollup_cost and all(cost_is_trusted(row) for row in members):
             acc.cost += sum(float(getattr(row, "total_cost", 0.0) or 0.0) for row in members)
             acc.cost_seconds += coverage
             for row in members:
