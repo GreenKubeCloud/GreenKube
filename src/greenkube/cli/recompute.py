@@ -29,13 +29,18 @@ def parse_since(value: str, now: datetime) -> datetime:
 async def _run(start: datetime, end: datetime, *, only_outdated: bool, dry_run: bool) -> str:
     from ..core.config import get_config
     from ..core.db import get_db_manager
-    from ..core.factory import get_combined_metrics_repository, get_node_repository
+    from ..core.factory import get_combined_metrics_repository, get_embodied_repository, get_node_repository
     from ..impact.recompute import MetricRecomputer
 
     manager = get_db_manager()
     await manager.connect()
     try:
-        recomputer = MetricRecomputer(get_config(), get_combined_metrics_repository(), get_node_repository())
+        recomputer = MetricRecomputer(
+            get_config(),
+            get_combined_metrics_repository(),
+            get_node_repository(),
+            embodied_repository=get_embodied_repository(),
+        )
         report = await recomputer.run(start, end, only_outdated=only_outdated, dry_run=dry_run)
         return report.summary()
     finally:

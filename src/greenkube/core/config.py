@@ -248,6 +248,11 @@ class Config(BaseSettings):
     # Per-instance manufacturing GWP fallback (kg CO₂eq) used when Boavizta does not
     # recognise the cloud provider/instance type. 100 kg is a conservative midpoint.
     DEFAULT_EMBODIED_EMISSIONS_KG: float = 100.0
+    # Capacity-proportional embodied fallback (NRG-01) for nodes Boavizta does not know and that
+    # carry no greenkube.io/embodied-kg annotation: kg CO2e per vCPU (the Boavizta m5 family ratio)
+    # plus kg CO2e per GiB of memory. DEFAULT_EMBODIED_EMISSIONS_KG is used only without a capacity.
+    DEFAULT_EMBODIED_KG_PER_VCPU: float = 12.0
+    DEFAULT_EMBODIED_KG_PER_GIB: float = 0.0
 
     # --- Network variables ---
     LOG_LEVEL: str = "INFO"

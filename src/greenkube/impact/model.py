@@ -685,6 +685,9 @@ class ReservationAwareImpactModel:
         power_sources = sorted({node.power_source.value for node in acc.nodes.values()})
         if power_sources:
             assumptions["power_sources"] = power_sources
+        embodied_sources = sorted({node.embodied_source for node in acc.nodes.values() if node.embodied_source})
+        if embodied_sources:
+            assumptions["embodied_sources"] = embodied_sources
         if any(node.is_fallback for node in acc.nodes.values()):
             assumptions["unknown_node_profile"] = True
         if acc.observed_cost_sources:

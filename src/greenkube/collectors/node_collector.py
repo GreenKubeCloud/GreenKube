@@ -7,6 +7,7 @@ from kubernetes_asyncio.client.rest import ApiException
 
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api
+from greenkube.energy.embodied import parse_embodied_annotation
 
 from .base_collector import BaseCollector
 from .k8s_errors import KubernetesListError, list_all_pages
@@ -94,6 +95,8 @@ class NodeCollector(BaseCollector):
                     node_pool=node_pool,
                     cpu_capacity_cores=cpu_capacity,
                     memory_capacity_bytes=memory_capacity,
+                    # Operator embodied emissions (NRG-01); the only value node snapshots carry (NRG-07).
+                    embodied_emissions_kg=parse_embodied_annotation(getattr(node.metadata, "annotations", None)),
                     timestamp=datetime.now(timezone.utc),
                 )
 

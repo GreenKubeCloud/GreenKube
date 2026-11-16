@@ -9,6 +9,14 @@ from greenkube.models.boavizta import BoaviztaResponse
 
 logger = logging.getLogger(__name__)
 
+#: Providers of local or on-prem clusters, absent from Boavizta's cloud-instance catalogue.
+NON_CLOUD_PROVIDERS = frozenset({"unknown", "local", "minikube", "on_prem", "on-prem", "kind", "k3s", "k3d"})
+
+
+def is_cloud_provider(provider: Optional[str]) -> bool:
+    """True when ``provider`` can be looked up in Boavizta's cloud-instance catalogue."""
+    return bool(provider) and str(provider).strip().lower() not in NON_CLOUD_PROVIDERS
+
 
 class BoaviztaCollector(BaseCollector):
     """
@@ -22,6 +30,8 @@ class BoaviztaCollector(BaseCollector):
         if self.api_token:
             self.headers["Authorization"] = f"Bearer {self.api_token}"
         self._client: httpx.AsyncClient | None = None
+        #: Why the last lookup returned ``None`` (HTTP error, unexpected payload), for the negative cache.
+        self.last_error: Optional[str] = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Return the reusable HTTP client, creating it lazily if needed."""
@@ -56,11 +66,16 @@ class BoaviztaCollector(BaseCollector):
         Retrieves the impact of a server.
         Prioritizes cloud instance lookup if provider and instance_type are present.
         Falls back to model lookup if model is present.
+
+        No ``duration`` is sent, so embodied impacts cover the whole life of the asset.
+        Returns ``None`` (and sets :attr:`last_error`) when the API fails or answers an
+        unexpected payload.
         """
+        self.last_error = None
 
         # Local/on-prem clusters do not map to Boavizta's cloud-instance catalogue.
         if provider and instance_type:
-            if provider.strip().lower() in {"unknown", "local", "minikube", "on_prem", "on-prem"}:
+            if not is_cloud_provider(provider):
                 logger.debug(
                     "Skipping Boavizta cloud lookup for non-cloud provider %r; configured fallback will be used.",
                     provider,
@@ -89,11 +104,13 @@ class BoaviztaCollector(BaseCollector):
         try:
             response = await client.get(url, params=params)
             response.raise_for_status()
-            return BoaviztaResponse(**response.json())
+            return BoaviztaResponse.model_validate(response.json())
         except httpx.HTTPError as e:
+            self.last_error = f"HTTP error: {e}"
             logger.error("Boavizta API error for cloud instance %s/%s: %s", provider, instance_type, e)
             return None
         except Exception as e:
+            self.last_error = f"unexpected response: {e}"
             logger.error("Unexpected error calling Boavizta for %s/%s: %s", provider, instance_type, e)
             return None
 
@@ -109,10 +126,12 @@ class BoaviztaCollector(BaseCollector):
         try:
             response = await client.get(url, params=params)
             response.raise_for_status()
-            return BoaviztaResponse(**response.json())
+            return BoaviztaResponse.model_validate(response.json())
         except httpx.HTTPError as e:
+            self.last_error = f"HTTP error: {e}"
             logger.error("Boavizta API error for archetype %s: %s", archetype, e)
             return None
         except Exception as e:
+            self.last_error = f"unexpected response: {e}"
             logger.error("Unexpected error calling Boavizta for archetype %s: %s", archetype, e)
             return None

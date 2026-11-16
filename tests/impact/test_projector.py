@@ -86,7 +86,7 @@ class TestNodeProfiles:
         per_core = config.DEFAULT_INSTANCE_MIN_WATTS / config.DEFAULT_INSTANCE_VCORES
         assert profile.idle_watts == pytest.approx(per_core * 8)
         assert profile.embodied_g_per_hour == pytest.approx(
-            config.DEFAULT_EMBODIED_EMISSIONS_KG * 1000 / (config.DEFAULT_HARDWARE_LIFESPAN_YEARS * HOURS_PER_YEAR)
+            8 * config.DEFAULT_EMBODIED_KG_PER_VCPU * 1000 / (config.DEFAULT_HARDWARE_LIFESPAN_YEARS * HOURS_PER_YEAR)
         )
 
     def test_unknown_nodes_use_a_flagged_default_profile(self):

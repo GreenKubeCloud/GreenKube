@@ -266,6 +266,13 @@
         "electricityProvider": {"type": "string", "enum": ["electricity_maps", "wattnet"]},
         "normalizationGranularity": {"type": "string", "enum": ["hour", "day", "none"]},
         "intensityMaxAge": {"type": "string"},
+        "boavizta": {
+          "type": "object",
+          "properties": {
+            "embodiedKgPerVcpu": {"type": "number", "minimum": 0},
+            "embodiedKgPerGib": {"type": "number", "minimum": 0}
+          }
+        },
         "metricsCompressionAgeHours": {"type": "integer", "minimum": 1},
         "k8sRequestTimeout": {"type": "number", "minimum": 0},
         "db": {

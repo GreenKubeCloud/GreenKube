@@ -454,6 +454,13 @@ config:
     # conservative midpoint. The former value of 350 kg represented a full physical
     # server and over-estimated Scope 3 by 2–7× on low-carbon grids.
     defaultEmbodiedEmissionsKg: 100
+    # Capacity-proportional fallback for nodes Boavizta does not know (on-prem, kind, unknown
+    # instance types) and without a greenkube.io/embodied-kg node annotation: kg CO2e per vCPU
+    # (the Boavizta m5 family ratio) plus kg CO2e per GiB of memory. Rows using it carry
+    # embodied_source=fallback_per_vcpu. defaultEmbodiedEmissionsKg applies only when the node
+    # capacity is unknown.
+    embodiedKgPerVcpu: 12
+    embodiedKgPerGib: 0
 
   # PostgreSQL connection settings. SQLite is for `greenkube demo` and local
   # development only; the chart always uses PostgreSQL (bundled or external).

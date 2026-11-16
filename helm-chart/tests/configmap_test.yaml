@@ -1059,3 +1059,24 @@ tests:
       - equal:
           path: data.OPENCOST_CLUSTER_ID
           value: cluster-a
+
+  - it: sets the per-vCPU and per-GiB embodied fallback with defaults 12 and 0 (NRG-01)
+    asserts:
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_VCPU
+          value: "12"
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_GIB
+          value: "0"
+
+  - it: sets the embodied fallback coefficients from config.boavizta (NRG-01)
+    set:
+      config.boavizta.embodiedKgPerVcpu: 9.5
+      config.boavizta.embodiedKgPerGib: 1.2
+    asserts:
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_VCPU
+          value: "9.5"
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_GIB
+          value: "1.2"

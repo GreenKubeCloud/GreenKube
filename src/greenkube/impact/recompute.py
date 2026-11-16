@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
+from greenkube.energy.embodied import load_cached_profiles, resolve_node_embodied
 from greenkube.energy.node_power import resolve_node_power_profile
 from greenkube.impact.rows import (
     MetricRowAllocator,
@@ -146,7 +147,13 @@ class MetricRecomputer:
     """Re-allocates stored raw rows with the current Impact Model."""
 
     def __init__(
-        self, config: Any, repository: Any, node_repository: Any, *, allocator: Optional[MetricRowAllocator] = None
+        self,
+        config: Any,
+        repository: Any,
+        node_repository: Any,
+        *,
+        allocator: Optional[MetricRowAllocator] = None,
+        embodied_repository: Any = None,
     ):
         self.config = config
         self.repository = repository
@@ -159,6 +166,9 @@ class MetricRecomputer:
         }
         lifespan_years = float(getattr(config, "DEFAULT_HARDWARE_LIFESPAN_YEARS", 4) or 0)
         self.lifespan_hours = lifespan_years * HOURS_PER_YEAR
+        #: Stored Boavizta profiles (``instance_carbon_profiles``); ``None`` uses the fallbacks only.
+        self.embodied_repository = embodied_repository
+        self._embodied_profiles: Dict[tuple, dict] = {}
 
     async def run(
         self, start: datetime, end: datetime, *, only_outdated: bool = True, dry_run: bool = False
@@ -190,11 +200,15 @@ class MetricRecomputer:
             instance_profiles=INSTANCE_PROFILES,
             default_profile=self.default_profile,
         )
-        embodied_kg = getattr(info, "embodied_emissions_kg", None) if info is not None else None
-        embodied_g_per_hour = (
-            float(embodied_kg) * 1000.0 / self.lifespan_hours if embodied_kg and self.lifespan_hours > 0 else 0.0
-        )
         profile = power.profile
+        # Same resolution as the collection (NRG-01, NRG-07): the snapshot only carries an operator
+        # value; Boavizta values come from the stored profiles, never from a lookup that may fail.
+        embodied = resolve_node_embodied(
+            info,
+            self._embodied_profiles,
+            self.config,
+            cpu_capacity_cores=float(profile.get("vcores", 0.0) or 0.0) or None,
+        )
         return NodeSpec(
             name=node_name,
             instance_type=instance_type,
@@ -206,9 +220,11 @@ class MetricRecomputer:
             max_watts=float(profile.get("maxWatts", 0.0) or 0.0),
             vcores=float(profile.get("vcores", 0.0) or 0.0) or None,
             power_source=power.source,
-            embodied_g_per_hour=embodied_g_per_hour,
+            embodied_g_per_hour=embodied.g_per_hour,
             gpu_unattributed_watts=gpu_unattributed,
             is_fallback=power.is_fallback,
+            embodied_source=embodied.source,
+            embodied_reason=embodied.reason(node_name),
         )
 
     async def _run_chunk(
@@ -230,6 +246,7 @@ class MetricRecomputer:
         for container in containers:
             containers_by_pod[(container.namespace, container.pod_name, container.timestamp)].append(container)
         nodes = await self._nodes_at(end)
+        self._embodied_profiles = await load_cached_profiles(self.embodied_repository, nodes, self.config)
 
         groups: Dict[Tuple[str, Optional[datetime]], List[CombinedMetric]] = defaultdict(list)
         for row in pods:

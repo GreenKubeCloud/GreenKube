@@ -43,7 +43,7 @@ from greenkube.impact.types import (
     WorkloadRef,
 )
 from greenkube.models.metrics import CombinedMetric
-from greenkube.models.provenance import ALLOCATED_COST_SOURCES, CostSource
+from greenkube.models.provenance import ALLOCATED_COST_SOURCES, EMBODIED_FALLBACK_REASON_PREFIX, CostSource
 
 #: Joules per kWh.
 JOULES_PER_KWH = 3.6e6
@@ -112,6 +112,7 @@ class NodeIdleMetric:
     intensity_source: Optional[str] = None
     model_version: str = IMPACT_MODEL_VERSION
     scope: str = IDLE_SCOPE
+    embodied_source: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,9 @@ class NodeSpec:
     embodied_g_per_hour: float = 0.0
     gpu_unattributed_watts: float = 0.0
     is_fallback: bool = False
+    #: Where ``embodied_g_per_hour`` came from (``EmbodiedSource``) and its row estimation reason (NRG-01).
+    embodied_source: Optional[str] = None
+    embodied_reason: Optional[str] = None
 
 
 @dataclass
@@ -237,6 +241,8 @@ class MetricRowAllocator:
             is_fallback=spec.is_fallback,
             memory_watts_per_gib=self.memory_watts_per_gib,
             gpu_unattributed_watts=max(spec.gpu_unattributed_watts, 0.0),
+            embodied_source=spec.embodied_source,
+            embodied_reason=spec.embodied_reason,
         )
 
     def modeled_prices(self, node: NodeImpactProfile) -> UnitPrices:
@@ -320,6 +326,15 @@ class MetricRowAllocator:
             "embodied_co2e_grams": impact.co2e_embodied_g,
             "model_version": impact.model_version,
         }
+        if node.embodied_source is not None:
+            # NRG-01: the embodied provenance is recomputed with the row; a fallback is flagged.
+            reasons = [r for r in row.estimation_reasons if not r.startswith(EMBODIED_FALLBACK_REASON_PREFIX)]
+            if node.embodied_reason:
+                reasons.append(node.embodied_reason)
+            update["embodied_source"] = node.embodied_source
+            update["estimation_reasons"] = reasons
+            if node.embodied_reason:
+                update["is_estimated"] = True
         if not _is_observed_cost(row):
             # Allocation cost is share × capacity × unit price, so re-pricing a
             # share at the modeled prices is a per-resource rescale.
@@ -338,7 +353,11 @@ class MetricRowAllocator:
                 f"{MODELED_COST_REASON_PREFIX} '{row.pod_name}'; cost allocated by reservation at "
                 f"{modeled.source.value} unit prices ({modeled.detail or 'unspecified'})"
             )
-            reasons = [r for r in row.estimation_reasons if not r.startswith("No cost data for pod")]
+            reasons = [
+                r
+                for r in update.get("estimation_reasons", row.estimation_reasons)
+                if not r.startswith("No cost data for pod")
+            ]
             reasons = [r for r in reasons if not r.startswith(MODELED_COST_REASON_PREFIX)]
             update["estimation_reasons"] = [*reasons, reason]
             update["is_estimated"] = True
@@ -393,6 +412,7 @@ class MetricRowAllocator:
             power_source=node.power_source.value,
             intensity_source=fields.get("intensity_source", first.intensity_source),
             model_version=impact.model_version,
+            embodied_source=node.embodied_source,
         )
 
 

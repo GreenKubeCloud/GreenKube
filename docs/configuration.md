@@ -154,7 +154,11 @@ SQLite (`DB_TYPE=sqlite`, `DB_PATH`) remains for `greenkube demo` and local deve
 | Key | Default | Description |
 |-----|---------|-------------|
 | `config.boavizta.url` | `""` | Boavizta API endpoint for embodied emissions. Empty uses the public API `https://api.boavizta.org`, or the URL saved on the Settings page. A URL set here always takes precedence. |
-| `config.boavizta.defaultEmbodiedEmissionsKg` | `100` | Fallback embodied emissions in kg CO₂e when the instance type is not recognised |
+| `config.boavizta.defaultEmbodiedEmissionsKg` | `100` | Flat fallback embodied emissions in kg CO₂e, used only when neither Boavizta nor the node capacity is known (`embodied_source=fallback_default`) |
+| `config.boavizta.embodiedKgPerVcpu` | `12` | `DEFAULT_EMBODIED_KG_PER_VCPU`: embodied emissions in kg CO₂e per vCPU for nodes Boavizta does not know and without a `greenkube.io/embodied-kg` annotation (`embodied_source=fallback_per_vcpu`) |
+| `config.boavizta.embodiedKgPerGib` | `0` | `DEFAULT_EMBODIED_KG_PER_GIB`: kg CO₂e per GiB of node memory added to the per-vCPU fallback |
+
+A node annotation `greenkube.io/embodied-kg: "1500"` sets the whole-node embodied emissions of on-prem hardware (`embodied_source=configured`) and takes precedence over Boavizta. A failed Boavizta lookup is cached and retried at most every 24 hours.
 
 ### Prometheus & OpenCost integration (`config.prometheus`, `config.opencost`)
 

@@ -87,8 +87,15 @@ The model selects the power profile like the energy estimator does:
 
 `M_h = GWP × 1000 / (lifespan_years × 8760)` gCO₂e per node-hour.
 
-- `GWP` is the Boavizta manufacturing value stored on the node (`embodied_emissions_kg`), or `DEFAULT_EMBODIED_EMISSIONS_KG` (100 kg).
+- `GWP` is resolved per node by `greenkube.energy.embodied.resolve_node_embodied`, the same function for collection, `greenkube recompute` and projections, and recorded on every pod, container and idle row as `embodied_source`:
+  1. `configured`: the node annotation `greenkube.io/embodied-kg` (whole-node kg CO₂e, for on-prem hardware);
+  2. `boavizta`: the lifetime embedded GWP of the node's cloud instance type from the Boavizta API v1 (`impacts.gwp.embedded.value`, requested without `duration`), cached in `instance_carbon_profiles`;
+  3. `fallback_per_vcpu`: `DEFAULT_EMBODIED_KG_PER_VCPU` (12 kg, the Boavizta m5 family ratio) × cores + `DEFAULT_EMBODIED_KG_PER_GIB` (0) × GiB;
+  4. `fallback_default`: `DEFAULT_EMBODIED_EMISSIONS_KG` (100 kg) when the capacity is unknown.
+
+  Rows of the two fallbacks get `is_estimated` and an estimation reason starting with "Embodied emissions estimated". A failed Boavizta lookup is stored as a negative cache entry (`source = 'fallback'`, `error`) and retried at most every 24 hours. Node snapshots carry only the configured value (NRG-07).
 - The lifespan is `DEFAULT_HARDWARE_LIFESPAN_YEARS` (4 years).
+- Impact Model 4.0.0 introduced this resolution; rows written before kept the flat 100 kg per node (`embodied_source` NULL). `greenkube recompute --since <raw retention>` re-allocates the raw rows; hourly aggregates keep the old values.
 
 ## Allocation policy: `ReservationAwareAllocation`
 

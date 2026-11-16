@@ -79,6 +79,7 @@ IDLE_METRIC_COLUMNS: tuple[str, ...] = (
     "power_source",
     "intensity_source",
     "model_version",
+    "embodied_source",
 )
 
 
@@ -112,7 +113,7 @@ def _allocation_values(metric: CombinedMetric) -> tuple[Any, ...]:
 
 
 #: Where the node and pod metadata of a raw row came from (WP-01.1, migration 0120).
-ROW_SOURCE_COLUMNS: tuple[str, ...] = ("node_source", "metadata_source")
+ROW_SOURCE_COLUMNS: tuple[str, ...] = ("node_source", "metadata_source", "embodied_source")
 
 
 def _row_source_values(metric: CombinedMetric) -> tuple[Any, ...]:
@@ -368,7 +369,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                               calculation_version,
                               cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                               cost_source, usage_source, power_source, intensity_source,
-                              model_version, gpu_power_watts, node_source, metadata_source,
+                              model_version, gpu_power_watts, node_source, metadata_source, embodied_source,
                               collected_at, collection_run_id)
                         VALUES (
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -377,7 +378,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             ?,
                             ?, ?, ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?,
-                            ?, ?
+                            ?, ?, ?
                         )
                         ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
                             co2e_grams = excluded.co2e_grams,
@@ -412,6 +413,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             intensity_source = excluded.intensity_source,
                             model_version = excluded.model_version,
                             gpu_power_watts = excluded.gpu_power_watts,
+                            embodied_source = excluded.embodied_source,
                             collected_at = excluded.collected_at,
                             collection_run_id = excluded.collection_run_id,
                     """
@@ -1296,10 +1298,10 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                     cost_source, usage_source, power_source, intensity_source,
                     emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
-                    node_source, metadata_source, collected_at, collection_run_id
+                    node_source, metadata_source, embodied_source, collected_at, collection_run_id
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(namespace, pod_name, container_name, timestamp) DO UPDATE SET
                     co2e_grams = excluded.co2e_grams,
@@ -1327,6 +1329,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                     memory_limit = excluded.memory_limit,
                     model_version = excluded.model_version,
                     gpu_power_watts = excluded.gpu_power_watts,
+                    embodied_source = excluded.embodied_source,
                     node_source = excluded.node_source,
                     metadata_source = excluded.metadata_source,
                     collected_at = excluded.collected_at,

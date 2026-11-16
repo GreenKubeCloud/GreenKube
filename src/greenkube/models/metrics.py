@@ -1072,6 +1072,13 @@ class CombinedMetric(BaseModel):
             "(pod history or the live pod list) or missing (WP-01.1)."
         ),
     )
+    embodied_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the node embodied emissions came from: boavizta, configured, fallback_per_vcpu or "
+            "fallback_default (NRG-01). NULL on rows written before 0180 (flat fallback)."
+        ),
+    )
 
     # From CarbonEmissionMetric
     co2e_grams: float = Field(

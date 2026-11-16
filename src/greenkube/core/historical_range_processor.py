@@ -8,7 +8,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import Any, List
 
 from .. import __version__
 from ..collectors import dcgm_collector
@@ -35,11 +35,12 @@ from ..core.metric_assembler import (
 )
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PodResourceMaps
+from ..energy.embodied import resolve_node_embodied
 from ..energy.estimator import BasicEstimator
 from ..energy.node_power import NodePowerProfile, resolve_node_power_profile
 from ..impact.power import GpuDevice, GpuPowerModel, NodeGpuPower, node_gpu_power
 from ..impact.realization import refresh_realization_context
-from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour, mark_cost_pending
+from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, mark_cost_pending
 from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
 from ..models.provenance import CostSource, MetadataSource, NodeSource, UsageSource
@@ -646,12 +647,18 @@ class HistoricalRangeProcessor:
         *,
         instance_type: str | None,
         gpu_unattributed_watts: float,
+        config: Any = None,
     ) -> NodeSpec:
         """What the Impact Model needs to know about one node at one step."""
+        config = config if config is not None else get_config()
         profile = power.profile or {}
-        embodied_profile = None
-        if info is not None and info.cloud_provider and info.instance_type:
-            embodied_profile = boavizta_cache.get((info.cloud_provider, info.instance_type))
+        # Configured, Boavizta, per-vCPU fallback or flat default, with its provenance (NRG-01).
+        embodied = resolve_node_embodied(
+            info,
+            boavizta_cache,
+            config,
+            cpu_capacity_cores=(info.cpu_capacity_cores if info else None) or profile.get("vcores"),
+        )
         return NodeSpec(
             name=node_name,
             instance_type=instance_type,
@@ -663,9 +670,11 @@ class HistoricalRangeProcessor:
             max_watts=float(profile.get("maxWatts", 0.0) or 0.0),
             vcores=float(profile.get("vcores", 0.0) or 0.0) or None,
             power_source=power.source,
-            embodied_g_per_hour=embodied_g_per_hour(embodied_profile),
+            embodied_g_per_hour=embodied.g_per_hour,
             gpu_unattributed_watts=gpu_unattributed_watts,
             is_fallback=power.is_fallback,
+            embodied_source=embodied.source,
+            embodied_reason=embodied.reason(node_name),
         )
 
     async def _pod_history(
@@ -1655,6 +1664,7 @@ class HistoricalRangeProcessor:
                     boavizta_cache,
                     instance_type=(_ni.instance_type if _ni else None) or current_node_map.get(node_name),
                     gpu_unattributed_watts=gpu_power.unattributed_watts if gpu_power else 0.0,
+                    config=self._config,
                 )
                 node_profile = allocator.node_profile(
                     spec, node_rows, pue=pue, intensity=carbon_result.grid_intensity, hours=chosen_step_sec / 3600.0

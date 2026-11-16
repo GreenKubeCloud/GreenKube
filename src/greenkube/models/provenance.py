@@ -55,6 +55,24 @@ class PowerSource(StrEnum):
     MIXED = MIXED
 
 
+class EmbodiedSource(StrEnum):
+    """Where the whole-node embodied emissions of a row came from (NRG-01)."""
+
+    BOAVIZTA = "boavizta"
+    """Boavizta API value for the node's cloud provider and instance type."""
+    CONFIGURED = "configured"
+    """Operator value: node annotation ``greenkube.io/embodied-kg``."""
+    FALLBACK_PER_VCPU = "fallback_per_vcpu"
+    """Estimate from the node capacity: ``DEFAULT_EMBODIED_KG_PER_VCPU`` × cores (+ per GiB)."""
+    FALLBACK_DEFAULT = "fallback_default"
+    """Flat ``DEFAULT_EMBODIED_EMISSIONS_KG``: neither a lookup nor the node capacity is known."""
+    MIXED = MIXED
+
+
+#: ``estimation_reasons`` prefix of rows whose embodied emissions are a fallback (NRG-01).
+EMBODIED_FALLBACK_REASON_PREFIX = "Embodied emissions estimated"
+
+
 class IntensitySource(StrEnum):
     REALTIME = "realtime"
     CONSOLIDATED = "consolidated"

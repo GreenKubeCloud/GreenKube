@@ -36,7 +36,13 @@ class NodeInfo(BaseModel):
     memory_capacity_bytes: Optional[int] = Field(None, description="Memory capacity in bytes")
     is_active: bool = Field(True, description="Whether this node is currently active in the cluster.")
     timestamp: Optional[datetime] = Field(None, description="Snapshot timestamp")
-    embodied_emissions_kg: Optional[float] = Field(None, description="Manufactured emissions in kgCO2eq")
+    embodied_emissions_kg: Optional[float] = Field(
+        None,
+        description=(
+            "Operator-configured whole-node embodied emissions in kgCO2eq (annotation greenkube.io/embodied-kg). "
+            "None when not configured: Boavizta values and fallbacks live in instance_carbon_profiles (NRG-07)."
+        ),
+    )
     confirmed_until: Optional[datetime] = Field(
         None,
         description=(

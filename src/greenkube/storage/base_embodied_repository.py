@@ -20,5 +20,10 @@ class BaseEmbodiedRepository(abc.ABC):
         gwp: float,
         lifespan: int,
         source: str = "boavizta_api",
+        error: Optional[str] = None,
     ):
-        """Save or upsert an embodied carbon profile."""
+        """Save or upsert an embodied carbon profile.
+
+        ``source='fallback'`` with ``error`` records a failed lookup (negative cache, NRG-01);
+        ``last_updated`` then dates the attempt.
+        """

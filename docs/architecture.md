@@ -325,8 +325,8 @@ All collectors are fully asynchronous and implement a common pattern.
 - **Purpose:** Fetch hardware embodied emissions data
 - **API:** Boavizta API
 - **Caching:** Stores server impact profiles in `EmbodiedRepository`
-- **Fallback:** When the API does not recognise a provider or instance type, `EmbodiedEmissionsService` injects a profile using `DEFAULT_EMBODIED_EMISSIONS_KG` (default: 100 kg CO₂e) and marks the metric as estimated
-- **Emits:** Server impact data (GWP manufacture, lifespan)
+- **Fallback:** When the API does not recognise a provider or instance type, or fails, the failure is cached for 24 hours and the node gets `DEFAULT_EMBODIED_KG_PER_VCPU` × cores (`embodied_source=fallback_per_vcpu`, rows flagged estimated); a `greenkube.io/embodied-kg` node annotation takes precedence (`configured`)
+- **Emits:** Lifetime embedded GWP of the instance (`impacts.gwp.embedded.value` of the v1 API)
 
 ### Estimator (Business Logic)
 
@@ -808,7 +808,8 @@ All configuration flows through `src/greenkube/core/config.py`:
 - `INTENSITY_MAX_AGE` — Maximum age of a stored intensity before the zone default is used (default `6h`)
 - `CONTROLLER_METRICS_PORT` — Controller Prometheus endpoint port (default `9102`, `0` disables)
 - `NORMALIZATION_GRANULARITY` — hour|day|none
-- `DEFAULT_EMBODIED_EMISSIONS_KG` — Fallback embodied emissions when Boavizta API returns no data (default: 100 kg CO₂e)
+- `DEFAULT_EMBODIED_EMISSIONS_KG` — Flat fallback embodied emissions when neither Boavizta nor the node capacity is known (default: 100 kg CO₂e)
+- `DEFAULT_EMBODIED_KG_PER_VCPU` / `DEFAULT_EMBODIED_KG_PER_GIB` — Capacity-proportional embodied fallback (defaults 12 kg per vCPU, 0 kg per GiB)
 
 **Recommendations:**
 - `RECOMMENDATION_LOOKBACK_DAYS` — Default: 14
@@ -906,7 +907,7 @@ Controlled by `NORMALIZATION_GRANULARITY`:
 - Scope: Long-term (instance profiles rarely change)
 - Key: (provider, instance_type)
 - Purpose: Minimize external API calls for embodied emissions
-- Fallback: When API returns no data, a profile with `is_fallback=True` is injected using `DEFAULT_EMBODIED_EMISSIONS_KG`; the resulting metric is flagged `is_estimated=True`
+- Fallback: When the API returns no data, a negative entry (`source = 'fallback'`, `error`) is stored and retried after 24 hours; rows use the per-vCPU fallback, carry `embodied_source=fallback_per_vcpu` and are flagged `is_estimated=True`
 
 **Dashboard Summary Cache:**
 - Type: Persistent database (`metrics_summary` + `metrics_timeseries_cache`)

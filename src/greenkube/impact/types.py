@@ -24,8 +24,10 @@ from greenkube.models.provenance import CostSource, PowerSource
 #: added and existing components keep their values (1.1.0: memory and GPU power,
 #: 2.0.0: projections annualize over the target's observed coverage, 3.0.0: workload
 #: deletions take the pool's realization factor for their reserved parts, IMP-05, and
-#: ``capacity_released`` gains ``storage_gib`` and ``load_balancers``; allocations are unchanged).
-IMPACT_MODEL_VERSION = "3.0.0"
+#: ``capacity_released`` gains ``storage_gib`` and ``load_balancers``; allocations are unchanged; 4.0.0:
+#: embodied emissions from the Boavizta v1 value, an operator annotation or a per-vCPU fallback
+#: instead of a flat 100 kg per node, NRG-01).
+IMPACT_MODEL_VERSION = "4.0.0"
 
 #: Name of the synthetic workload that receives unreserved node capacity.
 IDLE_WORKLOAD_NAME = "__idle__"
@@ -292,6 +294,9 @@ class NodeImpactProfile:
     memory_watts_per_gib: float = 0.0
     #: Power of GPUs that DCGM attributes to no pod (idle GPUs), in W.
     gpu_unattributed_watts: float = 0.0
+    #: Where ``embodied_g_per_hour`` came from (``EmbodiedSource``), and the reason when it is a fallback.
+    embodied_source: Optional[str] = None
+    embodied_reason: Optional[str] = None
 
     @property
     def allocatable_cpu(self) -> float:

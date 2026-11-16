@@ -13,8 +13,10 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.energy.embodied import known_profiles, resolve_node_embodied
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
 from greenkube.impact.power import memory_watts_per_gib
 from greenkube.impact.pricing import (
@@ -69,8 +71,6 @@ COVERAGE_FROM_LOOKBACK = "lookback"
 FirstObservedLookup = Callable[["WorkloadRef"], Optional[datetime]]
 
 #: Fallbacks used only when the configuration object lacks a setting.
-_FALLBACK_LIFESPAN_YEARS = 4
-_FALLBACK_EMBODIED_KG = 100.0
 _FALLBACK_INTENSITY = 500.0
 _FALLBACK_PUE = 1.3
 
@@ -426,10 +426,21 @@ class ImpactProjector:
             entry = self.resolver.catalog.lookup(provider, region, instance_type)
             memory_gib = entry.memory_gib if entry is not None and entry.memory_gib else 0.0
 
-        lifespan_years = float(_setting(config, "DEFAULT_HARDWARE_LIFESPAN_YEARS", _FALLBACK_LIFESPAN_YEARS))
-        lifespan_hours = max(lifespan_years, 0.0) * HOURS_PER_YEAR
-        gwp_kg = embodied_kg or float(_setting(config, "DEFAULT_EMBODIED_EMISSIONS_KG", _FALLBACK_EMBODIED_KG))
-        embodied_g_per_hour = gwp_kg * 1000.0 / lifespan_hours if lifespan_hours > 0 else 0.0
+        # Same embodied resolution as the collected rows (NRG-01): operator value, Boavizta profile
+        # known to this process, per-vCPU fallback, flat default.
+        embodied = resolve_node_embodied(
+            SimpleNamespace(
+                embodied_emissions_kg=embodied_kg,
+                cloud_provider=provider,
+                instance_type=instance_type,
+                cpu_capacity_cores=capacity_cores,
+                memory_capacity_bytes=memory_bytes,
+            ),
+            known_profiles(),
+            config,
+            cpu_capacity_cores=cores,
+        )
+        embodied_g_per_hour = embodied.g_per_hour
 
         pue = env[0] if env else _provider_pue(config, provider)
         intensity = env[1] if env and env[1] > 0 else default_intensity
@@ -449,6 +460,8 @@ class ImpactProjector:
             provider=provider,
             is_fallback=is_fallback,
             memory_watts_per_gib=memory_watts_per_gib(config),
+            embodied_source=embodied.source,
+            embodied_reason=embodied.reason(name),
         )
 
     # ------------------------------------------------------------------ #
