@@ -295,6 +295,9 @@ class Config(BaseSettings):
     # --- OpenCost variables ---
     OPENCOST_API_URL: Optional[str] = None
     OPENCOST_VERIFY_CERTS: bool = True
+    #: OpenCost cluster id (``properties.cluster``) whose allocations GreenKube reads, for an OpenCost or
+    #: Kubecost that serves several clusters (COST-10). Unset: a single-cluster answer is used as is.
+    OPENCOST_CLUSTER_ID: Optional[str] = None
 
     # --- Boavizta variables ---
     BOAVIZTA_API_URL: str = "https://api.boavizta.org"

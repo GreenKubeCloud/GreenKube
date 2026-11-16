@@ -9,7 +9,7 @@ coverage of ``[start, end)`` is the share of its steps that were collected
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -42,6 +42,13 @@ REASON_ROWS_REJECTED = "rows_rejected"
 #: Reason of a stored step a re-collection left as it was because the new pass was worse (STO-01).
 REASON_RECOLLECT_SKIPPED = "recollect_skipped"
 
+#: ``cost_status`` of a step whose rows carry modeled cost because OpenCost could not price it
+#: (outage, lag, rejected request); the collection job re-prices it once OpenCost answers (COST-01).
+COST_STATUS_PENDING = "opencost_pending"
+#: ``cost_status`` of a pending step that left the backfill horizon before OpenCost priced it: its rows keep
+#: their untrusted ``opencost_pending`` cost for good (COST-01).
+COST_STATUS_PENDING_EXPIRED = "opencost_pending_expired"
+
 
 @dataclass(frozen=True)
 class CollectionWindowRecord:
@@ -61,6 +68,8 @@ class CollectionWindowRecord:
     opencost_total_cost: float | None = None
     attributed_cost: float | None = None
     collected_at: datetime | None = None
+    #: ``COST_STATUS_PENDING`` while the step's cost waits for OpenCost, else ``None``.
+    cost_status: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in WINDOW_STATUSES:
@@ -193,6 +202,31 @@ class CollectionWindowRepository(ABC):
         self, cluster_uid: str, source: str, since: datetime, limit: int
     ) -> list[CollectionWindowRecord]:
         """Failed steps starting at or after ``since``, least recently attempted first."""
+
+    async def list_cost_pending(
+        self, cluster_uid: str, source: str, since: datetime, until: datetime, limit: int
+    ) -> list[CollectionWindowRecord]:
+        """Steps of ``[since, until)`` whose cost waits for OpenCost, least recently attempted first (COST-01)."""
+        records = [
+            record
+            for record in await self.list_overlapping(cluster_uid, source, since, until)
+            if record.cost_status == COST_STATUS_PENDING and record.expected_steps == 1
+        ]
+        records.sort(key=lambda record: (record.collected_at or record.window_start, record.window_start))
+        return records[: max(int(limit), 0)]
+
+    async def expire_cost_pending(self, cluster_uid: str, source: str, before: datetime) -> int:
+        """Mark pending steps starting before ``before`` as ``opencost_pending_expired``; returns their number."""
+        records = [
+            record
+            for record in await self.list_overlapping(
+                cluster_uid, source, datetime(1970, 1, 1, tzinfo=before.tzinfo), before
+            )
+            if record.cost_status == COST_STATUS_PENDING and record.window_start < before
+        ]
+        if records:
+            await self.record([replace(record, cost_status=COST_STATUS_PENDING_EXPIRED) for record in records])
+        return len(records)
 
     @abstractmethod
     async def expire_failed(self, cluster_uid: str, source: str, before: datetime) -> int:

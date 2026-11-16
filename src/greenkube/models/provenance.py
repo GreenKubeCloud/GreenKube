@@ -33,6 +33,9 @@ class CostSource(StrEnum):
     KUBECOST = "kubecost"
     PRICING_CATALOG = "pricing_catalog"
     CUSTOM_RATE = "custom_rate"
+    OPENCOST_PENDING = "opencost_pending"
+    """Modeled cost of a window OpenCost could not price (outage, lag, rejected request): never
+    trusted, re-priced from OpenCost by the collection job once it answers again (COST-01)."""
     NONE = "none"
     MIXED = MIXED
 
@@ -141,8 +144,9 @@ def is_cost_trusted(row: Any, *, allowed: Iterable[str] = TRUSTED_COST_SOURCES) 
     adjustments that must not be presented as savings). A zero total on a row
     that requested CPU or memory is not trusted either: OpenCost had no price
     for it (a missing cost read as zero), and a zero after a change would be
-    measured as the whole cost saved. A pod so small that OpenCost rounds its
-    cost to zero is stored with its rebuilt cost (``opencost_derived``), not 0.
+    measured as the whole cost saved; the same holds for a row with CPU or
+    memory usage (COST-05). A pod so small that OpenCost rounds its cost to
+    zero is stored with its rebuilt cost (``opencost_derived``), not 0.
     """
     source = _normalized(_value(row, "cost_source"))
     if source is None or source not in {str(item) for item in allowed}:
@@ -162,8 +166,12 @@ def is_cost_trusted(row: Any, *, allowed: Iterable[str] = TRUSTED_COST_SOURCES) 
 
 
 def _requested(row: Any) -> bool:
-    """Whether a row requested CPU or memory (``cpu_request`` millicores, ``memory_request`` bytes)."""
-    for field in ("cpu_request", "memory_request"):
+    """Whether a row requested or used CPU or memory (COST-05: a zero cost for it is a missing price).
+
+    ``cpu_request`` (millicores), ``memory_request`` (bytes), and the usage
+    columns ``cpu_usage_millicores`` and ``memory_usage_bytes``.
+    """
+    for field in ("cpu_request", "memory_request", "cpu_usage_millicores", "memory_usage_bytes"):
         try:
             value = float(_value(row, field) or 0.0)
         except (TypeError, ValueError):
@@ -256,6 +264,7 @@ COST_SOURCE_RANK: dict[str, int] = {
     CostSource.OPENCOST_DERIVED.value: 4,
     CostSource.PRICING_CATALOG.value: 3,
     CostSource.CUSTOM_RATE.value: 2,
+    CostSource.OPENCOST_PENDING.value: 2,
     CostSource.MIXED.value: 2,
     CostSource.NONE.value: 1,
 }
@@ -270,6 +279,25 @@ def cost_source_rank_sql(expression: str) -> str:
     """SQL form of :func:`cost_source_rank` (SQLite and PostgreSQL)."""
     cases = " ".join(f"WHEN '{source}' THEN {rank}" for source, rank in COST_SOURCE_RANK.items())
     return f"(CASE LOWER({expression}) {cases} ELSE 0 END)"
+
+
+#: Price basis of a trusted cost: an allocation engine's own figure, or a list price (COST-01 acceptance d).
+COST_BASIS_ALLOCATED = "allocated"
+COST_BASIS_LIST_PRICE = "list_price"
+
+
+def cost_basis_family(source: Optional[str]) -> Optional[str]:
+    """Price basis of a cost source: ``allocated`` (OpenCost, Kubecost), ``list_price`` (catalog), else ``None``.
+
+    A change measurement must not compare a baseline priced on one basis with
+    an after-window priced on the other: the price switch would read as a saving.
+    """
+    value = _normalized(source)
+    if value in ALLOCATED_COST_SOURCES:
+        return COST_BASIS_ALLOCATED
+    if value == CostSource.PRICING_CATALOG.value:
+        return COST_BASIS_LIST_PRICE
+    return None
 
 
 def cost_source_for(cost_found: bool) -> CostSource:

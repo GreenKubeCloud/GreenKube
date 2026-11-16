@@ -31,6 +31,7 @@ from greenkube.core.optimization.verifier import (
     cost_is_trusted,
     usage_is_trusted,
 )
+from greenkube.models.provenance import cost_basis_family
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.model import HourBucket, TimeWindow
 
@@ -89,6 +90,7 @@ class _Accumulator:
         "factor",
         "factor_seconds",
         "instance_types",
+        "cost_bases",
     )
 
     def __init__(self) -> None:
@@ -113,6 +115,13 @@ class _Accumulator:
         self.factor = 0.0
         self.factor_seconds = 0.0
         self.instance_types: Dict[str, float] = defaultdict(float)
+        self.cost_bases: Dict[str, float] = defaultdict(float)
+
+
+def _shares(seconds: Dict[str, float]) -> Optional[Dict[str, float]]:
+    """Each price basis's share of the trusted cost time of a bucket (``None`` without any)."""
+    total = sum(seconds.values())
+    return {key: round(value / total, 6) for key, value in sorted(seconds.items())} if total > 0 else None
 
 
 def _number(value: Any) -> Optional[float]:
@@ -178,6 +187,10 @@ def hourly_buckets(
         if all(cost_is_trusted(row) for row in members):
             acc.cost += sum(float(getattr(row, "total_cost", 0.0) or 0.0) for row in members)
             acc.cost_seconds += coverage
+            for row in members:
+                basis = cost_basis_family(getattr(row, "cost_source", None))
+                if basis is not None:
+                    acc.cost_bases[basis] += _coverage_seconds(row, step_seconds)
             cpu = [getattr(row, "cost_cpu", None) for row in members]
             ram = [getattr(row, "cost_ram", None) for row in members]
             if any(value is None for value in cpu + ram):
@@ -234,6 +247,7 @@ def hourly_buckets(
                 embodied_coverage=min(acc.embodied_seconds / slot_seconds, 1.0),
                 carbon_factor=acc.factor / acc.factor_seconds if acc.factor_seconds > 0 else None,
                 instance_types={key: value * per_hour for key, value in acc.instance_types.items()},
+                cost_bases=_shares(acc.cost_bases),
             )
         )
     return buckets

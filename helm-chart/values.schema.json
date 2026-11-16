@@ -310,7 +310,7 @@
         },
         "opencost": {
           "type": "object",
-          "properties": {"url": {"type": "string"}, "verifyCerts": {"type": "boolean"}}
+          "properties": {"url": {"type": "string"}, "verifyCerts": {"type": "boolean"}, "clusterId": {"type": "string"}}
         },
         "corsOrigins": {"type": "string"},
         "trustedProxyIps": {"type": "string"},

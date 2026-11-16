@@ -23,6 +23,7 @@ observed cost).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -55,6 +56,31 @@ UNRESOLVED_NODE = "__unresolved__"
 
 #: ``estimation_reasons`` prefix written when a row's cost is modeled, not observed.
 MODELED_COST_REASON_PREFIX = "No observed cost for pod"
+#: Estimation reason of a row whose window OpenCost could not price (COST-01).
+OPENCOST_PENDING_REASON = (
+    "OpenCost could not price this window (outage, lag or rejected request); modeled cost kept as "
+    "opencost_pending until the window is re-priced from OpenCost"
+)
+
+
+def mark_cost_pending(row: CombinedMetric) -> CombinedMetric:
+    """Label a modeled row of a window OpenCost could not price as ``opencost_pending`` (COST-01).
+
+    The modeled figure is kept (dashboards stay continuous) but the row is
+    never trusted, and the collection job replaces it with OpenCost's cost
+    once OpenCost answers for the window. Rows with an allocated cost are
+    returned unchanged.
+    """
+    if _is_observed_cost(row):
+        return row
+    reasons = list(dict.fromkeys([*row.estimation_reasons, OPENCOST_PENDING_REASON]))
+    return row.model_copy(
+        update={
+            "cost_source": CostSource.OPENCOST_PENDING.value,
+            "is_estimated": True,
+            "estimation_reasons": reasons,
+        }
+    )
 
 
 @dataclass
@@ -316,6 +342,9 @@ class MetricRowAllocator:
             reasons = [r for r in reasons if not r.startswith(MODELED_COST_REASON_PREFIX)]
             update["estimation_reasons"] = [*reasons, reason]
             update["is_estimated"] = True
+            if (row.cost_source or "").strip().lower() == CostSource.OPENCOST_PENDING.value:
+                # A recompute re-prices the model but the window still waits for OpenCost.
+                update["cost_source"] = CostSource.OPENCOST_PENDING.value
         return row.model_copy(update=update)
 
     def _idle_row(
@@ -383,9 +412,61 @@ def group_rows_by_node_interval(
     return groups
 
 
+def _reservation(requests: Sequence[Optional[float]], usages: Sequence[Optional[float]]) -> List[float]:
+    weights = []
+    for request, usage in zip(requests, usages, strict=True):
+        values = [float(value) for value in (request, usage) if value is not None and math.isfinite(float(value))]
+        weights.append(max([0.0, *values]))
+    return weights
+
+
+def _unknown(requests: Sequence[Optional[float]], usages: Sequence[Optional[float]]) -> bool:
+    """Whether some container has neither a positive request nor a known usage."""
+    return any(not (request or 0) > 0 and usage is None for request, usage in zip(requests, usages, strict=True))
+
+
+def container_cost_shares(
+    cpu_requests: Sequence[Optional[float]],
+    cpu_usages: Sequence[Optional[float]],
+    memory_requests: Sequence[Optional[float]],
+    memory_usages: Sequence[Optional[float]],
+) -> Tuple[List[float], List[float]]:
+    """CPU and RAM cost shares of a pod's containers by reservation (COST-02, IMP-02).
+
+    OpenCost and the Impact Model charge the reservation ``max(request,
+    usage)``, so the CPU cost of a pod row is split by each container's
+    ``max(cpu_request, cpu_usage)`` and the RAM cost by ``max(memory_request,
+    memory_usage)``, never by usage alone. Without any CPU reservation the
+    memory one is used (and the other way round); the split is equal only
+    when neither is known. Collection and ``greenkube recompute`` share this
+    rule. Each list sums to 1.
+    """
+    count = len(cpu_requests)
+    if count == 0:
+        return [], []
+    cpu = _reservation(cpu_requests, cpu_usages)
+    memory = _reservation(memory_requests, memory_usages)
+    # A container with no request and an unknown usage has an unknown reservation, not a zero one:
+    # the resource falls back to an equal split rather than giving it no cost (review 5).
+    if _unknown(cpu_requests, cpu_usages):
+        cpu = [1.0] * count
+    if _unknown(memory_requests, memory_usages):
+        memory = [1.0] * count
+    if sum(cpu) <= 0:
+        cpu = memory if sum(memory) > 0 else [1.0] * count
+    if sum(memory) <= 0:
+        memory = cpu
+    cpu_total, memory_total = sum(cpu), sum(memory)
+    return [value / cpu_total for value in cpu], [value / memory_total for value in memory]
+
+
 def is_modeled_cost(source: Optional[str]) -> bool:
-    """True for cost tiers the model computes itself (catalog or custom rates)."""
-    return (source or "") in {CostSource.PRICING_CATALOG.value, CostSource.CUSTOM_RATE.value}
+    """True for cost tiers the model computes itself (catalog or custom rates, or pending OpenCost re-pricing)."""
+    return (source or "") in {
+        CostSource.PRICING_CATALOG.value,
+        CostSource.CUSTOM_RATE.value,
+        CostSource.OPENCOST_PENDING.value,
+    }
 
 
 def container_gpu_fields(pod: CombinedMetric, container_count: int) -> Dict[str, Any]:

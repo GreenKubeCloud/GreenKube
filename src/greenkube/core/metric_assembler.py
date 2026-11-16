@@ -11,7 +11,7 @@ from ..core.embodied_service import EmbodiedEmissionsService
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.estimator import BasicEstimator
-from ..impact.rows import container_gpu_fields
+from ..impact.rows import container_cost_shares, container_gpu_fields
 from ..models.metrics import CombinedMetric, CostMetric, EnergyMetric, PodMetric
 from ..models.node import NodeZoneContext
 from ..models.provenance import (
@@ -116,13 +116,6 @@ def _container_reasons(reasons: List[str], usage_source: str) -> List[str]:
     return list(reasons)
 
 
-def _weights(values: Sequence[Optional[float]]) -> Optional[List[float]]:
-    if any(value is None for value in values):
-        return None
-    weights = [max(float(value or 0), 0.0) for value in values]
-    return weights if sum(weights) > 0 else None
-
-
 class MetricAssembler:
     """Shared row-building helpers for the range collection path.
 
@@ -215,8 +208,11 @@ class MetricAssembler:
 
         Container rows inherit the provenance of their pod aggregate (A11): an
         OpenCost-priced, Prometheus-measured pod yields trusted container rows,
-        not blanket "estimated" ones (BUG-29). CPU cost follows the CPU share,
-        RAM cost follows the memory share; classic init containers get no row.
+        not blanket "estimated" ones (BUG-29). Energy and CO2e follow the CPU
+        usage share; CPU and RAM cost follow each container's reservation
+        ``max(request, usage)`` (COST-02, :func:`container_cost_shares`), other
+        cost components the CPU reservation share; classic init containers get
+        no row.
         """
         containers_by_pod: dict[tuple[str, str], list[PodMetric]] = {}
         for pod_metric in pod_metrics:
@@ -276,29 +272,29 @@ class MetricAssembler:
             if sum(cpu_weights) == 0:
                 cpu_weights = [1] * len(containers)
             total_weight = sum(cpu_weights)
-            memory_weights = (
-                _weights([resource_maps.container_memory_usage_map.get(key) for key in container_keys])
-                or _weights([item.memory_request for item in containers])
-                or cpu_weights
-            )
-            total_memory_weight = sum(memory_weights)
             has_components = aggregate.cost_cpu is not None or aggregate.cost_ram is not None
             gpu_fields = container_gpu_fields(aggregate, len(containers))
+            # Cost follows the reservation of each container (COST-02); energy keeps the usage share.
+            cpu_cost_shares, ram_cost_shares = container_cost_shares(
+                [item.cpu_request for item in containers],
+                [resource_maps.container_cpu_usage_map.get(key) for key in container_keys],
+                [item.memory_request for item in containers],
+                [resource_maps.container_memory_usage_map.get(key) for key in container_keys],
+            )
 
-            for pod_metric, container_key, weight, memory_weight in zip(
-                containers, container_keys, cpu_weights, memory_weights, strict=True
+            for pod_metric, container_key, weight, cost_share, ram_cost_share in zip(
+                containers, container_keys, cpu_weights, cpu_cost_shares, ram_cost_shares, strict=True
             ):
                 share = weight / total_weight
-                memory_share = memory_weight / total_memory_weight
                 usage_source = _container_usage_source(resource_maps, container_key, aggregate)
                 if has_components:
-                    cost_cpu = (aggregate.cost_cpu or 0.0) * share
-                    cost_ram = (aggregate.cost_ram or 0.0) * memory_share
+                    cost_cpu = (aggregate.cost_cpu or 0.0) * cost_share
+                    cost_ram = (aggregate.cost_ram or 0.0) * ram_cost_share
                     other_cost = aggregate.total_cost - (aggregate.cost_cpu or 0.0) - (aggregate.cost_ram or 0.0)
-                    total_cost = cost_cpu + cost_ram + other_cost * share
+                    total_cost = cost_cpu + cost_ram + other_cost * cost_share
                 else:
                     cost_cpu = cost_ram = None
-                    total_cost = aggregate.total_cost * share
+                    total_cost = aggregate.total_cost * cost_share
                 container_metrics.append(
                     aggregate.model_copy(
                         update={
@@ -306,9 +302,13 @@ class MetricAssembler:
                             "total_cost": total_cost,
                             "cost_cpu": cost_cpu,
                             "cost_ram": cost_ram,
-                            "cost_storage": None if aggregate.cost_storage is None else aggregate.cost_storage * share,
-                            "cost_network": None if aggregate.cost_network is None else aggregate.cost_network * share,
-                            "cost_lb": None if aggregate.cost_lb is None else aggregate.cost_lb * share,
+                            "cost_storage": (
+                                None if aggregate.cost_storage is None else aggregate.cost_storage * cost_share
+                            ),
+                            "cost_network": (
+                                None if aggregate.cost_network is None else aggregate.cost_network * cost_share
+                            ),
+                            "cost_lb": None if aggregate.cost_lb is None else aggregate.cost_lb * cost_share,
                             "usage_source": usage_source,
                             **gpu_fields,
                             "cpu_limit": pod_metric.cpu_limit,

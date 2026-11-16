@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from greenkube.storage.base_collection_window_repository import (
+    COST_STATUS_PENDING,
+    COST_STATUS_PENDING_EXPIRED,
     STATUS_FAILED,
     STATUS_GAP,
     CollectionWindowRecord,
@@ -19,7 +21,7 @@ from greenkube.utils.time import ensure_utc
 _FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _COLUMNS = (
     "cluster_uid, source, window_start, window_end, status, expected_steps, steps_with_data, pod_rows, "
-    "cpu_series, pods_without_cpu, reason, opencost_total_cost, attributed_cost, collected_at"
+    "cpu_series, pods_without_cpu, reason, opencost_total_cost, attributed_cost, collected_at, cost_status"
 )
 
 
@@ -43,6 +45,7 @@ def _row(row) -> CollectionWindowRecord:
         opencost_total_cost=row[11],
         attributed_cost=row[12],
         collected_at=ensure_utc(row[13]),
+        cost_status=row[14],
     )
 
 
@@ -73,13 +76,14 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
                 r.opencost_total_cost,
                 r.attributed_cost,
                 _encode(r.collected_at) if r.collected_at else now,
+                r.cost_status,
             )
             for r in records
         ]
         async with self._transaction(connection) as conn:
             await conn.executemany(
                 f"""INSERT INTO collection_windows ({_COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cluster_uid, source, window_start) DO UPDATE SET
                     window_end = excluded.window_end,
                     status = excluded.status,
@@ -91,7 +95,8 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
                     reason = excluded.reason,
                     opencost_total_cost = excluded.opencost_total_cost,
                     attributed_cost = excluded.attributed_cost,
-                    collected_at = excluded.collected_at
+                    collected_at = excluded.collected_at,
+                    cost_status = excluded.cost_status
                 -- A re-collection without data (beyond retention) never downgrades stored rows.
                 WHERE NOT (collection_windows.status = 'collected' AND excluded.status = 'failed')""",
                 params,
@@ -134,6 +139,17 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
             ) as cursor:
                 rows = await cursor.fetchall()
         return [_row(row) for row in rows]
+
+    async def expire_cost_pending(self, cluster_uid: str, source: str, before: datetime) -> int:
+        """Pending steps older than ``before`` become ``opencost_pending_expired`` (COST-01)."""
+        async with self.db_manager.connection_scope() as conn:
+            cursor = await conn.execute(
+                """UPDATE collection_windows SET cost_status = ?
+                WHERE cluster_uid = ? AND source = ? AND cost_status = ? AND window_start < ?""",
+                (COST_STATUS_PENDING_EXPIRED, cluster_uid, source, COST_STATUS_PENDING, _encode(before)),
+            )
+            await conn.commit()
+            return int(cursor.rowcount or 0)
 
     async def expire_failed(self, cluster_uid: str, source: str, before: datetime) -> int:
         """Failed steps older than ``before`` become gaps."""

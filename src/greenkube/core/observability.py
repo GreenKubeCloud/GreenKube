@@ -241,6 +241,23 @@ COLLECTION_SOURCE_REQUESTS = Counter(
     ["source", "outcome"],
     registry=REGISTRY,
 )
+OPENCOST_AUTH_FAILED = Gauge(
+    "greenkube_opencost_auth_failed",
+    "1 when OpenCost rejected the last allocation request with HTTP 401 or 403 (credentials), COST-06.",
+    registry=REGISTRY,
+)
+OPENCOST_AMBIGUOUS_CLUSTER = Gauge(
+    "greenkube_opencost_ambiguous_cluster",
+    "1 when the last OpenCost answer covered several clusters and OPENCOST_CLUSTER_ID is not set: no OpenCost "
+    "cost is stored for the window (COST-10).",
+    registry=REGISTRY,
+)
+OPENCOST_UNREBUILT_ALLOCATIONS = Counter(
+    "greenkube_opencost_unrebuilt_allocations_total",
+    "OpenCost allocations below its 5-decimal precision whose cost could not be rebuilt from node unit "
+    "prices, or with no running time: stored with cost_source none (untrusted), COST-05.",
+    registry=REGISTRY,
+)
 COLLECTION_SOURCE_DURATION = Histogram(
     "greenkube_collection_source_duration_seconds",
     "Duration of requests to measurement sources.",
@@ -349,6 +366,7 @@ _PROVENANCE_VALUES = frozenset(
         "kubecost",
         "pricing_catalog",
         "custom_rate",
+        "opencost_pending",
         "none",
         "prometheus",
         "metrics_server",

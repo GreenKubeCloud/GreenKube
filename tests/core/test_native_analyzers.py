@@ -1412,7 +1412,7 @@ class TestOrphanedPersistentVolume:
         recs = self._pv_recs(recommender, volumes)
         assert len(recs) == 1
         assert recs[0].potential_savings_cost == pytest.approx(87.5)
-        assert "OpenCost-reported cost savings: $87.50/year" in recs[0].description
+        assert "OpenCost-reported cost savings: 87.50 USD/year" in recs[0].description
         assert "$0.10/GiB-month" not in recs[0].description
 
     def test_reason_lists_the_collector_evidence(self, recommender):
@@ -1524,7 +1524,7 @@ class TestOrphanedLoadBalancer:
         recs = self._lb_recs(recommender, services)
         assert len(recs) == 1
         assert recs[0].potential_savings_cost == pytest.approx(97.3)
-        assert "OpenCost-reported cost savings: $97.30/year" in recs[0].description
+        assert "OpenCost-reported cost savings: 97.30 USD/year" in recs[0].description
         assert "$18.00/month" not in recs[0].description
 
     def test_cost_savings_use_configured_lb_price(self):

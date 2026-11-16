@@ -412,21 +412,23 @@ class TestEnrichOrphanedLbCosts:
     @pytest.mark.asyncio
     async def test_annualizes_opencost_window_costs(self):
         """Window costs should be annualized against the observation window."""
-        from greenkube.collectors.opencost_collector import OpenCostCollector
+        from greenkube.collectors.opencost_collector import AssetCost, OpenCostCollector
 
         services = [
             OrphanedLoadBalancer(name="lb-aaa", namespace="default", endpoint_count=0),
             OrphanedLoadBalancer(name="lb-bbb", namespace="default", endpoint_count=0),
         ]
         mock_opencost = AsyncMock(spec=OpenCostCollector)
-        mock_opencost.collect_lb_costs = AsyncMock(return_value={"default/lb-aaa": 2.5})
+        mock_opencost.collect_lb_cost_details = AsyncMock(return_value={"default/lb-aaa": AssetCost(2.5)})
 
         result = await enrich_orphaned_lb_costs(services, window_days=7, opencost=mock_opencost)
 
         # 2.5 USD over 7 days → 2.5 * 365/7 per year
         assert result[0].annual_cost == pytest.approx(2.5 * 365 / 7)
         assert result[1].annual_cost is None
-        mock_opencost.collect_lb_costs.assert_awaited_once_with(["default/lb-aaa", "default/lb-bbb"], window_days=7)
+        mock_opencost.collect_lb_cost_details.assert_awaited_once_with(
+            ["default/lb-aaa", "default/lb-bbb"], window_days=7
+        )
 
     @pytest.mark.asyncio
     async def test_keeps_services_unchanged_without_opencost_data(self):
@@ -435,7 +437,7 @@ class TestEnrichOrphanedLbCosts:
 
         services = [OrphanedLoadBalancer(name="lb-aaa", namespace="default", endpoint_count=0)]
         mock_opencost = AsyncMock(spec=OpenCostCollector)
-        mock_opencost.collect_lb_costs = AsyncMock(return_value={})
+        mock_opencost.collect_lb_cost_details = AsyncMock(return_value={})
 
         result = await enrich_orphaned_lb_costs(services, window_days=7, opencost=mock_opencost)
 
@@ -448,7 +450,7 @@ class TestEnrichOrphanedLbCosts:
 
         services = [OrphanedLoadBalancer(name="lb-aaa", namespace="default", endpoint_count=0)]
         mock_opencost = AsyncMock(spec=OpenCostCollector)
-        mock_opencost.collect_lb_costs = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_opencost.collect_lb_cost_details = AsyncMock(side_effect=RuntimeError("boom"))
 
         result = await enrich_orphaned_lb_costs(services, window_days=7, opencost=mock_opencost)
 
@@ -465,4 +467,4 @@ class TestEnrichOrphanedLbCosts:
         result = await enrich_orphaned_lb_costs([], opencost=mock_opencost)
 
         assert result == []
-        mock_opencost.collect_lb_costs.assert_not_awaited()
+        mock_opencost.collect_lb_cost_details.assert_not_awaited()

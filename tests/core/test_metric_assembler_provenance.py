@@ -81,10 +81,10 @@ def test_container_rows_are_not_blanket_estimated_and_keep_provenance():
         assert row.intensity_source == "consolidated"
         assert row.emaps_zone == "FR"
         assert is_cost_trusted(row) and is_usage_trusted(row)
-    # CPU cost follows CPU usage, RAM cost follows memory usage.
+    # Cost follows the reservation max(request, usage) (COST-02): CPU 300m vs 100m, RAM 300 vs 300 bytes.
     assert by_name["app"].cost_cpu == pytest.approx(0.375)
-    assert by_name["app"].cost_ram == pytest.approx(0.075)
-    assert by_name["proxy"].cost_ram == pytest.approx(0.225)
+    assert by_name["app"].cost_ram == pytest.approx(0.15)
+    assert by_name["proxy"].cost_ram == pytest.approx(0.15)
     assert sum(row.total_cost for row in rows) == pytest.approx(1.0)
     assert sum(row.cost_cpu or 0 for row in rows) == pytest.approx(0.5)
     assert by_name["app"].cpu_limit == 1000 and by_name["app"].memory_limit == 600
@@ -104,7 +104,7 @@ def test_container_rows_from_metrics_server_are_flagged_as_such():
     assert by_name["proxy"].usage_source == "metrics_server"
 
 
-def test_container_rows_without_cost_components_split_the_total_by_usage():
+def test_container_rows_without_cost_components_split_the_total_by_reservation():
     maps = PodResourceMaps(container_cpu_usage_map={("shop", "web-0", "app"): 75, ("shop", "web-0", "proxy"): 25})
     aggregate = _aggregate(cost_cpu=None, cost_ram=None, cost_storage=None, cost_network=None, cost_lb=None)
 

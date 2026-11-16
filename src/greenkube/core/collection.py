@@ -27,6 +27,8 @@ from ..models.metrics import CombinedMetric
 from ..models.provenance import ALLOCATED_COST_SOURCES
 from ..storage.base_collection_watermark_repository import CollectionWatermark, CollectionWatermarkRepository
 from ..storage.base_collection_window_repository import (
+    COST_STATUS_PENDING,
+    COST_STATUS_PENDING_EXPIRED,
     REASON_BEYOND_BACKFILL,
     REASON_NO_SCRAPE_DATA,
     REASON_NOT_PROBED,
@@ -50,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 #: Watermark source written by the combined (pod + container) metrics job.
 METRICS_WATERMARK_SOURCE = "combined_metrics"
+#: Watermark row recording the end of the last window OpenCost priced for this cluster: the fact
+#: "OpenCost is installed here" outlives the window records of the horizon (COST-01 review 2).
+OPENCOST_SEEN_SOURCE = "opencost_cost"
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _TARGET_CHUNK_SECONDS = 3600
 #: Unattributed share of the OpenCost window total above which a warning is logged (COL-03 step 4).
@@ -259,6 +264,10 @@ class CollectionReport:
     cost_unattributed_ratio: float | None = None
     #: Most scrapes of a cAdvisor series inside the rate window, when measured in this run (COL-04 step 3).
     rate_window_scrapes: float | None = None
+    #: Steps whose cost waited for OpenCost and were re-priced from it in this run (COST-01).
+    repriced_steps: int = 0
+    #: Steps inside the horizon whose cost still waits for OpenCost after the run (COST-01).
+    cost_pending_steps: int | None = None
     watermark: datetime | None = None
     error: str | None = None
     #: Rows of the most recent collected sample (pod and container rows).
@@ -325,6 +334,7 @@ class MetricsCollectionJob:
         try:
             watermark = await self.watermark_repository.get(self.cluster_uid, self.source)
             await self._seed_window_records(now)
+            await self._seed_opencost_known(now)
             if watermark is None and last is None:
                 watermark = await self._resume_from_stored_rows(now)
             plan = self._plan(now, watermark, last)
@@ -346,6 +356,7 @@ class MetricsCollectionJob:
                 )
             if last is None:
                 await self._retry_failed_steps(now, fence, report)
+                await self._reprice_pending_steps(now, fence, report)
                 await self._check_scrape_interval(now, report)
             await self._publish_coverage(now, report)
         except LeadershipLostError as error:
@@ -479,7 +490,11 @@ class MetricsCollectionJob:
         return None, stored
 
     async def _record_skipped(
-        self, window: CollectionWindow, rows: list[CombinedMetric], stored: dict[datetime, Any], reason: str
+        self,
+        window: CollectionWindow,
+        rows: list[CombinedMetric],
+        stored: dict[datetime, Any],
+        reason: str,
     ) -> None:
         """Log, count and record a re-collection left as stored (step reason ``recollect_skipped``)."""
         logger.warning(
@@ -499,6 +514,10 @@ class MetricsCollectionJob:
                 reason=REASON_RECOLLECT_SKIPPED,
                 steps_with_data=1,
                 pod_rows=len(stored[record.window_start].pods),
+                # The step keeps the cost status of its stored rows (COST-01).
+                cost_status=COST_STATUS_PENDING
+                if getattr(stored[record.window_start], "pending_cost_rows", 0)
+                else None,
             )
             for record in await self._window_records(window, rows)
             if record.window_start in stored
@@ -551,6 +570,7 @@ class MetricsCollectionJob:
             )
             self._account_records(records, report)
             report.rows_written += written
+            await self._note_opencost_seen(window)
             if advanced is not None:
                 watermark = advanced
                 advance = False
@@ -598,6 +618,10 @@ class MetricsCollectionJob:
         reconciliation = getattr(self.processor, "last_cost_reconciliation", None)
         if not isinstance(reconciliation, dict):
             reconciliation = {}
+        whole_window_pending = self._cost_pending()
+        pending_steps = getattr(self.processor, "last_cost_pending_steps", None)
+        if not isinstance(pending_steps, set):
+            pending_steps = set()
         missing = [start for start in window.sample_starts() if start not in pod_rows]
         scraped: set[datetime] | None = None
         probe: Callable[[datetime, datetime], Awaitable[set[datetime]]] | None = getattr(
@@ -633,6 +657,9 @@ class MetricsCollectionJob:
                     reason=reason,
                     opencost_total_cost=opencost_total,
                     attributed_cost=attributed,
+                    cost_status=(
+                        COST_STATUS_PENDING if step_rows and (whole_window_pending or start in pending_steps) else None
+                    ),
                 )
             )
         return records
@@ -763,6 +790,113 @@ class MetricsCollectionJob:
                     error,
                 )
                 collection_telemetry.record_window_error(self.source, "collection_failed")
+
+    async def _note_opencost_seen(self, window: CollectionWindow) -> None:
+        """Persist that OpenCost priced ``window`` for this cluster (COST-01 review 2)."""
+        if getattr(self.processor, "last_cost_status", None) != "ok":
+            return
+        try:
+            await self.watermark_repository.advance(self.cluster_uid, OPENCOST_SEEN_SOURCE, window.end)
+        except Exception as error:  # a diagnostic fact: never fail the collection for it
+            logger.warning("Could not record that OpenCost priced %s: %s", window.end.isoformat(), error)
+
+    def _cost_pending(self) -> bool:
+        """Whether the processor's last window waits for OpenCost (COST-01)."""
+        return getattr(self.processor, "last_cost_pending", False) is True
+
+    async def _seed_opencost_known(self, now: datetime) -> None:
+        """Tell the processor OpenCost priced a stored step of the horizon (survives restarts, COST-01).
+
+        An empty OpenCost answer is then a lag or a gap in OpenCost's data,
+        and the window is marked pending instead of modeled for good.
+        """
+        if getattr(self.processor, "opencost_known", None) is not False:
+            return
+        seen = await self.watermark_repository.get(self.cluster_uid, OPENCOST_SEEN_SOURCE)
+        if seen is not None:
+            setattr(self.processor, "opencost_known", True)
+            return
+        if self.window_repository is None:
+            return
+        horizon_start = align_down(now - self.max_backfill, self.step)
+        records = await self.window_repository.list_overlapping(self.cluster_uid, self.source, horizon_start, now)
+        if any(record.opencost_total_cost is not None for record in records):
+            setattr(self.processor, "opencost_known", True)
+
+    async def _reprice_pending_steps(self, now: datetime, fence: LeaderFence, report: CollectionReport) -> None:
+        """Re-collect steps whose cost waits for OpenCost, once OpenCost answers again (COST-01).
+
+        A step recorded with ``cost_status = opencost_pending`` holds rows with
+        a modeled cost labelled ``opencost_pending``. While the last window of
+        this run was still pending, nothing is tried. Otherwise at most one
+        chunk of pending steps inside the backfill horizon (least recently
+        attempted first) is re-collected; the pass replaces the window when
+        OpenCost priced it, which clears the status. A pass that would lose
+        stored pods is not written and the steps stay pending (their rows stay
+        untrusted). Steps that leave the horizon keep their pending rows.
+        """
+        if self.window_repository is None:
+            return
+        horizon_start = align_down(now - self.max_backfill, self.step)
+        end = align_down(now - self.safety_lag, self.step)
+        if end <= horizon_start:
+            return
+        expired = await self.window_repository.expire_cost_pending(self.cluster_uid, self.source, horizon_start)
+        if expired:
+            logger.warning(
+                "%d collection step(s) left COLLECTION_MAX_BACKFILL while their cost still waited for OpenCost; "
+                "their rows keep an untrusted opencost_pending cost (cost_status %s).",
+                expired,
+                COST_STATUS_PENDING_EXPIRED,
+            )
+            collection_telemetry.record_cost_pending_expired(self.source, expired)
+        if not self._cost_pending():
+            pending = await self.window_repository.list_cost_pending(
+                self.cluster_uid, self.source, horizon_start, end, self.max_chunk_steps
+            )
+            for window in _contiguous_windows(sorted(record.window_start for record in pending), self.step):
+                try:
+                    fence.check("re-price pending window")
+                    rows, rejected = self._quarantine(
+                        await self.processor.run_range(start=window.start, end=window.end)
+                    )
+                    if self._cost_pending():
+                        logger.warning(
+                            "OpenCost still cannot price %s -> %s; the window stays opencost_pending.",
+                            window.start.isoformat(),
+                            window.end.isoformat(),
+                        )
+                        break
+                    degraded, stored = await self._recollection_degradation(window, rows) if rows else (None, {})
+                    if degraded is not None:
+                        await self._record_skipped(window, rows, stored, degraded)
+                        continue
+                    records = self._flag_rejected(await self._window_records(window, rows), rejected)
+                    fence.check("write re-priced window")
+                    written, _ = await self._write_window(window, rows, records, fence, advance=False)
+                    report.rows_written += written
+                    # Only steps that hold rows and lost their pending status were re-priced.
+                    report.repriced_steps += sum(
+                        1 for record in records if record.cost_status is None and record.steps_with_data > 0
+                    )
+                    await self._note_opencost_seen(window)
+                except LeadershipLostError:
+                    raise
+                except Exception as error:
+                    logger.warning(
+                        "Re-pricing of window %s -> %s failed: %s",
+                        window.start.isoformat(),
+                        window.end.isoformat(),
+                        error,
+                    )
+                    collection_telemetry.record_window_error(self.source, "collection_failed")
+        remaining = await self.window_repository.list_cost_pending(
+            self.cluster_uid, self.source, horizon_start, end, 1_000_000
+        )
+        report.cost_pending_steps = len(remaining)
+        collection_telemetry.set_cost_pending_steps(self.source, len(remaining))
+        if report.repriced_steps:
+            logger.info("Re-priced %d collection step(s) from OpenCost after an outage.", report.repriced_steps)
 
     async def _seed_window_records(self, now: datetime) -> None:
         """Record the steps of rows stored before COL-04 as collected, once per cluster and source."""

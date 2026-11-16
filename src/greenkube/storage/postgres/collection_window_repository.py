@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any
 
 from greenkube.storage.base_collection_window_repository import (
+    COST_STATUS_PENDING,
+    COST_STATUS_PENDING_EXPIRED,
     STATUS_FAILED,
     STATUS_GAP,
     CollectionWindowRecord,
@@ -17,7 +19,7 @@ from greenkube.utils.time import ensure_utc
 
 _COLUMNS = (
     "cluster_uid, source, window_start, window_end, status, expected_steps, steps_with_data, pod_rows, "
-    "cpu_series, pods_without_cpu, reason, opencost_total_cost, attributed_cost, collected_at"
+    "cpu_series, pods_without_cpu, reason, opencost_total_cost, attributed_cost, collected_at, cost_status"
 )
 
 
@@ -37,6 +39,7 @@ def _row(row) -> CollectionWindowRecord:
         opencost_total_cost=row["opencost_total_cost"],
         attributed_cost=row["attributed_cost"],
         collected_at=ensure_utc(row["collected_at"]),
+        cost_status=row["cost_status"],
     )
 
 
@@ -66,13 +69,14 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
                 r.opencost_total_cost,
                 r.attributed_cost,
                 ensure_utc(r.collected_at) if r.collected_at else None,
+                r.cost_status,
             )
             for r in records
         ]
         async with self._connection(connection) as conn:
             await conn.executemany(
                 f"""INSERT INTO collection_windows ({_COLUMNS})
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14, NOW()))
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14, NOW()), $15)
                 ON CONFLICT (cluster_uid, source, window_start) DO UPDATE SET
                     window_end = EXCLUDED.window_end,
                     status = EXCLUDED.status,
@@ -84,7 +88,8 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
                     reason = EXCLUDED.reason,
                     opencost_total_cost = EXCLUDED.opencost_total_cost,
                     attributed_cost = EXCLUDED.attributed_cost,
-                    collected_at = EXCLUDED.collected_at
+                    collected_at = EXCLUDED.collected_at,
+                    cost_status = EXCLUDED.cost_status
                 -- A re-collection without data (beyond retention) never downgrades stored rows.
                 WHERE NOT (collection_windows.status = 'collected' AND EXCLUDED.status = 'failed')""",
                 params,
@@ -132,6 +137,23 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
                 max(int(limit), 0),
             )
         return [_row(row) for row in rows]
+
+    async def expire_cost_pending(self, cluster_uid: str, source: str, before: datetime) -> int:
+        """Pending steps older than ``before`` become ``opencost_pending_expired`` (COST-01)."""
+        async with self.db_manager.connection_scope() as conn:
+            result = await conn.execute(
+                """UPDATE collection_windows SET cost_status = $1
+                WHERE cluster_uid = $2 AND source = $3 AND cost_status = $4 AND window_start < $5""",
+                COST_STATUS_PENDING_EXPIRED,
+                cluster_uid,
+                source,
+                COST_STATUS_PENDING,
+                ensure_utc(before),
+            )
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
 
     async def expire_failed(self, cluster_uid: str, source: str, before: datetime) -> int:
         """Failed steps older than ``before`` become gaps."""

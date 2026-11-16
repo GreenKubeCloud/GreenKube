@@ -14,7 +14,13 @@ from .. import __version__
 from ..collectors import dcgm_collector
 from ..collectors.metrics_server_collector import MetricsServerCollector
 from ..collectors.node_collector import NodeCollector
-from ..collectors.opencost_collector import OpenCostCollector, opencost_step_share
+from ..collectors.opencost_collector import (
+    OPENCOST_STATUS_EMPTY,
+    OPENCOST_STATUS_NOT_CONFIGURED,
+    OPENCOST_STATUS_OK,
+    OpenCostCollector,
+    opencost_step_shares,
+)
 from ..collectors.pod_collector import PodCollector
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..collectors.promql import PromQLCatalog
@@ -33,7 +39,7 @@ from ..energy.estimator import BasicEstimator
 from ..energy.node_power import NodePowerProfile, resolve_node_power_profile
 from ..impact.power import GpuDevice, GpuPowerModel, NodeGpuPower, node_gpu_power
 from ..impact.realization import refresh_realization_context
-from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour
+from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour, mark_cost_pending
 from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
 from ..models.provenance import CostSource, MetadataSource, NodeSource, UsageSource
@@ -60,7 +66,11 @@ logger = logging.getLogger(__name__)
 #: without sample no longer drops the container rows of its siblings.  COL-09: pods with pod-level series
 #: only are kept when other pods have container series.  ``+range.5`` rows are
 #: not rewritten: re-collect a window inside Prometheus retention to apply it.
-CALCULATION_VERSION = f"{__version__}+range.6"
+#: range.7 (COL-10): a pod's OpenCost cost is spread over the steps of a multi-step window by its running
+#: seconds in each step (OpenCost ``start``/``end``), not ``step / running time`` per row.  ``+range.6``
+#: rows of catch-up and backfill windows keep their cost: re-collect a window inside retention to apply it.
+#: range.8 (COST-02): container rows split the pod cost by reservation max(request, usage), not by usage.
+CALCULATION_VERSION = f"{__version__}+range.8"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
@@ -179,10 +189,69 @@ class HistoricalRangeProcessor:
         #: Whether the last ``run_range`` call saw any container-level CPU series; False on runtimes whose
         #: cAdvisor exports pod cgroups only (cri-dockerd), where past windows get no container rows (COL-05).
         self.last_container_series_present = False
+        #: OpenCost outcome of the last ``run_range`` call (``OPENCOST_STATUS_*`` or ``unavailable``).
+        self.last_cost_status: str | None = None
+        #: True when the last ``run_range`` window waits for OpenCost: its modeled rows carry
+        #: ``cost_source = opencost_pending`` and the collection job re-prices it later (COST-01).
+        self.last_cost_pending = False
+        #: Steps of the last ``run_range`` call with a row whose OpenCost allocation carried no usable cost
+        #: while OpenCost is known: those rows are ``opencost_pending`` too (review of COST-01/COST-05).
+        self.last_cost_pending_steps: set[datetime] = set()
+        #: OpenCost priced a window before (in this process, or per the stored step records): an empty
+        #: OpenCost answer is then a lag or a gap of OpenCost's own data, not a cluster without OpenCost.
+        self.opencost_known = False
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _collect_costs(self, start: datetime, end: datetime) -> tuple[dict, bool]:
+        """OpenCost allocations of ``[start, end)`` keyed by ``(namespace, pod)``, and whether cost is pending.
+
+        The cost of the window is pending (COST-01) when OpenCost failed (any
+        error of the call: transport, non-2xx, invalid JSON) or answered without
+        allocations after it priced a window before (``opencost_known``). A
+        cluster without OpenCost (``not_configured``) is not pending: its rows
+        get the modeled cost as before. Sets ``last_cost_status`` and
+        ``last_cost_pending``.
+        """
+        try:
+            # Exact-window allocation keyed by (namespace, pod) (A4, BUG-04, BUG-41).
+            cost_metrics = await self.opencost_collector.collect_range(start=start, end=end)
+        except Exception as error:
+            logger.error(
+                "OpenCost allocation is unavailable for %s -> %s; the window keeps a modeled cost marked "
+                "opencost_pending and is re-priced when OpenCost answers again: %s",
+                start.isoformat(),
+                end.isoformat(),
+                error,
+            )
+            self.last_cost_status = "unavailable"
+            self.last_cost_pending = True
+            return {}, True
+        status = getattr(self.opencost_collector, "last_status", None)
+        status = status if isinstance(status, str) else None
+        if cost_metrics:
+            status = OPENCOST_STATUS_OK
+            self.opencost_known = True
+        self.last_cost_status = status
+        if (
+            not cost_metrics
+            and status in (OPENCOST_STATUS_EMPTY, OPENCOST_STATUS_NOT_CONFIGURED)
+            and self.opencost_known
+        ):
+            # An empty answer is a lag or a gap of OpenCost's data; no resolvable URL is a discovered
+            # OpenCost that is down (at restart): neither is a cluster without OpenCost.
+            logger.error(
+                "OpenCost %s for %s -> %s although it priced earlier windows; the window keeps a modeled cost "
+                "marked opencost_pending and is re-priced later.",
+                "returned no allocation" if status == OPENCOST_STATUS_EMPTY else "cannot be reached (no URL)",
+                start.isoformat(),
+                end.isoformat(),
+            )
+            self.last_cost_pending = True
+            return {}, True
+        return {(c.namespace, c.pod_name): c for c in cost_metrics}, False
 
     @staticmethod
     def _parse_duration_to_seconds(s: str) -> int:
@@ -954,6 +1023,9 @@ class HistoricalRangeProcessor:
         self.last_idle_metrics = []
         self.last_cost_reconciliation = {}
         self.last_container_series_present = False
+        self.last_cost_status = None
+        self.last_cost_pending = False
+        self.last_cost_pending_steps = set()
 
         chosen_step_sec = self._promql.step_seconds
         window = CollectionWindow.covering(start_dt, end_dt, timedelta(seconds=chosen_step_sec))
@@ -1169,20 +1241,11 @@ class HistoricalRangeProcessor:
             logger.warning("Failed to prepare embodied data: %s. Embodied emissions will be 0.", e)
             boavizta_cache = {}
 
-        # Cost data
-        range_seconds = (end_dt - start_dt).total_seconds()
-        try:
-            # Exact-window allocation keyed by (namespace, pod) (A4, BUG-04, BUG-41).
-            cost_metrics = await self.opencost_collector.collect_range(start=start_dt, end=end_dt)
-            cost_map = {(c.namespace, c.pod_name): c for c in cost_metrics}
-        except Exception as error:
-            logger.warning("OpenCost allocation is unavailable for %s -> %s: %s", start_dt, end_dt, error)
-            cost_map = {}
+        # Cost data: each row gets its pod's running share of the window allocation (COL-10).
+        step_delta = timedelta(seconds=chosen_step_sec)
+        cost_map, cost_pending = await self._collect_costs(start_dt, end_dt)
         # Reconciliation against the OpenCost total of the window (COL-03 step 4): an allocation
         # of a pod that gets no row (no sample of any kind) is not stored, so it must be counted.
-        opencost_window_total = sum(
-            cost.total_cost for cost in cost_map.values() if cost.source != CostSource.NONE.value
-        )
         attributed_cost_by_step: dict[int, float] = defaultdict(float)
 
         # Per-pod persistent storage (PVC) request/usage — best-effort.
@@ -1456,6 +1519,7 @@ class HistoricalRangeProcessor:
                 gpu_power = gpu_power_by_group.get((sample_start, node_name))
 
                 node_rows: List[CombinedMetric] = []
+                unusable_cost_pods: set[tuple[str, str]] = set()
                 group_pod_metrics: List[PodMetric] = []
                 for em_namespace, pod_name in pod_keys:
                     pod_key = (em_namespace, pod_name)
@@ -1478,11 +1542,15 @@ class HistoricalRangeProcessor:
                     cost_metric = cost_map.get(pod_key)
                     costs = cost_fields(
                         cost_metric,
-                        opencost_step_share(cost_metric, chosen_step_sec, range_seconds) if cost_metric else 1.0,
+                        opencost_step_shares(cost_metric, [ts], step_delta)[ts] if cost_metric else 1.0,
                         self._config.DEFAULT_COST,
                     )
                     if cost_metric is not None and cost_metric.source != CostSource.NONE.value:
                         attributed_cost_by_step[sample_start] += costs["total_cost"] or 0.0
+                    elif cost_metric is not None and self.opencost_known:
+                        # OpenCost knows the pod but its allocation carries no usable cost (minutes = 0
+                        # after a gap in OpenCost's data, unrebuilt sub-precision figure): pending, not modeled.
+                        unusable_cost_pods.add(pod_key)
                     is_estimated, estimation_reasons = self.assembler.build_estimation_flags(
                         energy_metric=energy_metric,
                         node_context=node_context,
@@ -1600,6 +1668,15 @@ class HistoricalRangeProcessor:
                 )
                 if allocated.idle is not None:
                     idle_rows.append(allocated.idle)
+                if cost_pending:
+                    # Modeled cost while OpenCost could not price the window: never trusted, re-priced later.
+                    allocated.rows = [mark_cost_pending(row) for row in allocated.rows]
+                elif unusable_cost_pods:
+                    allocated.rows = [
+                        mark_cost_pending(row) if (row.namespace, row.pod_name) in unusable_cost_pods else row
+                        for row in allocated.rows
+                    ]
+                    self.last_cost_pending_steps.add(ts)
 
                 container_cpu_usage = {
                     key: int(round(value * 1000))
@@ -1690,10 +1767,20 @@ class HistoricalRangeProcessor:
         # lost the Lease during the Prometheus queries writes nothing.
         self.last_idle_metrics = idle_rows
         if cost_map:
-            per_step_total = opencost_window_total / window.steps
+            # The OpenCost total expected in each step follows the pods' running time (COL-10).
+            step_starts = list(window.sample_starts())
+            expected_by_step: dict[datetime, float] = defaultdict(float)
+            for cost in cost_map.values():
+                if cost.source == CostSource.NONE.value:
+                    continue
+                for step_start, share in opencost_step_shares(cost, step_starts, step_delta).items():
+                    expected_by_step[step_start] += cost.total_cost * share
             self.last_cost_reconciliation = {
-                step_start: (per_step_total, attributed_cost_by_step.get(int(step_start.timestamp()), 0.0))
-                for step_start in window.sample_starts()
+                step_start: (
+                    expected_by_step.get(step_start, 0.0),
+                    attributed_cost_by_step.get(int(step_start.timestamp()), 0.0),
+                )
+                for step_start in step_starts
             }
         if namespace:
             combined = [c for c in combined if c.namespace == namespace]

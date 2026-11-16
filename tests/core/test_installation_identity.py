@@ -220,9 +220,9 @@ async def test_controllers_on_two_nodes_share_one_watermark(tmp_path):
 
         assert reports[0].windows_planned > 0
         assert reports[1].windows_planned == 0
-        assert [w.cluster_uid for w in await create_collection_watermark_repository(dbm, "sqlite").list_all()] == [
-            UID_A
-        ]
+        watermarks = await create_collection_watermark_repository(dbm, "sqlite").list_all()
+        # Only the metrics watermark (the OpenCost-seen row, COST-01, carries its own source).
+        assert [w.cluster_uid for w in watermarks if w.source == METRICS_WATERMARK_SOURCE] == [UID_A]
     finally:
         await dbm.close()
 

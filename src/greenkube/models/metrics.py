@@ -65,6 +65,12 @@ class CostMetric(BaseModel):
         None,
         description="Minutes the pod ran inside the allocation window, as reported by the cost source.",
     )
+    running_start: Optional[datetime] = Field(
+        None, description="First time the pod ran inside the allocation window (OpenCost ``start``)."
+    )
+    running_end: Optional[datetime] = Field(
+        None, description="Last time the pod ran inside the allocation window (OpenCost ``end``)."
+    )
     source: str = Field("opencost", description="Cost provenance (greenkube.models.provenance.CostSource).")
 
 

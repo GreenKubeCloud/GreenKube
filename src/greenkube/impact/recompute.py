@@ -29,6 +29,7 @@ from greenkube.impact.rows import (
     MetricRowAllocator,
     NodeIdleMetric,
     NodeSpec,
+    container_cost_shares,
     container_gpu_fields,
     is_modeled_cost,
 )
@@ -78,10 +79,11 @@ def _weights(values: Sequence[Optional[float]]) -> Optional[List[float]]:
 
 
 def container_weights(containers: Sequence[CombinedMetric]) -> Tuple[List[float], List[float]]:
-    """CPU and memory split weights of a pod's containers, as collection computes them.
+    """CPU and memory usage weights of a pod's containers, as collection computes them (energy split).
 
     CPU: usage, else memory usage, else CPU requests, else memory requests,
     else equal. Memory: memory usage, else memory requests, else the CPU weights.
+    Cost is split by reservation instead (:func:`~greenkube.impact.rows.container_cost_shares`).
     """
     cpu = (
         _weights([c.cpu_usage_millicores for c in containers])
@@ -100,13 +102,21 @@ def split_to_containers(pod: CombinedMetric, containers: Sequence[CombinedMetric
     """Re-splits a re-allocated pod row onto its container rows."""
     if not containers:
         return []
-    cpu_weights, memory_weights = container_weights(containers)
-    cpu_total, memory_total = sum(cpu_weights), sum(memory_weights)
+    cpu_weights, _ = container_weights(containers)
+    cpu_total = sum(cpu_weights)
+    # Cost follows the reservation of each container, as in collection (COST-02).
+    cpu_cost_shares, ram_cost_shares = container_cost_shares(
+        [c.cpu_request for c in containers],
+        [c.cpu_usage_millicores for c in containers],
+        [c.memory_request for c in containers],
+        [c.memory_usage_bytes for c in containers],
+    )
     modeled = is_modeled_cost(pod.cost_source)
     result: List[CombinedMetric] = []
-    for container, cpu_weight, memory_weight in zip(containers, cpu_weights, memory_weights, strict=True):
+    for container, cpu_weight, cost_share, ram_cost_share in zip(
+        containers, cpu_weights, cpu_cost_shares, ram_cost_shares, strict=True
+    ):
         share = cpu_weight / cpu_total
-        memory_share = memory_weight / memory_total
         update: Dict[str, Any] = {
             "joules": pod.joules * share,
             "co2e_grams": pod.co2e_grams * share,
@@ -115,8 +125,8 @@ def split_to_containers(pod: CombinedMetric, containers: Sequence[CombinedMetric
             **container_gpu_fields(pod, len(containers)),
         }
         if modeled:
-            cost_cpu = (pod.cost_cpu or 0.0) * share
-            cost_ram = (pod.cost_ram or 0.0) * memory_share
+            cost_cpu = (pod.cost_cpu or 0.0) * cost_share
+            cost_ram = (pod.cost_ram or 0.0) * ram_cost_share
             update.update(
                 total_cost=cost_cpu + cost_ram,
                 cost_cpu=cost_cpu,

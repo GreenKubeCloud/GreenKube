@@ -150,3 +150,23 @@ async def test_stored_metric_timestamps_are_distinct(database):
 
     assert await repo.stored_metric_timestamps() == [BASE, BASE + STEP]
     assert await repo.stored_metric_timestamps(since=BASE + STEP) == [BASE + STEP]
+
+
+@pytest.mark.asyncio
+async def test_cost_pending_status_round_trips_and_is_listed(database):
+    """COST-01: a step whose cost waits for OpenCost is stored, listed, then cleared by its re-pricing."""
+    from dataclasses import replace
+
+    from greenkube.storage.base_collection_window_repository import COST_STATUS_PENDING
+
+    backend, manager = database
+    repository = create_collection_window_repository(manager, backend)
+    pending = replace(_record(BASE, STATUS_COLLECTED), cost_status=COST_STATUS_PENDING)
+    await repository.record([pending, _record(BASE + STEP, STATUS_COLLECTED)])
+
+    listed = await repository.list_cost_pending("c1", SOURCE, BASE, BASE + 4 * STEP, 10)
+    assert [record.window_start for record in listed] == [BASE]
+    assert listed[0].cost_status == COST_STATUS_PENDING
+
+    await repository.record([_record(BASE, STATUS_COLLECTED)])
+    assert await repository.list_cost_pending("c1", SOURCE, BASE, BASE + 4 * STEP, 10) == []

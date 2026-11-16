@@ -50,7 +50,7 @@ All paths below are relative to `/api/v1`.
 | `GET` | `/setup/status` | Guided setup checklist: `complete`, `checks[]` (`id`, `category`, `title`, `status` ok/action_needed/blocked/not_applicable/pending, `reason`, `fix` {`text`, `snippet`, `ui_action`}, `docs_url`) and `capabilities` (`discovery`, `delivery`, `sync_tracking`, `measurement` with `state` and `reason`). |
 | `GET` | `/version` | Application version. |
 | `GET` | `/config` | Current non-sensitive runtime configuration, including `currency` (the pricing currency of every amount, `impact.pricing.currency`). |
-| `GET` | `/health/services` | Health checks for configured data sources (`?force=true` bypasses the cache). |
+| `GET` | `/health/services` | Health checks for configured data sources (`?force=true` bypasses the cache). The OpenCost entry also calls the allocation endpoint (10-minute window, with the configured credentials) and is `degraded` with the status code when it fails, even if `/healthz` answers. |
 | `GET` | `/health/services/{service_name}` | Health check for one data source. |
 | `POST` | `/config/services` | Removed: answers `410 Gone`. Data sources are configuration as code; see [Configuration](configuration.md#data-sources-are-configuration-as-code). |
 
