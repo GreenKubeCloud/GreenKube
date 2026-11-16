@@ -48,6 +48,10 @@ class NodeInfo(BaseModel):
         description="status.nodeInfo.bootID: nodes with the same value run on one host (NRG-15). Not stored.",
     )
     provider_id: Optional[str] = Field(None, description="spec.providerID (kind://, aws://, ...). Not stored.")
+    gpu_count: Optional[int] = Field(
+        None, description="GPUs in the node capacity (nvidia.com/gpu, amd.com/gpu, gpu.intel.com/*), NRG-13."
+    )
+    gpu_model: Optional[str] = Field(None, description="Label nvidia.com/gpu.product (NRG-13). Not stored.")
     confirmed_until: Optional[datetime] = Field(
         None,
         description=(

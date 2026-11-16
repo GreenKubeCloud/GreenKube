@@ -268,6 +268,17 @@ def set_shared_host_groups(count: int) -> None:
     SHARED_HOST_GROUPS.set(count)
 
 
+GPU_NODES_UNMEASURED = Gauge(
+    "greenkube_gpu_nodes_unmeasured",
+    "GPU nodes without DCGM samples whose GPU model has no TDP profile: their GPU power is not counted (NRG-13).",
+    registry=REGISTRY,
+)
+
+
+def set_gpu_nodes_unmeasured(count: int) -> None:
+    GPU_NODES_UNMEASURED.set(count)
+
+
 #: Outcome of the last hourly intensity fetch of a zone (NRG-03): fetched, empty or failed.
 INTENSITY_ZONES = Gauge(
     "greenkube_intensity_zones",

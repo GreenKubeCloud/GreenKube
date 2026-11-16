@@ -39,6 +39,26 @@ def _provider_id(node) -> str | None:
     return provider_id if isinstance(provider_id, str) and provider_id else None
 
 
+#: Extended resources of GPU device plugins (NRG-13).
+_GPU_RESOURCES = ("nvidia.com/gpu", "amd.com/gpu")
+_GPU_RESOURCE_PREFIX = "gpu.intel.com/"
+
+
+def _gpu_count(node) -> int | None:
+    """GPUs declared in the node capacity, or ``None`` when it declares none."""
+    capacity = getattr(getattr(node, "status", None), "capacity", None)
+    if not isinstance(capacity, dict):
+        return None
+    total = 0
+    for resource, quantity in capacity.items():
+        if resource in _GPU_RESOURCES or str(resource).startswith(_GPU_RESOURCE_PREFIX):
+            try:
+                total += int(float(str(quantity)))
+            except ValueError:
+                continue
+    return total or None
+
+
 class NodeCollector(BaseCollector):
     """Collects node zone information and instance types from the Kubernetes cluster."""
 
@@ -112,6 +132,8 @@ class NodeCollector(BaseCollector):
                     embodied_emissions_kg=parse_embodied_annotation(getattr(node.metadata, "annotations", None)),
                     host_id=_boot_id(node),
                     provider_id=_provider_id(node),
+                    gpu_count=_gpu_count(node),
+                    gpu_model=labels.get("nvidia.com/gpu.product") if isinstance(labels, dict) else None,
                     timestamp=datetime.now(timezone.utc),
                 )
 

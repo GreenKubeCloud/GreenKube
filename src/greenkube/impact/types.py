@@ -299,6 +299,8 @@ class NodeImpactProfile:
     embodied_reason: Optional[str] = None
     #: Estimation reason when the node shares its host with other nodes (NRG-15).
     host_reason: Optional[str] = None
+    #: Estimation reason of a GPU node without DCGM samples (NRG-13).
+    gpu_reason: Optional[str] = None
 
     @property
     def allocatable_cpu(self) -> float:

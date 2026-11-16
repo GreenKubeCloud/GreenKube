@@ -88,6 +88,7 @@ kind, k3d and multi-node minikube nodes are containers of one machine and each r
 
 - **`MemoryPowerModel`**: `P_mem = w_mem × memory GiB`, with the Cloud Carbon Footprint coefficient 0.392 W/GiB by default. On an m5.large (8 GiB) fully reserved, memory adds about 3.1 W.
 - **`GpuPowerModel`**: the board power DCGM measures (`DCGM_FI_DEV_POWER_USAGE`, averaged over the step). When only the GPU model and utilization are known, `P = idle + util × (TDP − idle)` with the TDP of `data/gpu_profiles.json` and idle at 15% of TDP. Each sample carries the GPU power DCGM attributes to its pod (`gpu_power_watts`); unattributed GPUs are node-level (`P_gpu_idle`).
+- **GPU nodes without DCGM (NRG-13)**: the node collector reads the GPUs of the node capacity (`nvidia.com/gpu`, `amd.com/gpu`, `gpu.intel.com/*`) and the `nvidia.com/gpu.product` label. At a step without DCGM samples for such a node, its GPUs are counted at the idle floor of their TDP profile (a lower bound) as unattributed node power (`P_gpu_idle`, the `__idle__` row), and its rows carry the reason "GPU power estimated from TDP". When the model has no profile, the GPU power is not counted, rows carry "GPU power not measured" and `greenkube_gpu_nodes_unmeasured` counts the node. Pod GPU requests are not attributed yet, and the detection uses the live node list of the collection run.
 
 ### Embodied emissions
 

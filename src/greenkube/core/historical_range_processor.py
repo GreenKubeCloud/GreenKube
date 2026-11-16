@@ -39,7 +39,14 @@ from ..energy.embodied import resolve_node_embodied
 from ..energy.estimator import BasicEstimator
 from ..energy.node_power import NodePowerProfile, resolve_node_power_profile
 from ..energy.shared_host import SharedHost, shared_host_groups
-from ..impact.power import GpuDevice, GpuPowerModel, NodeGpuPower, node_gpu_power
+from ..impact.power import (
+    GpuDevice,
+    GpuPowerModel,
+    NodeGpuPower,
+    UndetectedGpuPower,
+    node_gpu_power,
+    undetected_gpu_power,
+)
 from ..impact.realization import refresh_realization_context
 from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, mark_cost_pending
 from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
@@ -650,6 +657,7 @@ class HistoricalRangeProcessor:
         gpu_unattributed_watts: float,
         config: Any = None,
         shared_host: SharedHost | None = None,
+        undetected_gpu: UndetectedGpuPower | None = None,
     ) -> NodeSpec:
         """What the Impact Model needs to know about one node at one step."""
         config = config if config is not None else get_config()
@@ -673,12 +681,14 @@ class HistoricalRangeProcessor:
             vcores=float(profile.get("vcores", 0.0) or 0.0) or None,
             power_source=power.source,
             embodied_g_per_hour=embodied.g_per_hour,
-            gpu_unattributed_watts=gpu_unattributed_watts,
+            gpu_unattributed_watts=gpu_unattributed_watts
+            + ((undetected_gpu.watts or 0.0) if undetected_gpu is not None else 0.0),
             is_fallback=power.is_fallback,
             embodied_source=embodied.source,
             embodied_reason=embodied.reason(node_name),
             host_share=shared_host.share if shared_host is not None else 1.0,
             host_reason=shared_host.reason(node_name) if shared_host is not None else None,
+            gpu_reason=undetected_gpu.reason if undetected_gpu is not None else None,
         )
 
     async def _pod_history(
@@ -1247,6 +1257,15 @@ class HistoricalRangeProcessor:
         # Nodes that are one physical host (NRG-15), from the live node list of this run.
         shared_hosts = shared_host_groups(nodes_info) if getattr(self._config, "SHARED_HOST_DETECTION", True) else {}
         collection_telemetry.set_shared_host_groups(len({group.key for group in shared_hosts.values()}))
+        # GPU nodes of the live node list, for steps DCGM has no sample of (NRG-13).
+        undetected_gpus = {
+            name: undetected_gpu_power(info.gpu_count, info.gpu_model)
+            for name, info in nodes_info.items()
+            if info.gpu_count
+        }
+        collection_telemetry.set_gpu_nodes_unmeasured(
+            sum(1 for estimate in undetected_gpus.values() if estimate.watts is None)
+        )
         embodied_nodes: dict[str, NodeInfo] = dict(nodes_info)
         for node_name, timeline in node_timeline.items():
             for index, (_ts, snapshot_info) in enumerate(timeline):
@@ -1673,6 +1692,7 @@ class HistoricalRangeProcessor:
                     gpu_unattributed_watts=gpu_power.unattributed_watts if gpu_power else 0.0,
                     config=self._config,
                     shared_host=shared_hosts.get(node_name),
+                    undetected_gpu=None if gpu_power else undetected_gpus.get(node_name),
                 )
                 node_profile = allocator.node_profile(
                     spec, node_rows, pue=pue, intensity=carbon_result.grid_intensity, hours=chosen_step_sec / 3600.0

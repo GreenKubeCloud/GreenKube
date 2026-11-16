@@ -30,7 +30,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.energy.shared_host import SHARED_HOST_REASON_PREFIX
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
-from greenkube.impact.power import memory_watts_per_gib
+from greenkube.impact.power import (
+    GPU_TDP_ESTIMATE_REASON_PREFIX,
+    GPU_UNMEASURED_REASON_PREFIX,
+    memory_watts_per_gib,
+)
 from greenkube.impact.pricing import CustomRates, PricingCatalog, UnitPriceResolver, observed_rates_from_rows
 from greenkube.impact.projector import sample_from_metric
 from greenkube.impact.types import (
@@ -141,6 +145,8 @@ class NodeSpec:
     #: Share of a host shared with other nodes (1.0 alone) and its row estimation reason (NRG-15).
     host_share: float = 1.0
     host_reason: Optional[str] = None
+    #: Estimation reason of a GPU node without DCGM samples (NRG-13).
+    gpu_reason: Optional[str] = None
 
 
 @dataclass
@@ -157,6 +163,10 @@ def _is_observed_cost(row: CombinedMetric) -> bool:
         return True
     # Legacy rows without provenance: a positive cost came from OpenCost.
     return not source and (row.total_cost or 0.0) > 0
+
+
+#: Prefixes of node-level estimation reasons the allocator rewrites on every allocation.
+_NODE_REASON_PREFIXES = (SHARED_HOST_REASON_PREFIX, GPU_TDP_ESTIMATE_REASON_PREFIX, GPU_UNMEASURED_REASON_PREFIX)
 
 
 def embodied_g_per_hour(profile: Optional[Mapping[str, Any]]) -> float:
@@ -251,6 +261,7 @@ class MetricRowAllocator:
             embodied_source=spec.embodied_source,
             embodied_reason=spec.embodied_reason,
             host_reason=spec.host_reason,
+            gpu_reason=spec.gpu_reason,
         )
 
     def modeled_prices(self, node: NodeImpactProfile) -> UnitPrices:
@@ -343,14 +354,15 @@ class MetricRowAllocator:
             update["estimation_reasons"] = reasons
             if node.embodied_reason:
                 update["is_estimated"] = True
-        # NRG-15: a node sharing its host is charged its share of the host, and says so.
+        # NRG-15 and NRG-13: a node sharing its host, or with GPUs DCGM does not report, says so.
+        node_reasons = [reason for reason in (node.host_reason, node.gpu_reason) if reason]
         reasons = [
             r
             for r in update.get("estimation_reasons", row.estimation_reasons)
-            if not r.startswith(SHARED_HOST_REASON_PREFIX)
+            if not r.startswith(_NODE_REASON_PREFIXES)
         ]
-        if node.host_reason:
-            reasons.append(node.host_reason)
+        if node_reasons:
+            reasons.extend(node_reasons)
             update["is_estimated"] = True
         if reasons != list(row.estimation_reasons) or "estimation_reasons" in update:
             update["estimation_reasons"] = reasons

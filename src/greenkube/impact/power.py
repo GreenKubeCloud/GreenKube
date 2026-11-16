@@ -170,6 +170,49 @@ class NodeGpuPower:
         return sum(self.by_pod.values()) + self.unattributed_watts
 
 
+#: ``estimation_reasons`` prefixes of rows of a GPU node without DCGM samples (NRG-13).
+GPU_TDP_ESTIMATE_REASON_PREFIX = "GPU power estimated from TDP"
+GPU_UNMEASURED_REASON_PREFIX = "GPU power not measured"
+
+
+@dataclass(frozen=True)
+class UndetectedGpuPower:
+    """Estimated power of the GPUs of a node that DCGM does not report (NRG-13)."""
+
+    #: Whole-node GPU power in W, or ``None`` when the GPU model is unknown.
+    watts: Optional[float]
+    reason: str
+
+
+def undetected_gpu_power(
+    gpu_count: int, gpu_model: Optional[str], model: Optional[GpuPowerModel] = None
+) -> UndetectedGpuPower:
+    """GPU power of a node whose capacity declares ``gpu_count`` GPUs but DCGM has no sample.
+
+    Without utilization the GPUs are counted at the idle floor of their TDP profile
+    (``GpuProfile.watts(None)``), a lower bound. Pod requests of GPUs are not attributed:
+    the power goes to the node's ``__idle__`` row.
+    """
+    model = model or GpuPowerModel()
+    profile = model.profile_for(gpu_model)
+    if profile is None:
+        return UndetectedGpuPower(
+            watts=None,
+            reason=(
+                f"{GPU_UNMEASURED_REASON_PREFIX}: {gpu_count} GPU(s) of unknown model '{gpu_model or 'unknown'}' "
+                "and no DCGM exporter series"
+            ),
+        )
+    watts = gpu_count * profile.watts(None)
+    return UndetectedGpuPower(
+        watts=watts,
+        reason=(
+            f"{GPU_TDP_ESTIMATE_REASON_PREFIX}: DCGM exporter not available; {gpu_count} x {profile.name} "
+            f"counted at the idle floor ({profile.watts(None):g} W each)"
+        ),
+    )
+
+
 def node_gpu_power(devices: Sequence[GpuDevice], model: Optional[GpuPowerModel] = None) -> NodeGpuPower:
     """Sums the power of a node's GPUs, attributing each GPU to the pod DCGM names."""
     model = model or GpuPowerModel()
