@@ -75,6 +75,22 @@ def per_core_watts(provider: Optional[str]) -> tuple[float, float, str]:
     return 0.74, 3.5, "CCF default"
 
 
+def default_profile_from_config(config: Any) -> dict[str, Any]:
+    """``DEFAULT_INSTANCE_PROFILE`` of the configuration: used only when nothing is known of a node."""
+
+    def _number(name: str, default: float) -> float:
+        try:
+            return float(getattr(config, name, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "vcores": int(_number("DEFAULT_INSTANCE_VCORES", 1) or 1),
+        "minWatts": _number("DEFAULT_INSTANCE_MIN_WATTS", 1.0),
+        "maxWatts": _number("DEFAULT_INSTANCE_MAX_WATTS", 10.0),
+    }
+
+
 def capacity_derived_profile(cores: float, provider: Optional[str]) -> dict[str, Any]:
     min_per_core, max_per_core, _ = per_core_watts(provider)
     return {"vcores": cores, "minWatts": min_per_core * cores, "maxWatts": max_per_core * cores}

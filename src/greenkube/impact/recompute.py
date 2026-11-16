@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
 from greenkube.energy.embodied import load_cached_profiles, resolve_node_embodied
-from greenkube.energy.node_power import resolve_node_power_profile
+from greenkube.energy.node_power import default_profile_from_config, resolve_node_power_profile
 from greenkube.impact.rows import (
     MetricRowAllocator,
     NodeIdleMetric,
@@ -159,11 +159,7 @@ class MetricRecomputer:
         self.repository = repository
         self.node_repository = node_repository
         self.allocator = allocator if allocator is not None else MetricRowAllocator(config)
-        self.default_profile = {
-            "vcores": int(getattr(config, "DEFAULT_INSTANCE_VCORES", 1) or 1),
-            "minWatts": float(getattr(config, "DEFAULT_INSTANCE_MIN_WATTS", 1.0)),
-            "maxWatts": float(getattr(config, "DEFAULT_INSTANCE_MAX_WATTS", 10.0)),
-        }
+        self.default_profile = default_profile_from_config(config)
         lifespan_years = float(getattr(config, "DEFAULT_HARDWARE_LIFESPAN_YEARS", 4) or 0)
         self.lifespan_hours = lifespan_years * HOURS_PER_YEAR
         #: Stored Boavizta profiles (``instance_carbon_profiles``); ``None`` uses the fallbacks only.

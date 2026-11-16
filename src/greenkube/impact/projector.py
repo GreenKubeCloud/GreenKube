@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.energy.embodied import known_profiles, resolve_node_embodied
+from greenkube.energy.node_power import default_profile_from_config, resolve_node_power_profile
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
 from greenkube.impact.power import memory_watts_per_gib
 from greenkube.impact.pricing import (
@@ -99,37 +100,35 @@ class _PowerProfile:
     source: PowerSource
 
 
-def _power_profile(config: Any, instance_type: Optional[str], capacity_cores: Optional[float]) -> _PowerProfile:
-    """Mirrors ``BasicEstimator`` profile selection: instance profile, capacity-derived, default."""
+def _resolved_power(
+    config: Any,
+    name: str,
+    instance_type: Optional[str],
+    capacity_cores: Optional[float],
+    provider: Optional[str],
+) -> _PowerProfile:
+    """The node power profile of the collected rows (NRG-05): one resolver for both.
+
+    ``resolve_node_power_profile``: instance profile, then capacity × the provider's CCF
+    per-vCPU coefficients (their cross-provider average for an unknown provider), then
+    ``DEFAULT_INSTANCE_PROFILE``.
+    """
     from greenkube.data.instance_profiles import INSTANCE_PROFILES
 
-    profile = INSTANCE_PROFILES.get(instance_type) if instance_type else None
-    if profile:
-        vcores = float(profile.get("vcores") or 0) or (capacity_cores or 1.0)
-        return _PowerProfile(
-            vcores=vcores,
-            min_watts=float(profile.get("minWatts", 0.0)),
-            max_watts=float(profile.get("maxWatts", 0.0)),
-            source=PowerSource.INSTANCE_PROFILE,
-        )
-
-    default_vcores = float(_setting(config, "DEFAULT_INSTANCE_VCORES", 1) or 1)
-    default_min = float(_setting(config, "DEFAULT_INSTANCE_MIN_WATTS", 1.0))
-    default_max = float(_setting(config, "DEFAULT_INSTANCE_MAX_WATTS", 10.0))
-    if capacity_cores:
-        per_core_min = default_min / default_vcores if default_vcores > 0 else default_min
-        per_core_max = default_max / default_vcores if default_vcores > 0 else default_max
-        return _PowerProfile(
-            vcores=capacity_cores,
-            min_watts=per_core_min * capacity_cores,
-            max_watts=per_core_max * capacity_cores,
-            source=PowerSource.NODE_CAPACITY_DERIVED,
-        )
+    power = resolve_node_power_profile(
+        node_name=name,
+        instance_type=instance_type,
+        cpu_capacity_cores=capacity_cores,
+        provider=provider,
+        instance_profiles=INSTANCE_PROFILES,
+        default_profile=default_profile_from_config(config),
+    )
+    profile = power.profile
     return _PowerProfile(
-        vcores=default_vcores,
-        min_watts=default_min,
-        max_watts=default_max,
-        source=PowerSource.DEFAULT_PROFILE,
+        vcores=float(profile.get("vcores") or 0) or (capacity_cores or 1.0),
+        min_watts=float(profile.get("minWatts", 0.0) or 0.0),
+        max_watts=float(profile.get("maxWatts", 0.0) or 0.0),
+        source=PowerSource(power.source),
     )
 
 
@@ -411,7 +410,7 @@ class ImpactProjector:
         is_fallback: bool = False,
     ) -> NodeImpactProfile:
         config = self.config
-        power = _power_profile(config, instance_type, capacity_cores)
+        power = _resolved_power(config, name, instance_type, capacity_cores, provider)
         cores = capacity_cores or power.vcores
         memory_gib = memory_bytes / BYTES_PER_GIB if memory_bytes else 0.0
         prices = self.resolver.resolve(

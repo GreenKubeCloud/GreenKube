@@ -72,11 +72,13 @@ The **allocatable** capacity `A` is the denominator of reservation shares. Until
 
 ### Power profile
 
-The model selects the power profile like the energy estimator does:
+Collection, `greenkube recompute` and projections select the power profile with one function, `greenkube.energy.node_power.resolve_node_power_profile` (NRG-05), so a projection uses the watts of the rows its measurement later compares it with:
 
 1. **`instance_profile`**: the instance type is in `data/instance_power_profiles.csv`, which holds Cloud Carbon Footprint per-vCPU coefficients times vCPUs.
-2. **`node_capacity_derived`**: the instance type is unknown but the node CPU capacity is known. The model uses `DEFAULT_INSTANCE_MIN_WATTS` and `DEFAULT_INSTANCE_MAX_WATTS` per `DEFAULT_INSTANCE_VCORES`, times the capacity.
-3. **`default_profile`**: nothing is known about the node. The model uses the default instance profile, and the projection is flagged with `unknown_node_profile`.
+2. **`node_capacity_derived`**: the instance type is unknown but the node CPU capacity is known (or a `cpu-N` type). The model uses the per-vCPU coefficients of the node's provider from `data/provider_power_estimates.csv` (for example 0.74 / 3.5 W per vCPU on AWS), or their cross-provider average (0.726 / 3.564 W) when the provider is unknown, times the capacity. See `docs/power_estimation_methodology.md`.
+3. **`default_profile`**: nothing is known about the node. The model uses `DEFAULT_INSTANCE_MIN_WATTS` / `DEFAULT_INSTANCE_MAX_WATTS` for `DEFAULT_INSTANCE_VCORES`, and the projection is flagged with `unknown_node_profile`.
+
+Impact Model 4.0.0 aligned the projector on this resolver; before, it used `DEFAULT_INSTANCE_MIN_WATTS / DEFAULT_INSTANCE_VCORES` (1 W idle, 10 W max per core) for every node without a bundled profile.
 
 ### Memory and GPU power (B5)
 

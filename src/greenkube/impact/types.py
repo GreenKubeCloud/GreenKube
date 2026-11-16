@@ -26,7 +26,7 @@ from greenkube.models.provenance import CostSource, PowerSource
 #: deletions take the pool's realization factor for their reserved parts, IMP-05, and
 #: ``capacity_released`` gains ``storage_gib`` and ``load_balancers``; allocations are unchanged; 4.0.0:
 #: embodied emissions from the Boavizta v1 value, an operator annotation or a per-vCPU fallback
-#: instead of a flat 100 kg per node, NRG-01).
+#: instead of a flat 100 kg per node, NRG-01; projections take the collection power profile, NRG-05).
 IMPACT_MODEL_VERSION = "4.0.0"
 
 #: Name of the synthetic workload that receives unreserved node capacity.
