@@ -253,6 +253,9 @@ class Config(BaseSettings):
     # plus kg CO2e per GiB of memory. DEFAULT_EMBODIED_EMISSIONS_KG is used only without a capacity.
     DEFAULT_EMBODIED_KG_PER_VCPU: float = 12.0
     DEFAULT_EMBODIED_KG_PER_GIB: float = 0.0
+    # Operator whole-node embodied emissions by instance type, a JSON object {"r740": 1300} (NRG-01):
+    # used before Boavizta, after the greenkube.io/embodied-kg node annotation.
+    EMBODIED_KG_BY_INSTANCE_TYPE: str = ""
 
     # --- Network variables ---
     LOG_LEVEL: str = "INFO"
@@ -870,6 +873,17 @@ class Config(BaseSettings):
         if value < 10_000:
             raise ValueError("RECOMMENDATION_MAX_METRIC_ROWS must be at least 10000")
         return value
+
+    @field_validator("EMBODIED_KG_BY_INSTANCE_TYPE", mode="after")
+    @classmethod
+    def _validate_embodied_kg_by_instance_type(cls, value: str) -> str:
+        from greenkube.energy.embodied import parse_instance_type_overrides
+
+        try:
+            parse_instance_type_overrides(value)
+        except ValueError as exc:
+            raise ValueError(f"EMBODIED_KG_BY_INSTANCE_TYPE {exc}") from exc
+        return value.strip()
 
     @field_validator("SOURCES_CONFIG", mode="after")
     @classmethod

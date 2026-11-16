@@ -3,7 +3,8 @@
 
 Resolution order for one node (:func:`resolve_node_embodied`):
 
-1. ``configured``: the node annotation ``greenkube.io/embodied-kg`` (``NodeInfo.embodied_emissions_kg``);
+1. ``configured``: the node annotation ``greenkube.io/embodied-kg`` (``NodeInfo.embodied_emissions_kg``),
+   then ``EMBODIED_KG_BY_INSTANCE_TYPE`` (Helm ``config.boavizta.embodiedKgByInstanceType``);
 2. ``boavizta``: the Boavizta API value for the node's provider and instance type, cached in
    ``instance_carbon_profiles`` (see :mod:`greenkube.core.embodied_service`);
 3. ``fallback_per_vcpu``: ``DEFAULT_EMBODIED_KG_PER_VCPU`` × cores + ``DEFAULT_EMBODIED_KG_PER_GIB`` × GiB;
@@ -12,6 +13,7 @@ Resolution order for one node (:func:`resolve_node_embodied`):
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
@@ -111,6 +113,38 @@ def parse_embodied_annotation(annotations: Optional[Mapping[str, str]]) -> Optio
     return value
 
 
+def parse_instance_type_overrides(raw: Any) -> Dict[str, float]:
+    """``EMBODIED_KG_BY_INSTANCE_TYPE``: a JSON object ``{instance_type: kg}`` of positive numbers.
+
+    Raises ``ValueError`` on another shape; an empty value is ``{}``.
+    """
+    if isinstance(raw, Mapping):
+        parsed: Any = dict(raw)
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return {}
+        parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("must be a JSON object {instance_type: kg CO2e}")
+    result: Dict[str, float] = {}
+    for key, value in parsed.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+            raise ValueError(f"embodied kg of instance type '{key}' must be a positive number")
+        result[str(key)] = float(value)
+    return result
+
+
+def _configured_by_instance_type(config: Any, instance_type: Optional[str]) -> Optional[float]:
+    if not instance_type:
+        return None
+    try:
+        overrides = parse_instance_type_overrides(getattr(config, "EMBODIED_KG_BY_INSTANCE_TYPE", ""))
+    except ValueError:
+        return None
+    return overrides.get(instance_type)
+
+
 def resolve_node_embodied(
     info: Any,
     profiles: Mapping[tuple, Mapping[str, Any]],
@@ -131,6 +165,9 @@ def resolve_node_embodied(
         return NodeEmbodied(float(configured), hours, EmbodiedSource.CONFIGURED.value)
     provider = getattr(info, "cloud_provider", None) if info is not None else None
     instance_type = getattr(info, "instance_type", None) if info is not None else None
+    by_type = _configured_by_instance_type(config, instance_type)
+    if by_type is not None:
+        return NodeEmbodied(by_type, hours, EmbodiedSource.CONFIGURED.value)
     if provider and instance_type:
         profile = profiles.get((provider, instance_type))
         if profile and not profile.get("is_fallback"):

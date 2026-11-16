@@ -1069,6 +1069,15 @@ tests:
           path: data.DEFAULT_EMBODIED_KG_PER_GIB
           value: "0"
 
+  - it: renders the embodied kg by instance type map as JSON, empty by default (NRG-01)
+    set:
+      config.boavizta.embodiedKgByInstanceType:
+        r740: 1300
+    asserts:
+      - equal:
+          path: data.EMBODIED_KG_BY_INSTANCE_TYPE
+          value: '{"r740":1300}'
+
   - it: enables shared host detection by default and lets config.power disable it (NRG-15)
     set:
       config.power.sharedHostDetection: false

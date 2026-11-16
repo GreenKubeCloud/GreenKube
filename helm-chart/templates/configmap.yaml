@@ -110,6 +110,7 @@ data:
   DEFAULT_EMBODIED_EMISSIONS_KG: {{ .Values.config.boavizta.defaultEmbodiedEmissionsKg | quote }}
   DEFAULT_EMBODIED_KG_PER_VCPU: {{ .Values.config.boavizta.embodiedKgPerVcpu | quote }}
   DEFAULT_EMBODIED_KG_PER_GIB: {{ .Values.config.boavizta.embodiedKgPerGib | quote }}
+  EMBODIED_KG_BY_INSTANCE_TYPE: {{ .Values.config.boavizta.embodiedKgByInstanceType | default dict | toJson | quote }}
   SHARED_HOST_DETECTION: {{ .Values.config.power.sharedHostDetection | quote }}
 
   # --- Prometheus Collector Config ---

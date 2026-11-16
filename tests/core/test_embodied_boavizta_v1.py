@@ -188,6 +188,22 @@ def test_annotated_node_is_configured_and_wins_over_boavizta():
     assert embodied.reason("m") is None
 
 
+def test_instance_type_map_is_configured_and_wins_over_boavizta():
+    config = Config(EMBODIED_KG_BY_INSTANCE_TYPE='{"r740": 1300, "m5.large": 30}')
+    on_prem = NodeInfo(name="a", cloud_provider="unknown", instance_type="r740", cpu_capacity_cores=32)
+    cloud = NodeInfo(name="b", cloud_provider="aws", instance_type="m5.large", cpu_capacity_cores=2)
+    cache = {("aws", "m5.large"): {"gwp_manufacture": 24.0, "lifespan_hours": LIFESPAN_HOURS}}
+    assert resolve_node_embodied(on_prem, cache, config).gwp_kg == 1300.0
+    assert resolve_node_embodied(cloud, cache, config).source == EmbodiedSource.CONFIGURED.value
+
+
+def test_instance_type_map_must_be_an_object_of_positive_numbers():
+    with pytest.raises(ValueError):
+        Config(EMBODIED_KG_BY_INSTANCE_TYPE='{"r740": -1}')
+    with pytest.raises(ValueError):
+        Config(EMBODIED_KG_BY_INSTANCE_TYPE="[1, 2]")
+
+
 def test_unknown_capacity_uses_the_flat_default_flagged():
     embodied = resolve_node_embodied(NodeInfo(name="x"), {}, Config())
     assert embodied.source == EmbodiedSource.FALLBACK_DEFAULT.value

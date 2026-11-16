@@ -461,6 +461,9 @@ config:
     # capacity is unknown.
     embodiedKgPerVcpu: 12
     embodiedKgPerGib: 0
+    # Whole-node embodied emissions (kg CO2e) by instance type, for on-prem hardware or to
+    # override Boavizta, e.g. {r740: 1300}. A greenkube.io/embodied-kg node annotation wins.
+    embodiedKgByInstanceType: {}
 
   # Node power model.
   power:

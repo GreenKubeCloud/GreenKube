@@ -276,7 +276,8 @@
           "type": "object",
           "properties": {
             "embodiedKgPerVcpu": {"type": "number", "minimum": 0},
-            "embodiedKgPerGib": {"type": "number", "minimum": 0}
+            "embodiedKgPerGib": {"type": "number", "minimum": 0},
+            "embodiedKgByInstanceType": {"type": "object", "additionalProperties": {"type": "number", "exclusiveMinimum": 0}}
           }
         },
         "metricsCompressionAgeHours": {"type": "integer", "minimum": 1},
