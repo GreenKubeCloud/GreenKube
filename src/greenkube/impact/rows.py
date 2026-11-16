@@ -147,6 +147,8 @@ class NodeSpec:
     host_reason: Optional[str] = None
     #: Estimation reason of a GPU node without DCGM samples (NRG-13).
     gpu_reason: Optional[str] = None
+    #: Whole-node CPU in use (cores, window average) incl. kubelet, runtime and kernel; None: pods only (NRG-12).
+    node_cpu_used_cores: Optional[float] = None
 
 
 @dataclass
@@ -262,6 +264,7 @@ class MetricRowAllocator:
             embodied_reason=spec.embodied_reason,
             host_reason=spec.host_reason,
             gpu_reason=spec.gpu_reason,
+            node_cpu_used_cores=spec.node_cpu_used_cores,
         )
 
     def modeled_prices(self, node: NodeImpactProfile) -> UnitPrices:

@@ -7,7 +7,8 @@ Since Cloud Carbon Footprint (CCF) does not provide default estimation constants
 GreenKube estimates node power from three components (Impact Model `1.1.0` and later, see [Impact Model methodology](methodology/impact-model.md)). For a collection step of `H` hours:
 
 ```text
-node_utilization = min(total_node_cpu_cores / node_vcores, 1)
+node_cpu_cores   = max(root cgroup CPU of the node, Σ pod CPU)               # NRG-12
+node_utilization = min(node_cpu_cores / node_vcores, 1)
 cpu_power_watts    = min_watts + node_utilization × (max_watts - min_watts)     # LinearCpuPowerModel
 memory_power_watts = node_memory_gib × POWER_MEMORY_W_PER_GIB                    # MemoryPowerModel, 0.392 W/GiB
 gpu_power_watts    = Σ GPUs: DCGM_FI_DEV_POWER_USAGE, else TDP model             # GpuPowerModel

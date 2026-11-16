@@ -586,6 +586,32 @@ class HistoricalRangeProcessor:
             power, utilization, lambda series: self._iter_window_samples(series, chunk)
         )
 
+    async def _collect_node_cpu(self, chunk: CollectionWindow) -> dict[tuple[int, str], float]:
+        """Whole-node CPU cores per (sample start, node) from the root cgroup (NRG-12).
+
+        Empty when the series is absent or the query fails: utilisation then falls back
+        to the pods' sum, as before.
+        """
+        try:
+            series_list = await self._query_range(chunk, self._promql.node_cpu_usage())
+        except Exception as error:
+            logger.warning(
+                "Node root cgroup CPU unavailable for %s -> %s: %s; node utilisation uses the pods' sum.",
+                chunk.start.isoformat(),
+                chunk.end.isoformat(),
+                error,
+            )
+            return {}
+        result: dict[tuple[int, str], float] = {}
+        for series in series_list or []:
+            node = (series.get("metric") or {}).get("node")
+            if not node:
+                continue
+            for sample_start, value in self._iter_window_samples(series, chunk):
+                if math.isfinite(value) and value >= 0:
+                    result[(sample_start, node)] = max(result.get((sample_start, node), 0.0), value)
+        return result
+
     def _gpu_power_by_group(
         self,
         gpu_by_sample: dict[int, list[dcgm_collector.GpuSample]],
@@ -658,6 +684,7 @@ class HistoricalRangeProcessor:
         config: Any = None,
         shared_host: SharedHost | None = None,
         undetected_gpu: UndetectedGpuPower | None = None,
+        node_cpu_used_cores: float | None = None,
     ) -> NodeSpec:
         """What the Impact Model needs to know about one node at one step."""
         config = config if config is not None else get_config()
@@ -689,6 +716,7 @@ class HistoricalRangeProcessor:
             host_share=shared_host.share if shared_host is not None else 1.0,
             host_reason=shared_host.reason(node_name) if shared_host is not None else None,
             gpu_reason=undetected_gpu.reason if undetected_gpu is not None else None,
+            node_cpu_used_cores=node_cpu_used_cores,
         )
 
     async def _pod_history(
@@ -1481,6 +1509,7 @@ class HistoricalRangeProcessor:
                 pod_info_node_latest,
                 set(nodes_info) | {node for _start, node in groups if node},
             )
+            node_cpu_by_group = await self._collect_node_cpu(chunk)
 
             del samples, pod_node_map_by_ts
 
@@ -1693,6 +1722,7 @@ class HistoricalRangeProcessor:
                     config=self._config,
                     shared_host=shared_hosts.get(node_name),
                     undetected_gpu=None if gpu_power else undetected_gpus.get(node_name),
+                    node_cpu_used_cores=node_cpu_by_group.get((sample_start, node_name)),
                 )
                 node_profile = allocator.node_profile(
                     spec, node_rows, pue=pue, intensity=carbon_result.grid_intensity, hours=chosen_step_sec / 3600.0
@@ -1788,7 +1818,7 @@ class HistoricalRangeProcessor:
                             ]
                         combined.extend(container_rows)
 
-            del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group, counter_cpu_pods
+            del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group, counter_cpu_pods, node_cpu_by_group
             del net_rx_by_sample, net_tx_by_sample, disk_read_by_sample, disk_write_by_sample
             del restart_by_sample, ephemeral_usage_by_sample
             del container_memory_samples, normalized_container_samples
