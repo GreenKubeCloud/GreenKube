@@ -179,11 +179,13 @@ async def test_recompute_carbon_with_latest_intensities(combined_repository, con
     )
 
     # One set-based UPDATE for pod rows and one for container rows (A9, BUG-06).
-    assert result == 14
-    assert connection_mock.fetchval.await_count == 2
+    # Pod, container and node idle rows (NRG-09).
+    assert result == 21
+    assert connection_mock.fetchval.await_count == 3
     queries = [call.args[0] for call in connection_mock.fetchval.await_args_list]
     assert "UPDATE combined_metrics" in queries[0]
     assert "UPDATE container_metrics" in queries[1]
+    assert "UPDATE node_idle_metrics" in queries[2]
     assert all("carbon_intensity_history" in query for query in queries)
     # Persisted zone defaults never pass for measurements (BUG-07).
     assert all("'default_fallback'" in query for query in queries)
