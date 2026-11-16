@@ -907,6 +907,94 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             logger.error("Error reading node idle metrics from Postgres: %s", e)
             raise QueryError(f"Error reading node idle metrics: {e}") from e
 
+    async def _idle_parts(self, start_time: datetime, end_time: datetime, ts_raw: str, ts_hourly: str):
+        """UNION ALL branches of the idle rows of a window, split at the idle compression watermark."""
+        split = await self._raw_hourly_split(start_time, end_time, "node_idle_metrics")
+        columns = "co2e_grams, embodied_co2e_grams, total_cost, joules"
+        parts: list[str] = []
+        params: list[Any] = []
+        if split.has_raw:
+            first = len(params) + 1
+            parts.append(
+                f"SELECT {ts_raw} AS ts, {columns} FROM node_idle_metrics "
+                f"WHERE timestamp >= ${first} AND timestamp < ${first + 1} "
+                f"AND NOT (timestamp >= ${first + 2} AND timestamp < ${first + 3})"
+            )
+            params.extend(split.raw_params())
+        if split.has_hourly:
+            first = len(params) + 1
+            parts.append(
+                f"SELECT {ts_hourly} AS ts, {columns} FROM node_idle_metrics_hourly "
+                f"WHERE hour_bucket >= ${first} AND hour_bucket < ${first + 1}"
+            )
+            params.extend(split.hourly_params())
+        return parts, params
+
+    async def aggregate_idle_summary(self, start_time: datetime, end_time: datetime) -> Optional[dict]:
+        """Totals of the node ``__idle__`` share in ``[start, end)`` (NRG-02), raw and hourly rows.
+
+        ``None`` when the window holds no idle row (periods before idle rows were
+        stored, or no data): unknown, never zero.
+        """
+        try:
+            parts, params = await self._idle_parts(start_time, end_time, "NULL::timestamptz", "NULL::timestamptz")
+            if not parts:
+                return None
+            async with self.db_manager.connection_scope() as conn:
+                row = await conn.fetchrow(
+                    "SELECT COUNT(*) AS n, COALESCE(SUM(co2e_grams), 0) AS co2e, "
+                    "COALESCE(SUM(embodied_co2e_grams), 0) AS embodied, COALESCE(SUM(total_cost), 0) AS cost, "
+                    f"COALESCE(SUM(joules), 0) AS joules FROM ({' UNION ALL '.join(parts)}) AS idle",
+                    *params,
+                )
+            if not row or not row["n"]:
+                return None
+            return {
+                "idle_co2e_grams": float(row["co2e"]),
+                "idle_embodied_co2e_grams": float(row["embodied"]),
+                "idle_cost": float(row["cost"]),
+                "idle_energy_joules": float(row["joules"]),
+            }
+        except Exception as e:
+            logger.error("Error in aggregate_idle_summary: %s", e)
+            raise QueryError(f"aggregate_idle_summary failed: {e}") from e
+
+    async def aggregate_idle_timeseries(
+        self, start_time: datetime, end_time: datetime, granularity: str = "hour"
+    ) -> List[dict]:
+        """Idle share per bucket, same buckets and labels as :meth:`aggregate_timeseries` (NRG-02)."""
+        unit = granularity if granularity in ("hour", "day", "week", "month") else "hour"
+        formats = {
+            "hour": "%Y-%m-%dT%H:00:00Z",
+            "day": "%Y-%m-%dT00:00:00Z",
+            "week": "%Y-%m-%dT00:00:00Z",
+            "month": "%Y-%m-01T00:00:00Z",
+        }
+        try:
+            parts, params = await self._idle_parts(start_time, end_time, "timestamp", "hour_bucket")
+            if not parts:
+                return []
+            async with self.db_manager.connection_scope() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {_utc_trunc(unit, 'ts')} AS ts_bucket, SUM(co2e_grams) AS co2e, "
+                    "SUM(embodied_co2e_grams) AS embodied, SUM(total_cost) AS cost, SUM(joules) AS joules "
+                    f"FROM ({' UNION ALL '.join(parts)}) AS idle GROUP BY ts_bucket ORDER BY ts_bucket",
+                    *params,
+                )
+            return [
+                {
+                    "timestamp": row["ts_bucket"].astimezone(timezone.utc).strftime(formats[unit]),
+                    "co2e_grams": float(row["co2e"] or 0.0),
+                    "embodied_co2e_grams": float(row["embodied"] or 0.0),
+                    "total_cost": float(row["cost"] or 0.0),
+                    "energy_joules": float(row["joules"] or 0.0),
+                }
+                for row in rows
+            ]
+        except Exception as e:
+            logger.error("Error in aggregate_idle_timeseries: %s", e)
+            raise QueryError(f"aggregate_idle_timeseries failed: {e}") from e
+
     async def read_container_metrics(
         self,
         start_time: datetime,
@@ -1831,6 +1919,53 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     if namespace:
                         params.append(namespace)
                     count = await conn.fetchval(query, *params)
+                    total += int(count or 0)
+                if not namespace:
+                    # The __idle__ rows of the same steps (NRG-09): same intensity, so pod and
+                    # idle rows of a node keep adding up. Idle rows have no namespace: a
+                    # namespace-filtered run leaves them to the next unfiltered one.
+                    count = await conn.fetchval(
+                        f"""
+                        WITH lookup AS (
+                            SELECT t.id AS row_id, t.emaps_zone AS zone, {lookup_expr} AS lookup_ts
+                            FROM node_idle_metrics AS t
+                            WHERE t.timestamp >= $2 AND t.timestamp < $3 AND t.emaps_zone IS NOT NULL
+                        ),
+                        fresh AS (
+                            SELECT l.row_id,
+                                   ci.carbon_intensity AS intensity,
+                                   CASE WHEN ci.is_estimated IS FALSE THEN 'consolidated'
+                                        ELSE 'realtime' END AS source
+                            FROM lookup AS l
+                            JOIN LATERAL (
+                                SELECT c.carbon_intensity, c.is_estimated, c.datetime
+                                FROM carbon_intensity_history AS c
+                                WHERE c.zone = l.zone AND c.datetime <= l.lookup_ts
+                                  AND {measured_intensity_sql("c")}
+                                ORDER BY c.datetime DESC
+                                LIMIT 1
+                            ) AS ci ON TRUE
+                            WHERE ci.datetime >= l.lookup_ts - $4::interval
+                        ),
+                        updated AS (
+                            UPDATE node_idle_metrics AS t
+                            SET grid_intensity = f.intensity,
+                                co2e_grams = (COALESCE(t.joules, 0) / $5) * COALESCE(t.pue, $1) * f.intensity,
+                                intensity_source = f.source
+                            FROM fresh AS f
+                            WHERE t.id = f.row_id
+                              AND (t.grid_intensity IS DISTINCT FROM f.intensity
+                                   OR t.intensity_source IS DISTINCT FROM f.source)
+                            RETURNING t.id
+                        )
+                        SELECT count(*) FROM updated
+                        """,
+                        cfg.DEFAULT_PUE,
+                        start_time,
+                        end_time,
+                        cfg.intensity_max_age,
+                        cfg.JOULES_PER_KWH,
+                    )
                     total += int(count or 0)
                 return total
         except Exception as e:

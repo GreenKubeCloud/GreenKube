@@ -408,6 +408,17 @@ class CombinedMetricsRepository(RawHourlySplitMixin, ABC):
         """Reads ``__idle__`` rows whose timestamp is in ``[start_time, end_time)``."""
         return []
 
+    async def aggregate_idle_summary(self, start_time: datetime, end_time: datetime) -> Optional[dict]:
+        """Totals of the node idle share (``idle_co2e_grams``, ``idle_embodied_co2e_grams``,
+        ``idle_cost``, ``idle_energy_joules``) in ``[start, end)``; ``None`` when unknown (NRG-02)."""
+        return None
+
+    async def aggregate_idle_timeseries(
+        self, start_time: datetime, end_time: datetime, granularity: str = "hour"
+    ) -> List[dict]:
+        """Idle share per time bucket, labelled like :meth:`aggregate_timeseries` (NRG-02)."""
+        return []
+
     async def read_hourly_metrics(
         self,
         start_time: datetime,

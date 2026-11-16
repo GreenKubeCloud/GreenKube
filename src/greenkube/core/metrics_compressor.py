@@ -201,6 +201,50 @@ class _MetricsTable:
         """
 
 
+def _duration_weighted(column: str) -> str:
+    """Duration-weighted average of an hour: times ``duration_seconds`` it gives back the raw sum."""
+    return (
+        f"CASE WHEN COUNT({column}) = 0 THEN NULL "
+        "WHEN SUM(COALESCE(duration_seconds, 0)) > 0 THEN "
+        f"SUM(COALESCE({column}, 0) * COALESCE(duration_seconds, 0)) * 1.0 / SUM(COALESCE(duration_seconds, 0)) "
+        f"ELSE AVG({column}) END"
+    )
+
+
+@dataclass(frozen=True)
+class _IdleTable(_MetricsTable):
+    """``node_idle_metrics``: the ``__idle__`` row of every node and step (NRG-02, ROL-07)."""
+
+    def aggregate_columns(self, backend: str) -> list[tuple[str, str]]:
+        """Return ``(hourly_column, select_expression)`` pairs of ``node_idle_metrics_hourly``."""
+        return [
+            ("node", "node"),
+            ("hour_bucket", self.hour_expr(backend)),
+            ("sample_count", "COUNT(*)"),
+            ("duration_seconds", "SUM(COALESCE(duration_seconds, 0))"),
+            ("joules", "SUM(COALESCE(joules, 0))"),
+            ("co2e_grams", "SUM(COALESCE(co2e_grams, 0))"),
+            ("embodied_co2e_grams", "SUM(COALESCE(embodied_co2e_grams, 0))"),
+            ("total_cost", "SUM(COALESCE(total_cost, 0))"),
+            ("cost_cpu", "SUM(cost_cpu)"),
+            ("cost_ram", "SUM(cost_ram)"),
+            ("cost_source", cost_source_aggregate_sql("cost_source")),
+            ("cpu_unreserved_cores", _duration_weighted("cpu_unreserved_cores")),
+            ("memory_unreserved_bytes", _duration_weighted("memory_unreserved_bytes")),
+            ("gpu_power_watts", _GPU_POWER_AVERAGE),
+            ("pue", "AVG(pue)"),
+            ("grid_intensity", "AVG(grid_intensity)"),
+            ("emaps_zone", _mode("emaps_zone", backend)),
+            ("power_source", _source_aggregate("power_source")),
+            ("intensity_source", _source_aggregate("intensity_source")),
+            ("model_version", _source_aggregate("model_version")),
+        ]
+
+
+#: Raw ``__idle__`` rows per node and step (B2, migration 0050), compressed into
+#: ``node_idle_metrics_hourly`` behind their own watermark (migration 0171).
+IDLE_TABLE = "node_idle_metrics"
+
 TABLES: tuple[_MetricsTable, ...] = (
     _MetricsTable("combined_metrics", "combined_metrics_hourly", ("pod_name", "namespace"), pod_scope=True),
     _MetricsTable(
@@ -209,10 +253,8 @@ TABLES: tuple[_MetricsTable, ...] = (
         ("pod_name", "namespace", "container_name"),
         pod_scope=False,
     ),
+    _IdleTable(IDLE_TABLE, "node_idle_metrics_hourly", ("node",), pod_scope=False),
 )
-
-#: Raw ``__idle__`` rows per node and step (B2, migration 0050), pruned with ``combined_metrics``.
-IDLE_TABLE = "node_idle_metrics"
 
 CollectionWatermarkProvider = Callable[[], Awaitable[Optional[datetime]]]
 
@@ -690,10 +732,9 @@ class MetricsCompressor:
         after a table's compression watermark are never deleted, whatever the
         retention, so uncompressed hours cannot be lost.
 
-        The ``__idle__`` rows of ``node_idle_metrics`` (B2) are raw rows too:
-        they are pruned with the pod rows of ``combined_metrics`` (same
-        retention, same watermark), so every pod step kept in raw form keeps
-        the idle rows that complete its node totals, for ``greenkube recompute``.
+        The ``__idle__`` rows of ``node_idle_metrics`` (B2) are a metrics table
+        of their own: compressed into ``node_idle_metrics_hourly`` and pruned
+        behind their own watermark, like the pod rows (ROL-07).
         """
         retention_days = self._config.METRICS_RAW_RETENTION_DAYS
         if retention_days < 0:
@@ -710,8 +751,6 @@ class MetricsCompressor:
             if dirty:
                 cutoff = min(cutoff, dirty[0])  # never delete raw rows a re-aggregation still needs
             total += await self._delete_raw_before(table, cutoff)
-            if table.pod_scope:
-                total += await self._delete_idle_before(cutoff)
         if total:
             logger.info("Pruned %d raw metrics older than %d days", total, retention_days)
         return total
@@ -749,20 +788,6 @@ class MetricsCompressor:
             except BaseException:
                 await conn.rollback()
                 raise
-            return max(cursor.rowcount, 0)
-
-    async def _delete_idle_before(self, cutoff: datetime) -> int:
-        """Delete ``__idle__`` rows of steps before ``cutoff`` (an hour boundary)."""
-        async with self._db.connection_scope() as conn:
-            if self._db.db_type == "postgres":
-                status = await conn.execute(f"DELETE FROM {IDLE_TABLE} WHERE timestamp < $1", cutoff)
-                return _status_count(status)
-            # Stored timestamps are ISO strings: compare on the hour bucket, like raw rows.
-            cursor = await conn.execute(
-                f'DELETE FROM {IDLE_TABLE} WHERE "timestamp" < ? AND {_SQLITE_HOUR.format(column='"timestamp"')} < ?',
-                (to_iso_z(cutoff + timedelta(seconds=1)), to_iso_z(cutoff)),
-            )
-            await conn.commit()
             return max(cursor.rowcount, 0)
 
     async def _prune_hourly(self, now: datetime | None = None) -> int:
@@ -848,6 +873,8 @@ class MetricsCompressor:
                 "combined_metrics_hourly",
                 "container_metrics",
                 "container_metrics_hourly",
+                "node_idle_metrics",
+                "node_idle_metrics_hourly",
                 "workload_usage_hourly",
                 "carbon_intensity_history",
                 "node_snapshots",

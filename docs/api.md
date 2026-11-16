@@ -61,8 +61,8 @@ The unauthenticated `/api/v1/health/heartbeat` liveness route is excluded from t
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/metrics` | Paginated combined per-pod metrics. `last`, `namespace`, `offset`, `limit`, and `cursor` are supported. |
-| `GET` | `/metrics/summary` | Aggregated cluster or namespace totals (`last`, optional `namespace`). |
-| `GET` | `/metrics/timeseries` | Aggregated time series (`last`, optional `namespace`, `granularity=hour\|day\|week\|month`; default `hour`). |
+| `GET` | `/metrics/summary` | Aggregated cluster or namespace totals (`last`, optional `namespace`). The `total_*` fields are **allocated to workloads** (pod rows). Without `namespace` the response adds the node idle share (`idle_co2e_grams`, `idle_embodied_co2e_grams`, `idle_cost`, `idle_energy_joules`: unreserved capacity, `__idle__` rows) and the cluster totals `cluster_total_*` = allocated + idle; they are `null` with a namespace filter or when the range holds no idle row. |
+| `GET` | `/metrics/timeseries` | Aggregated time series (`last`, optional `namespace`, `granularity=hour\|day\|week\|month`; default `hour`). Each point carries the same `idle_*` and `cluster_total_*` fields as the summary (cluster-wide only). |
 | `GET` | `/metrics/by-namespace` | Metrics grouped by namespace (`last`; optional `namespace` narrows the result). |
 | `GET` | `/metrics/top-pods` | Highest-emitting pods (`last`, optional `namespace`, `limit`, 1–50; default 10). |
 | `GET` | `/metrics/dashboard-summary` | Precomputed KPI values for dashboard windows (optional `namespace`). |

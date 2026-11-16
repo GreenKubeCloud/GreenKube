@@ -60,6 +60,7 @@ METRIC_TABLES = frozenset(
         "container_metrics_hourly",
         "carbon_intensity_history",
         "node_idle_metrics",
+        "node_idle_metrics_hourly",
         "node_power_consumption",
         "node_snapshots",
         "node_snapshots_scd",

@@ -497,16 +497,16 @@ class TestPostgresCompressionBranches:
         conn.fetchval = AsyncMock(return_value=watermark)
         conn.fetch = AsyncMock(return_value=[])  # no dirty hour
         conn.transaction = MagicMock(return_value=AsyncMock())
-        # combined_metrics (raw_pruned_until, delete), its node_idle_metrics rows (same cutoff),
-        # then container_metrics (raw_pruned_until, delete).
-        conn.execute = AsyncMock(side_effect=["UPDATE 1", "DELETE 4", "DELETE 1", "UPDATE 1", "DELETE 2"])
+        # combined_metrics, container_metrics, then node_idle_metrics (ROL-07): each sets
+        # raw_pruned_until and deletes below the same cutoff.
+        conn.execute = AsyncMock(side_effect=["UPDATE 1", "DELETE 4", "UPDATE 1", "DELETE 2", "UPDATE 1", "DELETE 1"])
         compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg, collection_watermark_provider=None)
 
         assert await compressor._prune_raw(now) == 7
         deletes = [call for call in conn.execute.await_args_list if call.args[0].startswith("DELETE")]
         cutoffs = {call.args[1] for call in deletes}
         assert cutoffs == {datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)}
-        assert "node_idle_metrics" in deletes[1].args[0]
+        assert "node_idle_metrics" in deletes[2].args[0]
 
     @pytest.mark.asyncio
     async def test_postgres_hourly_pruning_parses_deleted_row_counts(self):
@@ -515,11 +515,12 @@ class TestPostgresCompressionBranches:
         cfg = Config()
         cfg.METRICS_AGGREGATED_RETENTION_DAYS = 30
         conn = type("Conn", (), {})()
-        conn.execute = AsyncMock(side_effect=["DELETE 1", "DELETE 3"])
+        # combined, container and node idle hourly tables (ROL-07).
+        conn.execute = AsyncMock(side_effect=["DELETE 1", "DELETE 3", "DELETE 2"])
         compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg, collection_watermark_provider=None)
 
-        assert await compressor._prune_hourly() == 4
-        assert conn.execute.await_count == 2
+        assert await compressor._prune_hourly() == 6
+        assert conn.execute.await_count == 3
 
     @pytest.mark.asyncio
     async def test_postgres_namespace_cache_refresh_and_empty_status_counts(self):

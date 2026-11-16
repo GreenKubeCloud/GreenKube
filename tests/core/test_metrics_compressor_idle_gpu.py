@@ -170,15 +170,23 @@ async def test_idle_rows_follow_the_raw_retention_of_pod_rows(metrics_db, clock)
     assert stats["raw_rows_pruned"] == 2 * (steps - kept)
 
 
-async def test_idle_rows_are_kept_while_pod_rows_are_not_compressed(metrics_db, clock):
+async def test_idle_rows_are_compressed_before_they_are_pruned(metrics_db, clock):
+    """ROL-07: idle rows have their own hourly aggregate; pruning never loses a step."""
     repo = _repository(metrics_db)
     steps = 12 * 24 * DAYS
     await repo.write_idle_metrics([_idle(index) for index in range(steps)])
 
-    # Nothing was compressed (no pod rows, no watermark): idle rows stay, like raw pod rows would.
     clock.now = T0 + timedelta(days=DAYS, minutes=37)
     await MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None).run()
-    assert (await _fetch(metrics_db, "SELECT COUNT(*) FROM node_idle_metrics"))[0][0] == steps
+    (raw,) = (await _fetch(metrics_db, "SELECT COUNT(*) FROM node_idle_metrics"))[0]
+    (hourly_samples, hourly_cost) = (
+        await _fetch(metrics_db, "SELECT SUM(sample_count), SUM(total_cost) FROM node_idle_metrics_hourly")
+    )[0]
+    assert raw < steps
+    # Every pruned step lives on in the hourly aggregate, every hour with its 12 steps.
+    assert hourly_samples >= steps - raw
+    assert hourly_samples % 12 == 0
+    assert hourly_cost == pytest.approx(float(hourly_samples))
 
 
 async def test_hourly_tables_keep_the_gpu_energy_of_raw_rows(metrics_db, clock):

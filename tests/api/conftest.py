@@ -137,6 +137,19 @@ def mock_combined_metrics_repo():
 
     repo.aggregate_summary = _aggregate_summary
     repo.aggregate_timeseries = _aggregate_timeseries
+    # No node idle share unless a test sets one (NRG-02).
+    repo.aggregate_idle_summary = AsyncMock(return_value=None)
+    repo.aggregate_idle_timeseries = AsyncMock(return_value=[])
+
+    # The raw/hourly boundary of the base class (ROL-01).
+    async def _compression_boundary(raw_table):
+        return await _Base.compression_boundary(repo, raw_table)
+
+    async def _raw_hourly_split(start_time, end_time, raw_table):
+        return await _Base._raw_hourly_split(repo, start_time, end_time, raw_table)
+
+    repo.compression_boundary = _compression_boundary
+    repo._raw_hourly_split = _raw_hourly_split
 
     # Wire up read_combined_metrics_smart and read_hourly_metrics
     # so that tests mocking read_combined_metrics get correct behavior.

@@ -132,7 +132,30 @@ async def metrics_summary(
     summary = await repo.aggregate_summary(start_time=start, end_time=end, namespace=namespace)
     scope2 = summary.get("total_co2e_grams", 0.0)
     scope3 = summary.get("total_embodied_co2e_grams", 0.0)
-    return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3)
+    # The node idle share belongs to no namespace: cluster-wide scope only (NRG-02).
+    idle = None if namespace else await repo.aggregate_idle_summary(start, end)
+    return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3, **_with_idle(summary, idle))
+
+
+#: Allocated measure → idle and cluster-total field suffix (NRG-02).
+_IDLE_MEASURES = {
+    "total_co2e_grams": "co2e_grams",
+    "total_embodied_co2e_grams": "embodied_co2e_grams",
+    "total_cost": "cost",
+    "total_energy_joules": "energy_joules",
+}
+
+
+def _with_idle(allocated: dict, idle: Optional[dict]) -> dict:
+    """Idle share and cluster totals (allocated + idle) of a summary or a bucket; empty when unknown."""
+    if idle is None:
+        return {}
+    fields: dict = {}
+    for total, suffix in _IDLE_MEASURES.items():
+        value = float(idle.get(f"idle_{suffix}") or 0.0)
+        fields[f"idle_{suffix}"] = value
+        fields[f"cluster_total_{suffix}"] = float(allocated.get(total) or 0.0) + value
+    return fields
 
 
 _GRANULARITY_FORMATS = {
@@ -161,19 +184,43 @@ async def metrics_timeseries(
     # Use SQL-level aggregation when available (e.g. SQLite) to avoid loading
     # all rows into Python objects — typically 10–20x faster for demo mode.
     rows = await repo.aggregate_timeseries(start_time=start, end_time=end, granularity=granularity, namespace=namespace)
-    return [
-        TimeseriesPoint(
-            timestamp=row["timestamp"],
-            co2e_grams=row["co2e_grams"],
-            embodied_co2e_grams=row["embodied_co2e_grams"],
-            total_co2e_all_scopes=row["co2e_grams"] + row.get("embodied_co2e_grams", 0.0),
-            total_cost=row["total_cost"],
-            joules=row["energy_joules"],
-            pod_count=0,  # not aggregated at timeseries level
-            namespace_count=0,  # not aggregated at timeseries level
+    idle_rows = [] if namespace else await repo.aggregate_idle_timeseries(start, end, granularity)
+    idle_by_bucket = {
+        row["timestamp"]: {
+            "idle_co2e_grams": row["co2e_grams"],
+            "idle_embodied_co2e_grams": row["embodied_co2e_grams"],
+            "idle_cost": row["total_cost"],
+            "idle_energy_joules": row["energy_joules"],
+        }
+        for row in idle_rows
+    }
+    by_bucket = {row["timestamp"]: row for row in rows}
+    empty = {"co2e_grams": 0.0, "embodied_co2e_grams": 0.0, "total_cost": 0.0, "energy_joules": 0.0}
+    for bucket in idle_by_bucket.keys() - by_bucket.keys():
+        by_bucket[bucket] = {"timestamp": bucket, **empty}
+    points = []
+    for bucket in sorted(by_bucket):
+        row = by_bucket[bucket]
+        allocated = {
+            "total_co2e_grams": row["co2e_grams"],
+            "total_embodied_co2e_grams": row.get("embodied_co2e_grams", 0.0),
+            "total_cost": row["total_cost"],
+            "total_energy_joules": row["energy_joules"],
+        }
+        points.append(
+            TimeseriesPoint(
+                timestamp=row["timestamp"],
+                co2e_grams=row["co2e_grams"],
+                embodied_co2e_grams=row["embodied_co2e_grams"],
+                total_co2e_all_scopes=row["co2e_grams"] + row.get("embodied_co2e_grams", 0.0),
+                total_cost=row["total_cost"],
+                joules=row["energy_joules"],
+                pod_count=0,  # not aggregated at timeseries level
+                namespace_count=0,  # not aggregated at timeseries level
+                **_with_idle(allocated, idle_by_bucket.get(bucket)),
+            )
         )
-        for row in rows
-    ]
+    return points
 
 
 @router.get("/metrics/by-namespace", response_model=List[NamespaceBreakdownItem])
