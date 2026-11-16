@@ -222,6 +222,11 @@ def client(mock_carbon_repo, mock_combined_metrics_repo, mock_node_repo, mock_re
     app.dependency_overrides[get_node_repository] = lambda: mock_node_repo
     app.dependency_overrides[get_recommendation_repository] = lambda: mock_reco_repo
     app.dependency_overrides[get_savings_ledger_repository] = lambda: mock_savings_repo
+    from greenkube.api.routers.recommendations import get_ledger_repo
+
+    ledger_repo = AsyncMock()
+    ledger_repo.get_identity = AsyncMock(return_value=None)
+    app.dependency_overrides[get_ledger_repo] = lambda: ledger_repo
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

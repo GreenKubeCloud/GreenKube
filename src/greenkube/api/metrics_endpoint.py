@@ -16,7 +16,7 @@ import weakref
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from math import log2
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 from prometheus_client.core import CounterMetricFamily
@@ -433,7 +433,10 @@ NS_REC_SAVINGS_COST = Gauge(
 # Savings ledger metrics (DB-backed)
 #
 # The ``*_attributed_*_total`` and ``*_reversed_*_total`` families are monotonic
-# counters computed from the append-only ledger, labelled by ``method``
+# counters computed from the append-only, hash-chained ledger v2 (LED-04:
+# positive entries are attributed, negative entries such as supersession,
+# drift and restatement reversals are reversed; the cost of reliability fixes
+# is a cost, never a saving, and is left out), labelled by ``method``
 # (projected, measured, user_declared). Net savings = attributed − reversed.
 # Never sum methods: only ``method="measured"`` is realized savings.
 # ---------------------------------------------------------------------------
@@ -451,17 +454,19 @@ class _SavingsLedgerCounterCollector:
         ),
         (
             "greenkube_cost_savings_attributed_dollars",
-            "Cumulative cost (dollars) accrued in the savings ledger, by method. Monotonic.",
+            "Cumulative cost (dollars) accrued in the savings ledger, by method; the cost of reliability fixes "
+            "is not a saving and is left out. Monotonic.",
             "accrued_cost_dollars",
         ),
         (
             "greenkube_co2e_savings_reversed_grams",
-            "Cumulative CO2e (grams) reversed: superseded accruals and negative declarations. Monotonic.",
+            "Cumulative CO2e (grams) reversed: negative ledger entries (supersession, drift, restatement). Monotonic.",
             "reversed_co2e_grams",
         ),
         (
             "greenkube_cost_savings_reversed_dollars",
-            "Cumulative cost (dollars) reversed: superseded accruals and negative declarations. Monotonic.",
+            "Cumulative cost reversed: negative savings entries (supersession, drift, restatement); the cost of "
+            "reliability fixes is not counted. Monotonic.",
             "reversed_cost_dollars",
         ),
     )
@@ -490,12 +495,41 @@ class _SavingsLedgerCounterCollector:
             yield family
 
 
+#: Ledger clusters whose savings metrics already read ledger v2 in this process (the switch is one-way).
+_LEDGER_V2_COUNTERS: dict[str, str] = {}
+
+
+async def savings_counter_source(ledger_repo, ledger_cluster: str) -> Optional[str]:
+    """The ledger v2 cluster uid the savings counters and gauges read, or None to keep the v1 ledger.
+
+    The counters switch to ledger v2 only once its accrued book reconciles
+    with the v1 rows (the projector caught up), so the switch never shows as a
+    drop; afterwards they stay on v2 in this process even while the projector
+    catches up a new row (review WP-09).
+    """
+    known = _LEDGER_V2_COUNTERS.get(ledger_cluster)
+    if known is not None:
+        return known
+    identity = await ledger_repo.get_identity(ledger_cluster)
+    if identity is None:
+        logger.info("Savings ledger v2 has no cluster identity yet: savings metrics read the v1 ledger.")
+        return None
+    from ..verify.ledger.reconciliation import reconcile
+
+    if not await reconcile(ledger_repo, identity[0], ledger_cluster):
+        logger.info("Savings ledger v2 does not reconcile with the v1 ledger yet: savings metrics read the v1 ledger.")
+        return None
+    _LEDGER_V2_COUNTERS[ledger_cluster] = identity[0]
+    return identity[0]
+
+
 SAVINGS_LEDGER_COUNTERS = _SavingsLedgerCounterCollector()
 REGISTRY.register(SAVINGS_LEDGER_COUNTERS)
 
 SAVINGS_MEASURED_RATIO = Gauge(
     "greenkube_savings_measured_vs_projected_ratio",
-    "Share of net accrued CO2e savings that is measured rather than projected (0–1).",
+    "Share of net accrued CO2e savings that is measured rather than projected (0–1), "
+    "both accrued on the allocated basis since ledger/2.",
     ["cluster"],
     registry=REGISTRY,
 )
@@ -1319,12 +1353,24 @@ async def refresh_metrics_from_db(
             cluster = _get_cluster_name()
             ledger_key = f"ledger:{ledger_cluster}:{cluster}"
             if _savings_refresh_due(savings_repo, ledger_key):
-                counters = await savings_repo.get_lifetime_counters(ledger_cluster)
+                # LED-04: counters and dashboard windows come from the hash-chained ledger v2 (restated,
+                # reversals visible); the v1 staging ledger only before the ledger has a cluster identity.
+                from ..storage.ledger_repository import get_ledger_repository
+
+                ledger_repo = get_ledger_repository()
+                ledger_uid = await savings_counter_source(ledger_repo, ledger_cluster)
+                if ledger_uid is not None:
+                    counters = await ledger_repo.lifetime_counters(ledger_uid)
+                else:
+                    counters = await savings_repo.get_lifetime_counters(ledger_cluster)
                 update_attributed_savings_metrics(counters, cluster=cluster)
                 clear_dashboard_savings_metrics()
                 savings_namespaces = await get_dashboard_namespaces("savings")
                 for window_slug, start_time, end_time in _dashboard_window_ranges(now):
-                    breakdown = await savings_repo.get_accrual_breakdown(ledger_cluster, start_time, end_time)
+                    if ledger_uid is not None:
+                        breakdown = await ledger_repo.accrual_breakdown(ledger_uid, start_time, end_time)
+                    else:
+                        breakdown = await savings_repo.get_accrual_breakdown(ledger_cluster, start_time, end_time)
                     update_dashboard_savings_from_breakdown(
                         window_slug,
                         breakdown,

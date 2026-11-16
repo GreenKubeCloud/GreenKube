@@ -548,6 +548,13 @@ async def test_a_v1_row_visible_after_higher_ids_were_projected_is_never_lost(le
     monkeypatch.setattr(projector_module, "WATERMARK_LOOKBACK", 5)
     await ledger.v1.save_records(_hourly_rows(30))
     # The first row is not visible to the projector yet (as if its transaction had not committed).
+    # The v1 ledger is append-only (LED-04): the simulation lifts its update trigger first.
+    if ledger.backend == "postgres":
+        await ledger.execute(
+            "DROP TRIGGER trg_recommendation_savings_ledger_append_only ON recommendation_savings_ledger"
+        )
+    else:
+        await ledger.execute("DROP TRIGGER trg_recommendation_savings_ledger_no_update")
     await ledger.execute(
         "UPDATE recommendation_savings_ledger SET cluster_name = 'not-yet' "
         "WHERE id = (SELECT MIN(id) FROM recommendation_savings_ledger)"

@@ -218,6 +218,14 @@ spec:
           annotations:
             summary: Savings accruals are missing from the GreenKube savings ledger v2
             description: {{ `{{ $value }} row(s) of {{ $labels.source_table }} have no savings ledger v2 entry after full sweeps for 3 hours; the v2 totals do not reconcile with GET /api/v1/recommendations/savings. See greenkube_ledger_write_errors_total and the controller logs.` | quote }}
+        - alert: GreenKubeLedgerReconciliationFailed
+          expr: min by (cluster_uid) (greenkube_ledger_reconciliation_ok) == 0
+          for: 3h
+          labels:
+            severity: warning
+          annotations:
+            summary: The GreenKube savings ledger v2 does not reconcile with the v1 staging ledger
+            description: {{ `The accrued book of the savings ledger v2 of cluster {{ $labels.cluster_uid }} differs from the non-superseded v1 accrual rows for 3 hours (an unprojected row or an unreversed supersession); the controller logs name the method and quantity.` | quote }}
     {{- end }}
     {{- $ops := .Values.monitoring.prometheusRule.operations | default dict }}
     {{- if ne (toString $ops.enabled) "false" }}

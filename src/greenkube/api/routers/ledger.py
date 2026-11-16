@@ -57,7 +57,10 @@ logger = logging.getLogger(__name__)
 
 #: What each ledger method measures (projected != allocated != realized), for labels.
 METHOD_BASIS: Dict[str, str] = {
-    "projected": "projection of an applied change that is not measured yet",
+    "projected": (
+        "projection of an applied change that is not measured yet, on the allocated basis like measurements "
+        "(entries before ledger/2: expected billable, see accounting_bases)"
+    ),
     "measured_allocated": "measured allocated saving (what the workload stops being charged); not the bill",
     "realized_billed": "measured billed saving (removed node-hours on the bill)",
     "user_declared": "value declared by a user, never measured",
@@ -96,6 +99,7 @@ FOCUS_COLUMNS = (
     "x-greenkube-reason",
     "x-greenkube-method",
     "x-greenkube-method-version",
+    "x-greenkube-basis",
     "x-greenkube-saving",
     "x-greenkube-co2e-g",
     "x-greenkube-window-share",
@@ -145,6 +149,7 @@ CSV_COLUMNS = (
     "created_by",
     "prev_hash",
     "hash",
+    "basis",
 )
 
 
@@ -216,7 +221,7 @@ class LedgerFilters:
         method: Optional[str] = Query(
             None, description="projected, measured_allocated, realized_billed, user_declared"
         ),
-        quantity: Optional[str] = Query(None, description="cost or co2e_g"),
+        quantity: Optional[str] = Query(None, description="cost, co2e_g, cpu_core_h or mem_gib_h"),
         entry_kind: Optional[str] = Query(None, description="accrual, reversal or restatement"),
         book: Optional[str] = Query(None, description="accrued (reconciles with v1) or restatement"),
         reason: Optional[str] = Query(None, description="accrual, drift, supersession or restatement"),
@@ -336,6 +341,7 @@ async def get_ledger_summary(
         "currencies": [],
         "methods": dict(METHOD_BASIS),
         "entries_by_kind": {},
+        "cost_of_fix": [],
         "chain": None,
     }
     if cluster_uid is None:
@@ -350,7 +356,17 @@ async def get_ledger_summary(
     # Never summed across methods, quantities or currencies: one total per (method, quantity, unit).
     totals: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     by_kind: Dict[str, int] = {}
+    cost_of_fix: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for row in rows:
+        if row.reason_group == "cost_of_fix":
+            # The cost of reliability fixes: a cost, never a saving, so never inside a savings total.
+            fix = cost_of_fix.setdefault(
+                (row.method, row.unit),
+                {"method": row.method, "quantity": row.quantity, "unit": row.unit, "currency": row.unit, "value": 0.0},
+            )
+            fix["value"] += row.value
+            by_kind[row.entry_kind] = by_kind.get(row.entry_kind, 0) + row.entries
+            continue
         bucket = totals.setdefault(
             (row.method, row.quantity, row.unit),
             {
@@ -365,12 +381,19 @@ async def get_ledger_summary(
             },
         )
         bucket["accrued" if row.book == BOOK_ACCRUED else "restatement"] += row.value
+        # LED-01: never mix bases silently; each total says how much of it is on which basis.
+        basis = bucket.setdefault("accounting_bases", {}).setdefault(
+            row.basis, {"accrued": 0.0, "restatement": 0.0, "restated": 0.0}
+        )
+        basis["accrued" if row.book == BOOK_ACCRUED else "restatement"] += row.value
+        basis["restated"] += row.value
         by_kind[row.entry_kind] = by_kind.get(row.entry_kind, 0) + row.entries
     for bucket in totals.values():
         bucket["restated"] = bucket["accrued"] + bucket["restatement"]
     base["totals"] = sorted(totals.values(), key=lambda item: (item["method"], item["quantity"], item["unit"]))
     base["currencies"] = sorted({item["unit"] for item in totals.values() if item["quantity"] == QUANTITY_COST})
     base["entries_by_kind"] = by_kind
+    base["cost_of_fix"] = sorted(cost_of_fix.values(), key=lambda item: (item["method"], item["unit"]))
     base["chain"] = {
         "head_seq": head_seq or None,
         "head_hash": head_hash,
@@ -495,6 +518,7 @@ def _focus_row(cost: Optional[LedgerEntry], co2e: Optional[LedgerEntry], share: 
         "x-greenkube-reason": entry.reason,
         "x-greenkube-method": entry.method,
         "x-greenkube-method-version": entry.method_version,
+        "x-greenkube-basis": entry.effective_basis,
         "x-greenkube-saving": repr(saving),
         "x-greenkube-co2e-g": repr((co2e.value if co2e is not None else 0.0) * share),
         "x-greenkube-window-share": repr(share),
@@ -514,6 +538,9 @@ async def _focus_lines(entries: AsyncIterator[LedgerEntry], filters: LedgerFilte
     pending: Dict[Tuple[str, str, str], Dict[str, LedgerEntry]] = {}
     order: List[Tuple[str, str, str]] = []
     async for entry in entries:
+        if entry.quantity not in (QUANTITY_COST, QUANTITY_CO2E):
+            # Released capacity is not money: it has no place in a FOCUS cost row (CSV export and summary carry it).
+            continue
         key = (entry.group_key, entry.method, entry.entry_kind)
         if key not in pending:
             pending[key] = {}

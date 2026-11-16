@@ -69,6 +69,7 @@ from greenkube.storage.base_optimization_run_repository import OptimizationRunRe
 from greenkube.storage.base_pull_request_repository import PullRequestRepository
 from greenkube.storage.base_repository import RecommendationRepository
 from greenkube.storage.base_savings_repository import SavingsLedgerRepository
+from greenkube.storage.ledger_repository import LedgerRepository, get_ledger_repository
 from greenkube.utils.date_utils import parse_duration
 
 logger = logging.getLogger(__name__)
@@ -328,12 +329,23 @@ async def list_applied_recommendations(
     return await reco_repo.get_applied_recommendations(namespace=namespace)
 
 
+def _verification(record) -> str:
+    status = record.verification_status
+    return str(getattr(status, "value", status) or "")
+
+
+async def get_ledger_repo() -> LedgerRepository:
+    """Provide the savings ledger v2 repository (the read model of the savings report, LED-04)."""
+    return get_ledger_repository()
+
+
 @router.get("/recommendations/savings", response_model=SavingsReport)
 async def get_savings_summary(
     namespace: Optional[str] = Depends(validate_namespace),
     last: Optional[str] = Query(None, description="Time range (e.g., '24h', '7d', '30d', 'ytd')."),
     reco_repo: RecommendationRepository = Depends(get_recommendation_repository),
     savings_repo: SavingsLedgerRepository = Depends(get_savings_ledger_repository),
+    ledger_repo: LedgerRepository = Depends(get_ledger_repo),
 ):
     """Return projected, measured and realized savings as separate blocks.
 
@@ -349,9 +361,33 @@ async def get_savings_summary(
     except Exception as exc:
         logger.error("Could not load applied recommendations for the savings report: %s", exc)
         raise HTTPException(status_code=503, detail="Recommendation store unavailable.") from exc
+    accrued_only = None
+    unverified = None
+    fixes = None
+    source = "ledger_v2"
     try:
         cluster_name = _get_savings_cluster_name()
-        breakdown = await savings_repo.get_accrual_breakdown(cluster_name, start, end, namespace=namespace)
+        identity = await ledger_repo.get_identity(cluster_name)
+        if identity is not None:
+            # LED-04: the hash-chained ledger v2 is the single read model (restated totals).
+            breakdown = await ledger_repo.accrual_breakdown(identity[0], start, end, namespace=namespace)
+            accrued_only = await ledger_repo.accrual_breakdown(
+                identity[0], start, end, namespace=namespace, books=("accrued",)
+            )
+            inconclusive = [
+                int(record.id)
+                for record in applied
+                if record.id is not None and _verification(record) == "inconclusive"
+            ]
+            unverified = await ledger_repo.accrual_breakdown(
+                identity[0], start, end, namespace=namespace, recommendation_ids=inconclusive
+            )
+            fixes = await ledger_repo.accrual_breakdown(
+                identity[0], start, end, namespace=namespace, reasons=("cost_of_fix",)
+            )
+        else:
+            source = "ledger_v1"
+            breakdown = await savings_repo.get_accrual_breakdown(cluster_name, start, end, namespace=namespace)
         legacy = await savings_repo.has_legacy_compressed_rows(cluster_name, start, end, namespace=namespace)
     except Exception as exc:
         logger.error("Could not read the savings ledger: %s", exc)
@@ -363,6 +399,10 @@ async def get_savings_summary(
         start=start,
         end=end,
         legacy_compressed=legacy,
+        accrued_only=accrued_only,
+        source=source,
+        projected_unverified=unverified,
+        cost_of_fix=fixes,
     )
 
 

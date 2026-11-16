@@ -14,11 +14,12 @@ updated or deleted (database triggers reject it): a correction is a new entry.
   ``reversal`` of that projected accrual (BUG-39).
 
 ``book`` keeps the two views apart: ``accrued`` entries mirror the v1 ledger
-(``recommendation_savings_ledger``) and reconcile with
-``GET /recommendations/savings``; ``restatement`` entries (restatements, the
+(``recommendation_savings_ledger``, a staging table since LED-04);
+``restatement`` entries (restatements, the
 reversals of the projections they restate, and later reversals of either)
 move projected amounts to measured ones. The restated total of a method is
-the sum over both books.
+the sum over both books: what ``GET /recommendations/savings``, the savings
+counters and the dashboard gauges show.
 
 Each cluster's entries form a hash chain: ``seq`` is a gap-free position and
 ``hash = sha256(prev_hash || canonical_json(entry))``, where the canonical
@@ -57,12 +58,51 @@ REASON_ACCRUAL = "accrual"
 REASON_DRIFT = "drift"
 REASON_SUPERSESSION = "supersession"
 REASON_RESTATEMENT = "restatement"
-REASONS = (REASON_ACCRUAL, REASON_DRIFT, REASON_SUPERSESSION, REASON_RESTATEMENT)
+#: A projection reversed because its measurement refuted it (not realized, LED-03).
+REASON_NOT_REALIZED = "not_realized"
+#: A supersession reversal cancelled because the rollback review was dismissed (LED-08).
+REASON_REINSTATEMENT = "reinstatement"
+#: The measured cost of a reliability fix (a request increase), booked as a negative cost, never a saving.
+REASON_COST_OF_FIX = "cost_of_fix"
+#: Released capacity accrued from the change measurement.
+REASON_RELEASED_CAPACITY = "released_capacity"
+REASONS = (
+    REASON_COST_OF_FIX,
+    REASON_RELEASED_CAPACITY,
+    REASON_ACCRUAL,
+    REASON_DRIFT,
+    REASON_SUPERSESSION,
+    REASON_RESTATEMENT,
+    REASON_NOT_REALIZED,
+    REASON_REINSTATEMENT,
+)
+
+#: Accounting basis of an amount (LED-01): what the number measures. One basis per method.
+BASIS_ALLOCATED = "allocated"
+BASIS_BILLABLE_EXPECTED = "billable_expected"
+BASIS_BILLED = "billed"
+BASIS_DECLARED = "declared"
+BASES = (BASIS_ALLOCATED, BASIS_BILLABLE_EXPECTED, BASIS_BILLED, BASIS_DECLARED)
+#: Basis of an entry stored before the ``basis`` column existed (migration 0160): projections were
+#: accrued on the expected-billable basis (allocated x realization factor) until ledger/2.
+LEGACY_BASIS = {
+    METHOD_PROJECTED: BASIS_BILLABLE_EXPECTED,
+    METHOD_MEASURED_ALLOCATED: BASIS_ALLOCATED,
+    METHOD_REALIZED_BILLED: BASIS_BILLED,
+    METHOD_USER_DECLARED: BASIS_DECLARED,
+}
 
 QUANTITY_COST = "cost"
 QUANTITY_CO2E = "co2e_g"
-QUANTITIES = (QUANTITY_COST, QUANTITY_CO2E)
+#: Released capacity (WP-08.1): reserved CPU and memory released by a change, never money.
+QUANTITY_CPU_CORE_HOURS = "cpu_core_h"
+QUANTITY_MEM_GIB_HOURS = "mem_gib_h"
+CAPACITY_QUANTITIES = (QUANTITY_CPU_CORE_HOURS, QUANTITY_MEM_GIB_HOURS)
+#: Money and carbon: the quantities of savings totals (capacity is reported apart, never added).
+SAVINGS_QUANTITIES = (QUANTITY_COST, QUANTITY_CO2E)
+QUANTITIES = (QUANTITY_COST, QUANTITY_CO2E, QUANTITY_CPU_CORE_HOURS, QUANTITY_MEM_GIB_HOURS)
 CO2E_UNIT = "gCO2e"
+CAPACITY_UNITS = {QUANTITY_CPU_CORE_HOURS: "core-hours", QUANTITY_MEM_GIB_HOURS: "GiB-hours"}
 
 #: v1 ledger method labels mapped onto the v2 vocabulary.
 V1_METHODS = {
@@ -74,7 +114,8 @@ V1_METHODS = {
 }
 
 #: Version of the ledger writer; part of every entry's ``method_version`` for v1 projections.
-LEDGER_WRITER_VERSION = "ledger/1"
+#: ``ledger/2`` entries carry their ``basis`` (part of the hash payload); ``ledger/1`` entries have none.
+LEDGER_WRITER_VERSION = "ledger/2"
 
 _NAMESPACE = uuid.UUID("6f1d3c52-5a0e-4c39-9a51-3b8ad0c4f6e1")
 
@@ -82,6 +123,13 @@ _NAMESPACE = uuid.UUID("6f1d3c52-5a0e-4c39-9a51-3b8ad0c4f6e1")
 def v2_method(v1_method: Optional[str]) -> str:
     """The v2 method of a v1 ledger row (``measured`` rows measured allocated cost)."""
     return V1_METHODS.get(v1_method or "", str(v1_method))
+
+
+def basis_of(method: str, stored: Optional[str] = None) -> str:
+    """The accounting basis of an entry: the stored one, else the basis its method had before ledger/2."""
+    if stored:
+        return stored
+    return LEGACY_BASIS.get(method, BASIS_ALLOCATED)
 
 
 def entry_id_for(cluster_uid: str, entry_key: str) -> str:
@@ -138,6 +186,8 @@ class LedgerEntryDraft:
     restates_entry_id: Optional[str] = None
     source_table: Optional[str] = None
     source_id: Optional[int] = None
+    #: Accounting basis (LED-01); ``None`` only on entries stored before migration 0160.
+    basis: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.entry_kind not in ENTRY_KINDS:
@@ -146,6 +196,8 @@ class LedgerEntryDraft:
             raise ValueError(f"unknown book {self.book!r}")
         if self.method not in LEDGER_METHODS:
             raise ValueError(f"unknown ledger method {self.method!r}")
+        if self.basis is not None and self.basis not in BASES:
+            raise ValueError(f"unknown basis {self.basis!r}")
         if not math.isfinite(float(self.value)):
             raise ValueError("ledger values must be finite")
         if ensure_utc(self.period_end) < ensure_utc(self.period_start):
@@ -172,6 +224,9 @@ class LedgerEntry(LedgerEntryDraft):
         data = asdict(self)
         data.pop("hash", None)
         data.pop("prev_hash", None)
+        if data.get("basis") is None:
+            # Entries stored before the basis column keep the payload (and hash) they were chained with.
+            data.pop("basis", None)
         for key in ("period_start", "period_end", "slot_start", "created_at"):
             data[key] = format_time(data[key])
         data["value"] = float(self.value)
@@ -181,6 +236,11 @@ class LedgerEntry(LedgerEntryDraft):
                 data[key] = float(data[key])
         return data
 
+    @property
+    def effective_basis(self) -> str:
+        """The stored basis, or the one inferred from the method for entries stored before it existed."""
+        return basis_of(self.method, self.basis)
+
     def computed_hash(self) -> str:
         return chain_hash(self.prev_hash, self.canonical())
 
@@ -188,6 +248,8 @@ class LedgerEntry(LedgerEntryDraft):
         data = self.payload()
         data["prev_hash"] = self.prev_hash
         data["hash"] = self.hash
+        data["basis"] = self.effective_basis
+        data["basis_stored"] = self.basis is not None
         return data
 
 
@@ -223,6 +285,13 @@ def place(
 
 
 __all__ = [
+    "BASES",
+    "BASIS_ALLOCATED",
+    "BASIS_BILLABLE_EXPECTED",
+    "BASIS_BILLED",
+    "BASIS_DECLARED",
+    "LEGACY_BASIS",
+    "basis_of",
     "BOOKS",
     "BOOK_ACCRUED",
     "BOOK_RESTATEMENT",
@@ -244,7 +313,16 @@ __all__ = [
     "QUANTITY_COST",
     "REASONS",
     "REASON_ACCRUAL",
+    "CAPACITY_QUANTITIES",
+    "CAPACITY_UNITS",
+    "QUANTITY_CPU_CORE_HOURS",
+    "QUANTITY_MEM_GIB_HOURS",
+    "REASON_COST_OF_FIX",
+    "REASON_RELEASED_CAPACITY",
+    "SAVINGS_QUANTITIES",
     "REASON_DRIFT",
+    "REASON_NOT_REALIZED",
+    "REASON_REINSTATEMENT",
     "REASON_RESTATEMENT",
     "REASON_SUPERSESSION",
     "canonical_json",

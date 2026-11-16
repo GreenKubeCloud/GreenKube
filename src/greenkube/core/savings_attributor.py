@@ -59,6 +59,7 @@ from ..models.savings import (
 )
 from ..storage.base_savings_repository import ATTRIBUTION_STREAM, AccrualWatermarkConflict, SavingsLedgerRepository
 from ..utils.date_utils import ensure_utc
+from ..verify.ledger.model import BASIS_ALLOCATED, BASIS_BILLABLE_EXPECTED, BASIS_DECLARED
 from .observability import REGISTRY as OBSERVABILITY_REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,9 @@ class AccrualComponent:
     method: str
     co2e_grams_per_year: float
     cost_per_year: float
+    #: Accounting basis (LED-01): ``allocated`` for projections and measurements, ``declared`` for
+    #: user declarations, ``billable_expected`` only for projections without an Impact Model projection.
+    basis: str = BASIS_ALLOCATED
 
     @property
     def is_zero(self) -> bool:
@@ -147,20 +151,66 @@ def user_declared_savings(record: RecommendationRecord) -> Optional[UserDeclared
     return UserDeclaredSavings.model_validate(raw)
 
 
+def _impact(record: RecommendationRecord) -> Optional[dict]:
+    impact = record.impact
+    if impact is None:
+        return None
+    if hasattr(impact, "model_dump"):
+        impact = impact.model_dump()
+    return impact if isinstance(impact, dict) else None
+
+
+def _impact_number(impact: Optional[dict], key: str) -> Optional[float]:
+    value = impact.get(key) if impact is not None else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(float(value)):
+        return None
+    return float(value)
+
+
+def projected_allocated_rates(record: RecommendationRecord) -> Optional[tuple[float, float]]:
+    """The projection's annual (cost, CO2e grams) on the ALLOCATED basis, or None without an Impact Model one.
+
+    The same quantities a change measurement compares with
+    (:func:`greenkube.verify.attribution.allocated_projection` and the
+    allocated CO2e of the measured components), so that ``projected`` and
+    ``measured_allocated`` accruals are one quantity before and after
+    measurement (LED-01). The realization factor is never applied: the
+    billable expectation is reported apart (``realization``) and never accrued.
+    A projection that does not model CO2e accrues no CO2e.
+    """
+    impact = _impact(record)
+    cost = _impact_number(impact, "allocated_cost_annual")
+    if cost is None:
+        return None
+    from ..impact.comparison import measurable_co2e_projection
+    from ..impact.types import MEASURED_CO2E_COMPONENTS
+
+    co2e = measurable_co2e_projection(impact, MEASURED_CO2E_COMPONENTS, allocated=True)
+    co2e = float(co2e) if co2e is not None and isfinite(float(co2e)) else 0.0
+    return cost, co2e
+
+
 def _projection_components(record: RecommendationRecord) -> List[AccrualComponent]:
-    projected_co2e = _finite("carbon_saved_co2e_grams", record.carbon_saved_co2e_grams, record.id)
-    projected_cost = _finite("cost_saved", record.cost_saved, record.id)
+    allocated = projected_allocated_rates(record)
+    if allocated is not None:
+        projected_cost, projected_co2e = allocated
+        basis = BASIS_ALLOCATED
+    else:
+        # Recommendations stored without an Impact Model projection: the legacy value, labelled as such.
+        projected_co2e = _finite("carbon_saved_co2e_grams", record.carbon_saved_co2e_grams, record.id)
+        projected_cost = _finite("cost_saved", record.cost_saved, record.id)
+        basis = BASIS_BILLABLE_EXPECTED
     components: List[AccrualComponent] = []
     declared = user_declared_savings(record)
     if declared is not None:
         declared_co2e = _finite("user_declared co2e", declared.co2e_grams_per_year, record.id)
         declared_cost = _finite("user_declared cost", declared.cost_per_year, record.id)
-        components.append(AccrualComponent(METHOD_USER_DECLARED, declared_co2e, declared_cost))
+        components.append(AccrualComponent(METHOD_USER_DECLARED, declared_co2e, declared_cost, BASIS_DECLARED))
         if declared.co2e_grams_per_year is not None:
             projected_co2e = 0.0
         if declared.cost_per_year is not None:
             projected_cost = 0.0
-    components.append(AccrualComponent(METHOD_PROJECTED, projected_co2e, projected_cost))
+    components.append(AccrualComponent(METHOD_PROJECTED, projected_co2e, projected_cost, basis))
     return [component for component in components if not component.is_zero]
 
 
@@ -400,6 +450,7 @@ class SavingsAttributor:
                             baseline_value=record.potential_savings_co2e_grams,
                             actual_value=component.co2e_grams_per_year,
                             confidence=record.confidence if component.method == METHOD_PROJECTED else None,
+                            basis=component.basis,
                         )
                     )
         return rows

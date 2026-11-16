@@ -18,8 +18,8 @@ _INSERT_SQL = """
          cost_saved_dollars, period_seconds, timestamp,
          period_start, period_end, slot_start,
          measurement_method, baseline_value, actual_value,
-         confidence, superseded)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         confidence, superseded, basis)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT DO NOTHING
 """
 
@@ -60,6 +60,7 @@ def _row_params(record: SavingsLedgerRecord) -> tuple:
         record.actual_value,
         record.confidence,
         int(bool(record.superseded)),
+        record.basis,
     )
 
 
