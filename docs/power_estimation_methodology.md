@@ -63,9 +63,12 @@ Each metric row records where its grid intensity came from (`intensity_source`):
 |---|---|
 | `consolidated` | Final provider value no older than `INTENSITY_MAX_AGE` (default `6h`) |
 | `realtime` | Provisional provider value no older than `INTENSITY_MAX_AGE`; the hourly recompute replaces it once the provider consolidates it |
-| `zone_default` | No fresh value: the bundled per-zone default is used |
-| `stale` | Only a value older than `INTENSITY_MAX_AGE` exists and the zone has no default |
-| `global_default` | Neither a value nor a zone default: `DEFAULT_INTENSITY` is used |
+| `zone_default` | No fresh value: the bundled annual value of the zone is used |
+| `country_default` | No fresh value and the zone (a sub-zone such as `US-CAL-CISO` or `SE-SE3`) has no bundled value: its country's annual value is used |
+| `stale` | Only a value older than `INTENSITY_MAX_AGE` exists and neither the zone nor its country has a default |
+| `global_default` | Neither a value nor a zone or country default: `DEFAULT_INTENSITY` is used |
+
+The bundled defaults (`src/greenkube/data/electricity_maps_default.csv`) are the annual mean intensity of each country for one calendar year (2024), with life-cycle emission factors, from [Ember's yearly electricity data](https://ember-energy.org/data/yearly-electricity-data/) (CC BY 4.0). `scripts/generate_zone_intensity_defaults.py` regenerates the table; the year is in every row. An annual mean ignores the hour-to-hour variation of the grid: set an Electricity Maps or Wattnet token for hourly values. Rows already stored with a default keep the value they were computed with.
 
 Defaults are computed when metrics are calculated and are never written into
 the intensity history, so a missing token or a provider outage cannot pass for

@@ -78,6 +78,8 @@ class IntensitySource(StrEnum):
     CONSOLIDATED = "consolidated"
     STALE = "stale"
     ZONE_DEFAULT = "zone_default"
+    COUNTRY_DEFAULT = "country_default"
+    """Bundled annual value of the zone's country: the zone has none of its own (NRG-04)."""
     GLOBAL_DEFAULT = "global_default"
     UNKNOWN = "unknown"
     """Legacy rows written before provenance was recorded."""

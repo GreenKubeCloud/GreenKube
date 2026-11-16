@@ -479,7 +479,7 @@ Schema (33 columns):
   `DEFAULT_COST` placeholder carry `none`),
   `usage_source` (prometheus, metrics_server, none),
   `power_source` (instance_profile, node_capacity_derived, default_profile, kepler),
-  `intensity_source` (realtime, consolidated, stale, zone_default, global_default; `unknown` for legacy rows).
+  `intensity_source` (realtime, consolidated, stale, zone_default, country_default, global_default; `unknown` for legacy rows).
   Hourly aggregates of rows with different sources carry `mixed`, except a cost mixing only `opencost` and
   `opencost_derived` rows, which carries `opencost_derived` and stays trusted. Consumers decide what to trust with
   `is_cost_trusted()` / `is_usage_trusted()` instead of `is_estimated`.
