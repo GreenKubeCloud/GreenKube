@@ -67,15 +67,19 @@ async def test_read_hourly_metrics_default_filters_namespace():
 
 @pytest.mark.asyncio
 async def test_read_combined_metrics_smart_uses_raw_hourly_and_mixed_paths():
+    """Full hours below the boundary come from the hourly table, everything else from raw rows (ROL-01)."""
     now = datetime.now(timezone.utc)
+    hour = now.replace(minute=0, second=0, microsecond=0)
     raw = [_metric("raw-api", "prod", now - timedelta(minutes=10), 2.0)]
     hourly = [_metric("hourly-api", "prod", now - timedelta(days=2), 5.0)]
     repo = DummyCombinedMetricsRepository(raw_metrics=raw, hourly_metrics=hourly)
 
     with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
         recent = await repo.read_combined_metrics_smart(now - timedelta(hours=2), now, namespace="prod")
-        old = await repo.read_combined_metrics_smart(now - timedelta(days=3), now - timedelta(days=2), namespace="prod")
-        mixed = await repo.read_combined_metrics_smart(now - timedelta(days=3), now, namespace="prod")
+        old = await repo.read_combined_metrics_smart(
+            hour - timedelta(days=3), hour - timedelta(days=2), namespace="prod"
+        )
+        mixed = await repo.read_combined_metrics_smart(hour - timedelta(days=3), now, namespace="prod")
 
     assert recent == raw
     assert old == hourly

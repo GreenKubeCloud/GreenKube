@@ -336,7 +336,7 @@ async def _insert_hourly_metric(
             (
                 pod_name,
                 namespace,
-                hour_bucket.isoformat(),
+                hour_bucket.strftime("%Y-%m-%dT%H:%M:%SZ"),  # the stored format of hour buckets
                 3,
                 total_cost,
                 co2e_grams,
@@ -532,7 +532,7 @@ async def test_container_metrics_compression_keeps_sibling_containers_separate(r
         ]
     )
 
-    await MetricsCompressor(real_database.manager)._compress_to_hourly()
+    await MetricsCompressor(real_database.manager, collection_watermark_provider=None)._compress_to_hourly()
     hourly = await repo.read_container_metrics_smart(timestamp, timestamp + timedelta(hours=1), namespace="prod")
 
     assert {metric.container_name for metric in hourly} == {"web", "telemetry-sidecar"}
@@ -598,17 +598,19 @@ async def test_combined_metrics_repository_reads_hourly_rollups(real_database: R
     invalid_json_row = next(metric for metric in all_hourly if metric.pod_name == "worker-hourly")
     assert invalid_json_row.estimation_reasons == []
 
-    summary = await repo.aggregate_summary(old_window_start, old_window_end, namespace="prod")
+    summary = await repo.aggregate_summary(old_hour, old_hour + timedelta(hours=1), namespace="prod")
     assert summary["total_co2e_grams"] == pytest.approx(12.0)
     assert summary["total_embodied_co2e_grams"] == pytest.approx(1.5)
     assert summary["pod_count"] == 1
 
-    timeseries = await repo.aggregate_timeseries(old_window_start, old_window_end, granularity="week", namespace="prod")
+    timeseries = await repo.aggregate_timeseries(
+        old_hour, old_hour + timedelta(hours=1), granularity="week", namespace="prod"
+    )
     assert len(timeseries) == 1
     assert timeseries[0]["co2e_grams"] == pytest.approx(12.0)
     assert timeseries[0]["energy_joules"] == pytest.approx(1200.0)
 
-    by_namespace = await repo.aggregate_by_namespace(old_window_start, old_window_end, namespace="prod")
+    by_namespace = await repo.aggregate_by_namespace(old_hour, old_hour + timedelta(hours=1), namespace="prod")
     assert by_namespace == [
         {
             "namespace": "prod",
@@ -619,7 +621,7 @@ async def test_combined_metrics_repository_reads_hourly_rollups(real_database: R
         }
     ]
 
-    top_pods = await repo.aggregate_top_pods(old_window_start, old_window_end, namespace="prod", limit=5)
+    top_pods = await repo.aggregate_top_pods(old_hour, old_hour + timedelta(hours=1), namespace="prod", limit=5)
     assert len(top_pods) == 1
     assert top_pods[0]["pod_name"] == "api-hourly"
     assert top_pods[0]["co2e_grams"] == pytest.approx(12.0)

@@ -375,6 +375,20 @@ class CollectionStatusResponse(BaseModel):
     )
 
 
+class CompressionStatusResponse(BaseModel):
+    """Hourly compression watermark and lag (ROL-01)."""
+
+    status: str = Field(
+        ..., description="`ok`, or `degraded` when a compression watermark trails its reachable hour by over 2 h."
+    )
+    lag_seconds: Optional[float] = Field(
+        None, description="Largest lag of the metric tables behind now - METRICS_COMPRESSION_AGE_HOURS."
+    )
+    watermarks: dict[str, Optional[datetime]] = Field(
+        default_factory=dict, description="Compression watermark per raw metric table (exclusive end)."
+    )
+
+
 class HealthResponse(BaseModel):
     """Response schema for the health check endpoint."""
 
@@ -385,6 +399,9 @@ class HealthResponse(BaseModel):
     )
     demo: bool = Field(
         False, description="True when the API runs `greenkube demo` (synthetic data, pull requests disabled)."
+    )
+    compression: Optional[CompressionStatusResponse] = Field(
+        None, description="Hourly compression watermark and lag; absent when the database cannot be read."
     )
 
 

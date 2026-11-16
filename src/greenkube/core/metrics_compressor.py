@@ -41,6 +41,8 @@ from ..utils.date_utils import to_iso_z
 
 logger = logging.getLogger(__name__)
 
+#: Compression lag above which health reports the compressor as degraded (ROL-01).
+COMPRESSION_LAG_DEGRADED_SECONDS = 2 * 3600
 #: Upper bound of hours aggregated in one transaction.
 MAX_HOURS_PER_TRANSACTION = 24
 #: Raw rows are refreshed by the carbon-intensity recompute for this many hours
@@ -259,41 +261,37 @@ class MetricsCompressor:
             "hourly_rows_pruned": 0,
         }
 
+        failures: list[BaseException] = []
+
+        async def step(name: str, action: Callable[[], Awaitable[Any]]) -> Any:
+            try:
+                return await action()
+            except Exception as e:
+                logger.error("%s failed: %s", name, e)
+                failures.append(e)
+                return None
+
         # Roll up before compression and pruning, while the last day is still raw.
         if self._rollup_enabled:
-            try:
-                await self.refresh_usage_rollup(now)
-            except Exception as e:
-                logger.error("Workload usage rollup failed: %s", e)
+            await step("Workload usage rollup", lambda: self.refresh_usage_rollup(now))
 
-        try:
-            compressed = await self._compress_to_hourly(now)
+        compressed = await step("Metrics compression", lambda: self._compress_to_hourly(now))
+        if compressed:
             stats["hours_compressed"] = compressed["hours"]
             stats["rows_compressed"] = compressed["rows"]
-        except Exception as e:
-            logger.error("Metrics compression failed: %s", e)
-
-        try:
-            stats["raw_rows_pruned"] = await self._prune_raw(now)
-        except Exception as e:
-            logger.error("Raw metrics pruning failed: %s", e)
-
-        try:
-            stats["hourly_rows_pruned"] = await self._prune_hourly(now)
-        except Exception as e:
-            logger.error("Hourly metrics pruning failed: %s", e)
-
+        stats["raw_rows_pruned"] = await step("Raw metrics pruning", lambda: self._prune_raw(now)) or 0
+        stats["hourly_rows_pruned"] = await step("Hourly metrics pruning", lambda: self._prune_hourly(now)) or 0
         if self._rollup_enabled:
-            try:
-                await self._prune_usage_rollup(now)
-            except Exception as e:
-                logger.error("Workload usage rollup pruning failed: %s", e)
-
+            await step("Workload usage rollup pruning", lambda: self._prune_usage_rollup(now))
         # Reclaim dead tuple space so the PVC can be reused for new data.
-        try:
-            await self._vacuum_main_tables()
-        except Exception as e:
-            logger.error("Vacuum failed: %s", e)
+        await step("Vacuum", self._vacuum_main_tables)
+        await step("Compression lag export", lambda: self.compression_status(now))
+
+        if failures:
+            # A swallowed failure must still show in the loop status and metrics (ROL-01).
+            from .loops import report_loop_failure
+
+            report_loop_failure(failures[0])
 
         logger.info(
             "Compression cycle complete: %d hourly rows, %d raw rows compressed, %d raw pruned, %d hourly pruned",
@@ -303,6 +301,31 @@ class MetricsCompressor:
             stats["hourly_rows_pruned"],
         )
         return stats
+
+    async def compression_status(self, now: datetime | None = None) -> dict[str, Any]:
+        """Return the compression watermark and lag of each metrics table and export the lag gauge.
+
+        The lag is how far the watermark trails the last hour the compressor may
+        reach (``floor_hour(now - METRICS_COMPRESSION_AGE_HOURS)``). Readers never
+        lose rows when it grows (they split at the watermark), but raw retention
+        and query cost do: a lag above :data:`COMPRESSION_LAG_DEGRADED_SECONDS`
+        reports ``degraded``.
+        """
+        from .observability import METRICS_COMPRESSION_LAG
+
+        now = now or self._now()
+        reachable = floor_hour(now - timedelta(hours=self._config.METRICS_COMPRESSION_AGE_HOURS))
+        tables: dict[str, Any] = {}
+        worst: Optional[float] = None
+        for table in TABLES:
+            watermark = await self.get_watermark(table.raw)
+            lag = max((reachable - watermark).total_seconds(), 0.0) if watermark is not None else None
+            if lag is not None:
+                METRICS_COMPRESSION_LAG.labels(table=table.raw).set(lag)
+                worst = lag if worst is None else max(worst, lag)
+            tables[table.raw] = {"watermark": watermark, "lag_seconds": lag}
+        degraded = worst is not None and worst > COMPRESSION_LAG_DEGRADED_SECONDS
+        return {"status": "degraded" if degraded else "ok", "lag_seconds": worst, "tables": tables}
 
     # ------------------------------------------------------------------
     # Time helpers

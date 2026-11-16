@@ -274,6 +274,12 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
+    async def compression_boundary(self, raw_table: str) -> datetime:
+        """Return the compression watermark of ``raw_table``: the raw/hourly read boundary (ROL-01)."""
+        from ..raw_hourly_split import read_compression_boundary
+
+        return await read_compression_boundary(self.db_manager, raw_table, f"{raw_table}_hourly")
+
     @asynccontextmanager
     async def _connection(self, conn: Any = None) -> AsyncIterator[Any]:
         """``conn`` when given (the caller's transaction), else a pooled connection."""
@@ -1015,14 +1021,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         namespace: Optional[str] = None,
     ) -> dict:
         """SQL-level aggregation for summary — queries both raw and hourly tables."""
-        from datetime import timedelta
-        from datetime import timezone as tz
 
-        from greenkube.core.config import get_config
-
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -1031,26 +1031,25 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 idx = 1
 
                 # Raw table — only for data within the compression window
-                if end_time >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                if split.has_raw:
                     ns_clause = ""
                     if namespace:
-                        ns_clause = f" AND namespace = ${idx + 2}"
+                        ns_clause = f" AND namespace = ${idx + 4}"
                     parts.append(f"""
                         SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
                                pod_name, namespace
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}
+                          AND NOT (timestamp >= ${idx + 2} AND timestamp < ${idx + 3}){ns_clause}
                     """)
-                    params.extend([raw_start, end_time])
-                    idx += 2
+                    params.extend(split.raw_params())
+                    idx += 4
                     if namespace:
                         params.append(namespace)
                         idx += 1
 
                 # Hourly table — only for data before the compression cutoff
-                if start_time < cutoff:
-                    hourly_end = min(end_time, cutoff)
+                if split.has_hourly:
                     ns_clause = ""
                     if namespace:
                         ns_clause = f" AND namespace = ${idx + 2}"
@@ -1060,7 +1059,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
-                    params.extend([start_time, hourly_end])
+                    params.extend(split.hourly_params())
                     idx += 2
                     if namespace:
                         params.append(namespace)
@@ -1119,10 +1118,6 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
 
         Handles the raw/hourly split the same way as aggregate_summary.
         """
-        from datetime import timedelta
-        from datetime import timezone as tz
-
-        from greenkube.core.config import get_config
 
         # Map report granularity names → PostgreSQL date_trunc units
         _GRAN_TRUNC = {
@@ -1133,11 +1128,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             "yearly": "year",
         }
 
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
-        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
-        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -1160,29 +1151,28 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                     raw_ts_expr = "NULL::timestamptz"
                     hourly_ts_expr = "NULL::timestamptz"
 
-                if end_aware >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
-                    ns_clause = f" AND namespace = ${idx + 2}" if namespace else ""
+                if split.has_raw:
+                    ns_clause = f" AND namespace = ${idx + 4}" if namespace else ""
                     parts.append(f"""
                         SELECT {group_cols}, {raw_ts_expr} AS ts_bucket
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}
+                          AND NOT (timestamp >= ${idx + 2} AND timestamp < ${idx + 3}){ns_clause}
                     """)
-                    params.extend([raw_start, end_time])
-                    idx += 2
+                    params.extend(split.raw_params())
+                    idx += 4
                     if namespace:
                         params.append(namespace)
                         idx += 1
 
-                if start_aware < cutoff:
-                    hourly_end = min(end_aware, cutoff)
+                if split.has_hourly:
                     ns_clause = f" AND namespace = ${idx + 2}" if namespace else ""
                     parts.append(f"""
                         SELECT {group_cols}, {hourly_ts_expr} AS ts_bucket
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
-                    params.extend([start_time, hourly_end])
+                    params.extend(split.hourly_params())
                     idx += 2
                     if namespace:
                         params.append(namespace)
@@ -1218,10 +1208,6 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         namespace: Optional[str] = None,
     ) -> list:
         """SQL-level time-series aggregation — queries both raw and hourly tables."""
-        from datetime import timedelta
-        from datetime import timezone as tz
-
-        from greenkube.core.config import get_config
 
         _PG_TRUNC = {
             "hour": "hour",
@@ -1231,9 +1217,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         }
         trunc_unit = _PG_TRUNC.get(granularity, "hour")
 
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -1242,26 +1226,25 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 idx = 1
 
                 # Raw table — recent data
-                if end_time >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                if split.has_raw:
                     ns_clause = ""
                     if namespace:
-                        ns_clause = f" AND namespace = ${idx + 2}"
+                        ns_clause = f" AND namespace = ${idx + 4}"
                     parts.append(f"""
                         SELECT timestamp AS ts, co2e_grams, embodied_co2e_grams,
                                total_cost, joules, cpu_usage_millicores, memory_usage_bytes
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}
+                          AND NOT (timestamp >= ${idx + 2} AND timestamp < ${idx + 3}){ns_clause}
                     """)
-                    params.extend([raw_start, end_time])
-                    idx += 2
+                    params.extend(split.raw_params())
+                    idx += 4
                     if namespace:
                         params.append(namespace)
                         idx += 1
 
                 # Hourly table — old data
-                if start_time < cutoff:
-                    hourly_end = min(end_time, cutoff)
+                if split.has_hourly:
                     ns_clause = ""
                     if namespace:
                         ns_clause = f" AND namespace = ${idx + 2}"
@@ -1272,7 +1255,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
-                    params.extend([start_time, hourly_end])
+                    params.extend(split.hourly_params())
                     idx += 2
                     if namespace:
                         params.append(namespace)
@@ -1348,14 +1331,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         namespace: Optional[str] = None,
     ) -> list:
         """SQL-level aggregation of metrics grouped by namespace."""
-        from datetime import timedelta
-        from datetime import timezone as tz
 
-        from greenkube.core.config import get_config
-
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -1363,24 +1340,23 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 params: list = []
                 idx = 1
 
-                if end_time >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                if split.has_raw:
                     ns_clause = ""
                     if namespace:
-                        ns_clause = f" AND namespace = ${idx + 2}"
+                        ns_clause = f" AND namespace = ${idx + 4}"
                     parts.append(f"""
                         SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}
+                          AND NOT (timestamp >= ${idx + 2} AND timestamp < ${idx + 3}){ns_clause}
                     """)
-                    params.extend([raw_start, end_time])
-                    idx += 2
+                    params.extend(split.raw_params())
+                    idx += 4
                     if namespace:
                         params.append(namespace)
                         idx += 1
 
-                if start_time < cutoff:
-                    hourly_end = min(end_time, cutoff)
+                if split.has_hourly:
                     ns_clause = ""
                     if namespace:
                         ns_clause = f" AND namespace = ${idx + 2}"
@@ -1389,7 +1365,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
-                    params.extend([start_time, hourly_end])
+                    params.extend(split.hourly_params())
                     idx += 2
                     if namespace:
                         params.append(namespace)
@@ -1424,14 +1400,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         limit: int = 10,
     ) -> list:
         """SQL-level aggregation of top pods by CO2 emissions."""
-        from datetime import timedelta
-        from datetime import timezone as tz
 
-        from greenkube.core.config import get_config
-
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -1439,24 +1409,23 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 params: list = []
                 idx = 1
 
-                if end_time >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                if split.has_raw:
                     ns_clause = ""
                     if namespace:
-                        ns_clause = f" AND namespace = ${idx + 2}"
+                        ns_clause = f" AND namespace = ${idx + 4}"
                     parts.append(f"""
                         SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}
+                          AND NOT (timestamp >= ${idx + 2} AND timestamp < ${idx + 3}){ns_clause}
                     """)
-                    params.extend([raw_start, end_time])
-                    idx += 2
+                    params.extend(split.raw_params())
+                    idx += 4
                     if namespace:
                         params.append(namespace)
                         idx += 1
 
-                if start_time < cutoff:
-                    hourly_end = min(end_time, cutoff)
+                if split.has_hourly:
                     ns_clause = ""
                     if namespace:
                         ns_clause = f" AND namespace = ${idx + 2}"
@@ -1465,7 +1434,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
-                    params.extend([start_time, hourly_end])
+                    params.extend(split.hourly_params())
                     idx += 2
                     if namespace:
                         params.append(namespace)
@@ -1565,65 +1534,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         namespace: Optional[str] = None,
     ) -> Optional[int]:
         """Count raw and hourly combined rows without materializing them."""
-        from datetime import timedelta, timezone
-
-        from greenkube.core.config import get_config
-
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
-        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
-        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=timezone.utc)
-        try:
-            async with self.db_manager.connection_scope() as conn:
-                total = 0
-                if end_aware >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
-                    if namespace:
-                        total += int(
-                            await conn.fetchval(
-                                "SELECT COUNT(*) FROM combined_metrics "
-                                "WHERE timestamp >= $1 AND timestamp < $2 AND namespace = $3",
-                                raw_start,
-                                end_aware,
-                                namespace,
-                            )
-                            or 0
-                        )
-                    else:
-                        total += int(
-                            await conn.fetchval(
-                                "SELECT COUNT(*) FROM combined_metrics WHERE timestamp >= $1 AND timestamp < $2",
-                                raw_start,
-                                end_aware,
-                            )
-                            or 0
-                        )
-                if start_aware < cutoff:
-                    hourly_end = min(end_aware, cutoff)
-                    if namespace:
-                        total += int(
-                            await conn.fetchval(
-                                "SELECT COUNT(*) FROM combined_metrics_hourly "
-                                "WHERE hour_bucket >= $1 AND hour_bucket < $2 AND namespace = $3",
-                                start_aware,
-                                hourly_end,
-                                namespace,
-                            )
-                            or 0
-                        )
-                    else:
-                        total += int(
-                            await conn.fetchval(
-                                "SELECT COUNT(*) FROM combined_metrics_hourly "
-                                "WHERE hour_bucket >= $1 AND hour_bucket < $2",
-                                start_aware,
-                                hourly_end,
-                            )
-                            or 0
-                        )
-                return total
-        except Exception as exc:
-            logger.warning("Could not count combined metrics: %s", exc)
-            return None
+        return await self._count_smart("combined_metrics", start_time, end_time, namespace)
 
     async def count_container_metrics_smart(
         self,
@@ -1632,64 +1543,42 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         namespace: Optional[str] = None,
     ) -> Optional[int]:
         """Count raw and hourly container rows without materializing them."""
-        from datetime import timedelta, timezone
+        return await self._count_smart("container_metrics", start_time, end_time, namespace)
 
-        from greenkube.core.config import get_config
-
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
-        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
-        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=timezone.utc)
+    async def _count_smart(
+        self, table: str, start_time: datetime, end_time: datetime, namespace: Optional[str]
+    ) -> Optional[int]:
+        """Count the rows of ``table`` and its hourly table split at the compression watermark (ROL-01)."""
+        split = await self._raw_hourly_split(start_time, end_time, table)
+        ns_raw = " AND namespace = $5" if namespace else ""
+        ns_hourly = " AND namespace = $3" if namespace else ""
+        extra = [namespace] if namespace else []
         try:
             async with self.db_manager.connection_scope() as conn:
                 total = 0
-                if end_aware >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
-                    if namespace:
-                        total += int(
-                            await conn.fetchval(
-                                "SELECT COUNT(*) FROM container_metrics "
-                                "WHERE timestamp >= $1 AND timestamp < $2 AND namespace = $3",
-                                raw_start,
-                                end_aware,
-                                namespace,
-                            )
-                            or 0
+                if split.has_raw:
+                    total += int(
+                        await conn.fetchval(
+                            f"SELECT COUNT(*) FROM {table} WHERE timestamp >= $1 AND timestamp < $2 "
+                            f"AND NOT (timestamp >= $3 AND timestamp < $4){ns_raw}",
+                            *split.raw_params(),
+                            *extra,
                         )
-                    else:
-                        total += int(
-                            await conn.fetchval(
-                                "SELECT COUNT(*) FROM container_metrics WHERE timestamp >= $1 AND timestamp < $2",
-                                raw_start,
-                                end_aware,
-                            )
-                            or 0
+                        or 0
+                    )
+                if split.has_hourly:
+                    total += int(
+                        await conn.fetchval(
+                            f"SELECT COUNT(*) FROM {table}_hourly "
+                            f"WHERE hour_bucket >= $1 AND hour_bucket < $2{ns_hourly}",
+                            *split.hourly_params(),
+                            *extra,
                         )
-                if start_aware < cutoff:
-                    hourly_end = min(end_aware, cutoff)
-                    if namespace:
-                        total += int(
-                            await conn.fetchval(
-                                "SELECT COUNT(*) FROM container_metrics_hourly "
-                                "WHERE hour_bucket >= $1 AND hour_bucket < $2 AND namespace = $3",
-                                start_aware,
-                                hourly_end,
-                                namespace,
-                            )
-                            or 0
-                        )
-                    else:
-                        total += int(
-                            await conn.fetchval(
-                                "SELECT COUNT(*) FROM container_metrics_hourly "
-                                "WHERE hour_bucket >= $1 AND hour_bucket < $2",
-                                start_aware,
-                                hourly_end,
-                            )
-                            or 0
-                        )
+                        or 0
+                    )
                 return total
         except Exception as exc:
-            logger.warning("Could not count container metrics: %s", exc)
+            logger.warning("Could not count %s: %s", table, exc)
             return None
 
     async def read_combined_metrics_page(
@@ -1710,16 +1599,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         Returns:
             Tuple of (total_count, page_items).
         """
-        from datetime import timedelta
-        from datetime import timezone as tz
 
-        from greenkube.core.config import get_config
-
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
-        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
-        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -1730,9 +1611,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 params: list = []
                 idx = 1
 
-                if end_aware >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
-                    ns_clause = f" AND namespace = ${idx + 2}" if namespace else ""
+                if split.has_raw:
+                    ns_clause = f" AND namespace = ${idx + 4}" if namespace else ""
                     parts.append(f"""
                         SELECT
                             pod_name, namespace, total_cost, co2e_grams, pue,
@@ -1751,16 +1631,16 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                             cost_source, usage_source, power_source, intensity_source
                         FROM combined_metrics
-                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}{ns_clause}
+                        WHERE timestamp >= ${idx} AND timestamp < ${idx + 1}
+                          AND NOT (timestamp >= ${idx + 2} AND timestamp < ${idx + 3}){ns_clause}
                     """)
-                    params.extend([raw_start, end_time])
-                    idx += 2
+                    params.extend(split.raw_params())
+                    idx += 4
                     if namespace:
                         params.append(namespace)
                         idx += 1
 
-                if start_aware < cutoff:
-                    hourly_end = min(end_aware, cutoff)
+                if split.has_hourly:
                     ns_clause = f" AND namespace = ${idx + 2}" if namespace else ""
                     parts.append(f"""
                         SELECT
@@ -1786,7 +1666,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ${idx} AND hour_bucket < ${idx + 1}{ns_clause}
                     """)
-                    params.extend([start_time, hourly_end])
+                    params.extend(split.hourly_params())
                     idx += 2
                     if namespace:
                         params.append(namespace)

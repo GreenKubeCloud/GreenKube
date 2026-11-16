@@ -201,7 +201,29 @@ class CarbonIntensityRepository(ABC):
         pass
 
 
-class ContainerMetricsRepository(ABC):
+class RawHourlySplitMixin:
+    """Raw/hourly read boundary shared by the metric repositories (ROL-01)."""
+
+    async def compression_boundary(self, raw_table: str) -> datetime:
+        """Return the hour-aligned boundary between ``raw_table`` and its hourly table.
+
+        SQL repositories return the compression watermark. This default, used
+        by in-memory doubles that keep no watermark, is the start of the hour
+        ``METRICS_COMPRESSION_AGE_HOURS`` ago.
+        """
+        from ..core.config import get_config
+        from .raw_hourly_split import floor_hour
+
+        return floor_hour(datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS))
+
+    async def _raw_hourly_split(self, start_time: datetime, end_time: datetime, raw_table: str):
+        """Split ``[start_time, end_time)`` between raw and hourly rows at :meth:`compression_boundary`."""
+        from .raw_hourly_split import split_window
+
+        return split_window(start_time, end_time, await self.compression_boundary(raw_table))
+
+
+class ContainerMetricsRepository(RawHourlySplitMixin, ABC):
     """Persistence contract for the container-scoped resource series used by actions."""
 
     @abstractmethod
@@ -244,23 +266,14 @@ class ContainerMetricsRepository(ABC):
         end_time: datetime,
         namespace: Optional[str] = None,
     ) -> List[CombinedMetric]:
-        """Merge raw and hourly container samples at the configured compression boundary."""
-        from datetime import timedelta
-        from datetime import timezone as tz
-
-        from ..core.config import get_config
-
-        compression_cutoff = datetime.now(tz.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
-        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
-        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
-
-        if start_aware >= compression_cutoff - timedelta(minutes=1):
-            return await self.read_container_metrics(start_time, end_time, namespace)
-        if end_aware <= compression_cutoff:
-            return await self.read_hourly_container_metrics(start_time, end_time, namespace)
-
-        hourly = await self.read_hourly_container_metrics(start_time, compression_cutoff, namespace)
-        raw = await self.read_container_metrics(compression_cutoff, end_time, namespace)
+        """Merge raw and hourly container samples at the compression watermark (ROL-01)."""
+        split = await self._raw_hourly_split(start_time, end_time, "container_metrics")
+        hourly: List[CombinedMetric] = []
+        if split.has_hourly:
+            hourly = await self.read_hourly_container_metrics(split.hourly_start, split.hourly_end, namespace)
+        raw: List[CombinedMetric] = []
+        for raw_start, raw_end in split.raw_ranges:
+            raw += await self.read_container_metrics(raw_start, raw_end, namespace)
         return hourly + raw
 
 
@@ -289,7 +302,7 @@ def window_step_profiles(rows: Any) -> dict[datetime, WindowStepProfile]:
     return {step: WindowStepProfile(frozenset(names), allocated[step], pending[step]) for step, names in pods.items()}
 
 
-class CombinedMetricsRepository(ABC):
+class CombinedMetricsRepository(RawHourlySplitMixin, ABC):
     """
     Abstract base class for combined metrics data repositories.
     Defines the contract for writing and reading CombinedMetric records.
@@ -417,41 +430,19 @@ class CombinedMetricsRepository(ABC):
         end_time: datetime,
         namespace: Optional[str] = None,
     ) -> List[CombinedMetric]:
-        """Intelligently read from raw or hourly table based on time range.
+        """Read the window from the hourly table below the compression watermark and from raw rows elsewhere.
 
-        For recent data (within METRICS_COMPRESSION_AGE_HOURS), reads raw data.
-        For older data, reads from the hourly table.
-        For mixed ranges, merges both sources.
+        Full hours below the watermark come from the hourly table; the rest of
+        the window (rows at or after the watermark and the partial edge hours)
+        from raw rows (ROL-01, see :mod:`greenkube.storage.raw_hourly_split`).
         """
-        from datetime import timedelta
-        from datetime import timezone as tz
-
-        from ..core.config import get_config
-
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        compression_cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
-
-        # Ensure timezone-aware comparison
-        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
-        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
-
-        # Use a 1-minute tolerance to avoid split-brain when the requested
-        # start is effectively at the compression boundary (e.g. "last 24h").
-        if start_aware >= compression_cutoff - timedelta(minutes=1):
-            # All data is recent — use raw table
-            metrics = await self.read_combined_metrics(start_time, end_time)
-            if namespace:
-                metrics = [m for m in metrics if m.namespace == namespace]
-            return metrics
-
-        if end_aware <= compression_cutoff:
-            # All data is old — use hourly table
-            return await self.read_hourly_metrics(start_time, end_time, namespace)
-
-        # Mixed range: hourly for old part, raw for recent part
-        hourly_metrics = await self.read_hourly_metrics(start_time, compression_cutoff, namespace)
-        raw_metrics = await self.read_combined_metrics(compression_cutoff, end_time)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
+        hourly_metrics: List[CombinedMetric] = []
+        if split.has_hourly:
+            hourly_metrics = await self.read_hourly_metrics(split.hourly_start, split.hourly_end, namespace)
+        raw_metrics: List[CombinedMetric] = []
+        for raw_start, raw_end in split.raw_ranges:
+            raw_metrics += await self.read_combined_metrics(raw_start, raw_end)
         if namespace:
             raw_metrics = [m for m in raw_metrics if m.namespace == namespace]
         return hourly_metrics + raw_metrics

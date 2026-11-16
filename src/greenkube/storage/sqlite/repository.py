@@ -319,6 +319,12 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         """
         self.db_manager = db_manager
 
+    async def compression_boundary(self, raw_table: str) -> datetime:
+        """Return the compression watermark of ``raw_table``: the raw/hourly read boundary (ROL-01)."""
+        from ..raw_hourly_split import read_compression_boundary
+
+        return await read_compression_boundary(self.db_manager, raw_table, f"{raw_table}_hourly")
+
     async def write_combined_metrics(
         self,
         metrics: List[CombinedMetric],
@@ -721,30 +727,26 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         namespace: Optional[str] = None,
     ) -> Optional[int]:
         """Count raw and hourly combined rows without materializing them."""
-        from datetime import timedelta, timezone
 
-        from greenkube.core.config import get_config
-
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
-        start_aware = ensure_utc(start_time)
-        end_aware = ensure_utc(end_time)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
         try:
             async with self.db_manager.connection_scope() as conn:
                 total = 0
-                if end_aware >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
-                    query = 'SELECT COUNT(*) FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ?'
-                    params: list[Any] = [to_iso_z(raw_start), to_iso_z(end_aware)]
+                if split.has_raw:
+                    query = (
+                        'SELECT COUNT(*) FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ? '
+                        'AND NOT ("timestamp" >= ? AND "timestamp" < ?)'
+                    )
+                    params: list[Any] = [to_iso_z(v) for v in split.raw_params()]
                     if namespace:
                         query += " AND namespace = ?"
                         params.append(namespace)
                     async with conn.execute(query, params) as cursor:
                         row = await cursor.fetchone()
                         total += int(row[0] or 0)
-                if start_aware < cutoff:
-                    hourly_end = min(end_aware, cutoff)
+                if split.has_hourly:
                     query = "SELECT COUNT(*) FROM combined_metrics_hourly WHERE hour_bucket >= ? AND hour_bucket < ?"
-                    params = [to_iso_z(start_aware), to_iso_z(hourly_end)]
+                    params = [to_iso_z(v) for v in split.hourly_params()]
                     if namespace:
                         query += " AND namespace = ?"
                         params.append(namespace)
@@ -763,30 +765,26 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         namespace: Optional[str] = None,
     ) -> Optional[int]:
         """Count raw and hourly container rows without materializing them."""
-        from datetime import timedelta, timezone
 
-        from greenkube.core.config import get_config
-
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS)
-        start_aware = ensure_utc(start_time)
-        end_aware = ensure_utc(end_time)
+        split = await self._raw_hourly_split(start_time, end_time, "container_metrics")
         try:
             async with self.db_manager.connection_scope() as conn:
                 total = 0
-                if end_aware >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
-                    query = "SELECT COUNT(*) FROM container_metrics WHERE timestamp >= ? AND timestamp < ?"
-                    params: list[Any] = [to_iso_z(raw_start), to_iso_z(end_aware)]
+                if split.has_raw:
+                    query = (
+                        "SELECT COUNT(*) FROM container_metrics WHERE timestamp >= ? AND timestamp < ? "
+                        "AND NOT (timestamp >= ? AND timestamp < ?)"
+                    )
+                    params: list[Any] = [to_iso_z(v) for v in split.raw_params()]
                     if namespace:
                         query += " AND namespace = ?"
                         params.append(namespace)
                     async with conn.execute(query, params) as cursor:
                         row = await cursor.fetchone()
                         total += int(row[0] or 0)
-                if start_aware < cutoff:
-                    hourly_end = min(end_aware, cutoff)
+                if split.has_hourly:
                     query = "SELECT COUNT(*) FROM container_metrics_hourly WHERE hour_bucket >= ? AND hour_bucket < ?"
-                    params = [to_iso_z(start_aware), to_iso_z(hourly_end)]
+                    params = [to_iso_z(v) for v in split.hourly_params()]
                     if namespace:
                         query += " AND namespace = ?"
                         params.append(namespace)
@@ -890,14 +888,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         """
         Aggregates summary metrics from both raw and hourly SQLite tables.
         """
-        from datetime import timedelta
-        from datetime import timezone as tz
 
-        from greenkube.core.config import get_config
-
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -906,22 +898,21 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 params: list = []
 
                 # Raw table — recent data
-                if end_time >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                if split.has_raw:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(f"""
                         SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
                                pod_name, namespace
                         FROM combined_metrics
-                        WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}
+                        WHERE "timestamp" >= ? AND "timestamp" < ?
+                          AND NOT ("timestamp" >= ? AND "timestamp" < ?){ns_clause}
                     """)
-                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
+                    params.extend(to_iso_z(v) for v in split.raw_params())
                     if namespace:
                         params.append(namespace)
 
                 # Hourly table — old data
-                if start_time < cutoff:
-                    hourly_end = min(end_time, cutoff)
+                if split.has_hourly:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(f"""
                         SELECT co2e_grams, embodied_co2e_grams, total_cost, joules,
@@ -929,7 +920,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}
                     """)
-                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
+                    params.extend(to_iso_z(v) for v in split.hourly_params())
                     if namespace:
                         params.append(namespace)
 
@@ -981,12 +972,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
     ) -> int:
         """SQL COUNT of distinct groups — no CombinedMetric rows loaded into memory."""
         import sqlite3
-        from datetime import timedelta
-        from datetime import timezone as tz
 
         import aiosqlite
-
-        from greenkube.core.config import get_config
 
         _SQLITE_GRAN_FMTS = {
             "hourly": "%Y-%m-%dT%H:00:00Z",
@@ -995,11 +982,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
             "yearly": "%Y-01-01T00:00:00Z",
         }
 
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
-        start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=tz.utc)
-        end_aware = end_time if end_time.tzinfo else end_time.replace(tzinfo=tz.utc)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         if granularity == "weekly":
             # Floor to Monday of the ISO week (same bucket as the other backends).
@@ -1023,25 +1006,24 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 parts: list[str] = []
                 params: list = []
 
-                if end_aware >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_aware, cutoff - timedelta(minutes=1))
+                if split.has_raw:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(
                         f"SELECT {group_cols}, {raw_ts_expr} AS ts_bucket "
-                        f'FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}'
+                        f'FROM combined_metrics WHERE "timestamp" >= ? AND "timestamp" < ? '
+                        f'AND NOT ("timestamp" >= ? AND "timestamp" < ?){ns_clause}'
                     )
-                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
+                    params.extend(to_iso_z(v) for v in split.raw_params())
                     if namespace:
                         params.append(namespace)
 
-                if start_aware < cutoff:
-                    hourly_end = min(end_aware, cutoff)
+                if split.has_hourly:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(
                         f"SELECT {group_cols}, {hourly_ts_expr} AS ts_bucket "
                         f"FROM combined_metrics_hourly WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}"
                     )
-                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
+                    params.extend(to_iso_z(v) for v in split.hourly_params())
                     if namespace:
                         params.append(namespace)
 
@@ -1076,10 +1058,6 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         """
         Groups time-series data by granularity from both raw and hourly SQLite tables.
         """
-        from datetime import timedelta
-        from datetime import timezone as tz
-
-        from greenkube.core.config import get_config
 
         _SQLITE_FORMATS = {
             "hour": "%Y-%m-%dT%H:00:00Z",
@@ -1095,9 +1073,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         else:
             ts_bucket_expr = f"strftime('{ts_format}', ts)"
 
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -1106,22 +1082,21 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 params: list = []
 
                 # Raw table — recent data
-                if end_time >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                if split.has_raw:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(f"""
                         SELECT "timestamp" AS ts, co2e_grams, embodied_co2e_grams,
                                total_cost, joules, cpu_usage_millicores, memory_usage_bytes
                         FROM combined_metrics
-                        WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}
+                        WHERE "timestamp" >= ? AND "timestamp" < ?
+                          AND NOT ("timestamp" >= ? AND "timestamp" < ?){ns_clause}
                     """)
-                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
+                    params.extend(to_iso_z(v) for v in split.raw_params())
                     if namespace:
                         params.append(namespace)
 
                 # Hourly table — old data
-                if start_time < cutoff:
-                    hourly_end = min(end_time, cutoff)
+                if split.has_hourly:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(f"""
                         SELECT hour_bucket AS ts, co2e_grams, embodied_co2e_grams,
@@ -1130,7 +1105,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}
                     """)
-                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
+                    params.extend(to_iso_z(v) for v in split.hourly_params())
                     if namespace:
                         params.append(namespace)
 
@@ -1680,14 +1655,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         namespace: Optional[str] = None,
     ) -> List[dict]:
         """SQL-level aggregation grouped by namespace — raw + hourly tables."""
-        from datetime import timedelta
-        from datetime import timezone as tz
 
-        from greenkube.core.config import get_config
-
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -1695,27 +1664,26 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 parts: list[str] = []
                 params: list = []
 
-                if end_time >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                if split.has_raw:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(f"""
                         SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics
-                        WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}
+                        WHERE "timestamp" >= ? AND "timestamp" < ?
+                          AND NOT ("timestamp" >= ? AND "timestamp" < ?){ns_clause}
                     """)
-                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
+                    params.extend(to_iso_z(v) for v in split.raw_params())
                     if namespace:
                         params.append(namespace)
 
-                if start_time < cutoff:
-                    hourly_end = min(end_time, cutoff)
+                if split.has_hourly:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(f"""
                         SELECT namespace, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}
                     """)
-                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
+                    params.extend(to_iso_z(v) for v in split.hourly_params())
                     if namespace:
                         params.append(namespace)
 
@@ -1749,14 +1717,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         limit: int = 10,
     ) -> List[dict]:
         """SQL-level aggregation of top pods by CO2 — raw + hourly tables."""
-        from datetime import timedelta
-        from datetime import timezone as tz
 
-        from greenkube.core.config import get_config
-
-        cfg = get_config()
-        now = datetime.now(tz.utc)
-        cutoff = now - timedelta(hours=cfg.METRICS_COMPRESSION_AGE_HOURS)
+        split = await self._raw_hourly_split(start_time, end_time, "combined_metrics")
 
         try:
             async with self.db_manager.connection_scope() as conn:
@@ -1764,27 +1726,26 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 parts: list[str] = []
                 params: list = []
 
-                if end_time >= cutoff - timedelta(minutes=1):
-                    raw_start = max(start_time, cutoff - timedelta(minutes=1))
+                if split.has_raw:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(f"""
                         SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics
-                        WHERE "timestamp" >= ? AND "timestamp" < ?{ns_clause}
+                        WHERE "timestamp" >= ? AND "timestamp" < ?
+                          AND NOT ("timestamp" >= ? AND "timestamp" < ?){ns_clause}
                     """)
-                    params.extend([to_iso_z(raw_start), to_iso_z(end_time)])
+                    params.extend(to_iso_z(v) for v in split.raw_params())
                     if namespace:
                         params.append(namespace)
 
-                if start_time < cutoff:
-                    hourly_end = min(end_time, cutoff)
+                if split.has_hourly:
                     ns_clause = " AND namespace = ?" if namespace else ""
                     parts.append(f"""
                         SELECT namespace, pod_name, co2e_grams, embodied_co2e_grams, total_cost, joules
                         FROM combined_metrics_hourly
                         WHERE hour_bucket >= ? AND hour_bucket < ?{ns_clause}
                     """)
-                    params.extend([to_iso_z(start_time), to_iso_z(hourly_end)])
+                    params.extend(to_iso_z(v) for v in split.hourly_params())
                     if namespace:
                         params.append(namespace)
 

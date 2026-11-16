@@ -1,7 +1,7 @@
 # tests/core/optimization/test_context_builder.py
 """Tests for the OptimizationContext builder (single data-loading path)."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -215,7 +215,8 @@ class TestBuild:
                 return len(metrics)
 
             async def read_combined_metrics(self, start_time, end_time):
-                return [aggregate]
+                # The window is read in up to two raw ranges around the hourly part: serve the row once.
+                return [aggregate] if end_time >= datetime.now(timezone.utc) - timedelta(minutes=1) else []
 
             async def read_hourly_metrics(self, start_time, end_time, namespace=None):
                 return []

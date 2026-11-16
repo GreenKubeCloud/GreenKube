@@ -46,7 +46,7 @@ All paths below are relative to `/api/v1`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Readiness and application version. Returns `503` with `status: migrating` until the controller has applied every database migration (cached once current), `database_unavailable` when the schema cannot be checked, and `degraded` while a supervised in-process loop is down or stale. |
+| `GET` | `/health` | Readiness and application version. Returns `503` with `status: migrating` until the controller has applied every database migration (cached once current), `database_unavailable` when the schema cannot be checked, and `degraded` while a supervised in-process loop is down or stale. `compression` gives the hourly compression `watermarks` per metric table, the largest `lag_seconds` behind `now - METRICS_COMPRESSION_AGE_HOURS` and `status` (`degraded` above two hours; it never changes readiness). |
 | `GET` | `/setup/status` | Guided setup checklist: `complete`, `checks[]` (`id`, `category`, `title`, `status` ok/action_needed/blocked/not_applicable/pending, `reason`, `fix` {`text`, `snippet`, `ui_action`}, `docs_url`) and `capabilities` (`discovery`, `delivery`, `sync_tracking`, `measurement` with `state` and `reason`). |
 | `GET` | `/version` | Application version. |
 | `GET` | `/config` | Current non-sensitive runtime configuration, including `currency` (the pricing currency of every amount, `impact.pricing.currency`). |
