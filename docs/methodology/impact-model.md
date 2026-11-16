@@ -80,11 +80,11 @@ Collection, `greenkube recompute` and projections select the power profile with 
 
 Impact Model 4.0.0 aligned the projector on this resolver; before, it used `DEFAULT_INSTANCE_MIN_WATTS / DEFAULT_INSTANCE_VCORES` (1 W idle, 10 W max per core) for every node without a bundled profile.
 
-### Nodes sharing one host (NRG-15)
 ### CPU used outside pods (NRG-12)
 
 The node utilisation is measured at node level when the kubelet exposes its root cgroup (`container_cpu_usage_seconds_total{id="/"}`, kubelet, container runtime, kernel and host processes included): `utilisation = max(root cgroup cores, Σ pod cores) / capacity`. Pods still receive `pod cores / capacity` of the dynamic range, and the rest, `(node − Σ pods) / capacity`, is the system share charged to the node's `__idle__` row, so pod and idle rows add up to the node power at its real utilisation. Without the root cgroup series the utilisation is the sum of the pods, as before. Node-exporter fallback and a stored `node_utilization_source` are not implemented yet.
 
+### Nodes sharing one host (NRG-15)
 
 kind, k3d and multi-node minikube nodes are containers of one machine and each report the host capacity. Nodes with the same `bootID` (or a `kind://`, `k3d://` provider ID) form a group of N: each node gets `idle_watts / N`, `memory_watts_per_gib / N` and `embodied / N`, while the dynamic range `max − idle` is not scaled because each node's utilisation is already a fraction of the host capacity. Pod and idle rows of such nodes carry a "Shared host" estimation reason. The grouping uses the live node list of the collection run; `greenkube recompute` and projections do not apply it yet. Opt out with `config.power.sharedHostDetection: false`.
 
