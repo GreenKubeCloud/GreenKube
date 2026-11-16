@@ -43,6 +43,11 @@ class NodeInfo(BaseModel):
             "None when not configured: Boavizta values and fallbacks live in instance_carbon_profiles (NRG-07)."
         ),
     )
+    host_id: Optional[str] = Field(
+        None,
+        description="status.nodeInfo.bootID: nodes with the same value run on one host (NRG-15). Not stored.",
+    )
+    provider_id: Optional[str] = Field(None, description="spec.providerID (kind://, aws://, ...). Not stored.")
     confirmed_until: Optional[datetime] = Field(
         None,
         description=(

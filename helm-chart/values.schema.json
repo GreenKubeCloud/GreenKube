@@ -266,6 +266,12 @@
         "electricityProvider": {"type": "string", "enum": ["electricity_maps", "wattnet"]},
         "normalizationGranularity": {"type": "string", "enum": ["hour", "day", "none"]},
         "intensityMaxAge": {"type": "string"},
+        "power": {
+          "type": "object",
+          "properties": {
+            "sharedHostDetection": {"type": "boolean"}
+          }
+        },
         "boavizta": {
           "type": "object",
           "properties": {

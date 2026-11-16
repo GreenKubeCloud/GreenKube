@@ -160,6 +160,12 @@ SQLite (`DB_TYPE=sqlite`, `DB_PATH`) remains for `greenkube demo` and local deve
 
 A node annotation `greenkube.io/embodied-kg: "1500"` sets the whole-node embodied emissions of on-prem hardware (`embodied_source=configured`) and takes precedence over Boavizta. A failed Boavizta lookup is cached and retried at most every 24 hours.
 
+### Node power (`config.power`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `config.power.sharedHostDetection` | `true` | `SHARED_HOST_DETECTION`. Nodes with the same `status.nodeInfo.bootID` (or `kind://` and `k3d://` provider IDs) are one physical host: each of N nodes gets 1/N of the host idle power, memory power and embodied emissions, its rows carry a "Shared host" estimation reason, and `greenkube_shared_host_groups` counts the groups. `false` charges every node the whole host. |
+
 ### Prometheus & OpenCost integration (`config.prometheus`, `config.opencost`)
 
 When the URLs are empty, GreenKube attempts in-cluster discovery for Prometheus and OpenCost. Set explicit URLs when discovery does not match your installation:

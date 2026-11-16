@@ -483,6 +483,9 @@ class Config(BaseSettings):
     # Memory power per GiB of node memory (MemoryPowerModel, roadmap B5). The
     # default is the Cloud Carbon Footprint coefficient (0.392 W/GB).
     POWER_MEMORY_W_PER_GIB: float = 0.392
+    # Nodes with the same bootID (or kind://, k3d:// provider IDs) are one physical host: each gets
+    # 1/N of the host idle power, memory power and embodied emissions (NRG-15). false disables it.
+    SHARED_HOST_DETECTION: bool = True
     # Carbon price (currency per tonne CO2e) that converts projected CO2e into
     # value: value_annual = cost + CARBON_PRICE_PER_TONNE * tCO2e (roadmap I2, D-2).
     CARBON_PRICE_PER_TONNE: float = 100.0

@@ -80,6 +80,10 @@ Collection, `greenkube recompute` and projections select the power profile with 
 
 Impact Model 4.0.0 aligned the projector on this resolver; before, it used `DEFAULT_INSTANCE_MIN_WATTS / DEFAULT_INSTANCE_VCORES` (1 W idle, 10 W max per core) for every node without a bundled profile.
 
+### Nodes sharing one host (NRG-15)
+
+kind, k3d and multi-node minikube nodes are containers of one machine and each report the host capacity. Nodes with the same `bootID` (or a `kind://`, `k3d://` provider ID) form a group of N: each node gets `idle_watts / N`, `memory_watts_per_gib / N` and `embodied / N`, while the dynamic range `max − idle` is not scaled because each node's utilisation is already a fraction of the host capacity. Pod and idle rows of such nodes carry a "Shared host" estimation reason. The grouping uses the live node list of the collection run; `greenkube recompute` and projections do not apply it yet. Opt out with `config.power.sharedHostDetection: false`.
+
 ### Memory and GPU power (B5)
 
 - **`MemoryPowerModel`**: `P_mem = w_mem × memory GiB`, with the Cloud Carbon Footprint coefficient 0.392 W/GiB by default. On an m5.large (8 GiB) fully reserved, memory adds about 3.1 W.

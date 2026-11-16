@@ -28,6 +28,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.energy.shared_host import SHARED_HOST_REASON_PREFIX
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
 from greenkube.impact.power import memory_watts_per_gib
 from greenkube.impact.pricing import CustomRates, PricingCatalog, UnitPriceResolver, observed_rates_from_rows
@@ -137,6 +138,9 @@ class NodeSpec:
     #: Where ``embodied_g_per_hour`` came from (``EmbodiedSource``) and its row estimation reason (NRG-01).
     embodied_source: Optional[str] = None
     embodied_reason: Optional[str] = None
+    #: Share of a host shared with other nodes (1.0 alone) and its row estimation reason (NRG-15).
+    host_share: float = 1.0
+    host_reason: Optional[str] = None
 
 
 @dataclass
@@ -224,13 +228,16 @@ class MetricRowAllocator:
             power_source = PowerSource(spec.power_source)
         except ValueError:
             power_source = PowerSource.DEFAULT_PROFILE
+        share = min(max(spec.host_share, 0.0), 1.0) if spec.host_share > 0 else 1.0
         return NodeImpactProfile(
             name=spec.name,
             cpu_capacity_cores=float(cores),
             mem_capacity_gib=memory_gib,
-            idle_watts=max(spec.idle_watts, 0.0),
-            max_watts=max(spec.max_watts, 0.0),
-            embodied_g_per_hour=max(spec.embodied_g_per_hour, 0.0),
+            # A shared host (NRG-15): this node gets its share of the host idle, memory and embodied;
+            # the dynamic range is not scaled (utilisation is already a fraction of the host capacity).
+            idle_watts=max(spec.idle_watts, 0.0) * share,
+            max_watts=max(spec.idle_watts, 0.0) * share + max(spec.max_watts - spec.idle_watts, 0.0),
+            embodied_g_per_hour=max(spec.embodied_g_per_hour, 0.0) * share,
             prices=prices,
             pue=pue,
             grid_intensity_g_per_kwh=intensity,
@@ -239,10 +246,11 @@ class MetricRowAllocator:
             region=spec.region,
             provider=spec.provider,
             is_fallback=spec.is_fallback,
-            memory_watts_per_gib=self.memory_watts_per_gib,
+            memory_watts_per_gib=self.memory_watts_per_gib * share,
             gpu_unattributed_watts=max(spec.gpu_unattributed_watts, 0.0),
             embodied_source=spec.embodied_source,
             embodied_reason=spec.embodied_reason,
+            host_reason=spec.host_reason,
         )
 
     def modeled_prices(self, node: NodeImpactProfile) -> UnitPrices:
@@ -335,6 +343,17 @@ class MetricRowAllocator:
             update["estimation_reasons"] = reasons
             if node.embodied_reason:
                 update["is_estimated"] = True
+        # NRG-15: a node sharing its host is charged its share of the host, and says so.
+        reasons = [
+            r
+            for r in update.get("estimation_reasons", row.estimation_reasons)
+            if not r.startswith(SHARED_HOST_REASON_PREFIX)
+        ]
+        if node.host_reason:
+            reasons.append(node.host_reason)
+            update["is_estimated"] = True
+        if reasons != list(row.estimation_reasons) or "estimation_reasons" in update:
+            update["estimation_reasons"] = reasons
         if not _is_observed_cost(row):
             # Allocation cost is share × capacity × unit price, so re-pricing a
             # share at the modeled prices is a per-resource rescale.

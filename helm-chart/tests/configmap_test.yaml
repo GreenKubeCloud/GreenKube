@@ -1069,6 +1069,14 @@ tests:
           path: data.DEFAULT_EMBODIED_KG_PER_GIB
           value: "0"
 
+  - it: enables shared host detection by default and lets config.power disable it (NRG-15)
+    set:
+      config.power.sharedHostDetection: false
+    asserts:
+      - equal:
+          path: data.SHARED_HOST_DETECTION
+          value: "false"
+
   - it: sets the embodied fallback coefficients from config.boavizta (NRG-01)
     set:
       config.boavizta.embodiedKgPerVcpu: 9.5

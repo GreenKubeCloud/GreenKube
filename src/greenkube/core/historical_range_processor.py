@@ -38,6 +38,7 @@ from ..core.prometheus_resource_mapper import PodResourceMaps
 from ..energy.embodied import resolve_node_embodied
 from ..energy.estimator import BasicEstimator
 from ..energy.node_power import NodePowerProfile, resolve_node_power_profile
+from ..energy.shared_host import SharedHost, shared_host_groups
 from ..impact.power import GpuDevice, GpuPowerModel, NodeGpuPower, node_gpu_power
 from ..impact.realization import refresh_realization_context
 from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, mark_cost_pending
@@ -648,6 +649,7 @@ class HistoricalRangeProcessor:
         instance_type: str | None,
         gpu_unattributed_watts: float,
         config: Any = None,
+        shared_host: SharedHost | None = None,
     ) -> NodeSpec:
         """What the Impact Model needs to know about one node at one step."""
         config = config if config is not None else get_config()
@@ -675,6 +677,8 @@ class HistoricalRangeProcessor:
             is_fallback=power.is_fallback,
             embodied_source=embodied.source,
             embodied_reason=embodied.reason(node_name),
+            host_share=shared_host.share if shared_host is not None else 1.0,
+            host_reason=shared_host.reason(node_name) if shared_host is not None else None,
         )
 
     async def _pod_history(
@@ -1240,6 +1244,9 @@ class HistoricalRangeProcessor:
 
         # Boavizta embodied profiles for every node version the window can use:
         # the current nodes and every snapshot of the timeline (RECON-05).
+        # Nodes that are one physical host (NRG-15), from the live node list of this run.
+        shared_hosts = shared_host_groups(nodes_info) if getattr(self._config, "SHARED_HOST_DETECTION", True) else {}
+        collection_telemetry.set_shared_host_groups(len({group.key for group in shared_hosts.values()}))
         embodied_nodes: dict[str, NodeInfo] = dict(nodes_info)
         for node_name, timeline in node_timeline.items():
             for index, (_ts, snapshot_info) in enumerate(timeline):
@@ -1665,6 +1672,7 @@ class HistoricalRangeProcessor:
                     instance_type=(_ni.instance_type if _ni else None) or current_node_map.get(node_name),
                     gpu_unattributed_watts=gpu_power.unattributed_watts if gpu_power else 0.0,
                     config=self._config,
+                    shared_host=shared_hosts.get(node_name),
                 )
                 node_profile = allocator.node_profile(
                     spec, node_rows, pue=pue, intensity=carbon_result.grid_intensity, hours=chosen_step_sec / 3600.0

@@ -462,6 +462,13 @@ config:
     embodiedKgPerVcpu: 12
     embodiedKgPerGib: 0
 
+  # Node power model.
+  power:
+    # Nodes that are one physical host (same status.nodeInfo.bootID, or kind:// and k3d://
+    # provider IDs) share the host idle power, memory power and embodied emissions 1/N
+    # instead of each being charged the whole host. Set false to disable.
+    sharedHostDetection: true
+
   # PostgreSQL connection settings. SQLite is for `greenkube demo` and local
   # development only; the chart always uses PostgreSQL (bundled or external).
   db:

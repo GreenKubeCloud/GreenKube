@@ -257,6 +257,17 @@ def record_rows_rejected(source: str, reason: str, count: int = 1) -> None:
         ROWS_REJECTED.labels(source=source, reason=reason).inc(count)
 
 
+SHARED_HOST_GROUPS = Gauge(
+    "greenkube_shared_host_groups",
+    "Groups of Kubernetes nodes found to run on one physical host in the latest collection (NRG-15).",
+    registry=REGISTRY,
+)
+
+
+def set_shared_host_groups(count: int) -> None:
+    SHARED_HOST_GROUPS.set(count)
+
+
 #: Outcome of the last hourly intensity fetch of a zone (NRG-03): fetched, empty or failed.
 INTENSITY_ZONES = Gauge(
     "greenkube_intensity_zones",

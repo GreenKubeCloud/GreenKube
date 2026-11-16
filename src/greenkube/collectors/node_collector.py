@@ -26,6 +26,19 @@ def _k8s_timeout() -> int | None:
     return t if t > 0 else None
 
 
+def _boot_id(node) -> str | None:
+    """``status.nodeInfo.bootID``: nodes sharing it run on one host (NRG-15)."""
+    node_info = getattr(getattr(node, "status", None), "node_info", None)
+    boot_id = getattr(node_info, "boot_id", None)
+    return boot_id if isinstance(boot_id, str) and boot_id else None
+
+
+def _provider_id(node) -> str | None:
+    """``spec.providerID`` (``kind://...`` groups container nodes of one host, NRG-15)."""
+    provider_id = getattr(getattr(node, "spec", None), "provider_id", None)
+    return provider_id if isinstance(provider_id, str) and provider_id else None
+
+
 class NodeCollector(BaseCollector):
     """Collects node zone information and instance types from the Kubernetes cluster."""
 
@@ -97,6 +110,8 @@ class NodeCollector(BaseCollector):
                     memory_capacity_bytes=memory_capacity,
                     # Operator embodied emissions (NRG-01); the only value node snapshots carry (NRG-07).
                     embodied_emissions_kg=parse_embodied_annotation(getattr(node.metadata, "annotations", None)),
+                    host_id=_boot_id(node),
+                    provider_id=_provider_id(node),
                     timestamp=datetime.now(timezone.utc),
                 )
 

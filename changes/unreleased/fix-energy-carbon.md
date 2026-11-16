@@ -3,6 +3,8 @@
 - **Operator embodied value:** the node annotation `greenkube.io/embodied-kg` sets the whole-node embodied emissions of on-prem hardware and takes precedence over Boavizta.
 - **Capacity-proportional embodied fallback:** `DEFAULT_EMBODIED_KG_PER_VCPU` (12 kg per vCPU, the Boavizta m5 family ratio) and `DEFAULT_EMBODIED_KG_PER_GIB` (0), Helm `config.boavizta.embodiedKgPerVcpu` and `config.boavizta.embodiedKgPerGib`. `DEFAULT_EMBODIED_EMISSIONS_KG` now applies only when the node capacity is unknown.
 
+- **Shared host detection (NRG-15):** nodes with the same `bootID` (or `kind://`, `k3d://` provider IDs) are treated as one host; each of N nodes gets 1/N of the host idle power, memory power and embodied emissions, rows carry a "Shared host" estimation reason and `greenkube_shared_host_groups` counts the groups. On a three-node kind cluster the modelled baseline drops by about two thirds. Opt out with `config.power.sharedHostDetection: false` (`SHARED_HOST_DETECTION`). `greenkube recompute` and projections do not apply it yet.
+
 ### Changed
 - **Impact Model 4.0.0:** embodied emissions change for every node. Rows stored before keep the flat 100 kg per node with `embodied_source` NULL; run `greenkube recompute --since <raw retention>` to re-allocate raw rows. Hourly aggregates keep the old values.
 

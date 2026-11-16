@@ -297,6 +297,8 @@ class NodeImpactProfile:
     #: Where ``embodied_g_per_hour`` came from (``EmbodiedSource``), and the reason when it is a fallback.
     embodied_source: Optional[str] = None
     embodied_reason: Optional[str] = None
+    #: Estimation reason when the node shares its host with other nodes (NRG-15).
+    host_reason: Optional[str] = None
 
     @property
     def allocatable_cpu(self) -> float:
