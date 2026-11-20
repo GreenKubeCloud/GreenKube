@@ -62,7 +62,7 @@ def _allocation_values(metric: CombinedMetric) -> tuple[Any, ...]:
 
 
 #: Where the node and pod metadata of a raw row came from (WP-01.1, migration 0120).
-ROW_SOURCE_COLUMNS: tuple[str, ...] = ("node_source", "metadata_source", "embodied_source")
+ROW_SOURCE_COLUMNS: tuple[str, ...] = ("node_source", "metadata_source", "embodied_source", "gpu_source")
 
 
 def _row_source_values(metric: CombinedMetric) -> tuple[Any, ...]:
@@ -112,6 +112,7 @@ IDLE_METRIC_COLUMNS: tuple[str, ...] = (
     "intensity_source",
     "model_version",
     "embodied_source",
+    "gpu_source",
 )
 
 
@@ -370,7 +371,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         calculation_version,
                         cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                         cost_source, usage_source, power_source, intensity_source,
-                        model_version, gpu_power_watts, node_source, metadata_source, embodied_source,
+                        model_version, gpu_power_watts, node_source, metadata_source, embodied_source, gpu_source,
                         collected_at, collection_run_id
                     ) VALUES (
                         $1, $2, $3, $4,
@@ -390,7 +391,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         $36, $37, $38, $39, $40,
                         $41, $42, $43, $44,
                         $45, $46, $47, $48,
-                        $49, $50, $51
+                        $49, $50, $51, $52
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         co2e_grams = EXCLUDED.co2e_grams,
@@ -426,6 +427,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         model_version = EXCLUDED.model_version,
                         gpu_power_watts = EXCLUDED.gpu_power_watts,
                         embodied_source = EXCLUDED.embodied_source,
+                        gpu_source = EXCLUDED.gpu_source,
                         collected_at = EXCLUDED.collected_at,
                         collection_run_id = EXCLUDED.collection_run_id,
                 """
@@ -721,13 +723,13 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                 cost_source, usage_source, power_source, intensity_source,
                 emaps_zone, cpu_limit, memory_limit, model_version, gpu_power_watts,
-                node_source, metadata_source, embodied_source, collected_at, collection_run_id
+                node_source, metadata_source, embodied_source, gpu_source, collected_at, collection_run_id
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
                 $10, $11, $12, $13, $14, $15, $16, $17,
                 $18, $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31,
-                $32, $33, $34, $35, $36, $37, $38, $39, $40, $41
+                $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42
             )
             ON CONFLICT (namespace, pod_name, container_name, timestamp) DO UPDATE SET
                 co2e_grams = EXCLUDED.co2e_grams,
@@ -756,6 +758,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 model_version = EXCLUDED.model_version,
                 gpu_power_watts = EXCLUDED.gpu_power_watts,
                 embodied_source = EXCLUDED.embodied_source,
+                gpu_source = EXCLUDED.gpu_source,
                 node_source = EXCLUDED.node_source,
                 metadata_source = EXCLUDED.metadata_source,
                 collected_at = EXCLUDED.collected_at,

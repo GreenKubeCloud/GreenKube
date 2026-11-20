@@ -51,7 +51,7 @@ from ..impact.realization import refresh_realization_context
 from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, mark_cost_pending
 from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
-from ..models.provenance import CostSource, MetadataSource, NodeSource, UsageSource
+from ..models.provenance import CostSource, GpuSource, MetadataSource, NodeSource, UsageSource
 from ..storage.base_pod_snapshot_repository import PodSnapshotRepository, snapshot_at, snapshot_uncertain
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
@@ -699,6 +699,7 @@ class HistoricalRangeProcessor:
         config: Any = None,
         shared_host: SharedHost | None = None,
         undetected_gpu: UndetectedGpuPower | None = None,
+        gpu_source: str | None = None,
         node_cpu_used_cores: float | None = None,
     ) -> NodeSpec:
         """What the Impact Model needs to know about one node at one step."""
@@ -730,6 +731,7 @@ class HistoricalRangeProcessor:
             host_share=shared_host.share if shared_host is not None else 1.0,
             host_reason=shared_host.reason(node_name) if shared_host is not None else None,
             gpu_reason=undetected_gpu.reason if undetected_gpu is not None else None,
+            gpu_source=gpu_source,
             node_cpu_used_cores=node_cpu_used_cores,
         )
 
@@ -1751,6 +1753,11 @@ class HistoricalRangeProcessor:
                     config=self._config,
                     shared_host=shared_hosts.get(node_name),
                     undetected_gpu=undetected_gpu,
+                    gpu_source=(
+                        GpuSource.DCGM.value
+                        if gpu_power
+                        else (undetected_gpu.source if undetected_gpu is not None else None)
+                    ),
                     node_cpu_used_cores=node_cpu_by_group.get((sample_start, node_name)),
                 )
                 node_profile = allocator.node_profile(

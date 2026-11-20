@@ -26,6 +26,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.models.provenance import GpuSource
+
 logger = logging.getLogger(__name__)
 
 #: Cloud Carbon Footprint memory coefficient (W per GB of installed memory).
@@ -184,6 +186,11 @@ class UndetectedGpuPower:
     reason: str
     gpu_count: int = 0
     profile: Optional[GpuProfile] = None
+
+    @property
+    def source(self) -> str:
+        """``gpu_tdp_estimate`` with a TDP profile, ``unmeasured`` without (``GpuSource``)."""
+        return GpuSource.GPU_TDP_ESTIMATE.value if self.profile is not None else GpuSource.UNMEASURED.value
 
     def split(
         self, requests_by_pod: Mapping[Tuple[str, str], int], assumed_utilization_pct: float

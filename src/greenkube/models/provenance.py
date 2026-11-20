@@ -69,6 +69,17 @@ class EmbodiedSource(StrEnum):
     MIXED = MIXED
 
 
+class GpuSource(StrEnum):
+    """Where the GPU power of a row's node came from (NRG-13). NULL: no GPU detected on the node."""
+
+    DCGM = "dcgm"
+    """DCGM exporter samples (measured power, or TDP at the measured utilization)."""
+    GPU_TDP_ESTIMATE = "gpu_tdp_estimate"
+    """No DCGM sample: GPUs of the node capacity estimated from their TDP profile."""
+    UNMEASURED = "unmeasured"
+    """No DCGM sample and no TDP profile for the GPU model: GPU power is not counted."""
+
+
 #: ``estimation_reasons`` prefix of rows whose embodied emissions are a fallback (NRG-01).
 EMBODIED_FALLBACK_REASON_PREFIX = "Embodied emissions estimated"
 

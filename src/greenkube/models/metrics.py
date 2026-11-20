@@ -1083,6 +1083,13 @@ class CombinedMetric(BaseModel):
             "fallback_default (NRG-01). NULL on rows written before 0180 (flat fallback)."
         ),
     )
+    gpu_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the GPU power of the row's node came from: dcgm, gpu_tdp_estimate or unmeasured (NRG-13). "
+            "NULL when no GPU was detected on the node, and on rows written before 0182."
+        ),
+    )
 
     # From CarbonEmissionMetric
     co2e_grams: float = Field(

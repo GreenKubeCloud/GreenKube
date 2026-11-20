@@ -302,6 +302,8 @@ class NodeImpactProfile:
     host_reason: Optional[str] = None
     #: Estimation reason of a GPU node without DCGM samples (NRG-13).
     gpu_reason: Optional[str] = None
+    #: Where the node's GPU power came from (``GpuSource``), None without GPUs (NRG-13).
+    gpu_source: Optional[str] = None
     #: Whole-node CPU in use (cores, window average) from the root cgroup; None: the sum of the pods (NRG-12).
     node_cpu_used_cores: Optional[float] = None
 

@@ -209,3 +209,28 @@ def test_pod_snapshots_keep_gpu_requests_without_changing_other_pods():
     snapshots = {s.pod_name: s for s in snapshots_from_pod_metrics([gpu_pod, cpu_pod], seen)}
     assert [m.gpu_request for m in snapshots["g"].pod_metrics()] == [2]
     assert "gpu_request" not in snapshots["c"].containers[0]
+
+
+async def test_rows_say_where_their_gpu_power_came_from(tmp_path):
+    node = NodeInfo(name="g1", cloud_provider="aws", instance_type="g4dn.12xlarge", cpu_capacity_cores=48)
+    node.gpu_count, node.gpu_model = 4, "Tesla-T4"
+    pods, (idle,) = await _run(tmp_path, node)
+    assert {row.gpu_source for row in pods} == {"gpu_tdp_estimate"}
+    assert idle.gpu_source == "gpu_tdp_estimate"
+
+    unknown = NodeInfo(name="g1", cloud_provider="aws", instance_type="g9.mystery", cpu_capacity_cores=48)
+    unknown.gpu_count, unknown.gpu_model = 2, "Mystery-X"
+    pods, (idle,) = await _run(tmp_path / "unknown", unknown)
+    assert {row.gpu_source for row in pods} == {"unmeasured"}
+
+    plain = NodeInfo(name="g1", cloud_provider="aws", instance_type="m5.large", cpu_capacity_cores=2)
+    pods, (idle,) = await _run(tmp_path / "plain", plain)
+    assert {row.gpu_source for row in pods} == {None}
+    assert idle.gpu_source is None
+
+
+async def test_rows_of_a_dcgm_node_are_dcgm(tmp_path):
+    processor, _ = _dcgm_processor(tmp_path)
+    rows = await processor.run_range(BASE, BASE + timedelta(seconds=STEP))
+    assert {row.gpu_source for row in rows if not row.container_name} == {"dcgm"}
+    assert {idle.gpu_source for idle in processor.last_idle_metrics} == {"dcgm"}

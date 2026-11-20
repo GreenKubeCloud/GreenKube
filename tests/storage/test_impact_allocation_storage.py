@@ -162,3 +162,19 @@ def _wall_clock_at_test_time(monkeypatch):
     monkeypatch.setitem(
         globals(), "T0", datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
     )
+
+
+async def test_pod_container_and_idle_rows_keep_gpu_source(repo):
+    """NRG-13: where the GPU power of a row came from survives storage."""
+    await repo.write_combined_metrics(
+        [_row(T0, gpu_source="gpu_tdp_estimate"), _row(T0, container_name="trainer", gpu_source="gpu_tdp_estimate")]
+    )
+    await repo.write_idle_metrics([_idle(T0, gpu_source="unmeasured")])
+    (pod,) = await repo.read_combined_metrics(T0, T0 + timedelta(minutes=5))
+    (container,) = await repo.read_container_metrics(T0, T0 + timedelta(minutes=5))
+    (idle,) = await repo.read_idle_metrics(T0, T0 + timedelta(minutes=5))
+    assert (pod.gpu_source, container.gpu_source, idle.gpu_source) == (
+        "gpu_tdp_estimate",
+        "gpu_tdp_estimate",
+        "unmeasured",
+    )

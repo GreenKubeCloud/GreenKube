@@ -118,6 +118,8 @@ class NodeIdleMetric:
     model_version: str = IMPACT_MODEL_VERSION
     scope: str = IDLE_SCOPE
     embodied_source: Optional[str] = None
+    #: Where the node's GPU power came from (``GpuSource``), NULL without GPUs (NRG-13).
+    gpu_source: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,8 @@ class NodeSpec:
     host_reason: Optional[str] = None
     #: Estimation reason of a GPU node without DCGM samples (NRG-13).
     gpu_reason: Optional[str] = None
+    #: Where the node's GPU power came from (``GpuSource``); None without GPUs or when unknown (NRG-13).
+    gpu_source: Optional[str] = None
     #: Whole-node CPU in use (cores, window average) incl. kubelet, runtime and kernel; None: pods only (NRG-12).
     node_cpu_used_cores: Optional[float] = None
 
@@ -264,6 +268,7 @@ class MetricRowAllocator:
             embodied_reason=spec.embodied_reason,
             host_reason=spec.host_reason,
             gpu_reason=spec.gpu_reason,
+            gpu_source=spec.gpu_source,
             node_cpu_used_cores=spec.node_cpu_used_cores,
         )
 
@@ -357,6 +362,8 @@ class MetricRowAllocator:
             update["estimation_reasons"] = reasons
             if node.embodied_reason:
                 update["is_estimated"] = True
+        if node.gpu_source is not None:
+            update["gpu_source"] = node.gpu_source
         # NRG-15 and NRG-13: a node sharing its host, or with GPUs DCGM does not report, says so.
         node_reasons = [reason for reason in (node.host_reason, node.gpu_reason) if reason]
         reasons = [
@@ -447,6 +454,7 @@ class MetricRowAllocator:
             intensity_source=fields.get("intensity_source", first.intensity_source),
             model_version=impact.model_version,
             embodied_source=node.embodied_source,
+            gpu_source=node.gpu_source,
         )
 
 
