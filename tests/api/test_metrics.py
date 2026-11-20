@@ -225,3 +225,26 @@ class TestMetricsTopPodsEndpoint:
     def test_top_pods_invalid_last_returns_400(self, client):
         response = client.get("/api/v1/metrics/top-pods?last=bad_value")
         assert response.status_code == 400
+
+
+IDLE = {"idle_co2e_grams": 3.0, "idle_embodied_co2e_grams": 0.5, "idle_cost": 0.01, "idle_energy_joules": 7000.0}
+
+
+def test_summary_adds_the_idle_share_cluster_wide(client, mock_combined_metrics_repo, sample_combined_metrics):
+    """NRG-02 acceptance a: allocated totals, idle share and cluster totals = allocated + idle."""
+    mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+    mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+    data = client.get("/api/v1/metrics/summary").json()
+    assert data["total_energy_joules"] == pytest.approx(20000.0)
+    assert data["idle_energy_joules"] == pytest.approx(7000.0)
+    assert data["cluster_total_energy_joules"] == pytest.approx(27000.0)
+
+
+def test_namespace_summary_has_no_idle_share(client, mock_combined_metrics_repo, sample_combined_metrics):
+    """NRG-02 acceptance c: the idle share belongs to no namespace."""
+    mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+    mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+    data = client.get("/api/v1/metrics/summary?namespace=default").json()
+    assert data["idle_energy_joules"] is None
+    assert data["cluster_total_energy_joules"] is None
+    mock_combined_metrics_repo.aggregate_idle_summary.assert_not_awaited()

@@ -196,7 +196,7 @@ When `GREENKUBE_API_KEY` is configured, only this `POST` route with a single pro
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/report/summary` | Preview report row count and aggregate totals. |
+| `GET` | `/report/summary` | Preview report row count and aggregate totals. The `total_*` fields are allocated to workloads; without `namespace` the response adds the node idle share (`idle_*`) and the cluster totals (`cluster_total_*` = allocated + idle), summed over the selected ranges, as in `/metrics/summary`. `/report/export` holds pod rows only (no idle rows yet). |
 | `GET` | `/report/years` | List calendar years with reportable data. |
 | `GET` | `/report/export` | Stream a CSV or JSON report (`format=csv\|json`, default `csv`). |
 

@@ -552,6 +552,24 @@ class ReportSummaryResponse(BaseModel):
     total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
     unique_pods: int = Field(0, description="Number of unique pods.")
     unique_namespaces: int = Field(0, description="Number of unique namespaces.")
+    idle_co2e_grams: Optional[float] = Field(
+        None,
+        description="Scope 2 CO₂e of the node idle share (unreserved capacity, `__idle__` rows); null with a "
+        "namespace filter or when the range holds no idle row.",
+    )
+    idle_embodied_co2e_grams: Optional[float] = Field(None, description="Scope 3 CO₂e of the node idle share.")
+    idle_cost: Optional[float] = Field(None, description="Modeled cost of the node idle share.")
+    idle_energy_joules: Optional[float] = Field(None, description="Energy of the node idle share in Joules.")
+    cluster_total_co2e_grams: Optional[float] = Field(
+        None, description="Scope 2 CO₂e of the cluster: allocated to workloads + idle share."
+    )
+    cluster_total_embodied_co2e_grams: Optional[float] = Field(
+        None, description="Scope 3 CO₂e of the cluster: allocated + idle share."
+    )
+    cluster_total_cost: Optional[float] = Field(None, description="Cost of the cluster: allocated + idle share.")
+    cluster_total_energy_joules: Optional[float] = Field(
+        None, description="Energy of the cluster in Joules: allocated + idle share."
+    )
 
 
 class DashboardSummaryResponse(BaseModel):

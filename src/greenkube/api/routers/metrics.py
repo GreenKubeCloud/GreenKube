@@ -134,11 +134,11 @@ async def metrics_summary(
     scope3 = summary.get("total_embodied_co2e_grams", 0.0)
     # The node idle share belongs to no namespace: cluster-wide scope only (NRG-02).
     idle = None if namespace else await repo.aggregate_idle_summary(start, end)
-    return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3, **_with_idle(summary, idle))
+    return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3, **with_idle_share(summary, idle))
 
 
 #: Allocated measure → idle and cluster-total field suffix (NRG-02).
-_IDLE_MEASURES = {
+IDLE_MEASURES = {
     "total_co2e_grams": "co2e_grams",
     "total_embodied_co2e_grams": "embodied_co2e_grams",
     "total_cost": "cost",
@@ -146,12 +146,12 @@ _IDLE_MEASURES = {
 }
 
 
-def _with_idle(allocated: dict, idle: Optional[dict]) -> dict:
+def with_idle_share(allocated: dict, idle: Optional[dict]) -> dict:
     """Idle share and cluster totals (allocated + idle) of a summary or a bucket; empty when unknown."""
     if idle is None:
         return {}
     fields: dict = {}
-    for total, suffix in _IDLE_MEASURES.items():
+    for total, suffix in IDLE_MEASURES.items():
         value = float(idle.get(f"idle_{suffix}") or 0.0)
         fields[f"idle_{suffix}"] = value
         fields[f"cluster_total_{suffix}"] = float(allocated.get(total) or 0.0) + value
@@ -217,7 +217,7 @@ async def metrics_timeseries(
                 joules=row["energy_joules"],
                 pod_count=0,  # not aggregated at timeseries level
                 namespace_count=0,  # not aggregated at timeseries level
-                **_with_idle(allocated, idle_by_bucket.get(bucket)),
+                **with_idle_share(allocated, idle_by_bucket.get(bucket)),
             )
         )
     return points

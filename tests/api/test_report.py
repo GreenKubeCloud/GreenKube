@@ -393,3 +393,44 @@ class TestCsvSanitization:
         from greenkube.api.routers.report import _sanitize_cell
 
         assert _sanitize_cell(value) == expected
+
+
+IDLE = {"idle_co2e_grams": 3.0, "idle_embodied_co2e_grams": 0.5, "idle_cost": 0.01, "idle_energy_joules": 7000.0}
+
+
+class TestReportSummaryIdleShare:
+    """The yearly report shows the node idle share next to the allocated totals (NRG-02 acceptance e)."""
+
+    @pytest.mark.parametrize("query", ["", "?aggregate=true&granularity=daily"])
+    def test_cluster_wide_summary_adds_idle_and_cluster_totals(
+        self, client, mock_combined_metrics_repo, sample_combined_metrics, query
+    ):
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        data = client.get(f"/api/v1/report/summary{query}").json()
+        assert abs(data["total_energy_joules"] - 20000.0) < 0.01  # allocated to workloads, unchanged
+        assert data["idle_energy_joules"] == pytest.approx(7000.0)
+        assert data["idle_co2e_grams"] == pytest.approx(3.0)
+        assert data["cluster_total_energy_joules"] == pytest.approx(27000.0)
+        assert data["cluster_total_co2e_grams"] == pytest.approx(5.7 + 3.0, abs=0.01)
+        assert data["cluster_total_embodied_co2e_grams"] == pytest.approx(0.17 + 0.5, abs=0.01)
+        assert data["cluster_total_cost"] == pytest.approx(0.017 + 0.01, abs=0.001)
+
+    def test_idle_share_is_summed_over_selected_years(self, client, mock_combined_metrics_repo):
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        data = client.get("/api/v1/report/summary?years=2024&years=2025").json()
+        assert mock_combined_metrics_repo.aggregate_idle_summary.await_count == 2
+        assert data["idle_energy_joules"] == pytest.approx(14000.0)
+
+    def test_namespace_report_has_no_idle_share(self, client, mock_combined_metrics_repo, sample_combined_metrics):
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        data = client.get("/api/v1/report/summary?namespace=default").json()
+        assert data["idle_energy_joules"] is None
+        assert data["cluster_total_energy_joules"] is None
+        mock_combined_metrics_repo.aggregate_idle_summary.assert_not_awaited()
+
+    def test_no_idle_rows_leave_the_idle_share_unknown(self, client):
+        data = client.get("/api/v1/report/summary").json()
+        assert data["idle_energy_joules"] is None
+        assert data["cluster_total_cost"] is None
