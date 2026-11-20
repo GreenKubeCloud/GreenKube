@@ -1727,6 +1727,7 @@ def _load_values(
     if round_trip:
         yaml.preserve_quotes = True
         yaml.indent(mapping=2, sequence=4, offset=2)
+        yaml.width = 4_096
         if "\r\n" in content and "\n" not in content.replace("\r\n", ""):
             yaml.line_break = "\r\n"
     try:
@@ -2671,6 +2672,7 @@ def _roundtrip_yaml(content: str) -> YAML:
     yaml.allow_duplicate_keys = False
     yaml.preserve_quotes = True
     yaml.indent(mapping=2, sequence=4, offset=2)
+    yaml.width = 4_096
     if "\r\n" in content and "\n" not in content.replace("\r\n", ""):
         yaml.line_break = "\r\n"
     return yaml

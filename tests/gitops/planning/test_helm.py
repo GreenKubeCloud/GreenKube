@@ -459,6 +459,27 @@ def test_helm_values_receive_mebibytes_not_a_raw_byte_count():
         snapshot.close()
 
 
+def test_helm_values_rewrite_keeps_long_lines_unwrapped():
+    """Field report F-05: the rewritten values file was folded at 80 columns."""
+    description = "Simulation: " + "a long human description that is well past eighty columns " * 2
+    url = "http://prometheus-operated.monitoring.svc.cluster.local:9090/" + "x" * 60
+    values_content = (
+        f'description: "{description.strip()}"\n'
+        f"url: {url}\n"
+        "app:\n  resources:\n    requests:\n      cpu: 100m\n      memory: 128Mi\n"
+    )
+    expected = values_content.replace("cpu: 100m", "cpu: 300m").replace("memory: 128Mi", "memory: 256Mi")
+    snapshot = _snapshot({**_CHART, "apps/prod/values.yaml": values_content})
+    planner = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner()))
+
+    try:
+        plan = planner.plan(_action(), _values_source(), snapshot, BASE_REVISION, mapping=_values_mapping())
+
+        assert plan.files[0].content == expected
+    finally:
+        snapshot.close()
+
+
 def test_helm_values_planner_can_render_current_source_with_the_explicit_mapping():
     snapshot = _snapshot({**_CHART, "apps/prod/values.yaml": "app:\n  resources:\n    requests:\n      cpu: 300m\n"})
     planner = HelmValuesPlanner(renderer=_helm_renderer(_ChartRunner()))
