@@ -329,6 +329,7 @@ def test_providers_offer_the_sso_button_and_local_accounts_still_sign_in(oidc):
     assert h.client.get("/api/v1/auth/providers").json() == {
         "mode": "oidc",
         "password": True,
+        "api_key": False,
         "sso": {"kind": "oidc", "name": "Acme SSO", "login_path": "/auth/oidc/login"},
     }
     assert h.login().status_code == 200

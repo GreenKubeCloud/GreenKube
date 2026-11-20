@@ -230,6 +230,7 @@ def test_providers_describe_the_sign_in_options(tmp_path, monkeypatch):
         assert body == {
             "mode": "proxy",
             "password": True,
+            "api_key": False,
             "sso": {"kind": "proxy", "name": "your authentication proxy", "login_path": None},
         }
     env = {**PROXY_ENV, "AUTH_LOCAL_LOGIN": "false"}
@@ -330,6 +331,7 @@ def test_route_guards_hold_even_if_the_global_scope_table_misses_a_route(tmp_pat
 
 _EXEMPT_MUTATIONS = {
     "/api/v1/auth/login",
+    "/api/v1/auth/api-key-login",
     "/api/v1/auth/logout",
     "/api/v1/auth/password",
     "/api/v1/auth/sessions/{session_id}",
