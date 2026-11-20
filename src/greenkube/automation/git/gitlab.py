@@ -457,8 +457,10 @@ class GitLabProvider(GitProvider):
         commit_sha = commit_data.get("id") if isinstance(commit_data, dict) else None
         if not isinstance(commit_sha, str) or not commit_sha:
             raise GitProviderError("GitLab returned an invalid commit SHA.")
+        # Without ``start_sha`` this is the proof the commit sits on the base revision: a missing
+        # or malformed parent list fails closed.
         parent_ids = commit_data.get("parent_ids")
-        if isinstance(parent_ids, list) and request.base_revision not in parent_ids:
+        if not isinstance(parent_ids, list) or request.base_revision not in parent_ids:
             raise GitConflictError(
                 f"GitLab created commit {commit_sha} with an unexpected parent; expected {request.base_revision}."
             )

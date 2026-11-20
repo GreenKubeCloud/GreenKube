@@ -1203,6 +1203,27 @@ async def test_gitlab_create_commit_rejects_a_stale_base_before_committing():
 
 @pytest.mark.asyncio
 @respx.mock
+@pytest.mark.parametrize("commit_body", [{"id": "new-commit"}, {"id": "new-commit", "parent_ids": "base-sha"}])
+async def test_gitlab_create_commit_fails_closed_without_a_parent_list(commit_body):
+    """Without ``start_sha`` the parent check is the only proof the commit sits on the base."""
+    api = "https://gitlab.com/api/v4/projects/acme%2Fmanifests"
+    respx.get(f"{api}/repository/branches/feature%2Fatomic").mock(
+        return_value=Response(200, json={"commit": {"id": "base-sha"}})
+    )
+    respx.get(f"{api}/repository/files/new.yaml").mock(return_value=Response(404, json={"message": "File not found"}))
+    respx.post(f"{api}/repository/commits").mock(return_value=Response(201, json=commit_body))
+    provider = GitLabProvider("token")
+    repo = GitRepository(provider="gitlab", owner="acme", name="manifests")
+
+    with pytest.raises(GitConflictError):
+        await provider.create_commit(
+            _commit_request(repo, [GitFileEdit(path="new.yaml", action="create", content="new")])
+        )
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_gitlab_atomic_commit_post_is_not_retried_after_transport_failure():
     api = "https://gitlab.com/api/v4/projects/acme%2Fmanifests"
     respx.get(f"{api}/repository/branches/feature%2Fatomic").mock(
