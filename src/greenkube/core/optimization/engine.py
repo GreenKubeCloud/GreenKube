@@ -41,6 +41,7 @@ from greenkube.core.optimization.enrich import enrich_recommendations, rescore_w
 from greenkube.core.optimization.evidence import build_patch
 from greenkube.core.optimization.providers.base import RecommendationSource
 from greenkube.core.optimization.registry import build_signal_sources, cluster_uid
+from greenkube.core.optimization.targeting import is_static_pod_kind
 from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
 from greenkube.core.recommendation_reconciliation import RecommendationDiff, compute_diff, supporting_sources
 from greenkube.models.metrics import Recommendation, RecommendationPatchV2, RecommendationRecord, RecommendationType
@@ -445,6 +446,13 @@ class OptimizationEngine:
 
         await self._backfill_v2_fields(reco_repo)
         previous = await self._active_snapshot(reco_repo, namespace)
+        # Static (mirror) pods never get advice, whatever the source (F-04, REC-09); the records
+        # stored before this rule are retired with a reason, never deleted.
+        recommendations = _without_static_pods(recommendations)
+        await self._retire_withheld_decreases(
+            reco_repo, [record for record in previous if is_static_pod_kind(record.owner_kind)], reason="static_pod"
+        )
+        previous = [record for record in previous if not is_static_pod_kind(record.owner_kind)]
         kept = self._preserve_last_known(recommendations, previous, incomplete_sources)
         # Usage jitter below the hysteresis keeps the stored advice (no new revision, one shared action).
         kept = apply_revision_hysteresis(kept, previous, config=self.config)
@@ -488,7 +496,7 @@ class OptimizationEngine:
         reason: str = "reliability_signals_unknown",
     ) -> None:
         """Marks stale, with ``reason``, the decreases withheld this scan (REC-04) or the records of
-        targets gone from the cluster (``target_gone``, REC-05)."""
+        targets gone from the cluster (``target_gone``, REC-05), or of static pods (``static_pod``, F-04)."""
         from greenkube.core.optimization.lifecycle import RecommendationLifecycle
 
         lifecycle = RecommendationLifecycle(reco_repo)
@@ -716,6 +724,17 @@ def _with_last_known_votes(
 
 
 ContainerKey = Tuple[str, str, str, str]
+
+
+def _without_static_pods(recommendations: List[Recommendation]) -> List[Recommendation]:
+    """Drops the recommendations of static (mirror) pods, from any source (F-04)."""
+    kept = [rec for rec in recommendations if not is_static_pod_kind(rec.owner_kind)]
+    if len(kept) != len(recommendations):
+        logger.info(
+            "Dropped %d recommendation(s) of static (mirror) pods: their manifests live on the node, not in Git.",
+            len(recommendations) - len(kept),
+        )
+    return kept
 
 
 def _record_container(record: RecommendationRecord) -> ContainerKey:

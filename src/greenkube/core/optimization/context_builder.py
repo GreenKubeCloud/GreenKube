@@ -148,6 +148,11 @@ class ContextBuilder:
         pod_rows, container_rows = await usage_repo.read_baseline_rows(
             start, read_end, namespace=namespace, snapshot=snapshot, namespaces=active_namespaces
         )
+        # Static (mirror) pods are no workload of the cluster's Git (F-04): left out before
+        # liveness and signals, and reported.
+        from greenkube.core.optimization.liveness import exclude_static_pods
+
+        static_pods = exclude_static_pods(snapshot)
         # OOM kills, CPU throttling and JVM hints of the summaries (E9): rightsizing
         # sizes increases and judges decreases with them.
         signals = await self._attach_reliability_signals(snapshot, start, end)
@@ -178,6 +183,8 @@ class ContextBuilder:
             usage=snapshot,
             gone_targets=liveness.gone,
             not_running_targets=liveness.not_running,
+            static_pod_targets=static_pods.targets,
+            static_pod_count=static_pods.pod_count,
             **side_inputs,
         )
 

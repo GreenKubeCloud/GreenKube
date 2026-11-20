@@ -74,6 +74,21 @@ def liveness_diagnostics(gone: int, not_running: int) -> List[Dict[str, Any]]:
     return notes
 
 
+def static_pod_diagnostics(count: int) -> List[Dict[str, Any]]:
+    """Source-run diagnostic of the static (mirror) pods left out of every analyzer (F-04, REC-09)."""
+    if not count:
+        return []
+    return [
+        {
+            "level": "info",
+            "code": "static_pods_excluded",
+            "message": f"{count} static (mirror) pod(s) left out: their manifests live on the node "
+            "(kubeadm, kind, minikube, k3s control planes), not in Git, so GreenKube does not advise on them.",
+            "count": count,
+        }
+    ]
+
+
 def stale_oom_diagnostics(skipped: List[Skip]) -> List[Dict[str, Any]]:
     """Source-run diagnostic of the containers whose OOM kills predate their current limit (REC-02)."""
     stale = [skip for skip in skipped if skip[3] == OOM_KILLS_BEFORE_CHANGE]
@@ -230,6 +245,8 @@ class MemoryRightsizingAnalyzer(Analyzer):
         self._snapshot: Optional["UsageSnapshot"] = None
         #: (gone, not running) target counts of the last scan (REC-05).
         self._liveness: Tuple[int, int] = (0, 0)
+        #: Static (mirror) pods left out of the last scan (F-04).
+        self._static_pods = 0
 
     def scan_diagnostics(self) -> List[Dict[str, Any]]:
         """Decreases withheld for unknown reliability signals in the last scan."""
@@ -237,6 +254,7 @@ class MemoryRightsizingAnalyzer(Analyzer):
             *reliability_diagnostics(self.skipped, self._signal_status, self._snapshot),
             *stale_oom_diagnostics(self.skipped),
             *liveness_diagnostics(*self._liveness),
+            *static_pod_diagnostics(self._static_pods),
         ]
 
     def analyze(self, context: "OptimizationContext") -> List[Recommendation]:
@@ -247,6 +265,7 @@ class MemoryRightsizingAnalyzer(Analyzer):
 
         snapshot = context.usage_snapshot()
         self._liveness = (len(context.gone_targets), len(context.not_running_targets))
+        self._static_pods = context.static_pod_count
         self._signal_status = dict(snapshot.reliability_signal_status)
         self._snapshot = snapshot
         for target, container_name, summary in context.iter_container_summaries():
