@@ -25,6 +25,8 @@
 		'ambiguous-multi-source-owner': 'Multiple source owners were found',
 		'conflicting-equal-priority-source-units': 'Multiple current sources disagree',
 		'conflicting-source-forms': 'Source configuration is ambiguous',
+		'cross-repository-git-chart':
+			'The Helm chart is read from another Git repository than its values; GreenKube cannot plan it yet',
 		'highest-priority-source-is-ambiguous': 'The highest-priority source is ambiguous',
 		'highest-priority-source-blocked': 'The highest-priority source is blocked',
 		'highest-priority-source-unresolved': 'The highest-priority source is unresolved',

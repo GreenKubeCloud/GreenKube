@@ -36,6 +36,8 @@ from greenkube.gitops.discovery.common import (
 _HELM_VALUES_MAPPING_ANNOTATION = "greenkube.cloud/helm-values-mapping"
 #: Binding reason of a source whose type (directory, Kustomize, Helm) Argo CD did not report.
 SOURCE_TYPE_UNKNOWN_REASON = "source_type_unknown"
+#: Binding reason of a Helm chart read from another Git repository than its values (not plannable).
+CROSS_REPOSITORY_GIT_CHART_REASON = "cross-repository-git-chart"
 _MAX_HELM_VALUES_MAPPING_BYTES = 4096
 
 
@@ -540,6 +542,11 @@ def _candidate_for_workload(
     elif owner.repo_url is None:
         status = BindingStatus.UNRESOLVED
         reason = "source-repository-unresolved"
+    elif owner.chart is None and binding_source is not owner:
+        # A chart read from another Git repository: the values repository is the edit target,
+        # but the planner renders only charts from the bound repository or a chart registry.
+        status = BindingStatus.BLOCKED
+        reason = CROSS_REPOSITORY_GIT_CHART_REASON
     elif text(provider_id) is None:
         status = BindingStatus.UNRESOLVED
         reason = "provider-unresolved"

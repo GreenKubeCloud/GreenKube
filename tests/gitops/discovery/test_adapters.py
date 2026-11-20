@@ -261,7 +261,10 @@ def test_argo_upstream_git_chart_binds_to_the_ref_values_source():
 
     source = _argo(application, provider_id="gitlab-main")[0]
 
-    assert source.status is BindingStatus.RESOLVED
+    # Bound to the values repository (the only file to edit), but the planner cannot render a
+    # chart from another Git repository yet: blocked with an explicit reason, never actionable.
+    assert source.status is BindingStatus.BLOCKED
+    assert source.reason == "cross-repository-git-chart"
     assert source.repo_url == "https://gitlab.example.com/ops/gitops.git"
     assert source.ref == "release"
     assert source.revision == "c" * 40

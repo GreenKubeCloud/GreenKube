@@ -742,3 +742,10 @@ def test_openapi_is_stable_and_exposes_manual_resolution_routes(gitops_client):
 def _wall_clock_at_test_time(monkeypatch):
     """Re-read ``_NOW`` for each test: a wall-clock constant taken at import ages during a long suite."""
     monkeypatch.setitem(globals(), "_NOW", datetime.now(timezone.utc))
+
+
+def test_cross_repository_git_chart_reason_is_exposed():
+    """F-11: the blocked reason of an upstream Git chart is readable, not redacted."""
+    from greenkube.api.routers.gitops import _public_reason
+
+    assert _public_reason("cross-repository-git-chart") == "cross-repository-git-chart"
