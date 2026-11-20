@@ -1680,8 +1680,8 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         """DB-level paginated read: COUNT(total) + LIMIT/OFFSET in a single round-trip.
 
         Handles the raw/hourly split:
-        - Recent data (within METRICS_COMPRESSION_AGE_HOURS): queries combined_metrics.
-        - Older data: queries combined_metrics_hourly.
+        - Data at or after the compression watermark: queries combined_metrics.
+        - Older data: queries combined_metrics_hourly (ROL-01).
         - Mixed ranges: UNION ALL with column normalization.
 
         Returns:
