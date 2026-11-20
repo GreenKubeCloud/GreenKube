@@ -23,7 +23,8 @@ from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
-from tests.core.optimization.helpers import NativeRecommender
+
+from .helpers import NativeRecommender  # pyrefly: ignore[missing-import]
 
 MIB = 1024 * 1024
 START = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(days=8)

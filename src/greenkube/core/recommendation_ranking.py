@@ -7,13 +7,16 @@ expected value under the requested profile and carbon price, with the source
 track record, and the delivery eligibility.
 """
 
+import logging
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, cast
 
 from greenkube.models.metrics import Recommendation, RecommendationRecord, TopRecommendation
+
+logger = logging.getLogger(__name__)
 
 SavingsMetric = Literal["co2", "cost", "value"]
 
@@ -194,6 +197,31 @@ class DecisionRequest:
     carbon_price: Optional[float] = None
 
 
+async def _action_records_by_id(records: Sequence[Any], reco_repo: Any) -> Dict[int, Any]:
+    """The records and every other recommendation their typed actions group, by id (F-07).
+
+    Plan creation evaluates the policy over all the recommendations of an action;
+    eligibility reads the same ones. A sibling that cannot be read stays missing
+    (eligibility then blocks, as plan creation would refuse).
+    """
+    from greenkube.core.optimization.eligibility import validate_action
+
+    by_id: Dict[int, Any] = {record.id: record for record in records if isinstance(getattr(record, "id", None), int)}
+    wanted = {item for record in records for item in (validate_action(record)[0] or []) if item not in by_id}
+    getter = getattr(reco_repo, "get_recommendation_by_id", None)
+    for rec_id in sorted(wanted):
+        if not callable(getter):
+            break
+        try:
+            found = await cast(Any, getter)(rec_id)
+        except Exception as exc:
+            logger.warning("Could not read recommendation %s for eligibility: %s", rec_id, exc)
+            continue
+        if found is not None and getattr(found, "id", None) == rec_id:
+            by_id[rec_id] = found
+    return by_id
+
+
 async def decide_records(
     records: Sequence[Any],
     *,
@@ -249,6 +277,7 @@ async def decide_records(
         resource_bindings=resource_bindings,
         open_pr_recommendation_ids=open_prs,
         step_seconds=parse_query_step_seconds(str(getattr(config, "PROMETHEUS_QUERY_RANGE_STEP", "") or "5m")),
+        records_by_id=await _action_records_by_id(records, reco_repo),
     )
     policy_results = await elig.evaluate_policies(records, ctx, gitops_repo)
     if policy_results:
