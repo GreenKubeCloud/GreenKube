@@ -41,6 +41,8 @@ rules:
 - apiGroups: ["autoscaling.k8s.io"]
   resources:
   - verticalpodautoscalers
+  # Checkpoints carry the sample history: a VPA votes only once mature (A.5).
+  - verticalpodautoscalercheckpoints
   verbs:
   - get
   - list

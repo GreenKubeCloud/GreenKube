@@ -156,6 +156,10 @@ Proposals that are not numeric (schedules, deletions, HPA settings) are compared
 
 **Signal-only sources.** A third-party connector or a pushed signal has no v1 recommendation of its own: it becomes a recommendation only through consensus, under its own source id, and goes through the same enrichment (evidence, risk, eligibility) as any other recommendation.
 
+**Native measurement required.** A container request or limit group becomes a recommendation only when GreenKube's own analyzer proposed a change for that container: VPA, Goldilocks, KRR or a pushed signal alone, with no native measurement of the target, never creates an active recommendation. Their advice stays a signal on the Sources page (`GET /api/v1/sources/{id}/signals`). Other capabilities are unchanged.
+
+**Votes that are not counted.** Before the policy runs, an external numeric proposal is set aside when it is not a signal of need: a value on its tool's known minimum (`SIGNAL_TOOL_FLOORS`: KRR `simple` 10m and 100 Mi, the Fairwinds VPA chart 15m and 100 Mi split per container), or a change smaller than `SIGNAL_MIN_CHANGE_PERCENT` (5 %) or the absolute minimum (`SIGNAL_MIN_CHANGE_CPU_MILLICORES` 10m, `SIGNAL_MIN_CHANGE_MEMORY_BYTES` 16 MiB). A floor can therefore never win over a measured native value under `safest`. Each set-aside proposal is listed in `consensus.ignored_votes` (`source_id`, `signal_id`, `value`, `reason`: `tool_floor` or `below_min_change`). VPAs that are not mature yet do not vote at all (see [VPA maturity](sources/vpa.md#maturity)).
+
 **No empty changes.** A request recommendation whose consolidated value equals the current request is not emitted. Under `safest`, a source that reports the current value for a container (KRR reports a value for every container) therefore means "keep it": there is no recommendation, and reconciliation handles an existing record as usual. The same applies when the minimum floor (`RECOMMENDATION_MIN_CPU_MILLICORES`, `RECOMMENDATION_MIN_MEMORY_BYTES`) lands on the current request.
 
 ### Identity and revisions

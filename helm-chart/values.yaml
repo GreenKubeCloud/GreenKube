@@ -785,6 +785,29 @@ sources:
       rbac:
         create: true
       serviceAccountName: ""
+  # Known minimum each tool proposes, per engine family or source id (roadmap
+  # A.5). A proposal equal to it is the tool's floor, not a signal of need, and
+  # is not counted in the consensus. Defaults: KRR `simple` (--mem-min 100,
+  # --cpu-min 10) and the Fairwinds VPA chart (100 MB, 15m, split per container).
+  # Set the values your tools run with; {} disables floor detection.
+  toolFloors:
+    krr:
+      cpu: 10m
+      memory: 100Mi
+    vpa:
+      cpu: 15m
+      memory: 100Mi
+  # Smallest change an external source (VPA, KRR, push) must propose to count as
+  # a vote: both the relative and the absolute minimum must be reached.
+  minChange:
+    percent: 5
+    cpuMillicores: 10
+    memoryBytes: 16777216
+  vpa:
+    # Hours of samples a VPA needs before its target counts as a vote (checkpoint
+    # firstSampleStart..lastSampleStart, else totalSamplesCount at one a minute).
+    # A VPA with LowConfidence=True never votes. 0 disables the check.
+    minSampleHours: 24
 
 # ---------------------------------------------------------------------------
 # Impact Model (docs/methodology/impact-model.md)

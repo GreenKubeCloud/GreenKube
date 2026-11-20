@@ -16,6 +16,11 @@ a built-in recommendation of the same group with the chosen value, or from
 the signal itself; its impact is projected again by the caller (the same
 Impact Model as every other projection), never copied from another value.
 Signal-only sources therefore become recommendations only through consensus.
+
+A container-resources group needs a native (GreenKube-measured) proposal to
+become a recommendation, and external proposals on a known tool floor or below
+the minimum change are not counted (:func:`vote_screen`, roadmap A.5): an
+external source alone stays a signal, shown on the Sources page.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from greenkube.signals.consensus import (
     Ballot,
     ConsensusOutcome,
     ConsensusPolicy,
+    VoteScreen,
     ballots_for_signal,
     consolidate,
     parse_policy,
@@ -84,6 +90,29 @@ def consensus_policy(config: "Config") -> ConsensusPolicy:
     except ValueError:
         logger.warning("Invalid RECOMMENDATION_CONSENSUS_POLICY; using safest.")
         return ConsensusPolicy.SAFEST
+
+
+def tool_floors(config: "Config") -> Dict[str, Dict[str, int]]:
+    """The known tool floors per engine family or source id (``SIGNAL_TOOL_FLOORS``)."""
+    from greenkube.core.config import parse_tool_floors
+
+    try:
+        return parse_tool_floors(getattr(config, "SIGNAL_TOOL_FLOORS", None))
+    except ValueError:
+        logger.warning("Invalid SIGNAL_TOOL_FLOORS; using the built-in KRR and VPA floors.")
+        return parse_tool_floors(None)
+
+
+def vote_screen(config: "Config") -> VoteScreen:
+    """Which external proposals count as votes: tool floors and minimum change from the config (A.5)."""
+    return VoteScreen(
+        floors=tool_floors(config),
+        min_change_ratio=float(getattr(config, "SIGNAL_MIN_CHANGE_PERCENT", 5.0)) / 100.0,
+        min_change={
+            "cpu_request_m": int(getattr(config, "SIGNAL_MIN_CHANGE_CPU_MILLICORES", 10)),
+            "memory_request_bytes": int(getattr(config, "SIGNAL_MIN_CHANGE_MEMORY_BYTES", 16 * 1024 * 1024)),
+        },
+    )
 
 
 #: One source output: its signal, its reconciliation unit (v1 source or source id) and,
@@ -421,6 +450,7 @@ def consolidate_entries(
         consensus_policy(config),
         priorities=_source_priority_map(config),
         weight_for=weight_for,
+        screen=vote_screen(config),
     )
     result: List[Recommendation] = []
     for outcome in outcomes:
