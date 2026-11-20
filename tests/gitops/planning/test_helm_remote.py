@@ -527,6 +527,48 @@ def test_local_chart_plans_several_containers_in_one_values_edit():
         snapshot.close()
 
 
+def test_monorepo_git_chart_with_a_ref_values_source_in_the_same_repository_plans():
+    """A chart and its ``$values`` ref source in the same repository bind to the chart source and plan."""
+    application = {
+        "metadata": {"name": "payments", "namespace": "argocd"},
+        "spec": {
+            "destination": {"namespace": "prod"},
+            "sources": [
+                {
+                    "repoURL": VALUES_REPO,
+                    "targetRevision": "main",
+                    "path": "charts/payments",
+                    "helm": {"releaseName": "payments", "valueFiles": ["$values/apps/prod/values.yaml"]},
+                },
+                {"repoURL": VALUES_REPO, "targetRevision": "main", "ref": "values"},
+            ],
+        },
+        "status": {
+            "sync": {"revisions": [VALUES_REVISION, VALUES_REVISION]},
+            "resources": [
+                {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "prod", "name": "payments-api"}
+            ],
+        },
+    }
+    (source,) = discover_argo_application(application, cluster="prod", provider_id="github-main")
+    assert source.status is BindingStatus.RESOLVED
+    assert source.path == "charts/payments"
+    snapshot = _snapshot({**_LOCAL_CHART, "apps/prod/values.yaml": _LOCAL_VALUES})
+    target = ResourceTarget(api_version="apps/v1", kind="Deployment", namespace="prod", name="payments-api")
+
+    try:
+        plan = _planner(_BitnamiRunner(), _StubFetcher(_unknown_chart())).plan(
+            _action([_op("api", cpu="250m")], target),
+            source,
+            snapshot,
+            VALUES_REVISION,
+        )
+        assert plan.files[0].path == "apps/prod/values.yaml"
+        assert plan.files[0].content == _LOCAL_VALUES.replace("400m", "250m")
+    finally:
+        snapshot.close()
+
+
 def test_registry_rules_propose_bitnami_component_paths():
     identity = ChartIdentity(
         name="postgresql",

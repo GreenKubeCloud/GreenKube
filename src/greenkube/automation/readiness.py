@@ -1008,9 +1008,27 @@ def _repository_urls(bindings: Sequence[WorkloadBinding]) -> list[str]:
     for binding in bindings:
         for source in (binding.source, *binding.candidates):
             url = getattr(source, "repo_url", None) if source is not None else None
-            if url and url not in urls:
+            if url and url not in urls and not _serves_only_as_chart_source(source, url):
                 urls.append(url)
     return urls
+
+
+def _serves_only_as_chart_source(source: Any, url: str) -> bool:
+    """True when ``url`` only supplies a Helm chart: GreenKube never edits it, so never suggest it.
+
+    That is a Helm repository chart, or a chart read from a Git path whose values files all
+    live in other repositories (an upstream chart repository).
+    """
+    config = getattr(source, "renderer_config", None)
+    if not isinstance(config, Mapping):
+        return False
+    chart = config.get("chart")
+    if not isinstance(chart, Mapping) or chart.get("repo") != url:
+        return False
+    if chart.get("name") not in (None, ""):
+        return True
+    values_sources = [entry for entry in config.get("values_sources") or [] if isinstance(entry, Mapping)]
+    return bool(values_sources) and all(entry.get("repo_url") != url for entry in values_sources)
 
 
 def _resolved_repository_urls(bindings: Sequence[WorkloadBinding]) -> set[str]:

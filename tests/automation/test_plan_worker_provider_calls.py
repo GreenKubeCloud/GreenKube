@@ -377,6 +377,40 @@ async def test_retry_after_the_commit_adopts_the_applied_branch_without_a_second
 
 
 @pytest.mark.asyncio
+async def test_gitlab_concurrent_push_to_the_planned_file_is_a_conflict_not_an_overwrite():
+    """A push to the edited file after the head check is refused by ``last_commit_id`` (F-01)."""
+    repository = FakeGitRepository.with_files(_repository_files(50))
+    server = FakeGitLabServer(repository)
+    plan = _plan("gitlab", repository.refs["main"])
+    branch = plan_branch_name(plan)
+    worker, operations, plans, pull_requests = _worker("gitlab", plan)
+    concurrent = "kind: Deployment # pushed concurrently\n"
+    pushed: list[str] = []
+
+    def handle(request):
+        # The push lands after GreenKube checked the branch head and read the file.
+        if request.method == "POST" and request.url.path.endswith("/repository/commits") and not pushed:
+            pushed.append(repository.commit_on(branch, {MANIFEST_PATH: concurrent}))
+        return server.handle(request)
+
+    with respx.mock(assert_all_called=False) as router:
+        router.route(url__startswith=server.base_url).mock(side_effect=handle)
+        assert await worker.process_once("worker-1")
+
+    assert pushed
+    assert plans.plans["plan-1"].status is PlanStatus.STALE
+    assert repository.refs.get(branch) in (None, pushed[0])
+    if branch in repository.refs:
+        assert repository.file_text(branch, MANIFEST_PATH) == concurrent
+    assert server.pull_requests == []
+    # Only the reservation made before the commit remains: nothing was opened or committed.
+    assert [(record.status, record.commit_sha) for record in pull_requests.records] in (
+        [],
+        [(PullRequestStatus.PENDING, None)],
+    )
+
+
+@pytest.mark.asyncio
 async def test_exhausted_provider_call_budget_stops_the_operation_and_fails_closed():
     repository = FakeGitRepository.with_files(_repository_files(20))
     server = FakeGitHubServer(repository)

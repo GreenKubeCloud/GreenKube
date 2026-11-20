@@ -1155,7 +1155,9 @@ async def test_gitlab_create_commit_uses_native_actions_and_expected_parent():
     assert result.files_changed == ["new.yaml", "apps/update.yaml", "apps/delete.yaml"]
     assert commit_route.call_count == 1
     assert seen["commit"]["branch"] == "feature/atomic"
-    assert seen["commit"]["start_sha"] == "base-sha"
+    # ``start_sha`` only creates a branch on GitLab: on the existing plan branch it is refused.
+    assert "start_sha" not in seen["commit"]
+    assert "start_branch" not in seen["commit"]
     assert seen["commit"]["force"] is False
     assert seen["commit"]["commit_message"] == "apply plan"
     assert seen["commit"]["author_name"] == "GreenKube Bot"
@@ -1196,6 +1198,27 @@ async def test_gitlab_create_commit_rejects_a_stale_base_before_committing():
         )
 
     assert commit_route.call_count == 0
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("commit_body", [{"id": "new-commit"}, {"id": "new-commit", "parent_ids": "base-sha"}])
+async def test_gitlab_create_commit_fails_closed_without_a_parent_list(commit_body):
+    """Without ``start_sha`` the parent check is the only proof the commit sits on the base."""
+    api = "https://gitlab.com/api/v4/projects/acme%2Fmanifests"
+    respx.get(f"{api}/repository/branches/feature%2Fatomic").mock(
+        return_value=Response(200, json={"commit": {"id": "base-sha"}})
+    )
+    respx.get(f"{api}/repository/files/new.yaml").mock(return_value=Response(404, json={"message": "File not found"}))
+    respx.post(f"{api}/repository/commits").mock(return_value=Response(201, json=commit_body))
+    provider = GitLabProvider("token")
+    repo = GitRepository(provider="gitlab", owner="acme", name="manifests")
+
+    with pytest.raises(GitConflictError):
+        await provider.create_commit(
+            _commit_request(repo, [GitFileEdit(path="new.yaml", action="create", content="new")])
+        )
     await provider.close()
 
 

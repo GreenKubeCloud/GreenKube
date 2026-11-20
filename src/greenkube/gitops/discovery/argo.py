@@ -10,7 +10,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from greenkube.gitops.contracts import BindingStatus, ControllerKind, RendererKind, WorkloadSource
+from greenkube.gitops.contracts import (
+    BindingStatus,
+    ControllerKind,
+    RendererKind,
+    WorkloadSource,
+    canonical_repository_identity,
+)
 from greenkube.gitops.discovery.common import (
     SUPPORTED_WORKLOAD_KINDS,
     WORKLOAD_KINDS,
@@ -30,6 +36,8 @@ from greenkube.gitops.discovery.common import (
 _HELM_VALUES_MAPPING_ANNOTATION = "greenkube.cloud/helm-values-mapping"
 #: Binding reason of a source whose type (directory, Kustomize, Helm) Argo CD did not report.
 SOURCE_TYPE_UNKNOWN_REASON = "source_type_unknown"
+#: Binding reason of a Helm chart read from another Git repository than its values (not plannable).
+CROSS_REPOSITORY_GIT_CHART_REASON = "cross-repository-git-chart"
 _MAX_HELM_VALUES_MAPPING_BYTES = 4096
 
 
@@ -534,6 +542,11 @@ def _candidate_for_workload(
     elif owner.repo_url is None:
         status = BindingStatus.UNRESOLVED
         reason = "source-repository-unresolved"
+    elif owner.chart is None and binding_source is not owner:
+        # A chart read from another Git repository: the values repository is the edit target,
+        # but the planner renders only charts from the bound repository or a chart registry.
+        status = BindingStatus.BLOCKED
+        reason = CROSS_REPOSITORY_GIT_CHART_REASON
     elif text(provider_id) is None:
         status = BindingStatus.UNRESOLVED
         reason = "provider-unresolved"
@@ -628,12 +641,19 @@ def _git_values_binding_source(
     sources: list[_ArgoSource],
     renderer_config: Mapping[str, Any],
 ) -> _ArgoSource:
-    """Use the unique Git-backed values source as the editable Helm binding."""
-    if owner.chart is None:
+    """Use the unique Git-backed values source as the editable Helm binding.
+
+    A chart from a Helm repository is not editable, so its unique ``$ref`` values source is the
+    edit target. A chart read from a Git path switches to the values source only when every
+    values file comes from that single ``$ref`` source (an upstream chart repository whose
+    values live elsewhere); a values file beside the chart keeps the chart source.
+    """
+    entries = [entry for entry in renderer_config.get("values_sources", []) if isinstance(entry, Mapping)]
+    if owner.chart is None and (not entries or any(entry.get("source_ref") is None for entry in entries)):
         return owner
 
     source_indexes: set[int] = set()
-    for entry in renderer_config.get("values_sources", []):
+    for entry in entries:
         if not isinstance(entry, Mapping) or entry.get("source_ref") is None:
             continue
         index = entry.get("source_index")
@@ -648,7 +668,17 @@ def _git_values_binding_source(
     values_source = sources[source_index]
     if values_source.chart is not None or values_source.repo_url is None:
         return owner
+    if owner.chart is None and _same_repository(values_source.repo_url, owner.repo_url):
+        # Monorepo: the chart and its ``$values`` source share one repository, so the chart
+        # source (with its chart path) stays the binding and the planner finds the chart.
+        return owner
     return values_source
+
+
+def _same_repository(left: str | None, right: str | None) -> bool:
+    if left is None or right is None:
+        return False
+    return canonical_repository_identity(left) == canonical_repository_identity(right)
 
 
 def _renderer_configuration(

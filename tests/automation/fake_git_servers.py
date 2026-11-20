@@ -82,6 +82,18 @@ class FakeGitRepository:
             pending.extend(self.commits[current].parents)
         return False
 
+    def last_commit_for(self, ref: str, path: str) -> str | None:
+        """The newest commit reachable from ``ref`` (first parents) that changed ``path``."""
+        current = self.resolve(ref)
+        while current is not None:
+            commit = self.commits[current]
+            parent = commit.parents[0] if commit.parents else None
+            parent_entry = self.commits[parent].tree.get(path) if parent is not None else None
+            if commit.tree.get(path) != parent_entry:
+                return current
+            current = parent
+        return None
+
     def commit_on(self, branch: str, changes: dict[str, str | None], message: str = "change") -> str:
         """Commit file changes (``None`` deletes) on top of ``branch`` and advance it."""
         parent = self.refs[branch]
@@ -423,19 +435,48 @@ class FakeGitLabServer(_RecordingServer):
                     "encoding": "base64",
                     "content": _b64(repository.blobs[sha]),
                     "blob_id": sha,
-                    "last_commit_id": repository.resolve(ref),
+                    "commit_id": repository.resolve(ref),
+                    # GitLab reports the last commit that touched this file, not the ref head.
+                    "last_commit_id": repository.last_commit_for(ref, file_path),
                 },
             )
         if method == "POST" and local == "/repository/commits":
             branch = body["branch"]
-            if repository.refs.get(branch) != body["start_sha"]:
-                return _json(400, {"message": "start_sha has changed since"})
+            start = body.get("start_sha") or body.get("start_branch")
+            if start is not None:
+                # GitLab uses ``start_sha``/``start_branch`` only to create ``branch``: on an
+                # existing branch it refuses the commit unless ``force`` is set.
+                if branch in repository.refs and not body.get("force"):
+                    return _json(400, {"message": f"A branch called '{branch}' already exists."})
+                start_commit = repository.resolve(start)
+                if start_commit is None:
+                    return _json(400, {"message": "Invalid start revision"})
+                repository.refs[branch] = start_commit
+            elif branch not in repository.refs:
+                return _json(400, {"message": "You can only create or edit files when you are on a branch"})
+            parent = repository.refs[branch]
+            tree = repository.commits[parent].tree
+            for action in body["actions"]:
+                file_path, kind = action["file_path"], action["action"]
+                if kind == "create" and file_path in tree:
+                    return _json(400, {"message": "A file with this name already exists"})
+                if kind in ("update", "delete") and file_path not in tree:
+                    return _json(400, {"message": "A file with this name doesn't exist"})
+                expected = action.get("last_commit_id")
+                if expected is not None and expected != repository.last_commit_for(branch, file_path):
+                    return _json(
+                        400,
+                        {
+                            "message": "You are attempting to update a file that has changed since you "
+                            "started editing it."
+                        },
+                    )
             changes = {
                 action["file_path"]: (None if action["action"] == "delete" else action["content"])
                 for action in body["actions"]
             }
             sha = repository.commit_on(branch, changes, body["commit_message"])
-            return _json(201, {"id": sha, "parent_ids": [body["start_sha"]]})
+            return _json(201, {"id": sha, "parent_ids": [parent]})
         if method == "GET" and local == "/repository/merge_base":
             first, second = query["refs[]"]
             for candidate in (first, second):

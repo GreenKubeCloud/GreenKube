@@ -12,6 +12,7 @@ from greenkube.automation.readiness import (
     AutomationReadiness,
     CredentialsInspector,
     ProviderInference,
+    _repository_urls,
     inferred_provider_id,
     normalize_credentials_host,
     repository_ref,
@@ -754,3 +755,50 @@ async def test_an_unreadable_github_app_selection_keeps_the_last_known_one(tmp_p
 
 async def _fake_app_credentials(self, provider):
     return SimpleNamespace(app_id="123", private_key="pem")
+
+
+def _helm_source(repo_url: str, chart: dict, values_sources: list[dict], name: str) -> WorkloadSource:
+    return _source(repo_url, name=name).model_copy(
+        update={
+            "renderer": RendererKind.HELM_VALUES,
+            "renderer_config": {"chart": chart, "values_files": [], "values_sources": values_sources},
+        }
+    )
+
+
+def test_repositories_that_only_serve_as_a_chart_source_are_never_suggested():
+    """F-11: a Helm repository or an upstream Git chart whose values live elsewhere is not suggested."""
+    values_repo = "https://gitlab.example.com/ops/values.git"
+    helm_repository = _helm_source(
+        "https://charts.example.com/stable", {"name": "vpa", "repo": "https://charts.example.com/stable"}, [], "app-0"
+    )
+    upstream_git_chart = _helm_source(
+        "https://github.com/upstream/silo.git",
+        {"name": None, "repo": "https://github.com/upstream/silo.git"},
+        [
+            {"source_index": 1, "source_ref": "values", "repo_url": values_repo},
+            {"source_index": 2, "source_ref": "extra", "repo_url": "https://gitlab.example.com/ops/extra.git"},
+        ],
+        "app-1",
+    )
+    local_values_chart = _helm_source(
+        GITHUB_REPO,
+        {"name": None, "repo": GITHUB_REPO},
+        [{"source_index": 0, "source_ref": None, "repo_url": GITHUB_REPO}],
+        "app-2",
+    )
+    bindings = [
+        WorkloadBinding(
+            cluster="default",
+            namespace="payments",
+            workload_kind="Deployment",
+            workload_name=f"app-{index}",
+            status=BindingStatus.BLOCKED,
+            confidence=0.1,
+            candidates=(source,),
+        )
+        for index, source in enumerate((helm_repository, upstream_git_chart, local_values_chart))
+    ]
+    bindings.append(_binding(values_repo))
+
+    assert _repository_urls(bindings) == [GITHUB_REPO, values_repo]

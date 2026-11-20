@@ -407,12 +407,15 @@ class GitLabProvider(GitProvider):
                 action["last_commit_id"] = current.sha
             actions.append(action)
 
+        # No ``start_sha``: GitLab uses it only to create ``branch`` and refuses it on an
+        # existing branch ("A branch called ... already exists"). The plan branch exists
+        # already: its head was checked above, ``last_commit_id`` guards each edited file,
+        # and the parent of the new commit is checked against the base revision below.
         commit_response = await self._request(
             "POST",
             f"/projects/{self._project(repo)}/repository/commits",
             json_body={
                 "branch": branch,
-                "start_sha": request.base_revision,
                 "force": False,
                 "commit_message": request.message,
                 "author_name": request.author_name,
@@ -454,8 +457,10 @@ class GitLabProvider(GitProvider):
         commit_sha = commit_data.get("id") if isinstance(commit_data, dict) else None
         if not isinstance(commit_sha, str) or not commit_sha:
             raise GitProviderError("GitLab returned an invalid commit SHA.")
+        # Without ``start_sha`` this is the proof the commit sits on the base revision: a missing
+        # or malformed parent list fails closed.
         parent_ids = commit_data.get("parent_ids")
-        if isinstance(parent_ids, list) and request.base_revision not in parent_ids:
+        if not isinstance(parent_ids, list) or request.base_revision not in parent_ids:
             raise GitConflictError(
                 f"GitLab created commit {commit_sha} with an unexpected parent; expected {request.base_revision}."
             )
