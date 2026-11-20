@@ -71,8 +71,16 @@ class PrometheusCollector:
     async def _query_prometheus(self, client: httpx.AsyncClient, query: str) -> List[Dict[str, Any]]:
         """
         Internal helper to run a query against the Prometheus API.
+
+        Without a configured URL, discovery runs before the first request, as
+        in ``collect_range``, so relative URLs are never queried (F-06).
         """
-        base = self.base_url.rstrip("/") if self.base_url else ""
+        if not self.base_url:
+            await self._discover_and_update_url(client)
+        if not self.base_url:
+            logger.error("Prometheus URL is not configured and could not be discovered; query skipped: %s", query)
+            return []
+        base = self.base_url.rstrip("/")
         candidates = [
             f"{base}/api/v1/query",
             f"{base}/query",
