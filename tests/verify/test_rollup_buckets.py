@@ -210,3 +210,26 @@ def test_a_week_with_one_untrusted_sample_in_30_percent_of_hours_keeps_its_cover
     assert len(costed) / len(hours) >= 0.97
     assert sum(bucket.cost_coverage for bucket in buckets) / len(hours) >= 0.97
     assert all(bucket.cost == pytest.approx(0.012) for bucket in costed)
+
+
+async def test_a_measurement_read_across_the_compression_watermark_gives_the_raw_buckets(db):
+    """ROL-03 acceptance 3: the measurement read (read_combined_metrics_smart) of a window half compressed."""
+    rows = []
+    for hour_index in range(6):
+        hour = H0 + timedelta(hours=hour_index)
+        # A rollout in every hour: the old pod until :25, the new one from :25; one custom-rate sample.
+        rows += [_row(f"api-{hour_index}-old", t) for t in _steps(hour, 0, 5)]
+        rows += [_row(f"api-{hour_index}-new", t) for t in _steps(hour, 5, 11)]
+        rows.append(_row(f"api-{hour_index}-new", hour + timedelta(seconds=11 * STEP), source="custom_rate"))
+    repo = _repository(db)
+    await repo.write_combined_metrics(rows)
+    window = TimeWindow(start=H0, end=H0 + timedelta(hours=6))
+    raw = hourly_buckets(await repo.read_combined_metrics_smart(window.start, window.end, "prod"), window, STEP)
+    compressor = MetricsCompressor(db, Config(), collection_watermark_provider=None, rollup_enabled=False)
+    await compressor.run(now=H0 + timedelta(hours=3, days=1))
+    assert await compressor.get_watermark("combined_metrics") == H0 + timedelta(hours=3)
+    mixed = hourly_buckets(await repo.read_combined_metrics_smart(window.start, window.end, "prod"), window, STEP)
+    assert len(raw) == len(mixed) == 6
+    assert raw[0].cost == pytest.approx(12.0)
+    assert raw[0].cost_coverage == pytest.approx(11 / 12)
+    _assert_same(raw, mixed)
