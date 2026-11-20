@@ -73,8 +73,16 @@
 	const SOURCE_LABEL = { local: 'local account', proxy: 'single sign-on (authentication proxy)', oidc: 'single sign-on (OpenID Connect)' };
 
 	$: isSso = $currentUser?.auth_source === 'proxy' || $currentUser?.auth_source === 'oidc';
+	// Signed in with an API key (API_AUTH_MODE=api_key, F-09): no password and no sessions.
+	$: isApiKey = $currentUser?.kind === 'apikey';
 
-	onMount(load);
+	onMount(() => {
+		if ($currentUser?.kind === 'apikey') {
+			loading = false;
+			return;
+		}
+		load();
+	});
 </script>
 
 <div class="p-6 lg:p-8 space-y-6 max-w-[1200px] mx-auto">
@@ -95,56 +103,68 @@
 		{/if}
 	</div>
 
-	<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-		<Card title={isSso ? 'Password' : 'Change password'} icon="🔑">
-			{#if isSso}
-				<p class="text-sm text-dark-400" data-testid="sso-password">
-					You sign in through single sign-on: change your password at your identity provider.
-				</p>
-			{:else}
-				{#if message}
-					<p class="mb-3 text-xs text-green-400" role="status">{message}</p>
-				{/if}
-				<PasswordChangeForm username={$currentUser?.name || ''} on:changed={handleChanged} />
-			{/if}
-		</Card>
-
-		<Card title="Active sessions" icon="🖥️">
+	{#if isApiKey}
+		<Card title="API key" icon="🔑">
 			<div slot="actions">
 				<button type="button" class="btn-secondary text-xs !py-1.5 !px-3" on:click={signOut}>Sign out</button>
 			</div>
-			<DataState {loading} {error} empty={sessions.length === 0}>
-				<ul class="divide-y divide-dark-800" aria-label="Active sessions">
-					{#each sessions as session (session.id)}
-						<li class="flex items-center justify-between gap-3 py-3">
-							<div class="min-w-0">
-								<p class="text-sm text-dark-200 truncate">
-									{browserLabel(session.user_agent)}
-									{#if session.current}<span class="badge-green ml-2">This browser</span>{/if}
-									{#if session.remember}<span class="ml-2 text-[10px] text-dark-500">kept signed in</span>{/if}
-								</p>
-								<p class="text-xs text-dark-500">
-									{session.ip ?? 'unknown address'} · signed in {formatDate(session.created_at)} · last
-									active {formatDate(session.last_seen_at)}
-								</p>
-							</div>
-							<button
-								type="button"
-								class="btn-secondary text-xs !py-1 !px-2 shrink-0"
-								on:click={() => revoke(session)}
-								aria-label={session.current ? 'Sign out this browser' : `Revoke session ${session.id}`}
-							>
-								{session.current ? 'Sign out' : 'Revoke'}
-							</button>
-						</li>
-					{/each}
-				</ul>
-				{#if actionError}
-					<p class="mt-2 text-xs text-red-400" role="alert">{actionError}</p>
-				{/if}
-			</DataState>
+			<p class="text-sm text-dark-400" data-testid="api-key-account">
+				This browser is signed in with an API key (<code>apiAuthMode: api_key</code>): there is no password or
+				session to manage. Revoking the key signs this browser out.
+			</p>
 		</Card>
-	</div>
+	{:else}
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			<Card title={isSso ? 'Password' : 'Change password'} icon="🔑">
+				{#if isSso}
+					<p class="text-sm text-dark-400" data-testid="sso-password">
+						You sign in through single sign-on: change your password at your identity provider.
+					</p>
+				{:else}
+					{#if message}
+						<p class="mb-3 text-xs text-green-400" role="status">{message}</p>
+					{/if}
+					<PasswordChangeForm username={$currentUser?.name || ''} on:changed={handleChanged} />
+				{/if}
+			</Card>
+
+			<Card title="Active sessions" icon="🖥️">
+				<div slot="actions">
+					<button type="button" class="btn-secondary text-xs !py-1.5 !px-3" on:click={signOut}>Sign out</button>
+				</div>
+				<DataState {loading} {error} empty={sessions.length === 0}>
+					<ul class="divide-y divide-dark-800" aria-label="Active sessions">
+						{#each sessions as session (session.id)}
+							<li class="flex items-center justify-between gap-3 py-3">
+								<div class="min-w-0">
+									<p class="text-sm text-dark-200 truncate">
+										{browserLabel(session.user_agent)}
+										{#if session.current}<span class="badge-green ml-2">This browser</span>{/if}
+										{#if session.remember}<span class="ml-2 text-[10px] text-dark-500">kept signed in</span>{/if}
+									</p>
+									<p class="text-xs text-dark-500">
+										{session.ip ?? 'unknown address'} · signed in {formatDate(session.created_at)} · last
+										active {formatDate(session.last_seen_at)}
+									</p>
+								</div>
+								<button
+									type="button"
+									class="btn-secondary text-xs !py-1 !px-2 shrink-0"
+									on:click={() => revoke(session)}
+									aria-label={session.current ? 'Sign out this browser' : `Revoke session ${session.id}`}
+								>
+									{session.current ? 'Sign out' : 'Revoke'}
+								</button>
+							</li>
+						{/each}
+					</ul>
+					{#if actionError}
+						<p class="mt-2 text-xs text-red-400" role="alert">{actionError}</p>
+					{/if}
+				</DataState>
+			</Card>
+		</div>
+	{/if}
 
 	{#if hasScope($currentUser, 'admin') && $currentUser?.kind === 'user'}
 		<UsersCard currentUserName={$currentUser?.name || ''} />

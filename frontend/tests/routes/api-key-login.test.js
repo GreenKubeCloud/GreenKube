@@ -99,3 +99,18 @@ describe('sign-in form in session mode', () => {
 		expect(screen.queryByLabelText('API key')).not.toBeInTheDocument();
 	});
 });
+
+describe('account page signed in with an API key', () => {
+	it('explains the key instead of listing sessions or offering a password change', async () => {
+		const { currentUser } = await import('$lib/stores.js');
+		const AccountPage = (await import('../../src/routes/settings/account/+page.svelte')).default;
+		installFetch({});
+		currentUser.set(PRINCIPAL);
+		render(AccountPage);
+
+		expect(await screen.findByTestId('api-key-account')).toBeInTheDocument();
+		expect(screen.queryByLabelText('Active sessions')).not.toBeInTheDocument();
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+		currentUser.set(null);
+	});
+});
