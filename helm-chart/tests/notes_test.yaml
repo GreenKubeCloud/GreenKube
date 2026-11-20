@@ -221,3 +221,17 @@ tests:
     asserts:
       - notMatchRegexRaw:
           pattern: "config.clusterName is empty"
+
+  - it: does not suggest the default Git credentials Secret when providers are configured
+    set:
+      automation.providers:
+        - id: gitlab-main
+          type: gitlab
+          apiBaseUrl: https://gitlab.example.com/api/v4
+          secretName: gitlab-token
+          secretKey: token
+    asserts:
+      - notMatchRegexRaw:
+          pattern: create secret generic greenkube-git-credentials
+      - matchRegexRaw:
+          pattern: "gitlab-main \\(gitlab\\): Secret gitlab-token, key token"
