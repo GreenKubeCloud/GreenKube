@@ -10,7 +10,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from greenkube.gitops.contracts import BindingStatus, ControllerKind, RendererKind, WorkloadSource
+from greenkube.gitops.contracts import (
+    BindingStatus,
+    ControllerKind,
+    RendererKind,
+    WorkloadSource,
+    canonical_repository_identity,
+)
 from greenkube.gitops.discovery.common import (
     SUPPORTED_WORKLOAD_KINDS,
     WORKLOAD_KINDS,
@@ -655,7 +661,17 @@ def _git_values_binding_source(
     values_source = sources[source_index]
     if values_source.chart is not None or values_source.repo_url is None:
         return owner
+    if owner.chart is None and _same_repository(values_source.repo_url, owner.repo_url):
+        # Monorepo: the chart and its ``$values`` source share one repository, so the chart
+        # source (with its chart path) stays the binding and the planner finds the chart.
+        return owner
     return values_source
+
+
+def _same_repository(left: str | None, right: str | None) -> bool:
+    if left is None or right is None:
+        return False
+    return canonical_repository_identity(left) == canonical_repository_identity(right)
 
 
 def _renderer_configuration(
