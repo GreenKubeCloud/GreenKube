@@ -229,10 +229,6 @@
 				</div>
 				{#if authState === 'signed-out'}
 					<LoginForm on:signedin={handleSignedIn} />
-					<p class="mt-4 text-xs text-dark-500">
-						First sign-in? Use the initial admin password printed by <code>helm install</code>.
-						Scripts and Prometheus use API keys instead.
-					</p>
 				{:else if authState === 'password-change'}
 					<p class="mb-4 text-sm text-dark-400">
 						You signed in with the initial password. Choose your own password to continue; the

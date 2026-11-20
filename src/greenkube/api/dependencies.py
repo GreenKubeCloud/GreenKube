@@ -9,6 +9,7 @@ concrete implementations.
 
 import dataclasses
 import hashlib
+import hmac
 import logging
 import re
 import secrets
@@ -148,6 +149,7 @@ def verify_api_key(request: Request) -> None:
 # one is presented but never require it.
 _AUTH_PUBLIC_PATHS = (
     "/api/v1/auth/login",
+    "/api/v1/auth/api-key-login",
     "/api/v1/auth/logout",
     "/api/v1/auth/providers",
     "/api/v1/auth/oidc/login",
@@ -196,29 +198,63 @@ METRICS_TOKEN_PRINCIPAL = Principal(
 )
 
 
+async def resolve_key_principal(token: str, settings: AuthSettings, service: AuthService | None) -> Principal | None:
+    """Resolve an API key: the deprecated bootstrap key, the scrape token, then a scoped ``gk_`` key.
+
+    Returns ``None`` when the token matches no active key.
+    """
+    token = (token or "").strip()
+    if not token:
+        return None
+    # Compare digests so that neither the content nor the length of the key leaks through timing.
+    if (
+        settings.legacy_api_key
+        and settings.legacy_api_key_access != "disabled"
+        and constant_time_equals(sha256_hex(token), sha256_hex(settings.legacy_api_key))
+    ):
+        return _legacy_principal(token, settings.legacy_api_key_access)
+    if settings.metrics_token and constant_time_equals(sha256_hex(token), sha256_hex(settings.metrics_token)):
+        return METRICS_TOKEN_PRINCIPAL
+    if service is not None and token.startswith("gk_"):
+        key = await service.resolve_api_key(token)
+        if key is not None:
+            return api_key_principal(key)
+    return None
+
+
+def browser_key_csrf_token(token: str) -> str:
+    """The CSRF token of a browser signed in with an API key: an HMAC of the key, unguessable without it."""
+    return hmac.new(token.encode("utf-8"), b"greenkube-browser-key-csrf", hashlib.sha256).hexdigest()
+
+
 async def _bearer_principal(request: Request, settings: AuthSettings, service: AuthService | None) -> Principal:
     """Resolve ``Authorization: Bearer``: the deprecated bootstrap key, the scrape token, then a scoped key."""
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
-    token = token.strip()
-    if scheme.lower() == "bearer" and token:
-        # Compare digests so that neither the content nor the length of the key leaks through timing.
-        if (
-            settings.legacy_api_key
-            and settings.legacy_api_key_access != "disabled"
-            and constant_time_equals(sha256_hex(token), sha256_hex(settings.legacy_api_key))
-        ):
-            return _legacy_principal(token, settings.legacy_api_key_access)
-        if settings.metrics_token and constant_time_equals(sha256_hex(token), sha256_hex(settings.metrics_token)):
-            return METRICS_TOKEN_PRINCIPAL
-        if service is not None and token.startswith("gk_"):
-            key = await service.resolve_api_key(token)
-            if key is not None:
-                return api_key_principal(key)
+    if scheme.lower() == "bearer":
+        principal = await resolve_key_principal(token, settings, service)
+        if principal is not None:
+            return principal
     if await _open_access(settings, service):
         # Nothing to check a key against on an open development instance.
         return ANONYMOUS
     record_auth_failure("invalid_api_key")
     raise _bearer_unauthorized()
+
+
+async def _browser_key_principal(
+    request: Request, settings: AuthSettings, service: AuthService | None
+) -> Principal | None:
+    """In ``api_key`` mode, the API key a browser exchanged for its HttpOnly cookie (F-09)."""
+    if settings.mode != "api_key":
+        return None
+    token = request.cookies.get(settings.cookie_name)
+    if not token:
+        return None
+    principal = await resolve_key_principal(token, settings, service)
+    if principal is None:
+        record_auth_failure("invalid_api_key")
+        return None
+    return dataclasses.replace(principal, browser_key=True, csrf_token=browser_key_csrf_token(token))
 
 
 async def _session_principal(request: Request, settings: AuthSettings, service: AuthService | None) -> Principal | None:
@@ -339,7 +375,8 @@ async def authenticate(request: Request) -> None:
     """Resolve the request's :class:`Principal` and enforce scopes and CSRF (F14, F15).
 
     Order: a Bearer API key (the deprecated ``GREENKUBE_API_KEY`` bootstrap key,
-    then scoped ``gk_`` keys), then the session cookie. Protected routes are
+    then scoped ``gk_`` keys), then the session cookie (in ``api_key`` mode, the
+    cookie holding the API key the browser signed in with). Protected routes are
     ``/api/v1/*``, ``/api/v2/*`` and ``/prometheus/metrics``; the SPA, liveness, docs, OpenAPI
     schema and the provider webhook ingress route are public. Unsafe methods
     authenticated by a session cookie need a same-origin ``Origin``/``Referer``
@@ -361,6 +398,8 @@ async def authenticate(request: Request) -> None:
 
     if request.headers.get("Authorization"):
         principal: Principal | None = await _bearer_principal(request, settings, service)
+    elif settings.mode == "api_key":
+        principal = await _browser_key_principal(request, settings, service)
     else:
         principal = await _session_principal(request, settings, service)
         if settings.proxy_enabled and not auth_public:
@@ -392,11 +431,12 @@ async def authenticate(request: Request) -> None:
         # Accepted for one minor release; the route answers with a Deprecation header.
         request.state.deprecated_scope = (fallback, scope)
 
-    if principal.kind == "user" and request.method.upper() not in SAFE_METHODS:
+    if (principal.kind == "user" or principal.browser_key) and request.method.upper() not in SAFE_METHODS:
         # A user principal without a session (proxy identity before GET /auth/me) has no
         # CSRF token: the same code makes the UI refresh /auth/me, which starts the session.
+        # A browser signed in with an API key (cookie, ``api_key`` mode) is checked the same way.
         if (
-            not principal.is_session
+            not (principal.is_session or principal.browser_key)
             or not is_same_origin(request, settings, require=True)
             or not constant_time_equals(request.headers.get(CSRF_HEADER), principal.csrf_token)
         ):

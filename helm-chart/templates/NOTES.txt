@@ -45,7 +45,7 @@ Welcome to
    identity headers it sends, accepted only from config.trustedProxyIps ({{ .Values.config.trustedProxyIps }}).
    Roles come from IdP groups (auth.roles); others get "{{ (($auth.roles | default dict).defaultRole) | default "viewer" }}".
 {{- else -}}
-2. Authenticate with the API key (config.apiAuthMode=api_key, no browser sign-in):
+2. Authenticate with the API key (config.apiAuthMode=api_key; the UI also signs in with it):
 {{- end }}
 {{- if ne $mode "api_key" }}
 {{- if and (ne $mode "session") (eq $auth.localLogin false) }}

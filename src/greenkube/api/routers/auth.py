@@ -1,6 +1,6 @@
 """Sign-in, sessions, SSO, users and scoped API keys (roadmap F14, F15, F16).
 
-``/api/v1/auth/login``, ``/logout``, ``/providers`` and the OpenID Connect
+``/api/v1/auth/login``, ``/api-key-login``, ``/logout``, ``/providers`` and the OpenID Connect
 ``/oidc/login`` and ``/oidc/callback`` routes are reachable without
 credentials; every other route here goes through the global
 :func:`authenticate` dependency, which already enforced CSRF for
@@ -10,6 +10,7 @@ administration.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import secrets
 from datetime import datetime, timedelta
@@ -19,7 +20,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from greenkube.api.dependencies import get_auth_service, get_principal
+from greenkube.api.dependencies import (
+    browser_key_csrf_token,
+    get_auth_service,
+    get_principal,
+    resolve_key_principal,
+)
 from greenkube.auth import oidc
 from greenkube.auth.bootstrap import erase_consumed_initial_password, initial_admin_secret_from_config
 from greenkube.auth.http import (
@@ -52,6 +58,11 @@ _NO_STORE = {"Cache-Control": "no-store"}
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=256)
     password: str = Field(..., min_length=1, max_length=1024)
+    remember: bool = False
+
+
+class ApiKeyLoginRequest(BaseModel):
+    key: str = Field(..., min_length=1, max_length=1024)
     remember: bool = False
 
 
@@ -276,6 +287,58 @@ async def login(body: LoginRequest, request: Request, response: Response):
     return _issued_me(issued, settings)
 
 
+#: Throttle bucket of API-key sign-ins: there is no username, so every attempt from an IP counts together.
+_API_KEY_LOGIN_SUBJECT = "api-key"
+
+
+@router.post("/api-key-login", response_model=MeResponse)
+async def api_key_login(body: ApiKeyLoginRequest, request: Request, response: Response):
+    """Sign a browser in with an API key in ``API_AUTH_MODE=api_key`` (field report F-09).
+
+    The key is checked like a Bearer key and handed back as an HttpOnly,
+    ``SameSite=Strict`` cookie, so the UI never keeps it in JavaScript or browser
+    storage. Every request re-checks the key: revoking it signs the browser out.
+    Mutations need the returned CSRF token. Other modes sign browsers in with
+    ``/auth/login`` or single sign-on and answer 409.
+    """
+    settings = _settings()
+    if settings.mode != "api_key":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "API_KEY_LOGIN_DISABLED",
+                "message": "Sign in with a username and password or single sign-on (API_AUTH_MODE is not api_key).",
+            },
+        )
+    if not is_same_origin(request, settings, require=False):
+        record_auth_failure("csrf")
+        raise HTTPException(
+            status_code=403, detail={"code": "CSRF_REJECTED", "message": "Cross-site sign-in rejected."}
+        )
+    ip = client_ip(request, settings)
+    throttle = _throttle(request, settings)
+    _enforce_throttle(throttle, ip, _API_KEY_LOGIN_SUBJECT)
+    principal = await resolve_key_principal(body.key, settings, get_auth_service(request))
+    if principal is None:
+        throttle.record_failure(ip, _API_KEY_LOGIN_SUBJECT)
+        record_auth_failure("invalid_api_key")
+        raise HTTPException(status_code=401, detail={"code": "INVALID_API_KEY", "message": "Invalid API key."})
+    throttle.record_success(ip, _API_KEY_LOGIN_SUBJECT)
+    response.set_cookie(
+        settings.cookie_name,
+        body.key.strip(),
+        max_age=int(settings.remember_lifetime.total_seconds()) if body.remember else None,
+        path=cookie_path(request),
+        secure=cookie_secure(request, settings),
+        httponly=True,
+        samesite="strict",
+    )
+    response.headers.update(_NO_STORE)
+    logger.info("A browser signed in with API key %s.", principal.actor)
+    principal = dataclasses.replace(principal, browser_key=True, csrf_token=browser_key_csrf_token(body.key.strip()))
+    return _me(principal, settings)
+
+
 @router.post("/logout", status_code=204)
 async def logout(request: Request):
     """Revoke the current session server-side and clear the cookie."""
@@ -467,6 +530,9 @@ class AuthProviders(BaseModel):
 
     mode: str
     password: bool
+    api_key: bool = Field(
+        default=False, description="The form asks for an API key (API_AUTH_MODE=api_key, field report F-09)."
+    )
     sso: SsoProvider | None = None
 
 
@@ -480,7 +546,9 @@ async def providers(response: Response):
         sso = SsoProvider(kind="oidc", name=settings.oidc_provider_name, login_path="/auth/oidc/login")
     elif settings.proxy_enabled:
         sso = SsoProvider(kind="proxy", name="your authentication proxy")
-    return AuthProviders(mode=settings.mode, password=settings.password_login_enabled, sso=sso)
+    return AuthProviders(
+        mode=settings.mode, password=settings.password_login_enabled, api_key=settings.mode == "api_key", sso=sso
+    )
 
 
 def _oidc_cookie_name(settings: AuthSettings) -> str:

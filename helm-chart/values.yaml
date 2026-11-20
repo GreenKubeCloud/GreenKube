@@ -384,7 +384,7 @@ config:
   environment: production
   # session (default): sign in to the UI with a username and password
   # (server-side sessions); machines use scoped API keys (Bearer gk_...).
-  # api_key: Bearer API keys only, no browser sign-in.
+  # api_key: API keys only; the UI signs in with a key, there are no user accounts.
   # proxy: single sign-on through an authentication proxy (oauth2-proxy,
   # Authentik, Pomerium) whose identity headers are trusted only from
   # config.trustedProxyIps (required). oidc: native OpenID Connect sign-in
