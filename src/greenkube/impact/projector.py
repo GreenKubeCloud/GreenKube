@@ -161,9 +161,11 @@ def sample_from_metric(metric: Any, ref: WorkloadRef, default_hours: float) -> R
         return float(value)
 
     total_cost = _cost("total_cost")
+    hours = row_hours(metric, default_hours)
+    split_hours, unsplit_total = _cost_split_coverage(metric, hours)
     return ResourceSample(
         ref=ref,
-        hours=row_hours(metric, default_hours),
+        hours=hours,
         cpu_request_cores=max(_cores(getattr(metric, "cpu_request", 0)) or 0.0, 0.0),
         cpu_usage_cores=_cores(getattr(metric, "cpu_usage_millicores", None)),
         mem_request_gib=max(_gib(getattr(metric, "memory_request", 0)) or 0.0, 0.0),
@@ -179,8 +181,32 @@ def sample_from_metric(metric: Any, ref: WorkloadRef, default_hours: float) -> R
         observed_cost_network=_cost("cost_network"),
         observed_cost_lb=_cost("cost_lb"),
         observed_cost_source=getattr(metric, "cost_source", None),
+        observed_cost_split_hours=split_hours,
+        observed_cost_unsplit_total=unsplit_total,
         gpu_watts=_positive(getattr(metric, "gpu_power_watts", None)),
     )
+
+
+def _cost_split_coverage(metric: Any, hours: float) -> Tuple[Optional[float], Optional[float]]:
+    """Hours of an aggregated row that carry a CPU/RAM cost split, and the total of the others (F-03).
+
+    Returns ``(None, None)`` when the row says nothing about it (raw rows) or
+    when the split covers the whole row, so such samples keep the per-sample
+    pricing rules unchanged.
+    """
+    split_seconds = getattr(metric, "cost_split_duration_seconds", None)
+    duration = getattr(metric, "duration_seconds", None)
+    if not isinstance(split_seconds, (int, float)) or isinstance(split_seconds, bool):
+        return None, None
+    if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0:
+        return None, None
+    share = min(max(float(split_seconds) / float(duration), 0.0), 1.0)
+    unsplit_total = getattr(metric, "cost_unsplit_total", None)
+    unsplit = float(unsplit_total) if isinstance(unsplit_total, (int, float)) and unsplit_total > 0 else 0.0
+    if share >= 1.0 or share <= 0.0:
+        # Fully split, or fully unsplit (the components are then None anyway).
+        return None, None
+    return hours * share, unsplit
 
 
 def _utc(value: Any) -> Optional[datetime]:

@@ -1,6 +1,6 @@
 # Impact Model v1 — methodology
 
-**Model version:** `3.0.0` (`greenkube.impact.IMPACT_MODEL_VERSION`) · **Code:** `src/greenkube/impact/` · **Roadmap:** B1–B6, B8
+**Model version:** `4.0.0` (`greenkube.impact.IMPACT_MODEL_VERSION`) · **Code:** `src/greenkube/impact/` · **Roadmap:** B1–B6, B8
 
 The Impact Model is the single set of formulas GreenKube uses to say what a workload **is charged** (allocated cost and allocated CO₂e), what it **draws** (energy), and what a proposed change **releases**. Recommendation projections and the metric rows collection stores both come from it, so a projection and its later measurement are computed the same way.
 
@@ -12,6 +12,7 @@ This page is the reference for code review. When a formula below changes the num
 | `1.1.0` | Memory power (`MemoryPowerModel`) and GPU power (`GpuPowerModel`), allocated and projected. Stored rows carry the version that allocated them. |
 | `2.0.0` | Projections are annualized over the target's [observed coverage](#annualization-and-observed-coverage) instead of the whole lookback, with a minimum coverage and a short-coverage note. Projected CO₂e is reported by [component](#co2e-components-and-component-matched-comparison) (operational energy, idle share, embodied) with the value a measurement is compared with. Allocation is unchanged. |
 | `3.0.0` | Workload deletions take the pool's [realization factor](#realization-factor) for their reserved parts (IMP-05): per-asset costs (storage, LoadBalancer, network) and the usage-based CO₂e (dynamic CPU and GPU power) are saved whole, the rest at the factor; `co2e_expected_breakdown_annual_g` reports the expected CO₂e per component. `capacity_released` gains `storage_gib` and `load_balancers` (asset deletions). Allocation is unchanged: re-allocating stored rows (`greenkube recompute`) gives the same values. Recommendations are re-projected at the next scan; stored projections keep the version that made them. |
+| `4.0.0` | A baseline that mixes hours with a CPU/RAM cost split and hours with a total only (hours re-aggregated from 0.3.x rows, F-03) prices each component over the hours that carry it and [apportions](#anchoring-to-the-observed-cost) the total of the other hours. Before, the split cost was spread over every hour of the window, so projected cost savings were up to several hundred times too low during the 14 days after an upgrade from 0.3.x. `assumptions.unsplit_cost_hours_share` records the share of observed hours whose cost was apportioned. Allocation is unchanged: re-allocating stored rows (`greenkube recompute`) gives the same values. Recommendations are re-projected at the next scan; stored projections keep the version that made them. |
 
 ## Status of this version
 
@@ -180,7 +181,7 @@ The tier is recorded with every projection (`assumptions.unit_prices[].source` a
 
 | Tier | `source` | How the price is obtained | Confidence |
 |---|---|---|---|
-| 0. Observed, per sample | `opencost` / `opencost_derived` / `kubecost` (the row's `cost_source`) | The sample's observed cost divided by its reserved quantity (below). `detail` is `observed_components` or `observed_total_apportioned`. | 0.9, or 0.8 when apportioned from a total |
+| 0. Observed, per sample | `opencost` / `opencost_derived` / `kubecost` (the row's `cost_source`) | The sample's observed cost divided by its reserved quantity (below). `detail` is `observed_components`, `observed_total_apportioned`, or `observed_components_partly_apportioned`. | 0.9, or 0.8 when apportioned from a total |
 | 1. Observed, per node | `opencost` / `kubecost` | `Σ cost_cpu / Σ reserved core-hours` and `Σ cost_ram / Σ reserved GiB-hours` over the node's metric rows. Both resources must be observed with positive values. | 0.9 |
 | 2. Pricing catalog | `pricing_catalog` | On-demand list price of the node's instance type in its region, split between CPU and RAM with the OpenCost ratio (below). | 0.75 |
 | 3a. Custom rates | `custom_rate` (`configured`) | `IMPACT_PRICING_CPU_CORE_HOUR` and `IMPACT_PRICING_RAM_GIB_HOUR`. | 0.7 |
@@ -223,6 +224,7 @@ No observed cost:             p_cpu(s) = p_cpu(node)             p_ram(s) = p_ra
 
 - The second case is OpenCost's apportioning applied to the container's total. It is the common case today: OpenCost metric rows carry `total_cost` only. When one component is observed and the other is not, only the unsplit remainder of the total is apportioned to the missing one.
 - A component split larger than the total is scaled down to the total.
+- A baseline row aggregates many hours. When only some of them carry the CPU/RAM split (after an upgrade from 0.3.x, the hours re-aggregated from 0.3.x rows carry `total_cost` only), `cost_cpu` and `cost_ram` are the costs of the split hours `h_split`, and the total of the other hours `total_unsplit` is apportioned over their reserved quantities like the second case: `p_cpu(s) = (cost_cpu_s + total_unsplit × w'_cpu / (w'_cpu + w'_mem)) / q_cpu`, with `w'` computed over the unsplit hours only. `detail` is then `observed_components_partly_apportioned` (confidence at most 0.8), and `assumptions.unsplit_cost_hours_share` gives the share of the observed hours whose cost had no split (these hours and the samples with a total only).
 - In both observed cases, the cost of the sample's CPU and RAM reservation is at most its observed total. A CPU cut and a memory cut on the same container therefore never project more than the container's observed cost, which is also the [workload deletion](#workload-deletion-zombie-pods-idle-namespaces) projection of that container (BUG-15).
 - Rows without cost have `total_cost = 0` (`DEFAULT_COST`), and negative OpenCost costs are ignored, so these samples use the node prices.
 - A `cost_source` label outside the known sources (for example `mixed` on hourly aggregates) is treated as `opencost` and kept in `assumptions.observed_cost_sources` (and in the node price `detail`, e.g. `observed:mixed`).

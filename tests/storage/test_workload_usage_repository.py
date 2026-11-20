@@ -793,3 +793,69 @@ async def test_config_since_is_the_start_of_the_last_hour_with_other_requests_on
         web = summaries[("shop", "Deployment", "api")]["web"]
         assert web.memory_config_since == start + timedelta(hours=1)
         assert web.resources_config_since == start + timedelta(hours=3)
+
+
+def _unit_prices(rows: list[BaselineMetric]) -> tuple[float, float]:
+    """Reserved CPU and RAM unit prices the Impact Model derives from baseline rows."""
+    from greenkube.impact.model import sample_prices
+    from greenkube.impact.projector import sample_from_metric
+    from greenkube.impact.types import NodeImpactProfile, UnitPrices, WorkloadRef
+    from greenkube.models.provenance import CostSource
+
+    # The node's CPU/RAM price ratio matches the observed split (2:1 per core-hour and GiB-hour).
+    node = NodeImpactProfile(
+        name="node-a",
+        cpu_capacity_cores=4,
+        mem_capacity_gib=16,
+        idle_watts=10,
+        max_watts=50,
+        embodied_g_per_hour=0,
+        prices=UnitPrices(0.02, 0.01, "USD", CostSource.PRICING_CATALOG),
+        pue=1.2,
+        grid_intensity_g_per_kwh=100,
+    )
+    ref = WorkloadRef("c", "shop", "Deployment", "api", "")
+    cpu_cost = cpu_hours = ram_cost = ram_hours = 0.0
+    for row in rows:
+        sample = sample_from_metric(row, ref, 1.0)
+        prices = sample_prices(sample, node, "USD")
+        assert prices.observed
+        cpu_cost += prices.cpu_reserved_core_hour * sample.cpu_reserved_cores * sample.hours
+        cpu_hours += sample.cpu_reserved_cores * sample.hours
+        ram_cost += prices.ram_reserved_gib_hour * sample.mem_reserved_gib * sample.hours
+        ram_hours += sample.mem_reserved_gib * sample.hours
+    return cpu_cost / cpu_hours, ram_cost / ram_hours
+
+
+async def test_baseline_mixing_split_and_unsplit_hours_keeps_the_split_unit_prices(db):
+    """F-03: hours re-aggregated from 0.3.x rows carry only ``total_cost``.
+
+    A lookback that mixes them with split hours must give the unit prices of
+    the split hours alone (within 1 %), not dilute the CPU and RAM cost over
+    every hour of the window.
+    """
+    start = _base_hour() - timedelta(days=1)
+    rows = []
+    for day in range(2):
+        for step in range(12):
+            ts = start + timedelta(days=day, minutes=5 * step)
+            if day == 0:
+                rows.append(_row(ts, total_cost=0.009, cost_cpu=None, cost_ram=None))
+            else:
+                rows.append(_row(ts, total_cost=0.009, cost_cpu=0.006, cost_ram=0.003))
+    repository, _ = await _rolled(db, rows, start, hours=25)
+
+    split_window = (start + timedelta(days=1), start + timedelta(days=1, hours=1))
+    snapshot = await repository.read_usage_snapshot(*split_window)
+    split_pods, _ = await repository.read_baseline_rows(*split_window, snapshot=snapshot)
+    mixed_window = (start, start + timedelta(days=1, hours=1))
+    snapshot = await repository.read_usage_snapshot(*mixed_window)
+    mixed_pods, _ = await repository.read_baseline_rows(*mixed_window, snapshot=snapshot)
+
+    split_cpu, split_ram = _unit_prices(split_pods)
+    mixed_cpu, mixed_ram = _unit_prices(mixed_pods)
+    # 0.006 USD per 5 minutes for 0.5 core, 0.003 USD for 0.5 GiB.
+    assert split_cpu == pytest.approx(0.144, rel=1e-3)
+    assert split_ram == pytest.approx(0.072, rel=1e-3)
+    assert mixed_cpu == pytest.approx(split_cpu, rel=0.01)
+    assert mixed_ram == pytest.approx(split_ram, rel=0.01)

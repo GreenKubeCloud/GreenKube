@@ -243,6 +243,26 @@ class TestContainerRequestProperties:
         assert (prices["source"], prices["detail"]) == ("opencost", "observed_total_apportioned")
         assert delta.assumptions["observed_cost_sources"] == {"opencost": 1}
 
+    def test_partly_split_aggregate_prices_components_over_their_own_hours(self):
+        """F-03: a split covering 1 of 4 hours is not spread over the 4; the unsplit total is apportioned."""
+        node, pool = _profile()
+        # 1 split hour (CPU 0.08, RAM 0.04) and 3 hours with a total only (0.36).
+        sample = replace(
+            _sample(2, 0.1, 8, 1, hours=4.0, cost_total=0.48, cost_cpu=0.08, cost_ram=0.04),
+            observed_cost_split_hours=1.0,
+            observed_cost_unsplit_total=0.36,
+        )
+        delta = MODEL.project(_baseline([sample], 4.0), ContainerResourceChange(cpu_request_cores=(2, 1)), pool)
+        cpu_weight = 2 * node.prices.cpu_core_hour
+        ram_weight = 8 * node.prices.ram_gib_hour
+        unsplit_cpu = 0.36 * cpu_weight / (cpu_weight + ram_weight)
+        (prices,) = delta.assumptions["unit_prices"]
+        assert prices["detail"] == "observed_components_partly_apportioned"
+        assert prices["cpu_core_hour"] == pytest.approx((0.08 + unsplit_cpu) / (2 * 4))
+        assert prices["ram_gib_hour"] == pytest.approx((0.04 + 0.36 - unsplit_cpu) / (8 * 4))
+        assert delta.assumptions["unsplit_cost_hours_share"] == pytest.approx(0.75)
+        assert delta.confidence == pytest.approx(0.8)
+
     def test_unknown_observed_cost_source_is_recorded(self):
         _, pool = _profile()
         sample = replace(_sample(2, 0.1, 8, 1, cost_total=0.5), observed_cost_source="mixed")

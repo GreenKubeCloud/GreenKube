@@ -62,6 +62,11 @@ OBSERVED_COMPONENTS = "observed_components"
 #: ``detail`` of observed prices apportioned from a sample's total cost.
 OBSERVED_TOTAL_APPORTIONED = "observed_total_apportioned"
 
+#: ``detail`` of observed prices taken from a CPU and RAM cost split that covers
+#: only part of the sample's hours; the total of the other hours (re-aggregated
+#: from 0.3.x rows, F-03) is apportioned.
+OBSERVED_COMPONENTS_PARTLY_APPORTIONED = "observed_components_partly_apportioned"
+
 #: Unit prices listed in ``assumptions`` are capped to keep payloads small.
 MAX_LISTED_PRICES = 10
 
@@ -116,6 +121,9 @@ class SamplePrices:
     observed: bool
     #: ``cost_source`` label that is not a known :class:`CostSource` (kept for provenance).
     raw_source: Optional[str] = None
+    #: Hours of the sample whose observed cost had no CPU/RAM split at all and
+    #: was apportioned at the node's price ratio (F-03).
+    unsplit_hours: float = 0.0
 
 
 def observed_cost_breakdown(sample: ResourceSample) -> Optional[CostBreakdown]:
@@ -149,6 +157,10 @@ def sample_prices(sample: ResourceSample, node: NodeImpactProfile, currency: str
     2. The sample has only an observed total (OpenCost ``totalCost`` today):
        the unsplit total is apportioned to the resources without an observed
        cost, weighted by their modeled cost at the node's unit prices.
+       An aggregate whose split covers only some of its hours (hours
+       re-aggregated from 0.3.x rows carry a total only, F-03) prices each
+       component over the hours that carry it, and apportions the total of
+       the other hours the same way.
     3. No observed cost: the node's unit prices (catalog or custom rates).
 
     Under 1 and 2 the CPU and RAM cost of a sample never exceeds its observed
@@ -174,22 +186,49 @@ def sample_prices(sample: ResourceSample, node: NodeImpactProfile, currency: str
 
     cpu_known = sample.observed_cost_cpu is not None
     ram_known = sample.observed_cost_ram is not None
-    cpu_cost = observed.cpu if cpu_known else 0.0
-    ram_cost = observed.ram if ram_known else 0.0
     source, raw_source = parse_cost_source(sample.observed_cost_source)
     confidence = PRICE_CONFIDENCE.get(source, DEFAULT_RATE_CONFIDENCE)
-    detail = OBSERVED_COMPONENTS
-    if not (cpu_known and ram_known):
-        # OpenCost apportioning: split what the source left unsplit by the
-        # modeled cost of each resource at the node's unit prices.
-        cpu_weight = 0.0 if cpu_known else cpu_quantity * node_cpu
-        ram_weight = 0.0 if ram_known else mem_quantity * node_ram
-        weight = cpu_weight + ram_weight
-        if weight > 0:
-            cpu_cost += observed.other * cpu_weight / weight
-            ram_cost += observed.other * ram_weight / weight
-        detail = OBSERVED_TOTAL_APPORTIONED
+    split_hours = sample.observed_cost_split_hours
+    unsplit_hours = 0.0
+    if split_hours is not None and (cpu_known or ram_known) and split_hours < hours:
+        # F-03: the CPU/RAM split covers only ``split_hours`` (the others were
+        # re-aggregated from 0.3.x rows with a total only). Each component is
+        # priced over the hours that carry it, and the total of the unsplit
+        # hours is apportioned like a sample with a total only.
+        split_hours = max(split_hours, 0.0)
+        unsplit_hours = hours - split_hours
+        unsplit_total = min(max(sample.observed_cost_unsplit_total or 0.0, 0.0), observed.other)
+        cpu_cost, ram_cost, apportioned = _observed_cpu_ram_cost(
+            observed.cpu if cpu_known else None,
+            observed.ram if ram_known else None,
+            observed.other - unsplit_total,
+            sample.cpu_reserved_cores * split_hours * node_cpu,
+            sample.mem_reserved_gib * split_hours * node_ram,
+        )
+        unsplit_cpu, unsplit_ram, _ = _observed_cpu_ram_cost(
+            None,
+            None,
+            unsplit_total,
+            sample.cpu_reserved_cores * unsplit_hours * node_cpu,
+            sample.mem_reserved_gib * unsplit_hours * node_ram,
+        )
+        cpu_cost += unsplit_cpu
+        ram_cost += unsplit_ram
+        detail = OBSERVED_COMPONENTS_PARTLY_APPORTIONED
         confidence = min(confidence, APPORTIONED_CONFIDENCE)
+    else:
+        cpu_cost, ram_cost, apportioned = _observed_cpu_ram_cost(
+            observed.cpu if cpu_known else None,
+            observed.ram if ram_known else None,
+            observed.other,
+            cpu_quantity * node_cpu,
+            mem_quantity * node_ram,
+        )
+        detail = OBSERVED_TOTAL_APPORTIONED if apportioned else OBSERVED_COMPONENTS
+        if not (cpu_known or ram_known):
+            unsplit_hours = hours
+        if apportioned:
+            confidence = min(confidence, APPORTIONED_CONFIDENCE)
     return SamplePrices(
         cpu_reserved_core_hour=cpu_cost / cpu_quantity if cpu_quantity > 0 else 0.0,
         ram_reserved_gib_hour=ram_cost / mem_quantity if mem_quantity > 0 else 0.0,
@@ -199,7 +238,35 @@ def sample_prices(sample: ResourceSample, node: NodeImpactProfile, currency: str
         confidence=confidence,
         observed=True,
         raw_source=raw_source,
+        unsplit_hours=unsplit_hours,
     )
+
+
+def _observed_cpu_ram_cost(
+    cpu: Optional[float],
+    ram: Optional[float],
+    unsplit: float,
+    cpu_weight: float,
+    ram_weight: float,
+) -> Tuple[float, float, bool]:
+    """CPU and RAM cost of observed components, with ``unsplit`` cost apportioned to the unknown ones.
+
+    ``cpu`` or ``ram`` is None when the source did not split it; the unsplit
+    cost then goes to the unknown components, weighted by their modeled cost
+    at the node's unit prices (``cpu_weight``, ``ram_weight``), as OpenCost
+    apportions. Returns ``(cpu_cost, ram_cost, apportioned)``.
+    """
+    if cpu is not None and ram is not None:
+        return cpu, ram, False
+    cpu_cost = cpu if cpu is not None else 0.0
+    ram_cost = ram if ram is not None else 0.0
+    cpu_weight = 0.0 if cpu is not None else cpu_weight
+    ram_weight = 0.0 if ram is not None else ram_weight
+    weight = cpu_weight + ram_weight
+    if weight > 0 and unsplit > 0:
+        cpu_cost += unsplit * cpu_weight / weight
+        ram_cost += unsplit * ram_weight / weight
+    return cpu_cost, ram_cost, True
 
 
 @dataclass
@@ -232,6 +299,9 @@ class _Accumulator:
     observed_prices: Dict[Tuple[str, str, str], _PriceTally] = field(default_factory=dict)
     currencies: set = field(default_factory=set)
     observed_cost_sources: Counter = field(default_factory=Counter)
+    #: Observed hours, and those whose cost had no CPU/RAM split (F-03).
+    observed_hours: float = 0.0
+    unsplit_cost_hours: float = 0.0
 
     def track(
         self,
@@ -253,6 +323,8 @@ class _Accumulator:
             self.priced_nodes.setdefault(node.name, node)
             return
         self.observed_cost_sources[prices.raw_source or prices.source.value] += 1
+        self.observed_hours += weight
+        self.unsplit_cost_hours += min(max(prices.unsplit_hours, 0.0), weight)
         tally = self.observed_prices.setdefault((prices.source.value, prices.detail, prices.currency), _PriceTally())
         cpu_quantity = sample.cpu_reserved_cores * weight
         mem_quantity = sample.mem_reserved_gib * weight
@@ -689,6 +761,10 @@ class ReservationAwareImpactModel:
             assumptions["unknown_node_profile"] = True
         if acc.observed_cost_sources:
             assumptions["observed_cost_sources"] = dict(acc.observed_cost_sources)
+        if acc.unsplit_cost_hours > 0 and acc.observed_hours > 0:
+            # Share of the observed hours whose cost had no CPU/RAM split and
+            # was apportioned at the node's price ratio (F-03).
+            assumptions["unsplit_cost_hours_share"] = round(acc.unsplit_cost_hours / acc.observed_hours, 4)
         if currency == "mixed":
             assumptions["currencies"] = currencies
 

@@ -348,6 +348,15 @@ def node_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: Opt
 
 _HOD = f"CASE WHEN container_name = '{POD_LEVEL}' THEN hour_of_day ELSE -1 END"
 
+#: Coverage of the CPU/RAM cost split in an aggregated row (F-03). Hours
+#: re-aggregated from 0.3.x rows carry only ``total_cost``: ``SUM(cost_cpu)``
+#: covers the split hours alone, so its duration and the total cost of the
+#: unsplit hours travel with the row for the Impact Model to price each part.
+_COST_SPLIT_COLUMNS = """SUM(CASE WHEN cost_cpu IS NOT NULL OR cost_ram IS NOT NULL
+                THEN COALESCE(duration_seconds, 0) ELSE 0 END) AS cost_split_seconds,
+            SUM(CASE WHEN cost_cpu IS NULL AND cost_ram IS NULL
+                THEN COALESCE(total_cost, 0) ELSE 0 END) AS cost_unsplit_total"""
+
 
 def baseline_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: Optional[Sequence[str]] = None) -> str:
     """Rows aggregated for projections: pod level by hour of day, containers without it."""
@@ -368,6 +377,7 @@ def baseline_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces:
             SUM(total_cost) AS total_cost,
             SUM(cost_cpu) AS cost_cpu,
             SUM(cost_ram) AS cost_ram,
+            {_COST_SPLIT_COLUMNS},
             SUM(cost_storage) AS cost_storage,
             SUM(cost_network) AS cost_network,
             SUM(cost_lb) AS cost_lb,
@@ -553,6 +563,8 @@ def baseline_from_row(
         "total_cost": float(row["total_cost"] or 0.0),
         "cost_cpu": _f(row["cost_cpu"]),
         "cost_ram": _f(row["cost_ram"]),
+        "cost_split_duration_seconds": _f(row["cost_split_seconds"]),
+        "cost_unsplit_total": _f(row["cost_unsplit_total"]),
         "cost_storage": _f(row["cost_storage"]),
         "cost_network": _f(row["cost_network"]),
         "cost_lb": _f(row["cost_lb"]),

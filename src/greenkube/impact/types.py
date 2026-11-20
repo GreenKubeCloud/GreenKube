@@ -24,8 +24,10 @@ from greenkube.models.provenance import CostSource, PowerSource
 #: added and existing components keep their values (1.1.0: memory and GPU power,
 #: 2.0.0: projections annualize over the target's observed coverage, 3.0.0: workload
 #: deletions take the pool's realization factor for their reserved parts, IMP-05, and
-#: ``capacity_released`` gains ``storage_gib`` and ``load_balancers``; allocations are unchanged).
-IMPACT_MODEL_VERSION = "3.0.0"
+#: ``capacity_released`` gains ``storage_gib`` and ``load_balancers``; allocations are unchanged,
+#: 4.0.0: a baseline mixing split and unsplit cost hours prices each CPU/RAM component over the
+#: hours that carry it and apportions the rest, F-03; allocations are unchanged).
+IMPACT_MODEL_VERSION = "4.0.0"
 
 #: Name of the synthetic workload that receives unreserved node capacity.
 IDLE_WORKLOAD_NAME = "__idle__"
@@ -371,6 +373,13 @@ class ResourceSample:
     observed_cost_network: Optional[float] = None
     observed_cost_lb: Optional[float] = None
     observed_cost_source: Optional[str] = None
+    #: Hours of the sample whose observed cost carries the CPU/RAM split, when
+    #: only part of it does (an aggregate mixing split hours and hours
+    #: re-aggregated from 0.3.x rows, F-03). None: the split, when present,
+    #: covers every hour of the sample.
+    observed_cost_split_hours: Optional[float] = None
+    #: Observed ``total_cost`` of the hours without a CPU/RAM split.
+    observed_cost_unsplit_total: Optional[float] = None
     #: GPU power attributed to the sample by DCGM (average W over ``hours``).
     gpu_watts: Optional[float] = None
 
