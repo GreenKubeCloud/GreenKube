@@ -22,7 +22,7 @@ from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 from greenkube.verify.model import TimeWindow
-from greenkube.verify.series import hourly_buckets
+from greenkube.verify.series import MIN_HOUR_COVERAGE, hourly_buckets
 
 H0 = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
 STEP = 300
@@ -166,3 +166,47 @@ async def test_random_contiguous_pod_lifetimes_give_the_same_buckets(db, seed):
             # The trusted share of each pod is extrapolated over its lifetime: exact when the
             # untrusted samples carry the pod's trusted rate, close otherwise.
             assert after.cost_coverage == pytest.approx(before.cost_coverage, abs=0.1)
+
+
+def _rollup_row(hour: datetime, *, untrusted_samples: int) -> CombinedMetric:
+    """One pod-hour as the compressor stores it: 12 samples at 0.001, ``untrusted_samples`` of them custom-rate."""
+    trusted = 12 - untrusted_samples
+    return CombinedMetric(
+        pod_name="api",
+        namespace="prod",
+        owner_kind="Deployment",
+        owner_name="api",
+        timestamp=hour,
+        duration_seconds=12 * STEP,
+        sample_count=12,
+        first_sample_at=hour,
+        last_sample_at=hour + timedelta(seconds=11 * STEP),
+        total_cost=0.001 * trusted + 0.5 * untrusted_samples,
+        cost_cpu=0.00075 * 12,
+        cost_ram=0.00025 * 12,
+        cost_source="mixed" if untrusted_samples else "opencost",
+        trusted_cost=0.001 * trusted,
+        trusted_cost_cpu=0.00075 * trusted,
+        trusted_cost_ram=0.00025 * trusted,
+        trusted_cost_seconds=float(trusted * STEP),
+        usage_source="prometheus",
+        cpu_request=500,
+        memory_request=512 * 1024**2,
+        cpu_usage_millicores=100,
+        joules=120.0,
+        co2e_grams=12.0,
+    )
+
+
+def test_a_week_with_one_untrusted_sample_in_30_percent_of_hours_keeps_its_coverage():
+    """MEA-05 acceptance 2: hourly rows of 7 days, one custom-rate sample in 30% of the hours."""
+    rng = random.Random(7)
+    hours = [H0 + timedelta(hours=index) for index in range(7 * 24)]
+    tainted = set(rng.sample(range(len(hours)), k=round(0.3 * len(hours))))
+    rows = [_rollup_row(hour, untrusted_samples=1 if index in tainted else 0) for index, hour in enumerate(hours)]
+    buckets = hourly_buckets(rows, TimeWindow(start=hours[0], end=hours[-1] + timedelta(hours=1)), STEP)
+    assert len(buckets) == len(hours)
+    costed = [bucket for bucket in buckets if bucket.cost is not None and bucket.cost_coverage >= MIN_HOUR_COVERAGE]
+    assert len(costed) / len(hours) >= 0.97
+    assert sum(bucket.cost_coverage for bucket in buckets) / len(hours) >= 0.97
+    assert all(bucket.cost == pytest.approx(0.012) for bucket in costed)
