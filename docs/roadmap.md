@@ -5,12 +5,13 @@
 > **Inputs:**
 > - the data-quality audit, [`docs/reviews/data-quality-audit.md`](reviews/data-quality-audit.md): mechanism, evidence and fix of every finding cited here;
 > - the first field test on a real cluster (kubeadm 1.34, 3 control planes and 4 workers, Cilium, Argo CD, self-hosted GitLab, OpenCost, then VPA and KRR), 2026-11-16: issues F-01 to F-13 below;
-> - the maintainer's direction of 2026-11-20: focus the product on what creates value, and make GreenKube light.
+> - the maintainer's direction of 2026-11-20: focus the product on what creates value, and make GreenKube light;
+> - the maintainer's decisions of 2026-11-20 on the scope table (section 9): connectors and advisory analyzers go, orphaned LoadBalancer and PersistentVolume detection stays, carbon stays as it is, PostgreSQL becomes the only database, and lightness must not cost useful granularity.
 
 ## 0. How to use this roadmap
 
 - **Phases** run in order: A (make the core loop work on a real cluster), B (cut the scope), C (make it light), D (finish the audit work that still applies), E (prove and release). Inside a phase, tasks marked with the same **lane** touch the same files and run one after the other; different lanes can run in parallel.
-- **Every task is test-first.** Write the regression or acceptance test from the task text, see it fail on `dev`, then change the code. A task is done when its acceptance passes, the gates pass on SQLite and PostgreSQL, and the docs and changelog fragment are updated.
+- **Every task is test-first.** Write the regression or acceptance test from the task text, see it fail on `dev`, then change the code. A task is done when its acceptance passes, the gates of section 10 pass, and the docs and changelog fragment are updated.
 - **Removal tasks** (phase B) follow one procedure, described in B.0. Never remove a database table, a setting or an API route without that procedure.
 - Finding IDs (`COL-01`, `MEA-08`...) point to the audit. Field-test IDs (`F-01`...) point to section 4. The appendix lists every audit finding with its current status.
 
@@ -78,13 +79,13 @@ Everything else is either a dimension of those numbers (cost, carbon, capacity),
 | VPA source (includes Goldilocks) | **Keep, fix F-12** | The most common open-source recommender. Used as a corroborating vote, never alone. |
 | KRR source | **Keep, fix F-12**; drop the chart CronJob, document a push example instead | Common, but its floors must not win. The CronJob is weight in the chart. |
 | Push API (signal schema) | **Keep** | The open door for any other tool, at no maintenance cost per tool. |
-| Kubecost, GKE recommender, Azure Advisor, Polaris, replay connectors | **Remove** (about 2,100 lines) | Commercial or cloud-specific APIs that change often; Polaris gives hygiene findings, not sizes. Users can push signals instead. |
-| Native analyzers: zombie pods, idle namespaces, off-peak scaling, autoscaling candidates, carbon-aware scheduling, node over/under-provisioning, Karpenter NodePool heuristic | **Remove** (about 1,300 lines plus collectors) | Advisory only, not deliverable as a PR, not measurable, noisy (audit REC-09/10/11/14/16, field F-04). |
-| Orphaned LoadBalancer and PersistentVolume deletion (analyzers, delete action, deletion safety and re-check, deletion measurement) | **Remove for now** (about 1,100 lines) | Highest-risk change kind (a Cilium Gateway LB was once wrongly flagged), and its saving cannot be measured from pod metrics (MEA-15). It can return later as a separate, opt-in feature. |
-| Collectors for the removed features: Karpenter, Cluster Autoscaler, HPA, LB, PV, deletion candidates, Wattnet, DCGM GPU (about 2,100 lines) | **Remove** | No remaining consumer. The realization factor keeps a simple configured value (`IMPACT_AUTOSCALER_HINT`) instead of autoscaler discovery. |
-| Collected dimensions: network, disk I/O, ephemeral storage, PVC usage | **Remove** | Not used by rightsizing or measurement. Removing them cuts the PromQL queries per collection chunk and the row width (audit COL-13, COL-14, COL-19 become moot). |
+| Kubecost, GKE recommender, Azure Advisor, Polaris, replay connectors | **Remove** (about 2,100 lines; decided) | Commercial or cloud-specific APIs that change often; Polaris gives hygiene findings, not sizes. Users can push signals instead. |
+| Native analyzers: zombie pods, idle namespaces, off-peak scaling, autoscaling candidates, carbon-aware scheduling, node over/under-provisioning, Karpenter NodePool heuristic | **Remove** (about 1,300 lines; decided) | Advisory only, not deliverable as a PR, not measurable, noisy (audit REC-09/10/11/14/16, field F-04). |
+| Orphaned LoadBalancer and PersistentVolume detection (analyzers, delete action, deletion safety and re-check, deletion measurement) | **Keep, harden** (decided) | Cheap to run, simple to detect, and an immediate saving. Hardening in B.2: no false positive on Gateway or ingress-controller LoadBalancers, an on-premises price for volumes (IMP-11), and a realized amount read from cost data, not restated from the projection (MEA-15). |
+| Collectors: Karpenter, Cluster Autoscaler and HPA (realization factor), LB, PV and deletion candidates (orphan detection), Wattnet and DCGM (carbon) | **Keep** | Each still has a consumer. |
+| Collected dimensions: network, disk I/O, ephemeral storage, PVC usage | **Remove** | Not used by rightsizing, measurement or orphan detection (which reads PV and claim status, not usage). Removing them cuts the PromQL queries per collection chunk and the row width (audit COL-13, COL-14, COL-19 become moot). |
 | Cost: OpenCost, then bundled list prices, then configured rates | **Keep** | Unchanged. |
-| Carbon | **Simplify** | CO2e stays a dimension of every number, computed as energy × intensity × PUE. Energy comes from per-vCPU and per-GiB coefficients (CCF), using a node's capacity. Intensity comes from Electricity Maps when a token is set, else a bundled annual zone average. Embodied emissions come from bundled per-vCPU coefficients, not from live Boavizta calls. Remove Wattnet, the Boavizta collector, DCGM and GPU power. |
+| Carbon | **Keep as it is** (decided) | CO2e stays a dimension of every number. The current model stays: Electricity Maps, Wattnet, Boavizta (embodied and per-instance power), DCGM GPU power. Only the audit fixes apply (A.0 `fix/energy-carbon`, open NRG findings in phase D). |
 | Released capacity | **Keep** | The on-premises answer. |
 | Change measurement and ledger v2 (hash chain, CSV export) | **Keep** | The product. |
 | Legacy (v1) verifier and v1 ledger tables | **Remove** once their data is migrated (C.5) | Two systems for one job. |
@@ -95,14 +96,16 @@ Everything else is either a dimension of those numbers (cost, carbon, capacity),
 | GitOps: Argo CD, Flux; raw, Kustomize, local and remote Helm, Flux HelmRelease | **Keep, fix F-02 and F-11** | This is where real repositories break (F-02, F-11); it deserves the effort. |
 | Auth: sessions, API keys, OIDC, proxy headers, roles | **Keep, fix F-09** | Small and needed. |
 | UI: Overview (savings statement), Recommendations, Changes, Ledger, Sources, Setup, Settings | **Keep** | |
-| UI: Footprint pages (nodes, report), sustainability score, the large Grafana dashboard | **Remove** | Visibility features from the old positioning. Keep a small operations dashboard on the Prometheus metrics. |
-| Demo | **Keep**, built on the same code path | Adoption needs it. It must not keep a second storage dialect alive (see C.4). |
+| UI: Footprint pages (nodes, report) | **Keep** | With carbon kept as it is, cost and CO2e visibility per node and namespace stays useful. |
+| UI: sustainability score, the large Grafana dashboard | **Remove** | The score has no defined method (API-06). Keep a small operations dashboard on the Prometheus metrics. |
+| Demo | **Keep**, built on the same code path | Adoption needs it. It runs on PostgreSQL (C.4). |
+| Storage: PostgreSQL and SQLite | **PostgreSQL only** (decided) | One dialect to keep correct; managed databases and HA. SQLite goes (C.4). |
 
 **Expected effect** (an estimate to confirm while doing phase B):
-- about 15,000 to 20,000 lines of source removed, plus their tests;
-- about 40 to 60 settings removed;
-- the CronJobs and several loops removed;
-- about 6,000 more lines removed if one SQL dialect goes (C.4).
+- about 6,000 to 8,000 lines of source removed by phase B, plus their tests;
+- about 6,000 lines of SQLite migrations and repositories removed by C.4, plus the dual-dialect tests;
+- about 30 to 40 settings removed;
+- the KRR and Polaris CronJobs and several loops removed.
 
 ## 3. Lightness (decision)
 
@@ -113,14 +116,17 @@ Everything else is either a dimension of those numbers (cost, carbon, capacity),
 | Pods | 2 by default: GreenKube and PostgreSQL. The renderer runs only while rendering. |
 | CPU | under 100m averaged over a day; requests 100m in total for GreenKube |
 | Memory | under 300 MiB resident for GreenKube; PostgreSQL under 256 MiB |
-| Database growth | under 1 GB per year at 500 pods |
+| Database size | under 2 GB steady state at 500 pods with the 14-day raw window, plus under 1 GB per year of hourly history (to confirm with the first C.1 run) |
 | Prometheus load | at most 6 range queries per collection cycle, step 5 minutes |
 | Scan | one scan of 500 workloads under 30 s and under 150 MiB extra memory |
 
 **Levers, in order of expected gain** (tasks in phase C):
-1. **Store less** (C.3): keep per-pod step rows only as a short buffer (48 hours). Make the per-workload hourly table, which already exists for rightsizing, the long-term store for usage, cost, energy, CO2e and requests. Drop the per-pod and per-container hourly copies and the hourly compressor.
+1. **Store less, without losing useful detail** (C.3). Lightness must not come from aggregations too coarse to be useful: rightsizing needs per-container percentiles at the collection step, and measurement needs per-pod cost and CO2e. So the granularity stays, and the footprint comes from:
+   - keeping raw 5-minute rows exactly as long as the rightsizing lookback needs them (14 days), so percentiles are computed on raw samples, not on hourly maxima (ROL-04);
+   - keeping per-pod and per-container hourly rows with a bounded retention (default 400 days, enough for a year-over-year comparison), and workload-hour and node-hour rows for long-term history;
+   - narrower rows (the dimensions of section 2.1 go, unused columns go) and PostgreSQL time partitioning, so retention drops a partition instead of deleting rows.
 2. **Run less** (C.2): one GreenKube process by default (API and controller loops together, single replica). The renderer sandbox becomes an on-demand Kubernetes Job. Loop intervals are relaxed (discovery every 5 minutes, scans every 6 hours).
-3. **Query less** (C.3): fewer PromQL queries (CPU, memory, pod info, restarts). Hourly percentiles are computed server-side where possible.
+3. **Query less** (C.3): fewer PromQL queries per cycle (the removed dimensions go), and reads served by the coarsest table that still answers the question.
 4. **One SQL dialect** (C.4).
 5. **Process hygiene** (C.6): bounded memory per scan, lazy imports, one Uvicorn worker, a small connection pool, no unbounded caches.
 
@@ -131,16 +137,10 @@ Goal: on the field cluster (kubeadm, Cilium, Argo CD, self-hosted GitLab), open 
 ### A.0 Merge or re-scope the two stopped branches (lane: review)
 - `fix/rollups-reads` (WP-05: raw/hourly seam at the compression watermark, late rows re-aggregated, idle share exposed, faithful hourly rows):
   - review it independently, gate it, merge it. These are correctness fixes for numbers shown today.
-  - C.3 will later remove the per-pod hourly tables. Merge anyway: the fixes protect the data until C.3 lands.
-- `fix/energy-carbon` (WP-04):
-  - keep only what survives the carbon simplification of section 2.1:
-    - NRG-05, one power model for collection and projection;
-    - NRG-04, the year of the intensity defaults;
-    - NRG-12, non-pod CPU charged to idle;
-    - NRG-15, nodes sharing a host;
-    - NRG-14, operators can set server power;
-  - drop the Boavizta-per-instance-type setting and the GPU work: they are cut by B.5;
-  - review, gate, merge.
+  - the per-pod hourly tables stay (C.3), so these fixes are permanent.
+- `fix/energy-carbon` (WP-04: NRG-01 embodied value per instance type, NRG-04 dated intensity defaults, NRG-05 one power model for collection and projection, NRG-12 non-pod CPU charged to idle, NRG-13 GPU nodes without DCGM flagged (partly), NRG-15 nodes sharing a host):
+  - carbon stays as it is (section 2.1), so the whole branch applies;
+  - review it independently, gate it, merge it.
 
 ### A.1 F-01: no merge request can be opened on GitLab (blocker) (lane: git)
 - Every approved plan goes `stale` with "Plan branch moved during atomic commit". `GitLabProvider.create_commit` sends `start_sha` for a branch GreenKube has just created, and GitLab refuses it ("already exists").
@@ -229,14 +229,14 @@ Every surprise becomes an issue in this roadmap. **This is the release gate of p
 ### B.1 Remove the native advisory analyzers (lane: recommendations)
 - **Analyzers:** zombie pods, idle namespaces, off-peak scaling, autoscaling candidates, carbon-aware scheduling, over/under-provisioned nodes, and the Karpenter NodePool heuristic (`core/optimization/analyzers/*`, `providers/karpenter.py`).
 - **Recommendation types to retire:** `ZOMBIE_POD`, `IDLE_NAMESPACE`, `OFF_PEAK_SCALING`, `AUTOSCALING_CANDIDATE`, `CARBON_AWARE_SCHEDULING`, `OVERPROVISIONED_NODE`, `UNDERUTILIZED_NODE`.
+- **Keep:** the orphaned LoadBalancer and PersistentVolume analyzers and everything they use (B.2). Keep the Karpenter, Cluster Autoscaler and HPA collectors: the realization factor reads them.
 
-### B.2 Remove deletion recommendations (lane: recommendations, after B.1)
-- **Recommendation types:** `ORPHANED_LOAD_BALANCER` and `ORPHANED_PERSISTENT_VOLUME`.
-- **Modules:**
-  - `automation/actions/delete_resource.py`, `automation/deletion_recheck.py`;
-  - `core/deletion_safety.py`, `verify/deletion.py`;
-  - the deletion candidate storage, the LB, PV and deletion-candidate collectors.
-- Keep a design note in `docs/` on how to bring deletions back later as an opt-in feature: measured from billing or assets, never from pod metrics.
+### B.2 Harden orphaned LoadBalancer and PersistentVolume detection (lane: recommendations, after B.1)
+Kept because it is cheap, simple and gives an immediate saving. It is the highest-risk change kind, so it gets three fixes:
+- **No false orphan:** a LoadBalancer Service owned by a Gateway, an ingress controller or a mesh (owner references, Gateway API `status.addresses`, well-known labels of Cilium, Istio, Envoy Gateway, ingress-nginx, Traefik) is never orphaned. Add the Cilium Gateway case seen earlier as a regression test.
+- **Honest price:** a volume on non-cloud CSI or NFS storage is priced from the configured on-premises storage rate or shown as released capacity (GiB), never at the cloud default rate; OpenCost PV and LB costs are not annualized over the whole lookback (IMP-11).
+- **Honest measurement:** the realized saving of a deletion is read from cost data before and after (OpenCost asset cost, or the configured rate times the observed lifetime), with its coverage; when no such data exists, the verdict is `inconclusive`, never the restated projection (MEA-15).
+- **Acceptance:** the three cases above are tests; the deletion safety re-check still runs before every delete.
 
 ### B.3 Remove connectors and the chart CronJobs (lane: signals)
 - **Connectors:** Kubecost, GKE recommender, Azure Advisor, Polaris, replay.
@@ -249,17 +249,10 @@ Every surprise becomes an issue in this roadmap. **This is the release gate of p
   - a source alone never creates a recommendation (A.5).
 - Remove the `safest`, `median`, `weighted` and `priority` options and their settings.
 
-### B.4 Remove unused collectors and dimensions (lane: collection)
-- **Collectors:** Karpenter, Cluster Autoscaler, HPA (keep the HPA presence check needed by the policy gate, read through the existing object reader), Wattnet, DCGM.
-- **PromQL and columns:** network receive and transmit, disk read and write, ephemeral storage, PVC request and usage.
-- **Realization factor:** discovery goes; `IMPACT_AUTOSCALER_HINT` (and a per-pool override if needed) becomes the source of the realization factor.
-
-### B.5 Simplify carbon (lane: impact)
-- **Energy:** CCF per-vCPU and per-GiB coefficients applied to node capacity and pod usage. One table, documented in `docs/methodology/impact-model.md`.
-- **Embodied emissions:** bundled per-vCPU coefficients; no live Boavizta API, no `instance_carbon_profiles` writes.
-- **Intensity:** Electricity Maps when a token is set, else a bundled annual zone average (dated, A.0/NRG-04). Remove Wattnet.
-- **Remove** GPU power, DCGM and the `gpu_*` columns (stop writing first).
-- **Acceptance:** stored CO2e for a fixture node matches a hand calculation documented in the methodology.
+### B.4 Remove unused dimensions (lane: collection)
+- **PromQL and columns:** network receive and transmit, disk read and write, ephemeral storage, PVC request and usage. Orphaned-volume detection reads PV and claim status, not usage, so it is not affected.
+- **Collectors stay:** Karpenter, Cluster Autoscaler, HPA, LB, PV, deletion candidates, Wattnet, Boavizta, DCGM.
+- **Acceptance:** the number of range queries per collection chunk drops accordingly (counted in a test with a recording Prometheus fake).
 
 ### B.6 Remove the legacy verifier, v1 ledger reads and FOCUS (lane: measurement, after C.5)
 - Change measurement becomes the only verification path. The v1 savings tables are read only by the C.5 migration, then dropped.
@@ -267,11 +260,11 @@ Every surprise becomes an issue in this roadmap. **This is the release gate of p
   - the FOCUS export;
   - delivery modes `patch` and `ci` (`automation/delivery.py`, `cli/plan.py apply-patch` and `report-delivery`, the `plan_delivery` router).
 
-### B.7 Remove the footprint UI and trim exposition (lane: UI and API)
+### B.7 Remove the sustainability score and trim exposition (lane: UI and API)
 - **Remove:**
-  - the Footprint pages (nodes, report) and the report export routes;
-  - the sustainability score;
+  - the sustainability score (API-06);
   - the large Grafana dashboard.
+- **Keep** the Footprint pages (nodes, report) and their export routes: carbon stays as it is.
 - **Trim** `api/metrics_endpoint.py` to:
   - operational metrics: collection lag and coverage, loops, scans, measurement and ledger health;
   - the savings counters from ledger v2.
@@ -301,27 +294,29 @@ Every surprise becomes an issue in this roadmap. **This is the release gate of p
   - previews still render;
   - the NetworkPolicy tests still pass.
 
-### C.3 Store workload-hours, not pod-steps (lane: storage and measurement; largest task, start with a design note)
-- **Target:**
-  - the per-workload hourly table (today `workload_usage_hourly`, used by rightsizing) becomes the long-term store, extended with the measured cost (with source and trust), energy, CO2e, requests and limits, replica-hours, released capacity inputs and coverage;
-  - per-pod step rows (`combined_metrics`, `container_metrics`, `node_idle_metrics`) stay as a 48-hour buffer the rollup builds from;
-  - the per-pod and per-container hourly tables and the hourly compressor go;
-  - a node-hour table keeps the idle share.
-- **Measurement** (`verify/series.py`) reads workload-hours. The baseline snapshot freezes the workload-hours it used. The audit findings marked "re-check after C3" in the appendix are re-checked and closed.
-- **Migration:** build workload-hours for existing history from the current hourly tables, then drop them in a later release (B.0 procedure).
+### C.3 Bounded storage at useful granularity (lane: storage and measurement; largest task, start with a design note)
+Lightness must not come from aggregations too coarse to be useful. The granularity stays; the volume is bounded.
+- **Tiers:**
+  - **raw** (`combined_metrics`, `container_metrics`, `node_idle_metrics`, 5-minute step): kept for the rightsizing lookback, 14 days by default (`METRICS_RAW_RETENTION_DAYS`, never below the lookback; a start-up check refuses a lower value). Rightsizing percentiles are computed on these raw samples, not on hourly maxima (ROL-04);
+  - **hourly per pod and per container** (the current hourly tables, with the WP-05 fixes): bounded retention, default 400 days, instead of forever;
+  - **hourly per workload** (`workload_usage_hourly`) and **hourly per node** (new, keeps the idle share, ROL-07): long-term history, kept as long as the ledger needs them.
+- **Footprint levers:**
+  - PostgreSQL range partitioning by day (raw) and by month (hourly), so retention drops a partition instead of running large `DELETE`s, and vacuum stays cheap;
+  - narrower rows: the dimensions removed by B.4 go, and the hourly tables keep only the columns a read path uses (STO-14);
+  - each read is served by the coarsest tier that answers it (UI ranges over 14 days read hourly, the ledger reads workload-hours).
+- **Measurement** (`verify/series.py`) reads per-pod hourly rows for the baseline and post windows, as today; the baseline snapshot freezes them. The audit findings marked "re-check after C3" in the appendix are re-checked and closed.
 - **Acceptance:**
-  - a measurement on fixture data gives the same verdict and values (within 1 %) before and after;
-  - database growth at 500 pods is under the budget in the C.1 benchmark.
+  - the rightsizing p95 on a fixture with a short spike equals the raw-sample p95, not the hourly maximum;
+  - a measurement on fixture data gives the same verdict and values (within 1 %) before and after partitioning;
+  - retention drops partitions (test on PostgreSQL);
+  - database size at 500 pods is under the budget of section 3 in the C.1 benchmark.
 
-### C.4 One SQL dialect (lane: storage; decision required, see section 9)
-- **Recommended: PostgreSQL only.**
-  - It is the production path and the one tested on the field cluster.
-  - It allows managed databases and HA.
-- **What goes:** the SQLite repositories, migrations and dual-dialect tests.
+### C.4 PostgreSQL only (lane: storage; decided)
+- PostgreSQL is the production path, the one tested on the field cluster, and it allows managed databases and HA. Do C.4 before C.3, so partitioning is written for one dialect only.
+- **What goes:** the SQLite repositories, the SQLite migrations, `aiosqlite`, the dialect switches and the dual-dialect tests. The test suite runs on PostgreSQL only (a disposable database per run, as the agents do today).
+- **Upgrade:** a SQLite install gets a one-shot `greenkube migrate-to-postgres` command (copy every table, re-verify the ledger chain), documented in `docs/upgrading.md`; GreenKube refuses to start on a SQLite URL with a message pointing to it.
 - **The demo** runs with `docker compose` (GreenKube plus PostgreSQL) or against a disposable PostgreSQL started by `greenkube demo`.
-- **Alternative: SQLite only, single pod.**
-  - It would remove the PostgreSQL pod.
-  - But it gives up HA and managed databases, and it forces a data migration on every existing install.
+- **Acceptance:** grep finds no SQLite code path outside the migration command; the migration command keeps the ledger chain valid on a fixture.
 
 ### C.5 Migrate v1 ledger and legacy verification data (lane: measurement)
 Convert the remaining v1-only records into ledger v2 entries with a `legacy` basis and their provenance. Re-verify the chain. Then stop reading v1 (enables B.6).
@@ -376,22 +371,23 @@ Open findings are done in this order, each with its audit fix specification:
   - applied to the next projections, with a minimum number of decided verdicts before it applies.
 - This is the fourth promise of the product, and the first feature to build after the release.
 
-## 9. Decisions needed from the maintainer
+## 9. Maintainer decisions
 
-| # | Decision | Recommendation | Default if no answer |
-|---|---|---|---|
-| D1 | Validate the scope table of section 2.1 | As proposed | Proceed with B.1 to B.7 as written |
-| D2 | One SQL dialect | PostgreSQL only (C.4) | PostgreSQL only |
-| D3 | Deletion recommendations | Remove now, revisit after the release | Remove |
-| D4 | KRR CronJob in the chart | Remove, document a push example | Remove |
-| D5 | Footprint budget of section 3 | As proposed; revise after the first C.1 run | As proposed |
-| D6 | Push the two website repositories (local `main` commits not pushed; pushing may deploy) | Push after reading the diff | Not pushed |
+| # | Decision | Status |
+|---|---|---|
+| D1 | Scope table of section 2.1 | **Decided 2026-11-20:** connectors and advisory analyzers removed; carbon kept as it is (Wattnet, Boavizta and DCGM stay); collectors kept |
+| D2 | One SQL dialect | **Decided 2026-11-20:** PostgreSQL only (C.4) |
+| D3 | Deletion recommendations | **Decided 2026-11-20:** orphaned LoadBalancer and PersistentVolume detection kept and hardened (B.2) |
+| D4 | KRR CronJob in the chart | Open; proposed: remove, document a push example |
+| D5 | Footprint budget of section 3 | **Decided 2026-11-20:** lightness must not cost useful granularity (C.3); numbers revised after the first C.1 run |
+| D6 | Push the two website repositories (local `main` commits not pushed; pushing may deploy) | Open; proposed: push after reading the diff |
+| D7 | Footprint pages, FOCUS export, `patch` and `ci` delivery modes | Open; proposed: keep the Footprint pages, remove the other three |
 
 ## 10. Execution conventions
 
 - Branches `fix/<slug>`, `feat/<slug>`, `docs/<slug>` from `dev`.
 - One-line conventional commits in English, no body, no trailers. Merge with `--no-ff`.
-- Every change goes through an independent review and the full gates (ruff, pyrefly, SQLite and PostgreSQL suites, Helm, promtool, frontend) before it is merged.
+- Every change goes through an independent review and the full gates (ruff, pyrefly, the test suite on SQLite until C.4 and on PostgreSQL, Helm, promtool, frontend) before it is merged.
 - Each package has its own test database, created and dropped by the agent.
 - Changelog fragments go in `changes/unreleased/`.
 
@@ -402,7 +398,7 @@ Status meanings:
 - **partly addressed:** the note says what is missing.
 - **branch (not merged):** the work is on a stopped branch (A.0).
 - **obsolete:** the subject leaves the product (section 2.1).
-- **open; re-check after C3:** likely moot once workload-hours are the store.
+- **open; re-check after C3:** to re-check once the storage tiers of C.3 land.
 - **open:** to do in phase D.
 
 The "Package" column keeps the work-package numbering of the previous revision (WP-01 to WP-10). That numbering is still in the git history of this file and in the audit.
@@ -456,10 +452,10 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-02 | STO-08 | medium | Unknown requests, cost and energy are stored as 0 (model and schema defaults) instead of NULL, so SUM, AVG and MAX tr... | open |
 | WP-02 | STO-18 | low | Neither CombinedMetric nor the metric tables reject NaN, infinite or negative values, and a single NaN stored in a Po... | open |
 | WP-02 | STO-17 | low | CPU usage is stored as integer millicores (and hourly averages are cast to INTEGER), so pods using less than 0.5 m ar... | open |
-| WP-02 | NRG-07 | high | Two writers flip node_snapshots_scd.embodied_emissions_kg between NULL and the value every cycle: the SCD table grows... | obsolete: node snapshot embodied value no longer written |
+| WP-02 | NRG-07 | high | Two writers flip node_snapshots_scd.embodied_emissions_kg between NULL and the value every cycle: the SCD table grows... | open |
 | WP-02 | STO-06 | medium | Node snapshot versions (SCD2) are compared against float4 columns and written without a transaction or a uniqueness c... | open |
 | WP-02 | STO-07 | medium | No read path uses calculation_version or model_version, the hourly tables do not keep model_version, and rows written... | open; re-check after C3 |
-| WP-02 | STO-12 | low | SQLite stores timestamps as ISO text with variable fractional precision, so range bounds that fall in the same second... | open |
+| WP-02 | STO-12 | low | SQLite stores timestamps as ISO text with variable fractional precision, so range bounds that fall in the same second... | obsolete: SQLite removed (C.4) |
 | WP-02 | STO-13 | low | pod_count in summaries is COUNT(DISTINCT pod_name) without the namespace, so same-named pods of different namespaces ... | open |
 | WP-02 | STO-15 | low | All pending migrations run in one transaction that takes ACCESS EXCLUSIVE locks on the metric tables and then rewrite... | open |
 | WP-02 | STO-16 | low | `greenkube db copy` drops all metric history by default and the documentation says it is re-collected, although only ... | open |
@@ -478,15 +474,15 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-03 | COST-12 | low | Projections read every stored positive cost as an observed cost: default-rate rows get confidence 0.7 instead of 0.5 ... | open |
 | WP-03 | COST-11 | low | Currencies are labels, not checked values: the USD default rates are relabelled with IMPACT_PRICING_CURRENCY, OpenCos... | open |
 | WP-03 | COST-08 | medium | Cost provenance stops at the database: the API and UI show one cost figure that mixes OpenCost costs, list prices, ge... | open |
-| WP-04 | NRG-01 | critical | The Boavizta response model does not match the real API (gwp.embedded/use are objects), so every lookup fails and eve... | obsolete: live Boavizta lookups replaced by bundled per-vCPU embodied coefficients |
+| WP-04 | NRG-01 | critical | The Boavizta response model does not match the real API (gwp.embedded/use are objects), so every lookup fails and eve... | branch fix/energy-carbon (not merged) |
 | WP-04 | NRG-03 | high | The hourly carbon-intensity job never fetches DEFAULT_ZONE: clusters whose nodes carry no mappable zone/region label ... | branch fix/energy-carbon (not merged) |
 | WP-04 | NRG-04 | high | The bundled zone-default intensity table is a one-day snapshot with 251 of 349 zones empty and malformed rows (ES, SE... | branch fix/energy-carbon (not merged) |
 | WP-04 | NRG-05 | high | Projections use a different node power model from collection: for every node without a bundled instance profile the p... | branch fix/energy-carbon (not merged) |
 | WP-04 | NRG-12 | medium | Node CPU utilisation is the sum of pod CPU only: kubelet, container runtime, kernel and other non-pod CPU are ignored... | branch fix/energy-carbon (not merged) |
-| WP-04 | NRG-13 | medium | GPU energy is counted only when DCGM series exist; GPU nodes without the DCGM exporter are neither detected nor flagg... | obsolete: GPU energy out of scope |
+| WP-04 | NRG-13 | medium | GPU energy is counted only when DCGM series exist; GPU nodes without the DCGM exporter are neither detected nor flagg... | branch fix/energy-carbon (not merged) |
 | WP-04 | NRG-15 | medium | Nodes that share one physical host (kind, k3d, minikube multi-node, nested clusters) are each charged the full host c... | branch fix/energy-carbon (not merged) |
 | WP-04 | NRG-14 | medium | On-prem and bare-metal nodes are modelled with hyperscaler per-vCPU averages and the operator cannot supply real serv... | open |
-| WP-04 | NRG-16 | low | Wattnet's 15-minute intensities are stored but only the :00 point of each hour is ever used (default hour normalisati... | obsolete: Wattnet removed |
+| WP-04 | NRG-16 | low | Wattnet's 15-minute intensities are stored but only the :00 point of each hour is ever used (default hour normalisati... | open |
 | WP-04 | NRG-17 | low | Methodology docs and code disagree, and dead legacy estimator code with a different model is still shipped. | open |
 | WP-05 | ROL-01 | high | Every reader that combines raw and hourly tables splits at wall-clock now - METRICS_COMPRESSION_AGE_HOURS instead of ... | branch fix/rollups-reads (not merged) |
 | WP-05 | RECON-03 | high | Every aggregate that spans the raw/hourly boundary uses `now - METRICS_COMPRESSION_AGE_HOURS` instead of the compress... | branch fix/rollups-reads (not merged) |
@@ -546,10 +542,10 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-07 | MEA-16 | medium | Two verification systems with different rules write the same 'verified' / 'not_realized' labels: recommendations appl... | partly addressed on dev (WP-07.6): interim verifier on an interval; separate interim totals not done |
 | WP-07 | MEA-14 | medium | A reliability increase that works is still reported as 'not_realized' (recommendation verification 'failed'), because... | partly addressed on dev (WP-07.6): interim verifier on an interval; separate interim totals not done |
 | WP-07 | MEA-13 | medium | Hours are rated per covered time and hours without rows are dropped, so a workload that runs part of each hour (batch... | open |
-| WP-07 | MEA-15 | medium | A deletion is 'measured' by restating its projection: the pre-window cost of a Service or PersistentVolume cannot be ... | obsolete: deletion action removed |
+| WP-07 | MEA-15 | medium | A deletion is 'measured' by restating its projection: the pre-window cost of a Service or PersistentVolume cannot be ... | open |
 | WP-07 | MEA-17 | low | The baseline snapshot is frozen in the detection pass, before the last baseline samples are written and before provis... | open |
 | WP-08 | IMP-03 | high | On clusters without a detected autoscaler every rightsizing projection is 0 cost and 0 CO2e, reliability increases ar... | addressed on dev (WP-08.2) |
-| WP-08 | IMP-05 | medium | Workload deletions (zombie pods, idle namespaces) are projected with a realization factor of 1 even on fixed nodes, s... | obsolete: deletion action removed |
+| WP-08 | IMP-05 | medium | Workload deletions (zombie pods, idle namespaces) are projected with a realization factor of 1 even on fixed nodes, s... | obsolete: zombie and idle-namespace analyzers removed |
 | WP-08 | IMP-12 | low | The realization factor silently defaults to 1.0 until the controller process has completed a first autoscaler read (o... | addressed on dev (WP-08.2) |
 | WP-08 | API-12 | medium | On clusters without a node autoscaler every rightsizing recommendation has potential_savings_cost = 0 and potential_s... | addressed on dev (WP-08.2) |
 | WP-08 | MEA-06 | high | Without OpenCost or Kubecost no change can ever get a cost verdict: rows priced with configured rates (custom_rate) o... | open |
@@ -558,7 +554,7 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-08 | IMP-07 | medium | The UI sums the projected savings of overlapping recommendations (namespace deletion, workload deletion, off-peak, ri... | open |
 | WP-08 | IMP-08 | medium | There is no feedback loop from measured outcomes to projections: realization factors, the incident cost and the annua... | open |
 | WP-08 | LED-07 | medium | The 'compare realized to projected to refine the projection model' loop is not implemented: only a binary realized/no... | open |
-| WP-08 | IMP-11 | low | Orphaned PersistentVolumes on non-cloud CSI or NFS storage are projected at the cloud default rate as an expected bil... | obsolete: orphan deletion removed |
+| WP-08 | IMP-11 | low | Orphaned PersistentVolumes on non-cloud CSI or NFS storage are projected at the cloud default rate as an expected bil... | open |
 | WP-09 | LED-01 | high | The ledger accrues 'projected' savings on the expected-billable basis (allocated x realization factor, 0 on fixed-cap... | addressed on dev (WP-09.1) |
 | WP-09 | LED-04 | medium | The numbers users actually see (GET /recommendations/savings, overview hero, Prometheus counters and dashboard gauges... | addressed on dev (WP-09.2) |
 | WP-09 | LED-03 | medium | Projected savings accrued before a NOT REALIZED or INCONCLUSIVE verdict stay in the ledger for ever (never reversed, ... | addressed on dev (WP-09.3) |
