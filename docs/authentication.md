@@ -21,10 +21,21 @@ The mode is `config.apiAuthMode` (setting `API_AUTH_MODE`):
 | `session` (default) | local accounts (username and password) | scoped keys (and a bootstrap key kept from an earlier install) | Every installation |
 | `proxy` | single sign-on through an authentication proxy (oauth2-proxy, Authentik, Pomerium), plus local accounts | same | Clusters that already front their tools with an auth proxy |
 | `oidc` | native OpenID Connect (**Sign in with ...**), plus local accounts | same | Any OpenID Connect provider (Keycloak, Dex, Entra ID, Okta, Google, GitLab) |
-| `api_key` | no (`POST /auth/login` answers `409`) | scoped keys and the bootstrap key | Headless installations driven only by machines |
+| `api_key` | an API key, no accounts (`POST /auth/login` answers `409`, see [Browser sign-in with an API key](#browser-sign-in-with-an-api-key)) | scoped keys and the bootstrap key | Headless installations driven only by machines |
 
 Every browser mode ends in the same server-side session, cookie and CSRF protection described below; only the way
 the user proves who they are differs. See [Single sign-on](#single-sign-on) and [Roles](#roles).
+
+### Browser sign-in with an API key
+
+In `api_key` mode there are no accounts: the sign-in page asks for an API key (the bootstrap key
+`GREENKUBE_API_KEY` or a scoped `gk_` key). `POST /api/v1/auth/api-key-login` (`{"key": "...", "remember": false}`)
+checks it like a Bearer key and returns it in the same `HttpOnly; SameSite=Strict` cookie as a session, so the UI
+never keeps the key in JavaScript or browser storage. The key is checked again on every request: revoking a scoped
+key signs its browsers out. The browser gets the key's scopes, and cookie-authenticated mutations need the
+`X-CSRF-Token` returned by the sign-in and `/auth/me`, as with a session. Attempts share the sign-in rate limit
+(`auth.loginRateLimit`) per client IP; a wrong key answers `401`, and other modes answer `409`. For user accounts,
+roles and per-person audit, use `session` mode instead.
 
 ## First sign-in
 
