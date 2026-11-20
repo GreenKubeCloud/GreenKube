@@ -489,6 +489,9 @@ class Config(BaseSettings):
     # Nodes with the same bootID (or kind://, k3d:// provider IDs) are one physical host: each gets
     # 1/N of the host idle power, memory power and embodied emissions (NRG-15). false disables it.
     SHARED_HOST_DETECTION: bool = True
+    # Utilisation (0-100 %) assumed for a GPU a pod requests on a node without DCGM samples:
+    # the pod is charged idle + util x (TDP - idle) per requested GPU (NRG-13).
+    GPU_ASSUMED_UTILIZATION_PCT: float = Field(50.0, ge=0.0, le=100.0)
     # Carbon price (currency per tonne CO2e) that converts projected CO2e into
     # value: value_annual = cost + CARBON_PRICE_PER_TONNE * tCO2e (roadmap I2, D-2).
     CARBON_PRICE_PER_TONNE: float = 100.0

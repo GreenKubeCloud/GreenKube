@@ -29,6 +29,23 @@ def _containers_with_kind(spec, include_init_containers: bool) -> Iterator[tuple
             yield container, "init"
 
 
+#: Extended resources of GPU device plugins (NRG-13).
+_GPU_RESOURCES = ("nvidia.com/gpu", "amd.com/gpu")
+_GPU_RESOURCE_PREFIX = "gpu.intel.com/"
+
+
+def _gpu_quantity(resources: dict) -> int:
+    """Number of GPUs in a requests or limits mapping."""
+    total = 0
+    for resource, quantity in resources.items():
+        if resource in _GPU_RESOURCES or str(resource).startswith(_GPU_RESOURCE_PREFIX):
+            try:
+                total += int(float(str(quantity)))
+            except ValueError:
+                continue
+    return total
+
+
 def _container_metric(
     container,
     *,
@@ -51,6 +68,7 @@ def _container_metric(
         ephemeral_storage_request=parse_storage_request(requests.get("ephemeral-storage")),
         cpu_limit=parse_cpu_request(limits["cpu"]) if limits.get("cpu") else None,
         memory_limit=parse_memory_request(limits["memory"]) if limits.get("memory") else None,
+        gpu_request=_gpu_quantity(requests) or _gpu_quantity(limits),
         kind=kind,
         owner_kind=owner_kind,
         owner_name=owner_name,

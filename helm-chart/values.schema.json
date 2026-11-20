@@ -269,7 +269,8 @@
         "power": {
           "type": "object",
           "properties": {
-            "sharedHostDetection": {"type": "boolean"}
+            "sharedHostDetection": {"type": "boolean"},
+            "gpuAssumedUtilizationPct": {"type": "number", "minimum": 0, "maximum": 100}
           }
         },
         "boavizta": {

@@ -401,3 +401,10 @@ class TestSecretFilesForAliasedFields:
 
         assert cfg.METRICS_TOKEN == "scrape-token"
         assert cfg.API_KEY == "bootstrap-key"
+
+
+def test_gpu_assumed_utilization_defaults_to_half(monkeypatch):
+    monkeypatch.delenv("GPU_ASSUMED_UTILIZATION_PCT", raising=False)
+    assert Config().GPU_ASSUMED_UTILIZATION_PCT == 50.0
+    monkeypatch.setenv("GPU_ASSUMED_UTILIZATION_PCT", "80")
+    assert Config().GPU_ASSUMED_UTILIZATION_PCT == 80.0

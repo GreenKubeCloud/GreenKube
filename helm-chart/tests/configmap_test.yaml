@@ -1086,6 +1086,20 @@ tests:
           path: data.SHARED_HOST_DETECTION
           value: "false"
 
+  - it: sets the GPU utilisation assumed for requested GPUs without DCGM (NRG-13)
+    asserts:
+      - equal:
+          path: data.GPU_ASSUMED_UTILIZATION_PCT
+          value: "50"
+
+  - it: lets config.power override the assumed GPU utilisation (NRG-13)
+    set:
+      config.power.gpuAssumedUtilizationPct: 80
+    asserts:
+      - equal:
+          path: data.GPU_ASSUMED_UTILIZATION_PCT
+          value: "80"
+
   - it: sets the embodied fallback coefficients from config.boavizta (NRG-01)
     set:
       config.boavizta.embodiedKgPerVcpu: 9.5

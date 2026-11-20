@@ -102,6 +102,10 @@ class PodMetric(BaseModel):
     ephemeral_storage_request: int = Field(0, description="Ephemeral storage request in bytes.")
     cpu_limit: Optional[int] = Field(None, description="CPU limit in millicores; None when unlimited.")
     memory_limit: Optional[int] = Field(None, description="Memory limit in bytes; None when unlimited.")
+    gpu_request: int = Field(
+        0,
+        description="GPUs requested (nvidia.com/gpu, amd.com/gpu, gpu.intel.com/*; the limit when no request), NRG-13.",
+    )
     kind: str = Field(
         "container",
         description=(

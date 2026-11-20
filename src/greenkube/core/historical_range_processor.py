@@ -723,8 +723,7 @@ class HistoricalRangeProcessor:
             vcores=float(profile.get("vcores", 0.0) or 0.0) or None,
             power_source=power.source,
             embodied_g_per_hour=embodied.g_per_hour,
-            gpu_unattributed_watts=gpu_unattributed_watts
-            + ((undetected_gpu.watts or 0.0) if undetected_gpu is not None else 0.0),
+            gpu_unattributed_watts=gpu_unattributed_watts,
             is_fallback=power.is_fallback,
             embodied_source=embodied.source,
             embodied_reason=embodied.reason(node_name),
@@ -1727,16 +1726,31 @@ class HistoricalRangeProcessor:
                         )
                     )
 
+                # NRG-13: GPUs of a node DCGM does not report; requested GPUs go to the requesting pods.
+                undetected_gpu = None if gpu_power else undetected_gpus.get(node_name)
+                gpu_unattributed_watts = gpu_power.unattributed_watts if gpu_power else 0.0
+                if undetected_gpu is not None:
+                    gpu_requests: dict[tuple[str, str], int] = defaultdict(int)
+                    for container in group_pod_metrics:
+                        if container.gpu_request and container.kind != "init":
+                            gpu_requests[(container.namespace, container.pod_name)] += container.gpu_request
+                    gpu_by_pod, gpu_unattributed_watts = undetected_gpu.split(
+                        gpu_requests, float(getattr(self._config, "GPU_ASSUMED_UTILIZATION_PCT", 50.0))
+                    )
+                    for row in node_rows:
+                        row_gpu_watts = gpu_by_pod.get((row.namespace, row.pod_name))
+                        if row_gpu_watts is not None:
+                            row.gpu_power_watts = row_gpu_watts
                 spec = self._node_spec(
                     node_name,
                     _ni,
                     power,
                     boavizta_cache,
                     instance_type=(_ni.instance_type if _ni else None) or current_node_map.get(node_name),
-                    gpu_unattributed_watts=gpu_power.unattributed_watts if gpu_power else 0.0,
+                    gpu_unattributed_watts=gpu_unattributed_watts,
                     config=self._config,
                     shared_host=shared_hosts.get(node_name),
-                    undetected_gpu=None if gpu_power else undetected_gpus.get(node_name),
+                    undetected_gpu=undetected_gpu,
                     node_cpu_used_cores=node_cpu_by_group.get((sample_start, node_name)),
                 )
                 node_profile = allocator.node_profile(

@@ -166,6 +166,7 @@ A node annotation `greenkube.io/embodied-kg: "1500"` sets the whole-node embodie
 | Key | Default | Description |
 |-----|---------|-------------|
 | `config.power.sharedHostDetection` | `true` | `SHARED_HOST_DETECTION`. Nodes with the same `status.nodeInfo.bootID` (or `kind://` and `k3d://` provider IDs) are one physical host: each of N nodes gets 1/N of the host idle power, memory power and embodied emissions, its rows carry a "Shared host" estimation reason, and `greenkube_shared_host_groups` counts the groups. `false` charges every node the whole host. |
+| `config.power.gpuAssumedUtilizationPct` | `50` | `GPU_ASSUMED_UTILIZATION_PCT` (0 to 100). On a node whose capacity declares GPUs but the DCGM exporter has no sample, each GPU a pod requests (`nvidia.com/gpu`, `amd.com/gpu`, `gpu.intel.com/*`) is charged to that pod at `idle + util × (TDP − idle)` of its TDP profile; GPUs no pod requests stay at the idle floor on the node's `__idle__` row. |
 
 ### Prometheus & OpenCost integration (`config.prometheus`, `config.opencost`)
 

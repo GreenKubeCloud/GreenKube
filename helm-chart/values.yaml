@@ -471,6 +471,10 @@ config:
     # provider IDs) share the host idle power, memory power and embodied emissions 1/N
     # instead of each being charged the whole host. Set false to disable.
     sharedHostDetection: true
+    # Utilisation (0-100 %) assumed for a GPU a pod requests on a node the DCGM exporter does
+    # not report: the pod is charged idle + util x (TDP - idle) per requested GPU. GPUs no pod
+    # requests stay at the idle floor on the node's idle row.
+    gpuAssumedUtilizationPct: 50
 
   # PostgreSQL connection settings. SQLite is for `greenkube demo` and local
   # development only; the chart always uses PostgreSQL (bundled or external).
