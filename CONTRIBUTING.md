@@ -111,6 +111,8 @@ The script will:
 3. Commit everything as `chore: release v<version>`
 4. Create an annotated git tag `v<version>`
 
+`pyproject.toml` is the single source of truth for the version. The API version (shown by the UI banner), the chart `version` and `appVersion`, the chart image tag and the frontend package are copied from it. `python scripts/sync_version.py --check` (also run by `tests/scripts/test_sync_version.py`) fails when one of them diverges.
+
 Then review the commit and push:
 
 ```bash
