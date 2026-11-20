@@ -190,6 +190,9 @@ class HistoricalRangeProcessor:
         #: Consecutive failed Kubernetes list attempts per (list, window start, window end) (review 5).
         self._list_failures: dict[tuple[str, datetime], int] = {}
         self._gpu_model = GpuPowerModel()
+        #: Whether a DCGM query of this process returned GPU series: a later DCGM error then fails
+        #: the window instead of silently dropping GPU power (NRG-13).
+        self._dcgm_series_seen = False
         #: Idle rows (``__idle__`` per node and step) of the last ``run_range`` call.
         self.last_idle_metrics: List[NodeIdleMetric] = []
         #: Per step of the last ``run_range`` call: (OpenCost window total spread evenly over the steps,
@@ -567,7 +570,12 @@ class HistoricalRangeProcessor:
         return await self._query_range(chunk, self._promql.memory_working_set_by_level())
 
     async def _collect_gpu(self, chunk: CollectionWindow) -> dict[int, list[dcgm_collector.GpuSample]]:
-        """DCGM GPU power and utilization per step; empty when DCGM is absent or unreachable (B5)."""
+        """DCGM GPU power and utilization per step; empty when DCGM is absent (B5).
+
+        A query error is a warning on a cluster where DCGM never returned series. Once
+        this process has seen GPU series, an error raises ``RangeCollectionError`` so the
+        window is retried instead of being stored without GPU power (NRG-13).
+        """
         step = self._promql.step
         try:
             power, utilization = await asyncio.gather(
@@ -575,6 +583,11 @@ class HistoricalRangeProcessor:
                 self._query_range(chunk, dcgm_collector.utilization_query(step)),
             )
         except Exception as error:
+            if self._dcgm_series_seen:
+                raise RangeCollectionError(
+                    f"DCGM GPU metrics unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()} "
+                    f"after GPU series were collected: {error}"
+                ) from error
             logger.warning(
                 "DCGM GPU metrics unavailable for %s -> %s: %s; GPU power is not counted for this window.",
                 chunk.start.isoformat(),
@@ -582,6 +595,8 @@ class HistoricalRangeProcessor:
                 error,
             )
             return {}
+        if power or utilization:
+            self._dcgm_series_seen = True
         return dcgm_collector.samples_by_step(
             power, utilization, lambda series: self._iter_window_samples(series, chunk)
         )

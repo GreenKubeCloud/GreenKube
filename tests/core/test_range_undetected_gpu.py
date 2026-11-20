@@ -11,6 +11,7 @@ import pytest
 from greenkube.collectors.node_collector import NodeCollector
 from greenkube.core import collection_telemetry
 from greenkube.core.config import Config
+from greenkube.core.historical_range_processor import RangeCollectionError
 from greenkube.core.node_zone_mapper import NodeZoneMapper
 from greenkube.impact.power import undetected_gpu_power
 from greenkube.models.node import NodeInfo
@@ -86,3 +87,47 @@ async def test_gpu_node_of_unknown_model_is_counted_unmeasured(tmp_path):
     pods, _ = await _run(tmp_path, node)
     assert collection_telemetry.GPU_NODES_UNMEASURED._value.get() == 1
     assert all(any("GPU power not measured" in r for r in row.estimation_reasons) for row in pods)
+
+
+def _dcgm_processor(tmp_path):
+    cfg = Config(
+        DB_TYPE="sqlite",
+        DB_PATH=str(tmp_path / "range.db"),
+        PROMETHEUS_QUERY_RANGE_STEP="5m",
+        KUBERNETES_METRICS_API_ENABLED=False,
+        DEFAULT_ZONE="unknown",
+    )
+    node = NodeInfo(name="g1", cloud_provider="aws", instance_type="g4dn.12xlarge", cpu_capacity_cores=48)
+    prom = FakePrometheus()
+    labels = {"namespace": "ns", "pod": "p", "node": node.name, "container": "app"}
+    prom.add("container_cpu_usage_seconds_total", labels, 0.1)
+    prom.add("container_memory_working_set_bytes", labels, 1024**2)
+    gpu = {"UUID": "GPU-0", "modelName": "Tesla T4", "Hostname": node.name, "namespace": "ns", "pod": "p"}
+    prom.add("DCGM_FI_DEV_POWER_USAGE", gpu, 40.0)
+    prom.add("DCGM_FI_DEV_GPU_UTIL", gpu, 50.0)
+    processor = build_range_processor(
+        cfg,
+        MagicMock(),
+        prom,
+        FakeOpenCost(),
+        nodes={node.name: node},
+        zone_mapper=NodeZoneMapper(MagicMock(), cfg),
+    )
+    return processor, prom
+
+
+async def test_dcgm_outage_after_gpu_series_were_seen_fails_the_window(tmp_path):
+    processor, prom = _dcgm_processor(tmp_path)
+    rows = await processor.run_range(BASE, BASE + timedelta(seconds=STEP))
+    assert any(row.gpu_power_watts for row in rows)
+    prom.fail_queries_containing = ("DCGM_FI_DEV",)
+    later = BASE + timedelta(seconds=STEP)
+    with pytest.raises(RangeCollectionError, match="DCGM"):
+        await processor.run_range(later, later + timedelta(seconds=STEP))
+
+
+async def test_dcgm_error_on_a_cluster_without_gpu_series_does_not_fail_the_window(tmp_path):
+    processor, prom = _dcgm_processor(tmp_path)
+    prom.fail_queries_containing = ("DCGM_FI_DEV",)
+    rows = await processor.run_range(BASE, BASE + timedelta(seconds=STEP))
+    assert rows
