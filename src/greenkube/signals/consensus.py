@@ -293,8 +293,16 @@ IGNORED_MIN_CHANGE = "below_min_change"
 
 
 def is_native(ballot: "Ballot") -> bool:
-    """Whether a ballot comes from a native analyzer (GreenKube's own measurement)."""
-    return ballot.source == NATIVE_SOURCE or ballot.source.startswith(NATIVE_SOURCE + ".")
+    """Whether a ballot comes from GreenKube's own measurement.
+
+    A native analyzer (``greenkube``, ``greenkube.<analyzer>``), or a value a
+    built-in connector computed from GreenKube's usage data under a
+    ``greenkube.*`` engine family (the Polaris missing-request follow-up). A
+    pushed signal is never native, whatever engine family it declares.
+    """
+    if ballot.source == NATIVE_SOURCE or ballot.source.startswith(NATIVE_SOURCE + "."):
+        return True
+    return not ballot.pushed and ballot.family.startswith(NATIVE_SOURCE + ".")
 
 
 @dataclass(frozen=True)
@@ -346,10 +354,16 @@ class VoteScreen:
         return False
 
     def below_min_change(self, ballot: "Ballot") -> bool:
-        """Whether the ballot changes its current value by less than the minimum."""
+        """Whether the ballot changes its current value by less than the minimum.
+
+        A proposal equal to the current value is a "keep it" vote, not a small
+        change: it still counts (under ``safest`` it holds the current request).
+        """
         if ballot.value is None or not ballot.current:
             return False
         delta = abs(ballot.value - ballot.current)
+        if delta == 0:
+            return False
         minimum = max(self.min_change_ratio * ballot.current, float(self.min_change.get(str(ballot.resource), 0)))
         return delta < minimum
 

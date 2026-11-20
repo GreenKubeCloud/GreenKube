@@ -374,3 +374,59 @@ class TestCheckpointCollection:
         assert vpa.containers == 1
         assert vpa.first_sample_start is not None and vpa.last_sample_start is not None
         assert vpa.last_sample_start - vpa.first_sample_start == timedelta(minutes=27)
+
+
+class TestToolFloorSettings:
+    def test_defaults_are_the_krr_simple_and_fairwinds_vpa_floors(self):
+        from greenkube.core.config import parse_tool_floors
+
+        assert parse_tool_floors(Config().SIGNAL_TOOL_FLOORS) == {
+            "krr": {"cpu_request_m": 10, "memory_request_bytes": 100 * MIB},
+            "vpa": {"cpu_request_m": 15, "memory_request_bytes": 100 * MIB},
+        }
+
+    def test_an_empty_object_disables_floors(self):
+        from greenkube.core.config import parse_tool_floors
+
+        assert parse_tool_floors("{}") == {}
+
+    @pytest.mark.parametrize("value", ["not json", "[]", '{"krr": {"disk": "1Gi"}}', '{"krr": {"memory": "lots"}}'])
+    def test_invalid_floors_are_rejected_at_startup(self, value):
+        with pytest.raises(ValueError):
+            Config(SIGNAL_TOOL_FLOORS=value)
+
+
+class TestPerPodVpaFloor:
+    @staticmethod
+    def _ballot(value: int, containers=None):
+        from greenkube.signals.consensus import ballots_for_signal
+
+        signal = SourceSignal(
+            source_id="vpa",
+            engine_family="vpa",
+            target=TargetRef.for_kind(
+                "c1", "Deployment", "csi-nfs-controller", namespace="kube-system", container="nfs"
+            ),
+            capability=Capability.CONTAINER_REQUESTS,
+            kind="RIGHTSIZING_MEMORY",
+            proposal=ContainerResourcesProposal(
+                container="nfs",
+                current=ResourceSpec(memory_request_bytes=20 * MIB),
+                proposed=ResourceSpec(memory_request_bytes=value),
+            ),
+            algorithm=AlgorithmInfo(name="vpa-recommender"),
+            raw={"containers": containers} if containers else {},
+        )
+        [ballot] = ballots_for_signal(signal)
+        return ballot
+
+    def test_the_vpa_floor_is_split_between_the_pod_containers(self):
+        from greenkube.signals.consensus import VoteScreen
+
+        screen = VoteScreen()
+        # Three containers: the recommender's 100 Mi pod minimum gives each 33.3 Mi.
+        assert screen.reason(self._ballot(int(100 * MIB / 3), containers=3)) == "tool_floor"
+        assert screen.reason(self._ballot(50 * MIB, containers=3)) is None
+        assert screen.reason(self._ballot(100 * MIB, containers=3)) is None
+        # Unknown container count: any even split of the floor is a floor value.
+        assert screen.reason(self._ballot(50 * MIB)) == "tool_floor"

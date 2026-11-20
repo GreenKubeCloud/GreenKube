@@ -314,8 +314,9 @@ class FlakyPartialSource(FakeSource):
 class TestCompletenessFlagIsPerCall:
     async def test_source_is_authoritative_again_after_a_partial_run(self, sqlite_db):
         repo = SQLiteRecommendationRepository(sqlite_db)
-        await _seed(repo, _rec("vpa-a", source="vpa"), _rec("vpa-b", source="vpa"))
-        engine = _engine([FlakyPartialSource("vpa", [_rec("vpa-a", source="vpa")])])
+        # Native records: a VPA-only record is never re-emitted (A.5), whatever the completeness.
+        await _seed(repo, _rec("vpa-a"), _rec("vpa-b"))
+        engine = _engine([FlakyPartialSource("greenkube", [_rec("vpa-a")])])
 
         first = await engine.run_scan(AsyncMock(), AsyncMock(), repo)
         assert first.source_outcomes[0].status == SourceRunStatus.INCOMPLETE
