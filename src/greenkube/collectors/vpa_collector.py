@@ -219,6 +219,10 @@ class VPACollector:
                             parsed.total_samples = int(samples) if isinstance(samples, (int, float)) else 0
                             parsed.first_sample_start = _parse_time(checkpoint.get("firstSampleStart"))
                             parsed.last_sample_start = _parse_time(checkpoint.get("lastSampleStart"))
+                        elif self.checkpoints_readable:
+                            # Checkpoints are readable but the recommender wrote none for this
+                            # container yet: a brand-new VPA, no sample history to trust.
+                            parsed.total_samples = 0
                         recommendations.append(parsed)
             except Exception as e:
                 logger.warning("Skipping malformed VPA object: %s", e)

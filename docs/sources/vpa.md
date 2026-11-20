@@ -30,7 +30,7 @@ A Goldilocks VPA and a user VPA on the same container are two signals of the **s
 Minutes after a VPA is created, its recommender has a few samples and very wide bounds (the field report saw 3 to 28 samples and an `upperBound` of 15 cores), yet its `target` looks like normal advice. GreenKube ignores a VPA until it is mature:
 
 - `LowConfidence=True` or `RecommendationProvided=False` in `status.conditions`: not mature;
-- otherwise the sample history of the container's checkpoint must cover `sources.vpa.minSampleHours` (`VPA_MIN_SAMPLE_HOURS`, default `24`): the span from `firstSampleStart` to `lastSampleStart`, or `totalSamplesCount` at one sample a minute when the timestamps are missing;
+- otherwise the sample history of the container's checkpoint must cover `sources.vpa.minSampleHours` (`VPA_MIN_SAMPLE_HOURS`, default `24`): the span from `firstSampleStart` to `lastSampleStart`, or `totalSamplesCount` at one sample a minute when the timestamps are missing; a container without a checkpoint yet (a brand-new VPA) has no samples;
 - `0` turns the check off.
 
 An immature VPA yields neither a signal nor a recommendation and is counted in the `immature_vpas` diagnostic. When the checkpoints cannot be read (for example the ClusterRole lacks `verticalpodautoscalercheckpoints`), maturity is unknown: the VPA still votes and the `vpa_maturity_unknown` warning names the count.

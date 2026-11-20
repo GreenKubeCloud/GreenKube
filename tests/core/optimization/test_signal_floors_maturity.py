@@ -375,6 +375,43 @@ class TestCheckpointCollection:
         assert vpa.first_sample_start is not None and vpa.last_sample_start is not None
         assert vpa.last_sample_start - vpa.first_sample_start == timedelta(minutes=27)
 
+    @staticmethod
+    def _api(monkeypatch, checkpoints):
+        from greenkube.collectors import vpa_collector
+
+        vpa_item = {
+            "metadata": {"namespace": "shop", "name": "api"},
+            "spec": {"targetRef": {"kind": "Deployment", "name": "api"}, "updatePolicy": {"updateMode": "Off"}},
+            "status": {"recommendation": {"containerRecommendations": [{"containerName": "web", "target": {}}]}},
+        }
+
+        class Api:
+            async def list_cluster_custom_object(self, group, version, plural, **kwargs):
+                if plural == vpa_collector.VPA_CHECKPOINT_PLURAL:
+                    if isinstance(checkpoints, Exception):
+                        raise checkpoints
+                    return {"items": checkpoints}
+                return {"items": [vpa_item]}
+
+        monkeypatch.setattr(vpa_collector, "get_custom_objects_api", AsyncMock(return_value=Api()))
+        return vpa_collector.VPACollector()
+
+    async def test_a_vpa_without_a_checkpoint_yet_has_no_samples(self, monkeypatch):
+        collector = self._api(monkeypatch, [])
+
+        [vpa] = await collector.collect()
+
+        assert collector.checkpoints_readable is True
+        assert vpa.total_samples == 0
+
+    async def test_unreadable_checkpoints_leave_maturity_unknown(self, monkeypatch):
+        collector = self._api(monkeypatch, PermissionError("forbidden"))
+
+        [vpa] = await collector.collect()
+
+        assert collector.checkpoints_readable is False
+        assert vpa.total_samples is None
+
 
 class TestToolFloorSettings:
     def test_defaults_are_the_krr_simple_and_fairwinds_vpa_floors(self):
