@@ -407,12 +407,15 @@ class GitLabProvider(GitProvider):
                 action["last_commit_id"] = current.sha
             actions.append(action)
 
+        # No ``start_sha``: GitLab uses it only to create ``branch`` and refuses it on an
+        # existing branch ("A branch called ... already exists"). The plan branch exists
+        # already: its head was checked above, ``last_commit_id`` guards each edited file,
+        # and the parent of the new commit is checked against the base revision below.
         commit_response = await self._request(
             "POST",
             f"/projects/{self._project(repo)}/repository/commits",
             json_body={
                 "branch": branch,
-                "start_sha": request.base_revision,
                 "force": False,
                 "commit_message": request.message,
                 "author_name": request.author_name,

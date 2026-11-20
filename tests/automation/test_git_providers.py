@@ -1155,7 +1155,9 @@ async def test_gitlab_create_commit_uses_native_actions_and_expected_parent():
     assert result.files_changed == ["new.yaml", "apps/update.yaml", "apps/delete.yaml"]
     assert commit_route.call_count == 1
     assert seen["commit"]["branch"] == "feature/atomic"
-    assert seen["commit"]["start_sha"] == "base-sha"
+    # ``start_sha`` only creates a branch on GitLab: on the existing plan branch it is refused.
+    assert "start_sha" not in seen["commit"]
+    assert "start_branch" not in seen["commit"]
     assert seen["commit"]["force"] is False
     assert seen["commit"]["commit_message"] == "apply plan"
     assert seen["commit"]["author_name"] == "GreenKube Bot"

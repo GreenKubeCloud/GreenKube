@@ -428,14 +428,25 @@ class FakeGitLabServer(_RecordingServer):
             )
         if method == "POST" and local == "/repository/commits":
             branch = body["branch"]
-            if repository.refs.get(branch) != body["start_sha"]:
-                return _json(400, {"message": "start_sha has changed since"})
+            start = body.get("start_sha") or body.get("start_branch")
+            if start is not None:
+                # GitLab uses ``start_sha``/``start_branch`` only to create ``branch``: on an
+                # existing branch it refuses the commit unless ``force`` is set.
+                if branch in repository.refs and not body.get("force"):
+                    return _json(400, {"message": f"A branch called '{branch}' already exists."})
+                start_commit = repository.resolve(start)
+                if start_commit is None:
+                    return _json(400, {"message": "Invalid start revision"})
+                repository.refs[branch] = start_commit
+            elif branch not in repository.refs:
+                return _json(400, {"message": "You can only create or edit files when you are on a branch"})
+            parent = repository.refs[branch]
             changes = {
                 action["file_path"]: (None if action["action"] == "delete" else action["content"])
                 for action in body["actions"]
             }
             sha = repository.commit_on(branch, changes, body["commit_message"])
-            return _json(201, {"id": sha, "parent_ids": [body["start_sha"]]})
+            return _json(201, {"id": sha, "parent_ids": [parent]})
         if method == "GET" and local == "/repository/merge_base":
             first, second = query["refs[]"]
             for candidate in (first, second):
