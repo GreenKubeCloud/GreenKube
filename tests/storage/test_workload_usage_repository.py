@@ -205,6 +205,7 @@ async def test_sql_snapshot_matches_the_reference_summary(db):
             assert actual.sample_count == expected.sample_count
             assert actual.step_count == expected.step_count
             assert actual.replicas_max == expected.replicas_max
+            assert actual.replicas_latest == expected.replicas_latest
             assert actual.cpu_request == expected.cpu_request
             assert actual.cpu_limit == expected.cpu_limit
             assert actual.total_cost == pytest.approx(expected.total_cost, rel=1e-5)
@@ -793,3 +794,71 @@ async def test_config_since_is_the_start_of_the_last_hour_with_other_requests_on
         web = summaries[("shop", "Deployment", "api")]["web"]
         assert web.memory_config_since == start + timedelta(hours=1)
         assert web.resources_config_since == start + timedelta(hours=3)
+
+
+async def test_risk_profile_counts_the_replicas_of_a_rolled_up_statefulset(db):
+    """F-08: a 3-replica StatefulSet scanned from the rollup is no singleton (and a 1-replica one is)."""
+    from greenkube.core.optimization.context import OptimizationContext
+    from greenkube.core.optimization.enrich import build_risk_profile
+    from greenkube.core.optimization.risks import assess
+    from greenkube.models.metrics import Recommendation, RecommendationType
+
+    start = _base_hour()
+    rows: list[CombinedMetric] = []
+    for hour in range(3):
+        for step in range(12):
+            ts = start + timedelta(hours=hour, minutes=5 * step)
+            for index in range(3):
+                for container in (None, "volume"):
+                    rows.append(
+                        _row(
+                            ts,
+                            pod_name=f"seaweedfs-volume-{index}",
+                            namespace="storage",
+                            owner_kind="StatefulSet",
+                            owner_name="seaweedfs-volume",
+                            node=f"node-{index}",
+                            container_name=container,
+                        )
+                    )
+            for container in (None, "db"):
+                rows.append(
+                    _row(
+                        ts,
+                        pod_name="solo-0",
+                        namespace="storage",
+                        owner_kind="StatefulSet",
+                        owner_name="solo",
+                        container_name=container,
+                    )
+                )
+    repository, _ = await _rolled(db, rows, start, hours=3)
+    window = (start, start + timedelta(hours=3))
+    snapshot = await repository.read_usage_snapshot(*window)
+    pods, containers = await repository.read_baseline_rows(*window, snapshot=snapshot)
+    context = OptimizationContext(
+        config=Config(), metrics=list(pods), container_metrics=list(containers), usage=snapshot
+    )
+
+    def _rec(name: str, container: str) -> Recommendation:
+        return Recommendation(
+            pod_name=name,
+            container_name=container,
+            namespace="storage",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            scope="workload",
+            owner_kind="StatefulSet",
+            owner_name=name,
+            description="reduce cpu",
+            current_cpu_request_millicores=500,
+            recommended_cpu_request_millicores=200,
+        )
+
+    replicated = _rec("seaweedfs-volume", "volume")
+    profile = build_risk_profile(replicated, context)
+    assert profile.replicas == 3
+    assert "singleton_workload" not in assess(replicated, None, Config(), profile).risk_factors
+    single = _rec("solo", "db")
+    profile = build_risk_profile(single, context)
+    assert profile.replicas == 1
+    assert "singleton_workload" in assess(single, None, Config(), profile).risk_factors

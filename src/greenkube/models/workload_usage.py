@@ -153,6 +153,9 @@ class WorkloadUsageSummary:
     step_count: int = 0
     duration_seconds: float = 0.0
     replicas_max: int = 0
+    #: Distinct pods observed in the last observed hour (all nodes): the target's current
+    #: replica count as the rollup knows it (F-08). 0 when unknown.
+    replicas_latest: int = 0
     cpu: Optional[UsageStats] = None
     memory: Optional[UsageStats] = None
     cpu_request: int = 0

@@ -64,6 +64,28 @@ def _current_replicas(series: Sequence[CombinedMetric]) -> Optional[int]:
     return sum(1 for seen in last_seen.values() if latest - seen <= tolerance) or None
 
 
+def observed_replicas(
+    rec: Recommendation, context: "OptimizationContext", series: Sequence[CombinedMetric]
+) -> Optional[int]:
+    """The target's current replica count, or None when unknown (F-08).
+
+    From per-pod metric rows, the pods seen in the latest sampling step. Rows
+    read from the usage rollup are aggregated per target (one pseudo pod named
+    after the workload), so a scan over the rollup reads the distinct pods of
+    the target's last observed hour from its pod-level usage summary instead:
+    counting the pods of those rows reported every workload as a singleton.
+    """
+    snapshot = context.usage_snapshot()
+    pod_summary = None
+    if rec.owner_kind and rec.owner_name:
+        pod_summary = snapshot.summaries.get((rec.namespace or "", rec.owner_kind, rec.owner_name), {}).get(POD_LEVEL)
+    from_summary = pod_summary.replicas_latest if pod_summary is not None and pod_summary.replicas_latest > 0 else None
+    if snapshot.source == "rollup":
+        return from_summary
+    current = _current_replicas(series)
+    return current if current is not None else from_summary
+
+
 def _oom_events(summary: Any, context: "OptimizationContext") -> Optional[int]:
     """OOM kills of the target, or None when unknown (:func:`known_oom_events`)."""
     from greenkube.core.optimization.analyzers.rightsizing import known_oom_events
@@ -92,7 +114,7 @@ def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> W
 
         oom_unknown_cause = _cause(summary, context.usage_snapshot().reliability_signal_status)
     return WorkloadRiskProfile(
-        replicas=_current_replicas(series) if rec.owner_kind else None,
+        replicas=observed_replicas(rec, context, series) if rec.owner_kind else None,
         replica_cpu_p95_max=_replica_p95_max(series, "cpu_usage_millicores"),
         replica_memory_p95_max=_replica_p95_max(series, "memory_usage_bytes"),
         oom_events=oom_events,

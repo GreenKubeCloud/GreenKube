@@ -814,6 +814,7 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             step_count=sum(item.step_count for item in ordered),
             duration_seconds=sum(item.duration_seconds for item in ordered),
             replicas_max=max(item.pod_count for item in ordered),
+            replicas_latest=ordered[-1].pod_count,
             cpu=_stats(
                 sum(item.cpu_n for item in ordered),
                 sum(item.cpu_sum for item in ordered),
