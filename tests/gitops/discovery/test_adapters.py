@@ -239,6 +239,49 @@ def test_argo_remote_helm_chart_binds_to_git_managed_values_source():
     assert source.renderer_config["values_mapping"]["source_index"] == 1
 
 
+def test_argo_upstream_git_chart_binds_to_the_ref_values_source():
+    """A chart read from an upstream Git repository with all values in a ``$ref`` source binds to that source."""
+    application = _fixture("argo-multi-source.yaml")
+    application["spec"]["sources"][0] = {
+        "repoURL": "https://github.com/upstream/silo.git",
+        "targetRevision": "main",
+        "path": "helm/silo",
+        "helm": {
+            "releaseName": "silo",
+            "namespace": "prod",
+            "valueFiles": ["$values/demo/helm-values/silo/values-demo.yaml"],
+        },
+    }
+    application["spec"]["sources"][1] = {
+        "repoURL": "https://gitlab.example.com/ops/gitops.git",
+        "targetRevision": "release",
+        "ref": "values",
+    }
+    application["status"]["sync"]["revisions"] = ["b" * 40, "c" * 40]
+
+    source = _argo(application, provider_id="gitlab-main")[0]
+
+    assert source.status is BindingStatus.RESOLVED
+    assert source.repo_url == "https://gitlab.example.com/ops/gitops.git"
+    assert source.ref == "release"
+    assert source.revision == "c" * 40
+    assert source.source_revision == "c" * 40
+    assert source.evidence["source_index"] == 1
+    assert source.evidence["chart_source_index"] == 0
+    assert source.renderer_config["chart"]["repo"] == "https://github.com/upstream/silo.git"
+    assert [entry["source_index"] for entry in source.renderer_config["values_sources"]] == [1]
+
+
+def test_argo_git_chart_with_a_values_file_next_to_it_stays_bound_to_the_chart_source():
+    """A values file beside the chart keeps the chart source as the edit target."""
+    application = _fixture("argo-multi-source.yaml")
+
+    source = _argo(application)[0]
+
+    assert source.repo_url == "https://github.com/acme/apps.git"
+    assert source.evidence["source_index"] == 0
+
+
 def test_argo_local_helm_chart_without_value_files_keeps_chart_defaults_actionable():
     application = _application({"kind": "Deployment", "namespace": "prod", "name": "payments-api"})
     application["spec"]["source"]["helm"] = {}

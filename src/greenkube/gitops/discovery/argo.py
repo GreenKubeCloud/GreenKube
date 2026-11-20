@@ -628,12 +628,19 @@ def _git_values_binding_source(
     sources: list[_ArgoSource],
     renderer_config: Mapping[str, Any],
 ) -> _ArgoSource:
-    """Use the unique Git-backed values source as the editable Helm binding."""
-    if owner.chart is None:
+    """Use the unique Git-backed values source as the editable Helm binding.
+
+    A chart from a Helm repository is not editable, so its unique ``$ref`` values source is the
+    edit target. A chart read from a Git path switches to the values source only when every
+    values file comes from that single ``$ref`` source (an upstream chart repository whose
+    values live elsewhere); a values file beside the chart keeps the chart source.
+    """
+    entries = [entry for entry in renderer_config.get("values_sources", []) if isinstance(entry, Mapping)]
+    if owner.chart is None and (not entries or any(entry.get("source_ref") is None for entry in entries)):
         return owner
 
     source_indexes: set[int] = set()
-    for entry in renderer_config.get("values_sources", []):
+    for entry in entries:
         if not isinstance(entry, Mapping) or entry.get("source_ref") is None:
             continue
         index = entry.get("source_index")
