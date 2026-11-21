@@ -144,3 +144,24 @@ def test_bounding_by_the_pod_compares_peak_with_peak():
     )
     bounded, was_bounded = bounded_by_pod(inflated, pod)
     assert was_bounded and bounded is not None and bounded.max == 400 * MI
+
+
+def test_evidence_percentiles_use_the_step_peak():
+    """Re-review 4: evidence p95/p99 follow the sizing basis, max(average, peak) per raw step."""
+    from greenkube.core.optimization.statistics import usage_stats
+    from greenkube.models.metrics import CombinedMetric
+
+    rows = [
+        CombinedMetric(
+            pod_name="web",
+            namespace="ns",
+            container_name="app",
+            timestamp=BASE + timedelta(seconds=k * STEP),
+            memory_usage_bytes=240 * MI,
+            memory_usage_max_bytes=400 * MI,
+        )
+        for k in range(20)
+    ]
+    avg, peak, points = usage_stats(rows, "memory_usage_bytes", "memory_usage_max_bytes")
+    assert avg == 240 * MI and peak == 400 * MI
+    assert min(points) == 400 * MI
