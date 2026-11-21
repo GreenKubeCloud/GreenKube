@@ -194,11 +194,14 @@ class MetricRecomputer:
         #: Stored Boavizta profiles (``instance_carbon_profiles``); ``None`` uses the fallbacks only.
         self.embodied_repository = embodied_repository
         self._embodied_profiles: Dict[tuple, dict] = {}
+        #: Current node snapshots, read once per :meth:`run` when a pre-0183 snapshot needs them.
+        self._current_nodes_cache: Optional[Mapping[str, Any]] = None
 
     async def run(
         self, start: datetime, end: datetime, *, only_outdated: bool = True, dry_run: bool = False
     ) -> RecomputeReport:
         report = RecomputeReport(start=start, end=end, dry_run=dry_run)
+        self._current_nodes_cache = None
         chunk_start = start
         while chunk_start < end:
             chunk_end = min(chunk_start + RECOMPUTE_CHUNK, end)
@@ -215,7 +218,12 @@ class MetricRecomputer:
         return {info.name: info for info in snapshots or [] if getattr(info, "name", None)}
 
     async def _current_nodes(self) -> Mapping[str, Any]:
-        """The latest snapshot of every node, active or not (host ids for pre-0183 snapshots)."""
+        """The latest snapshot of every node, active or not (host ids for pre-0183 snapshots).
+
+        Read once per :meth:`run`: the current snapshots do not change between chunks.
+        """
+        if self._current_nodes_cache is not None:
+            return self._current_nodes_cache
         try:
             snapshots = await self.node_repository.get_latest_snapshots_before(
                 datetime.now(timezone.utc), include_inactive=True
@@ -223,7 +231,8 @@ class MetricRecomputer:
         except Exception as error:
             logger.warning("Could not read the current node snapshots: %s", error)
             return {}
-        return {info.name: info for info in snapshots or [] if getattr(info, "name", None)}
+        self._current_nodes_cache = {info.name: info for info in snapshots or [] if getattr(info, "name", None)}
+        return self._current_nodes_cache
 
     def _spec(
         self,
@@ -297,10 +306,10 @@ class MetricRecomputer:
             and previous_idle.host_share is not None
             and previous_idle.host_share >= 1.0
             and shared_now is not None
-            and shared_now.from_current_snapshot
+            and shared_now.borrowed_ids
         ):
-            # A share of 1 next to a snapshot without ids was written by a recompute that could
-            # not group the node (collections since 0183 store the ids): use the group (A.9).
+            # A share of 1 next to this node's snapshot without ids was written by a recompute that
+            # could not group it (collections since 0183 store the ids): use the group (A.9).
             return NodeInputs(
                 shared_now.share,
                 shared_now.reason(node_name),

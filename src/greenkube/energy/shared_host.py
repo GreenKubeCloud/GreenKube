@@ -32,6 +32,8 @@ class SharedHost:
     share: float
     #: ``True`` when the group needed the ids of the current snapshot of at least one member.
     from_current_snapshot: bool = False
+    #: ``True`` when this node itself took the ids of its current snapshot (its snapshot had none).
+    borrowed_ids: bool = False
 
     def reason(self, node_name: str) -> str:
         """The estimation reason of the rows of ``node_name``."""
@@ -93,6 +95,7 @@ def shared_host_groups(nodes: Mapping[str, Any], current: Optional[Mapping[str, 
     """
     members: Dict[str, list[str]] = defaultdict(list)
     borrowed: set[str] = set()
+    borrowing_nodes: set[str] = set()
     for name, info in nodes.items():
         key = _host_key(info)
         no_ids = not getattr(info, "host_id", None) and not getattr(info, "provider_id", None)
@@ -100,6 +103,7 @@ def shared_host_groups(nodes: Mapping[str, Any], current: Optional[Mapping[str, 
             key = _host_key(current[name])
             if key is not None:
                 borrowed.add(key)
+                borrowing_nodes.add(name)
         if key is not None:
             members[key].append(name)
     groups: Dict[str, SharedHost] = {}
@@ -108,6 +112,10 @@ def shared_host_groups(nodes: Mapping[str, Any], current: Optional[Mapping[str, 
             continue
         for name in names:
             groups[name] = SharedHost(
-                key=key, size=len(names), share=1.0 / len(names), from_current_snapshot=key in borrowed
+                key=key,
+                size=len(names),
+                share=1.0 / len(names),
+                from_current_snapshot=key in borrowed,
+                borrowed_ids=name in borrowing_nodes,
             )
     return groups

@@ -299,6 +299,47 @@ async def test_recompute_all_repairs_pre_0183_rows_recomputed_without_a_group(st
     assert all("current node snapshot" in " ".join(r.estimation_reasons) for r in after_rows)
 
 
+async def test_repair_keeps_the_recorded_share_of_a_member_whose_own_snapshot_has_ids(stores):
+    """Only a node that borrowed the current ids is repaired; a recorded share of 1 next to ids in force stays."""
+    t0 = _t0()
+    cfg = Config()
+    historical = {
+        "kind-control-plane": _kind_node("kind-control-plane", t0),
+        "kind-worker": _kind_node("kind-worker", t0, host_id=None, provider_id=None),
+    }
+    current = {n: _kind_node(n, t0, timestamp=t0 + timedelta(hours=1)) for n in historical}
+    rows, idle = _collect(cfg, historical, t0, node_cpu=None)
+    assert {i.host_share for i in idle} == {1.0}
+    await stores[1].save_nodes(list(historical.values()))
+    _, _, after_idle = await _store_and_recompute(stores, cfg, current, rows, idle, t0)
+    shares = {i.node: i.host_share for i in after_idle}
+    assert shares == pytest.approx({"kind-control-plane": 1.0, "kind-worker": 0.5})
+
+
+async def test_current_snapshots_are_read_once_per_run(stores):
+    t0 = _t0()
+    cfg = Config()
+    repo, node_repo = stores
+    names = ("kind-control-plane", "kind-worker")
+    await node_repo.save_nodes([_kind_node(n, t0, host_id=None, provider_id=None) for n in names])
+    await node_repo.save_nodes([_kind_node(n, t0, timestamp=t0 + timedelta(hours=3)) for n in names])
+    await repo.write_combined_metrics(
+        [_row(n, t0 + timedelta(hours=h), model_version="3.0.0") for n in names for h in range(3)]
+    )
+    calls: List[bool] = []
+    original = node_repo.get_latest_snapshots_before
+
+    async def spy(timestamp, include_inactive=False):
+        calls.append(include_inactive)
+        return await original(timestamp, include_inactive=include_inactive)
+
+    node_repo.get_latest_snapshots_before = spy
+    report = await MetricRecomputer(cfg, repo, node_repo).run(t0, t0 + timedelta(hours=3), only_outdated=False)
+    assert report.pod_rows_recomputed == 6
+    assert calls.count(True) == 1
+    assert calls.count(False) == 3
+
+
 async def test_pre_0183_snapshot_of_a_lone_node_stays_unshared(stores):
     """A node alone on its host per its current snapshot keeps the whole host."""
     t0 = _t0()

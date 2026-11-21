@@ -41,6 +41,11 @@ def test_nodes_without_ids_take_the_ids_of_their_current_snapshot():
     assert {name: group.share for name, group in groups.items()} == pytest.approx({"cp": 0.5, "w1": 0.5})
     assert all(group.from_current_snapshot for group in groups.values())
     assert "current node snapshot" in groups["cp"].reason("cp")
+    assert all(group.borrowed_ids for group in groups.values())
+    # Borrowing is per node: a member with ids in force did not borrow.
+    mixed = {"cp": _kind_node("cp"), "w1": _kind_node("w1", boot_id=None)}
+    mixed_groups = shared_host_groups(mixed, current)
+    assert (mixed_groups["cp"].borrowed_ids, mixed_groups["w1"].borrowed_ids) == (False, True)
     # Ids in force are never replaced by the current ones.
     moved = {"cp": _kind_node("cp", boot_id="old"), "w1": _kind_node("w1", boot_id="old")}
     assert not any(group.from_current_snapshot for group in shared_host_groups(moved, current).values())
