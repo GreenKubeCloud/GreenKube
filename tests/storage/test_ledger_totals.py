@@ -88,3 +88,31 @@ async def test_an_edited_total_fails_the_full_verification(ledger: LedgerDb):  #
     await ledger.execute("UPDATE savings_ledger_totals SET value = value * 100 WHERE quantity = 'cost'")
     result = (await verify_ledger(ledger.repo, checkpoints={}, full=True))[CLUSTER_UID]
     assert not result.ok and result.reason == "totals_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_edited_positive_and_negative_sums_fail_the_full_verification(ledger: LedgerDb):  # noqa: F811
+    """The net can stay right while the counters' positive and negative sums are edited (LED-09)."""
+    from greenkube.verify.ledger.verification import verify_ledger
+
+    await _accrue_realistic(ledger)
+    await _projector(ledger).sync()
+    await ledger.execute(
+        "UPDATE savings_ledger_totals SET positive = positive + 5, negative = negative - 5 WHERE quantity = 'cost'"
+    )
+    result = (await verify_ledger(ledger.repo, checkpoints={}, full=True))[CLUSTER_UID]
+    assert not result.ok and result.reason == "totals_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_mixed_sign_group_netting_to_zero_is_not_a_mismatch(ledger: LedgerDb):  # noqa: F811
+    from dataclasses import replace
+
+    from greenkube.verify.ledger.verification import verify_ledger
+    from tests.storage.test_ledger_v2_contract import _draft  # pyrefly: ignore[missing-import]
+
+    drafts = [replace(_draft(f"m{i}", value=(1e6 + 0.1 * i) * (1 if i % 2 else -1))) for i in range(40)]
+    await ledger.repo.append(CLUSTER_UID, "c", drafts)
+    assert (await verify_ledger(ledger.repo, checkpoints={}, full=True))[CLUSTER_UID].ok

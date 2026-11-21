@@ -513,7 +513,9 @@ class LedgerRepository:
         """
         keys = ", ".join(_TOTAL_KEYS)
         folded = await self._select(
-            f"SELECT {keys}, SUM(value) AS value, COUNT(*) AS entries FROM ("
+            f"SELECT {keys}, SUM(value) AS value, SUM(CASE WHEN value > 0 THEN value ELSE 0 END) AS positive, "
+            "SUM(CASE WHEN value < 0 THEN value ELSE 0 END) AS negative, SUM(ABS(value)) AS magnitude, "
+            "COUNT(*) AS entries FROM ("
             "SELECT COALESCE(namespace, '') AS namespace, "
             "COALESCE(recommendation_type, '') AS recommendation_type, method, quantity, COALESCE(unit, '') AS unit, "
             f"book, entry_kind, {_BASIS_SQL} AS basis, "
@@ -522,7 +524,8 @@ class LedgerRepository:
             [cluster_uid],
         )
         stored = await self._select(
-            f"SELECT {keys}, value, entries FROM savings_ledger_totals WHERE cluster_uid = ?", [cluster_uid]
+            f"SELECT {keys}, value, positive, negative, entries FROM savings_ledger_totals WHERE cluster_uid = ?",
+            [cluster_uid],
         )
         expected = {tuple(row[key] for key in _TOTAL_KEYS): row for row in folded}
         actual = {tuple(row[key] for key in _TOTAL_KEYS): row for row in stored if int(row["entries"] or 0)}
@@ -530,12 +533,14 @@ class LedgerRepository:
             want, have = expected.get(key), actual.get(key)
             if want is None or have is None:
                 return f"group {key} is {'missing from the totals' if have is None else 'not in the entries'}"
-            value, total = float(want["value"] or 0.0), float(have["value"] or 0.0)
-            if int(want["entries"]) != int(have["entries"]) or abs(value - total) > tolerance * max(1.0, abs(value)):
-                return (
-                    f"group {key}: totals {total!r} over {have['entries']} entries, "
-                    f"entries sum {value!r} over {want['entries']}"
-                )
+            if int(want["entries"]) != int(have["entries"]):
+                return f"group {key}: totals over {have['entries']} entries, entries {want['entries']}"
+            # Relative to the sum of magnitudes: a mixed-sign group whose net is near 0 is not a false mismatch.
+            bound = tolerance * max(1.0, float(want["magnitude"] or 0.0))
+            for column in ("value", "positive", "negative"):
+                folded_sum, total = float(want[column] or 0.0), float(have[column] or 0.0)
+                if abs(folded_sum - total) > bound:
+                    return f"group {key}: totals {column} {total!r}, entries {column} {folded_sum!r}"
         return None
 
     async def get_watermarks(self, cluster_uid: str) -> Dict[str, int]:
