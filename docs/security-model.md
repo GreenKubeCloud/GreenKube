@@ -53,7 +53,7 @@ on each mutating route, so a change to one never silently opens a route.
 | Plan approval (`POST /automation/plans/{id}/approve`), `POST /recommendations/{id}/apply-pr` | `approve` | operator, admin |
 | Delivery report of `patch`/`ci` plans | `plans:deliver` | operator, admin |
 | Push API (`POST /api/v1/signals`, as `push:<key name>` only) | `signals:write` | admin, or a key |
-| KRR and Polaris report uploads | `signals:report` (`signals:write` accepted, deprecated) | admin, or a key |
+| KRR report uploads | `signals:report` (`signals:write` accepted, deprecated) | admin, or a key |
 | `/prometheus/metrics` and the controller/worker metrics listeners | `metrics:read`, or the scrape token | viewer and above, or a key |
 | Users, roles, API keys, the repository allowlist | `admin` | admin |
 | `/auth/me`, own sessions, password change, sign-out | authenticated | any |
@@ -95,7 +95,7 @@ rotates them. Credentials are never written to ConfigMaps, logs, API responses, 
 | Controller/worker | Git providers (GitHub, GitLab, Gitea) | The Git credential, to its bound host only |
 | Controller | Remote Helm repositories and OCI registries | None (anonymous; registry bearer tokens never follow a redirect to another host) |
 | Controller | Self-hosted provider probe (`/api/v4/version`, `/api/v1/version`) | None |
-| Connectors (VPA, Goldilocks, Kubecost, GKE, Azure Advisor...) | Their in-cluster or cloud endpoints | Their own configured credentials |
+| Connectors (VPA, Goldilocks, Karpenter) | The Kubernetes API | The GreenKube ServiceAccount |
 | Renderer sandbox | Nothing (egress denied) | None |
 
 Restrict controller egress with `monitoring.networkPolicy.additionalEgress` (opt-in: the right egress list depends on
@@ -104,11 +104,11 @@ where Prometheus, OpenCost and your Git hosts live).
 ## Network policies
 
 - `postgres.networkPolicy` (on by default): only the release's api, controller and worker, and pods labelled
-  `greenkube.cloud/postgres-client: "true"` (a backup or copy Job), reach PostgreSQL. The renderer sandbox, the
-  KRR/Polaris jobs and other namespaces cannot.
+  `greenkube.cloud/postgres-client: "true"` (a backup or copy Job), reach PostgreSQL. The renderer sandbox and other
+  namespaces cannot.
 - The renderer sandbox always has an egress-deny policy.
-- `monitoring.networkPolicy` (opt-in): ingress to the API and metrics ports from Prometheus (plus the KRR/Polaris
-  jobs and `additionalIngress`, e.g. the Ingress controller) and egress limited to DNS, PostgreSQL, the renderer and
+- `monitoring.networkPolicy` (opt-in): ingress to the API and metrics ports from Prometheus (plus
+  `additionalIngress`, e.g. the Ingress controller or a KRR CronJob of your own) and egress limited to DNS, PostgreSQL, the renderer and
   `additionalEgress`. It is opt-in because a default egress list cannot know where Prometheus, OpenCost, the Kubernetes
   API and your Git hosts are; an API ingress policy that allows everything on the API port would add nothing.
 
@@ -146,7 +146,7 @@ spec:
 2. Prefer `oidc` or `proxy` mode with `auth.roles` mapped to IdP groups; keep `auth.localLogin` only as break-glass.
 3. Upgraded installs: migrate scripts from the bootstrap key to scoped keys, then set `auth.legacyApiKey: disabled`.
 4. Give each machine its own scoped key with the narrowest scopes and an expiry (`metrics:read` for Prometheus,
-   `signals:report` for KRR/Polaris, `read` + `plans:deliver` for CI delivery).
+   `signals:report` for KRR, `read` + `plans:deliver` for CI delivery).
 5. Use a CNI that enforces NetworkPolicy, so the renderer and PostgreSQL policies take effect.
 6. Keep auto-approval off, or limit it to `low` risk (`automation.autoApprove`).
 7. Use a GitHub App (repository-scoped, short-lived tokens) rather than a personal access token.

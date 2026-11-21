@@ -52,7 +52,7 @@ data is preserved: the bundled PostgreSQL StatefulSet, its volume and its Secret
 | Renderer only with automation | Renderer always deployed (25m / 96Mi) |
 | SQLite in Helm (`config.db.type`, `config.db.path`, `config.persistence`) | PostgreSQL only; SQLite stays for `greenkube demo` and local development |
 | Three `minSamples` knobs | One: `config.recommendations.minSamples` |
-| `config.recommendations.sourcePriority`, `vpaEnabled`, `karpenterEnabled` | `sources.priority`, `sources.settings.<id>.enabled` |
+| `config.recommendations.sourcePriority`, `vpaEnabled`, `karpenterEnabled` | `sources.settings.<id>.enabled`; the source priority is removed (see [Removed connectors](#removed-connectors-and-consensus-policies)) |
 | ConfigMap `<release>` (a Helm hook) | ConfigMap `<release>-config` (a regular release resource) |
 
 ### Metric measures in double precision (PostgreSQL)
@@ -109,9 +109,31 @@ An upgrade that reuses a 0.3.x values file keeps working: the chart maps the old
 | `automation.workerMetricsPort` | `worker.metricsPort` |
 | `rendererSandbox.*` | `renderer.*`; `rendererSandbox.enabled` is ignored |
 | `automation.policy.minSamples`, `config.recommendations.verification.minSamples` | still honoured for their gate; prefer `config.recommendations.minSamples` |
-| `config.recommendations.sourcePriority` | `sources.priority` |
+| `config.recommendations.sourcePriority` | ignored (see [Removed connectors](#removed-connectors-and-consensus-policies)) |
 | `config.db.type: postgres`, `config.db.path` | ignored |
 | `config.db.type: sqlite` | the upgrade fails with the migration commands, see below |
+
+### Removed connectors and consensus policies
+
+GreenKube's measured value now decides every size; VPA, Goldilocks, KRR and pushed signals move the confidence up or
+down, and a source alone never creates a recommendation. What was removed, and what happens to an existing install:
+
+| Removed | On upgrade |
+|---|---|
+| The Kubecost, GKE recommender, Azure Advisor and Polaris connectors | Their `SOURCES_CONFIG` / `sources.settings.<id>` entries (`kubecost`, `gke`, `azure_advisor`, `polaris`) are accepted and ignored, with one warning at start and a line under DEPRECATED VALUES. Push their advice to `POST /api/v1/signals` instead ([Push API](sources/push.md)). |
+| `POST /api/v1/sources/polaris/reports` | Answers `404`. |
+| The chart's KRR and Polaris CronJobs (`sources.krr.job.*`, `sources.polaris.job.*`) | Ignored with a line under DEPRECATED VALUES; the CronJobs, their ServiceAccounts and ClusterRoles are deleted by the upgrade. Run KRR yourself and push its report: [Robusta KRR](sources/krr.md) has a ready-made CronJob. |
+| `RECOMMENDATION_CONSENSUS_POLICY` (`safest`, `median`, `weighted`, `priority`; Helm `config.recommendations.consensusPolicy`) | Accepted and ignored, with one warning at start (and a line under DEPRECATED VALUES). |
+| `RECOMMENDATION_SOURCE_PRIORITY` (Helm `sources.priority`, `config.recommendations.sourcePriority`) | Accepted and ignored, with one warning at start (and a line under DEPRECATED VALUES). |
+
+Migration `0310` retires the **active** recommendations whose chosen source was one of the removed connectors: they
+become `stale` with a `stale` event of reason `type_removed`. Recommendations in a pull request, being measured or
+already in the ledger are untouched, and the ledger is never rewritten. The signals, runs and inbox rows of the
+removed connectors stay in their tables (nothing writes them any more); a later release drops what is left, after a
+backup note here. A recommendation stored before keeps the consensus `policy` it was built with; the next scan
+rebuilds it with the native value, which may change its proposed value (a new revision).
+
+These values are refused in a later release: remove them from your values file.
 
 Note that `automation.enabled: false` now means *discovery, previews and measurement run, no pull request is
 opened*. To keep the Git tokens out of every pod, also remove `automation.providers` and do not create

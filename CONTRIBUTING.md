@@ -4,7 +4,7 @@ Thank you for your interest in GreenKube! We welcome contributions of all kinds 
 
 GreenKube is an optimization loop for Kubernetes clusters run with GitOps. It aggregates recommendations, delivers them as pull requests, and measures the savings they produce (see [Concepts](docs/concepts.md)). These contributions are especially valuable:
 
-- **Recommendation sources:** connectors that turn another tool's output (KRR, Kubecost, Polaris, cloud recommenders…) into GreenKube recommendations. Start from `src/greenkube/core/optimization/providers/base.py`.
+- **Recommendation sources:** most tools can push their advice through the [push API](docs/sources/push.md) with no code in GreenKube; a plugin source starts from the [Source SDK](docs/sources.md).
 - **GitOps layouts and action kinds:** more repository layouts, and more kinds of changes that can become a pull request.
 - **Measurement methodology:** reviews of how costs, emissions and realized savings are estimated and verified.
 
