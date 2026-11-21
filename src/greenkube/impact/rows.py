@@ -120,6 +120,11 @@ class NodeIdleMetric:
     embodied_source: Optional[str] = None
     #: Where the node's GPU power came from (``GpuSource``), NULL without GPUs (NRG-13).
     gpu_source: Optional[str] = None
+    #: Inputs ``greenkube recompute`` needs to re-derive the row (0184): the node's share of a
+    #: shared host (1.0 alone, NRG-15) and its root-cgroup CPU (None: the pods' sum, NRG-12).
+    #: ``host_share`` NULL marks a row written before they were recorded.
+    host_share: Optional[float] = None
+    node_cpu_used_cores: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +277,7 @@ class MetricRowAllocator:
             embodied_source=spec.embodied_source,
             embodied_reason=spec.embodied_reason,
             host_reason=spec.host_reason,
+            host_share=spec.host_share if 0.0 < spec.host_share <= 1.0 else 1.0,
             gpu_reason=spec.gpu_reason,
             gpu_source=spec.gpu_source,
             node_cpu_used_cores=spec.node_cpu_used_cores,
@@ -410,6 +416,10 @@ class MetricRowAllocator:
             if (row.cost_source or "").strip().lower() == CostSource.OPENCOST_PENDING.value:
                 # A recompute re-prices the model but the window still waits for OpenCost.
                 update["cost_source"] = CostSource.OPENCOST_PENDING.value
+        if "estimation_reasons" in update:
+            # A re-allocation that drops a reason (a host no longer shared, a GPU now measured)
+            # clears the flag too: a row is estimated when it says why.
+            update["is_estimated"] = bool(update["estimation_reasons"])
         return row.model_copy(update=update)
 
     def _idle_row(
@@ -460,6 +470,8 @@ class MetricRowAllocator:
             model_version=impact.model_version,
             embodied_source=node.embodied_source,
             gpu_source=node.gpu_source,
+            host_share=node.host_share,
+            node_cpu_used_cores=node.node_cpu_used_cores,
         )
 
 

@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
 from greenkube.energy.embodied import load_cached_profiles, resolve_node_embodied
 from greenkube.energy.node_power import default_profile_from_config, resolve_node_power_profile
+from greenkube.energy.shared_host import SHARED_HOST_REASON_PREFIX, SharedHost, shared_host_groups
+from greenkube.impact.power import GPU_TDP_ESTIMATE_REASON_PREFIX, GPU_UNMEASURED_REASON_PREFIX
 from greenkube.impact.rows import (
     MetricRowAllocator,
     NodeIdleMetric,
@@ -55,6 +57,8 @@ class RecomputeReport:
     container_rows_recomputed: int = 0
     idle_rows_written: int = 0
     groups_skipped_current: int = 0
+    #: Node-steps of the current model whose idle row predates the recorded inputs (0184): left as stored.
+    groups_skipped_unrecorded: int = 0
     previous_versions: Counter = field(default_factory=Counter)
 
     def summary(self) -> str:
@@ -67,7 +71,8 @@ class RecomputeReport:
             f"{action} {self.pod_rows_recomputed} pod row(s), {self.container_rows_recomputed} container row(s) "
             f"and {self.idle_rows_written} idle row(s) to model {IMPACT_MODEL_VERSION} "
             f"between {self.start.isoformat()} and {self.end.isoformat()} "
-            f"({self.pod_rows_read} pod row(s) read, {self.groups_skipped_current} node-step(s) already current; "
+            f"({self.pod_rows_read} pod row(s) read, {self.groups_skipped_current} node-step(s) already current, "
+            f"{self.groups_skipped_unrecorded} node-step(s) kept: written before 0184; "
             f"previous versions: {versions or 'none'})"
         )
 
@@ -143,6 +148,26 @@ def split_to_containers(pod: CombinedMetric, containers: Sequence[CombinedMetric
     return result
 
 
+@dataclass(frozen=True)
+class NodeInputs:
+    """Node facts of one step that the stored rows do not carry (NRG-12, NRG-13, NRG-15)."""
+
+    host_share: float
+    host_reason: Optional[str]
+    node_cpu_used_cores: Optional[float]
+    gpu_source: Optional[str]
+    gpu_reason: Optional[str]
+
+
+def _stored_reason(rows: Sequence[CombinedMetric], prefixes: Tuple[str, ...]) -> Optional[str]:
+    """The first estimation reason of ``rows`` with one of ``prefixes`` (the collection's wording)."""
+    for row in rows:
+        for reason in row.estimation_reasons:
+            if reason.startswith(prefixes):
+                return reason
+    return None
+
+
 class MetricRecomputer:
     """Re-allocates stored raw rows with the current Impact Model."""
 
@@ -185,7 +210,14 @@ class MetricRecomputer:
             return {}
         return {info.name: info for info in snapshots or [] if getattr(info, "name", None)}
 
-    def _spec(self, node_name: str, info: Any, rows: Sequence[CombinedMetric], gpu_unattributed: float) -> NodeSpec:
+    def _spec(
+        self,
+        node_name: str,
+        info: Any,
+        rows: Sequence[CombinedMetric],
+        gpu_unattributed: float,
+        inputs: Optional["NodeInputs"] = None,
+    ) -> NodeSpec:
         instance_type = next((row.node_instance_type for row in rows if row.node_instance_type), None)
         instance_type = instance_type or (info.instance_type if info is not None else None)
         power = resolve_node_power_profile(
@@ -221,6 +253,44 @@ class MetricRecomputer:
             is_fallback=power.is_fallback,
             embodied_source=embodied.source,
             embodied_reason=embodied.reason(node_name),
+            host_share=inputs.host_share if inputs is not None else 1.0,
+            host_reason=inputs.host_reason if inputs is not None else None,
+            node_cpu_used_cores=inputs.node_cpu_used_cores if inputs is not None else None,
+            gpu_source=inputs.gpu_source if inputs is not None else None,
+            gpu_reason=inputs.gpu_reason if inputs is not None else None,
+        )
+
+    def _inputs(
+        self,
+        node_name: str,
+        rows: Sequence[CombinedMetric],
+        previous_idle: Optional[NodeIdleMetric],
+        shared_hosts: Mapping[str, SharedHost],
+    ) -> Optional["NodeInputs"]:
+        """What the collection knew of the node at this step, or ``None`` when it cannot be re-derived.
+
+        An idle row written since 0184 records the host share and the root-cgroup CPU the
+        collection used. Without it, rows of the current model came from a collection whose
+        inputs are lost (``None``: leave them as stored); older rows never had them and take the
+        shared host from the node snapshots (NRG-15), with the pods' CPU sum (NRG-12).
+        """
+        gpu_source = previous_idle.gpu_source if previous_idle is not None else None
+        gpu_reason = _stored_reason(rows, (GPU_TDP_ESTIMATE_REASON_PREFIX, GPU_UNMEASURED_REASON_PREFIX))
+        if previous_idle is not None and previous_idle.host_share is not None:
+            share = previous_idle.host_share
+            host_reason = _stored_reason(rows, (SHARED_HOST_REASON_PREFIX,)) if share < 1.0 else None
+            if share < 1.0 and host_reason is None and node_name in shared_hosts:
+                host_reason = shared_hosts[node_name].reason(node_name)
+            return NodeInputs(share, host_reason, previous_idle.node_cpu_used_cores, gpu_source, gpu_reason)
+        if node_name and any(row.model_version == IMPACT_MODEL_VERSION for row in rows):
+            return None
+        shared = shared_hosts.get(node_name)
+        return NodeInputs(
+            shared.share if shared is not None else 1.0,
+            shared.reason(node_name) if shared is not None else None,
+            None,
+            gpu_source,
+            gpu_reason,
         )
 
     async def _run_chunk(
@@ -243,6 +313,8 @@ class MetricRecomputer:
             containers_by_pod[(container.namespace, container.pod_name, container.timestamp)].append(container)
         nodes = await self._nodes_at(end)
         self._embodied_profiles = await load_cached_profiles(self.embodied_repository, nodes, self.config)
+        # Shared hosts from the snapshots' host and provider ids (0183), for rows without recorded inputs.
+        shared_hosts = shared_host_groups(nodes) if getattr(self.config, "SHARED_HOST_DETECTION", True) else {}
 
         groups: Dict[Tuple[str, Optional[datetime]], List[CombinedMetric]] = defaultdict(list)
         for row in pods:
@@ -256,15 +328,19 @@ class MetricRecomputer:
             if only_outdated and all(row.model_version == IMPACT_MODEL_VERSION for row in rows):
                 report.groups_skipped_current += 1
                 continue
+            previous_idle = idle_before.get((node_name, timestamp))
+            inputs = self._inputs(node_name, rows, previous_idle, shared_hosts)
+            if inputs is None:
+                report.groups_skipped_unrecorded += 1
+                continue
             for row in rows:
                 report.previous_versions[row.model_version] += 1
             first = rows[0]
             hours = (first.duration_seconds or 0) / 3600.0
             if hours <= 0:
                 continue
-            previous_idle = idle_before.get((node_name, timestamp))
             gpu_unattributed = (previous_idle.gpu_power_watts or 0.0) if previous_idle is not None else 0.0
-            spec = self._spec(node_name, nodes.get(node_name), rows, gpu_unattributed)
+            spec = self._spec(node_name, nodes.get(node_name), rows, gpu_unattributed, inputs)
             profile = self.allocator.node_profile(
                 spec, rows, pue=first.pue or 1.0, intensity=first.grid_intensity or 0.0, hours=hours
             )

@@ -81,6 +81,8 @@ IDLE_METRIC_COLUMNS: tuple[str, ...] = (
     "model_version",
     "embodied_source",
     "gpu_source",
+    "host_share",
+    "node_cpu_used_cores",
 )
 
 

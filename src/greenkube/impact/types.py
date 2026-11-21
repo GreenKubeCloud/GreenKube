@@ -300,6 +300,8 @@ class NodeImpactProfile:
     embodied_reason: Optional[str] = None
     #: Estimation reason when the node shares its host with other nodes (NRG-15).
     host_reason: Optional[str] = None
+    #: This node's share of its physical host (1.0 alone), already applied to idle, memory and embodied.
+    host_share: float = 1.0
     #: Estimation reason of a GPU node without DCGM samples (NRG-13).
     gpu_reason: Optional[str] = None
     #: Where the node's GPU power came from (``GpuSource``), None without GPUs (NRG-13).
