@@ -556,3 +556,33 @@ async def test_a_stale_verifier_does_not_flip_the_outcome_of_a_row_just_accepted
     )
     after = await rotated.get_chain_status(CLUSTER_UID)
     assert after is not None and after.ok and after.failure is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_rotate_key_without_a_trusted_row_needs_the_trust_flag(ledger: LedgerDb):  # noqa: F811
+    await LedgerRepository(ledger.manager, chain_key=K1).append(CLUSTER_UID, CLUSTER, [_draft("a0"), _draft("a1")])
+    await ledger.execute("DELETE FROM ledger_chain_status")
+    rotated = LedgerRepository(ledger.manager, chain_key=K2, previous_keys=[K1])
+    with pytest.raises(ValueError, match="--trust-entry-keys"):
+        await rotate_key(rotated, CLUSTER_UID, "lost row")
+    assert (await rotate_key(rotated, CLUSTER_UID, "lost row", trust_entry_keys=True)).ok
+    status = await rotated.get_chain_status(CLUSTER_UID)
+    assert status is not None and status.key_boundaries == ((chain_key_id(K1), 1), (chain_key_id(K2), 3))
+    audit = (await rotated.head_acceptances(CLUSTER_UID))[-1]
+    assert audit["reason"].startswith("trust-entry-keys")
+    await rotated.append(CLUSTER_UID, CLUSTER, [_draft("b0")])
+    assert (await verify_ledger(rotated, checkpoints={}, full=True))[CLUSTER_UID].ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_leaked_old_key_with_a_deleted_row_is_not_rotated_without_the_flag(ledger: LedgerDb):  # noqa: F811
+    rotated = await _rotated_chain(ledger)
+    await _rekey_tail_with(ledger, rotated, K1, 3)  # K2 entries 4-6 re-keyed with K1, totals unchanged
+    await ledger.execute("DELETE FROM ledger_chain_status")
+    with pytest.raises(LedgerChainKeyError, match="--trust-entry-keys"):
+        await rotated.append(CLUSTER_UID, CLUSTER, [_draft("c0")])
+    with pytest.raises(ValueError, match="--trust-entry-keys"):
+        await rotate_key(rotated, CLUSTER_UID, "following the writer's message")
+    assert await rotated.get_chain_status(CLUSTER_UID) is None

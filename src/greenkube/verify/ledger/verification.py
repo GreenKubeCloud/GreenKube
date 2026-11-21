@@ -713,7 +713,12 @@ async def _accept_trusting_entry_keys(
 
 
 async def rotate_key(
-    repo: LedgerRepository, cluster_uid: str, reason: str, *, now: Optional[datetime] = None
+    repo: LedgerRepository,
+    cluster_uid: str,
+    reason: str,
+    *,
+    now: Optional[datetime] = None,
+    trust_entry_keys: bool = False,
 ) -> ChainVerification:
     """Record a deliberate rotation of the chain key (``greenkube db ledger-rotate-key``, LED-05).
 
@@ -726,9 +731,18 @@ async def rotate_key(
     new key; once a verified head covers the boundary, a leaked old key cannot
     forge the entries after it, even through ``--rebuild-boundaries``.
 
+    The boundaries come from a trusted status row (signed with a configured
+    key). Without one (a lost or unsigned row) the rotation is refused unless
+    ``trust_entry_keys``: the boundaries are then taken from the entries' own
+    keys, with the rules of ``ledger-accept-head --trust-entry-keys``, trusting
+    every configured key over the whole chain (warned and audited). A leaked
+    previous key combined with a lost status row is accepted only by such an
+    explicit trust step.
+
     Raises:
-        ValueError: without a reason, without a key, on an unkeyed chain, or
-            when the chain already uses the current key.
+        ValueError: without a reason, without a key, on an unkeyed chain,
+            when the chain already uses the current key, or without a trusted
+            row and without ``trust_entry_keys``.
     """
     if not reason.strip():
         raise ValueError("a reason is required to rotate the ledger chain key")
@@ -741,6 +755,16 @@ async def rotate_key(
     kept = previous if previous is not None and repo.status_signature_valid(previous) is True else None
     if kept is not None and kept.key_boundaries and kept.key_for(10**18) == current_id:
         raise ValueError(f"the ledger of cluster {cluster_uid} already rotated to key {current_id}")
+    trusting = kept is None or not kept.key_boundaries
+    if trusting and not trust_entry_keys:
+        raise ValueError(
+            f"no trusted status row records the key boundaries of cluster {cluster_uid}: rerun with "
+            "--trust-entry-keys (`greenkube db ledger-rotate-key --trust-entry-keys`, or first "
+            "`ledger-accept-head --trust-entry-keys`) to take them from the entries' own keys, trusting every "
+            "configured key over the whole chain"
+        )
+    if trust_entry_keys and not trusting:
+        raise ValueError(f"a trusted status row exists for cluster {cluster_uid}: --trust-entry-keys is not needed")
     result = await verify_chain(repo, cluster_uid, boundaries=kept if kept and kept.key_boundaries else None)
     if result.ok:
         # The head the old row anchored must still be there (a lost tail is accepted first, with accept-head).
@@ -753,8 +777,30 @@ async def rotate_key(
         raise ValueError(f"the ledger of cluster {cluster_uid} holds no keyed entry: no rotation is needed")
     if result.head_key_id == current_id:
         raise ValueError(f"the ledger of cluster {cluster_uid} already uses key {current_id}")
-    boundaries = kept.key_boundaries if kept and kept.key_boundaries else result.key_boundaries
-    first_keyed = kept.first_keyed_seq if kept and kept.key_boundaries else result.first_keyed_seq
+    audit_prefix = ""
+    if trusting:
+        trusted_runs, refusal = _trusted_entry_runs(repo, result)
+        if trusted_runs is None:
+            return replace(
+                result,
+                ok=False,
+                failure_seq=None,
+                reason="boundary_rebuild_refused",
+                detail=f"the key boundaries cannot be taken from the entries: {refusal}",
+            )
+        logger.warning(
+            "Savings ledger of cluster %s: rotate-key --trust-entry-keys trusts every configured key over the whole "
+            "chain; boundaries %s.",
+            cluster_uid,
+            list(trusted_runs),
+        )
+        audit_prefix = "trust-entry-keys: "
+        boundaries: Tuple[Tuple[str, int], ...] = trusted_runs
+        first_keyed = result.first_keyed_seq
+    else:
+        assert kept is not None
+        boundaries = kept.key_boundaries
+        first_keyed = kept.first_keyed_seq
     rotated = tuple(boundaries) + ((current_id, (result.head_seq or 0) + 1),)
     # One transaction under the append lock: the head and the row are those verified, and the status row and its
     # audit row are written together.
@@ -773,7 +819,8 @@ async def rotate_key(
         ),
         expect_head=(result.head_seq or 0, result.head_hash),
         expect_signature=previous.signature if previous is not None else None,
-        audit_reason=f"rotate-key to {current_id} from seq {(result.head_seq or 0) + 1}: {reason.strip()}",
+        audit_reason=f"{audit_prefix}rotate-key to {current_id} from seq {(result.head_seq or 0) + 1}: "
+        f"{reason.strip()}",
         previous=previous,
         accepted_at=moment,
     )

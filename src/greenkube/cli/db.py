@@ -423,6 +423,13 @@ def ledger_accept_head_command(
 def ledger_rotate_key_command(
     cluster_uid: Annotated[str, typer.Option("--cluster-uid", help="Cluster uid of the ledger chain.")],
     reason: Annotated[str, typer.Option("--reason", help="Why the key is rotated (logged and audited).")],
+    trust_entry_keys: Annotated[
+        bool,
+        typer.Option(
+            "--trust-entry-keys",
+            help="Without a trusted status row: take the key boundaries from the entries' own keys (audited).",
+        ),
+    ] = False,
 ) -> None:
     """Record a rotation of the savings ledger chain key (LED-05).
 
@@ -440,7 +447,15 @@ def ledger_rotate_key_command(
         manager = get_db_manager()
         await manager.connect()
         try:
-            return await rotate_key(get_ledger_repository(manager), cluster_uid, reason)
+            if trust_entry_keys:
+                typer.echo(
+                    "Warning: --trust-entry-keys trusts every configured key (LEDGER_CHAIN_KEY and "
+                    "LEDGER_CHAIN_PREVIOUS_KEYS) over the whole chain.",
+                    err=True,
+                )
+            return await rotate_key(
+                get_ledger_repository(manager), cluster_uid, reason, trust_entry_keys=trust_entry_keys
+            )
         finally:
             await manager.close()
 

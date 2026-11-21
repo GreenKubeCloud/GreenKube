@@ -533,7 +533,9 @@ class LedgerRepository:
         current_id = chain_key_id(chain_key) if chain_key else None
         rotate_hint = (
             "deploy the Secret with the new key as LEDGER_CHAIN_KEY and the old key in LEDGER_CHAIN_PREVIOUS_KEYS, "
-            "then run `greenkube db ledger-rotate-key`"
+            "then run `greenkube db ledger-rotate-key`; if the status row is lost or unsigned, "
+            "`greenkube db ledger-rotate-key --trust-entry-keys` (or `ledger-accept-head --trust-entry-keys`) takes "
+            "the boundaries from the entries' own keys, trusting every configured key over the whole chain"
         )
         if head_key_id is None:
             if has_boundaries:
