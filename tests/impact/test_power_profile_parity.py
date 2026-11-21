@@ -142,3 +142,37 @@ def test_projector_shared_host_detection_can_be_disabled():
     alone = ImpactProjector(config, node_infos=_kind_nodes()[:1]).pool.nodes["kind-control-plane"]
     together = ImpactProjector(config, node_infos=_kind_nodes()).pool.nodes["kind-control-plane"]
     assert together.idle_watts == pytest.approx(alone.idle_watts)
+
+
+def test_the_embodied_annotation_is_the_whole_host_on_a_shared_host():
+    """NRG-15: `greenkube.io/embodied-kg` on nodes of one host is the host's value, split 1/N."""
+    from greenkube.core.historical_range_processor import HistoricalRangeProcessor
+    from greenkube.energy.node_power import default_profile_from_config
+    from greenkube.energy.shared_host import shared_host_groups
+
+    config = Config()
+    nodes = [node.model_copy(update={"embodied_emissions_kg": 1500.0}) for node in _kind_nodes()]
+    groups = shared_host_groups({node.name: node for node in nodes})
+    allocator = MetricRowAllocator(config)
+    total = 0.0
+    for node in nodes:
+        power = resolve_node_power_profile(
+            node_name=node.name,
+            instance_type=None,
+            cpu_capacity_cores=node.cpu_capacity_cores,
+            provider=node.cloud_provider,
+            instance_profiles=INSTANCE_PROFILES,
+            default_profile=default_profile_from_config(config),
+        )
+        spec = HistoricalRangeProcessor._node_spec(
+            node.name,
+            node,
+            power,
+            {},
+            instance_type=None,
+            gpu_unattributed_watts=0.0,
+            config=config,
+            shared_host=groups[node.name],
+        )
+        total += allocator.node_profile(spec, [], pue=1.0, intensity=100.0, hours=1.0).embodied_g_per_hour
+    assert total == pytest.approx(1500.0 * 1000 / (config.DEFAULT_HARDWARE_LIFESPAN_YEARS * 8760))
