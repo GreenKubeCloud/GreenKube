@@ -3,7 +3,7 @@
  * share and the cluster totals side by side; "not available" when unknown.
  */
 import { describe, expect, it } from 'vitest';
-import { NOT_AVAILABLE, idleShareNote, idleShareRows } from '../../src/lib/idleShare.js';
+import { NOT_AVAILABLE, idleShareNote, idleShareRows, windowStart } from '../../src/lib/idleShare.js';
 
 const known = {
 	total_co2e_grams: 1000,
@@ -53,8 +53,27 @@ describe('idleShareNote', () => {
 	it('says why the idle share is not available', () => {
 		expect(idleShareNote(known, '')).toBe('');
 		expect(idleShareNote({}, 'shop')).toMatch(/no namespace/);
-		expect(idleShareNote({ idle_data_since: '2026-11-01T00:00:00Z' }, '')).toMatch(/idle history starts/i);
-		expect(idleShareNote({}, '')).toMatch(/no node idle row/i);
+		expect(idleShareNote({}, '')).toBe('Not available for this period.');
+	});
+
+	it('blames the idle history only when it starts after the window start', () => {
+		const start = new Date('2026-11-20T00:00:00Z');
+		const later = { idle_data_since: '2026-11-20T06:00:00Z' };
+		const earlier = { idle_data_since: '2026-11-01T00:00:00Z' };
+		expect(idleShareNote(later, '', start)).toMatch(/idle history starts 2026-11-20 06:00 UTC/i);
+		expect(idleShareNote(earlier, '', start)).toBe('Not available for this period.');
+		expect(idleShareNote(earlier, '', start)).not.toMatch(/history starts/i);
+		// Without a known window start the cause cannot be told: no claim about the history.
+		expect(idleShareNote(later, '', null)).toBe('Not available for this period.');
+	});
+
+	it('computes the start of a time-range slug', () => {
+		const now = new Date('2026-11-21T12:00:00Z');
+		expect(windowStart('24h', now)?.toISOString()).toBe('2026-11-20T12:00:00.000Z');
+		expect(windowStart('7d', now)?.toISOString()).toBe('2026-11-14T12:00:00.000Z');
+		expect(windowStart('ytd', now)?.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+		expect(windowStart('1y', now)?.toISOString()).toBe('2025-11-21T12:00:00.000Z');
+		expect(windowStart('bogus', now)).toBeNull();
 	});
 
 	it('exports the not-available label', () => {

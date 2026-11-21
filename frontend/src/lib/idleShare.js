@@ -55,18 +55,43 @@ export function idleShareRows(summary) {
 }
 
 /**
+ * Start of a time-range slug ('1h', '24h', '7d', '30d', '1y', 'ytd') relative to `now`; null when unknown.
+ * @param {string|null|undefined} slug
+ * @param {Date} [now]
+ * @returns {Date|null}
+ */
+export function windowStart(slug, now = new Date()) {
+	if (slug === 'ytd') return new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+	const match = /^(\d+)(min|h|d|w|y)$/.exec(String(slug ?? ''));
+	if (!match) return null;
+	const amount = Number(match[1]);
+	const start = new Date(now.getTime());
+	if (match[2] === 'y') {
+		start.setUTCFullYear(start.getUTCFullYear() - amount);
+		return start;
+	}
+	const unit = { min: 60e3, h: 3600e3, d: 86400e3, w: 7 * 86400e3 }[match[2]];
+	return new Date(now.getTime() - amount * unit);
+}
+
+/**
  * Why the idle share is not available ('' when it is).
+ *
+ * The idle history is blamed only when it starts after `start`, the window
+ * start; otherwise (or when the start is unknown) the share is simply not
+ * available for this period.
  * @param {Record<string, any>|null|undefined} summary
  * @param {string|null|undefined} namespace the selected namespace filter
+ * @param {Date|null} [start] start of the selected window
  */
-export function idleShareNote(summary, namespace) {
+export function idleShareNote(summary, namespace, start = null) {
 	if (namespace) return 'The node idle share belongs to no namespace: shown for the whole cluster only.';
 	const s = summary ?? {};
 	if (known(s.idle_energy_joules) !== null && known(s.cluster_total_energy_joules) !== null) return '';
-	if (s.idle_data_since) {
-		const since = new Date(s.idle_data_since);
-		const label = Number.isNaN(since.getTime()) ? String(s.idle_data_since) : since.toISOString().slice(0, 16).replace('T', ' ');
+	const since = s.idle_data_since ? new Date(s.idle_data_since) : null;
+	if (since && !Number.isNaN(since.getTime()) && start instanceof Date && since > start) {
+		const label = since.toISOString().slice(0, 16).replace('T', ' ');
 		return `The idle history starts ${label} UTC, after the start of this period: the idle share would cover part of it only.`;
 	}
-	return 'No node idle row is stored for this period yet.';
+	return 'Not available for this period.';
 }

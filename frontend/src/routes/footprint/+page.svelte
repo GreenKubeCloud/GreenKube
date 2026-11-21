@@ -17,7 +17,7 @@
 	} from '$lib/api.js';
 	import { formatCO2, formatCost, formatEnergy, formatNumber, formatRelativeTime } from '$lib/utils/format.js';
 	import { buildTimeseriesOption, buildMultiSeriesOption, buildNamespaceDonutOption, buildTopPodsOption } from '$lib/charts.js';
-	import { NOT_AVAILABLE, idleShareNote, idleShareRows } from '$lib/idleShare.js';
+	import { NOT_AVAILABLE, idleShareNote, idleShareRows, windowStart } from '$lib/idleShare.js';
 	import StatCard from '$lib/components/StatCard.svelte';
 	import DataState from '$lib/components/DataState.svelte';
 	import Filters from '$lib/components/Filters.svelte';
@@ -126,7 +126,7 @@
 	}
 
 	$: idleRows = idleShareRows(summary);
-	$: idleNote = idleShareNote(summary, $selectedNamespace);
+	$: idleNote = idleShareNote(summary, $selectedNamespace, windowStart($selectedTimeRange));
 
 	/** A value of the idle-share table, or "not available" when unknown. */
 	function formatIdleValue(key, value) {

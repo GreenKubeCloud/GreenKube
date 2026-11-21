@@ -160,13 +160,16 @@ describe('/footprint charts', () => {
 
 	it('shows "not available" when the idle share is unknown', async () => {
 		api.getDashboardSummary.mockResolvedValue({
-			windows: { '24h': { ...summary, idle_energy_joules: null, cluster_total_energy_joules: null, idle_data_since: '2026-11-01T00:00:00Z' } }
+			windows: {
+				'24h': { ...summary, idle_energy_joules: null, cluster_total_energy_joules: null, idle_data_since: new Date(Date.now() - 3600e3).toISOString() }
+			}
 		});
 		render(FootprintPage);
 
 		const table = await screen.findByRole('table', { name: /idle share/i });
 		// Idle and cluster total of CO2e, cost and energy.
 		expect(within(table).getAllByText('not available')).toHaveLength(6);
+		// The idle history starts an hour ago, inside the 24h window.
 		expect(screen.getByText(/idle history starts/i)).toBeInTheDocument();
 	});
 
