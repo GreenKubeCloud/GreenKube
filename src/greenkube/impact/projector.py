@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from greenkube.energy.embodied import known_profiles, resolve_node_embodied
 from greenkube.energy.node_power import default_profile_from_config, resolve_node_power_profile
+from greenkube.energy.shared_host import SharedHost, scale_to_host_share, shared_host_groups
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
 from greenkube.impact.power import memory_watts_per_gib
 from greenkube.impact.pricing import (
@@ -332,6 +333,13 @@ class ImpactProjector:
         default_intensity = float(_setting(config, "DEFAULT_INTENSITY", _FALLBACK_INTENSITY))
         env = _row_environment(rows)
         nodes: Dict[str, NodeImpactProfile] = {}
+        # Nodes that are one physical host (NRG-15), split like the collected rows.
+        named = {getattr(info, "name", None): info for info in node_infos}
+        shared_hosts = (
+            shared_host_groups({name: info for name, info in named.items() if isinstance(name, str) and name})
+            if _setting(config, "SHARED_HOST_DETECTION", True)
+            else {}
+        )
         for info in node_infos:
             name = getattr(info, "name", None)
             if not isinstance(name, str) or not name:
@@ -346,6 +354,7 @@ class ImpactProjector:
                 embodied_kg=_positive(getattr(info, "embodied_emissions_kg", None)),
                 env=env.get(name),
                 default_intensity=default_intensity,
+                shared_host=shared_hosts.get(name),
             )
 
         # Nodes seen in metric rows but absent from the node snapshot keep their
@@ -411,6 +420,7 @@ class ImpactProjector:
         env: Optional[Tuple[float, float]],
         default_intensity: float,
         is_fallback: bool = False,
+        shared_host: Optional[SharedHost] = None,
     ) -> NodeImpactProfile:
         config = self.config
         power = _resolved_power(config, name, instance_type, capacity_cores, provider)
@@ -446,13 +456,20 @@ class ImpactProjector:
 
         pue = env[0] if env else _provider_pue(config, provider)
         intensity = env[1] if env and env[1] > 0 else default_intensity
+        scaled = scale_to_host_share(
+            idle_watts=power.min_watts,
+            max_watts=power.max_watts,
+            memory_watts_per_gib=memory_watts_per_gib(config),
+            embodied_g_per_hour=embodied_g_per_hour,
+            share=shared_host.share if shared_host is not None else 1.0,
+        )
         return NodeImpactProfile(
             name=name,
             cpu_capacity_cores=cores,
             mem_capacity_gib=memory_gib,
-            idle_watts=power.min_watts,
-            max_watts=power.max_watts,
-            embodied_g_per_hour=embodied_g_per_hour,
+            idle_watts=scaled.idle_watts,
+            max_watts=scaled.max_watts,
+            embodied_g_per_hour=scaled.embodied_g_per_hour,
             prices=prices,
             pue=pue,
             grid_intensity_g_per_kwh=intensity,
@@ -461,9 +478,10 @@ class ImpactProjector:
             region=region,
             provider=provider,
             is_fallback=is_fallback,
-            memory_watts_per_gib=memory_watts_per_gib(config),
+            memory_watts_per_gib=scaled.memory_watts_per_gib,
             embodied_source=embodied.source,
             embodied_reason=embodied.reason(name),
+            host_reason=shared_host.reason(name) if shared_host is not None else None,
         )
 
     # ------------------------------------------------------------------ #

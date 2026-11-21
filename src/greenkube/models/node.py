@@ -45,9 +45,11 @@ class NodeInfo(BaseModel):
     )
     host_id: Optional[str] = Field(
         None,
-        description="status.nodeInfo.bootID: nodes with the same value run on one host (NRG-15). Not stored.",
+        description="status.nodeInfo.bootID: nodes with the same value share one host (NRG-15); in snapshots (0183).",
     )
-    provider_id: Optional[str] = Field(None, description="spec.providerID (kind://, aws://, ...). Not stored.")
+    provider_id: Optional[str] = Field(
+        None, description="spec.providerID (kind://, aws://, ...). Stored in node snapshots (0183)."
+    )
     gpu_count: Optional[int] = Field(
         None, description="GPUs in the node capacity (nvidia.com/gpu, amd.com/gpu, gpu.intel.com/*), NRG-13."
     )

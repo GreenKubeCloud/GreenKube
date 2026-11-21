@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from greenkube.energy.shared_host import SHARED_HOST_REASON_PREFIX
+from greenkube.energy.shared_host import SHARED_HOST_REASON_PREFIX, scale_to_host_share
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
 from greenkube.impact.power import (
     GPU_TDP_ESTIMATE_REASON_PREFIX,
@@ -244,16 +244,21 @@ class MetricRowAllocator:
             power_source = PowerSource(spec.power_source)
         except ValueError:
             power_source = PowerSource.DEFAULT_PROFILE
-        share = min(max(spec.host_share, 0.0), 1.0) if spec.host_share > 0 else 1.0
+        # A shared host (NRG-15): this node gets its share of the host idle, memory and embodied.
+        scaled = scale_to_host_share(
+            idle_watts=spec.idle_watts,
+            max_watts=spec.max_watts,
+            memory_watts_per_gib=self.memory_watts_per_gib,
+            embodied_g_per_hour=spec.embodied_g_per_hour,
+            share=spec.host_share,
+        )
         return NodeImpactProfile(
             name=spec.name,
             cpu_capacity_cores=float(cores),
             mem_capacity_gib=memory_gib,
-            # A shared host (NRG-15): this node gets its share of the host idle, memory and embodied;
-            # the dynamic range is not scaled (utilisation is already a fraction of the host capacity).
-            idle_watts=max(spec.idle_watts, 0.0) * share,
-            max_watts=max(spec.idle_watts, 0.0) * share + max(spec.max_watts - spec.idle_watts, 0.0),
-            embodied_g_per_hour=max(spec.embodied_g_per_hour, 0.0) * share,
+            idle_watts=scaled.idle_watts,
+            max_watts=scaled.max_watts,
+            embodied_g_per_hour=scaled.embodied_g_per_hour,
             prices=prices,
             pue=pue,
             grid_intensity_g_per_kwh=intensity,
@@ -262,7 +267,7 @@ class MetricRowAllocator:
             region=spec.region,
             provider=spec.provider,
             is_fallback=spec.is_fallback,
-            memory_watts_per_gib=self.memory_watts_per_gib * share,
+            memory_watts_per_gib=scaled.memory_watts_per_gib,
             gpu_unattributed_watts=max(spec.gpu_unattributed_watts, 0.0),
             embodied_source=spec.embodied_source,
             embodied_reason=spec.embodied_reason,

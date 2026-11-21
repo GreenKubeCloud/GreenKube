@@ -143,3 +143,48 @@ async def test_migration_0181_clears_derived_values_and_collapses_flip_flop_vers
     assert all(version[3] is None for version in versions)
     assert not first[2] and second[2], "the collapsed version is closed, the real change is current"
     assert first[1] is not None and second[1] is None
+
+
+async def test_snapshots_keep_the_host_and_provider_ids(manager):
+    """NRG-15: recompute and projections read shared hosts from the snapshots."""
+    repo = _repository(manager)
+    await repo.save_nodes(
+        [
+            _node(T0, name=name, host_id="boot-1", provider_id=f"kind://docker/kind/{name}")
+            for name in ("kind-worker", "kind-worker2")
+        ]
+    )
+    latest = {n.name: n for n in await repo.get_latest_snapshots_before(T0 + timedelta(minutes=1))}
+    assert {(n.host_id, n.provider_id) for n in latest.values()} == {
+        ("boot-1", "kind://docker/kind/kind-worker"),
+        ("boot-1", "kind://docker/kind/kind-worker2"),
+    }
+    ranged = await repo.get_snapshots(T0 - timedelta(minutes=1), T0 + timedelta(minutes=1))
+    assert {info.host_id for _, info in ranged} == {"boot-1"}
+    # Unchanged ids do not open a new version; a reboot (new bootID) does.
+    assert (
+        await repo.save_nodes(
+            [
+                _node(
+                    T0 + timedelta(minutes=5),
+                    name="kind-worker",
+                    host_id="boot-1",
+                    provider_id="kind://docker/kind/kind-worker",
+                )
+            ]
+        )
+        == 0
+    )
+    assert (
+        await repo.save_nodes(
+            [
+                _node(
+                    T0 + timedelta(minutes=10),
+                    name="kind-worker",
+                    host_id="boot-2",
+                    provider_id="kind://docker/kind/kind-worker",
+                )
+            ]
+        )
+        == 1
+    )

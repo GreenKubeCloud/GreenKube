@@ -82,3 +82,63 @@ def test_a_single_implementation_of_profile_selection():
         or "def _power_profile(" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+def _kind_nodes() -> list[NodeInfo]:
+    return [
+        NodeInfo(
+            name=name,
+            cloud_provider="kind",
+            cpu_capacity_cores=14,
+            memory_capacity_bytes=39 * 1024**3,
+            host_id="boot-1",
+            provider_id=f"kind://docker/kind/{name}",
+        )
+        for name in ("kind-control-plane", "kind-worker", "kind-worker2")
+    ]
+
+
+def test_projector_splits_a_shared_host_like_collection():
+    """NRG-15: three nodes on one host are each projected with a third of the host baseline."""
+    from greenkube.core.historical_range_processor import HistoricalRangeProcessor
+    from greenkube.energy.node_power import default_profile_from_config
+    from greenkube.energy.shared_host import shared_host_groups
+
+    config = Config()
+    nodes = _kind_nodes()
+    groups = shared_host_groups({node.name: node for node in nodes})
+    projected = ImpactProjector(config, node_infos=nodes).pool.nodes
+    allocator = MetricRowAllocator(config)
+    for node in nodes:
+        power = resolve_node_power_profile(
+            node_name=node.name,
+            instance_type=None,
+            cpu_capacity_cores=node.cpu_capacity_cores,
+            provider=node.cloud_provider,
+            instance_profiles=INSTANCE_PROFILES,
+            default_profile=default_profile_from_config(config),
+        )
+        spec = HistoricalRangeProcessor._node_spec(
+            node.name,
+            node,
+            power,
+            {},
+            instance_type=None,
+            gpu_unattributed_watts=0.0,
+            config=config,
+            shared_host=groups[node.name],
+        )
+        collected = allocator.node_profile(spec, [], pue=1.0, intensity=100.0, hours=1.0)
+        mine = projected[node.name]
+        assert mine.idle_watts == pytest.approx(collected.idle_watts)
+        assert mine.max_watts == pytest.approx(collected.max_watts)
+        assert mine.memory_watts_per_gib == pytest.approx(collected.memory_watts_per_gib)
+        assert mine.embodied_g_per_hour == pytest.approx(collected.embodied_g_per_hour)
+        assert mine.host_reason == collected.host_reason
+
+
+def test_projector_shared_host_detection_can_be_disabled():
+    config = Config(SHARED_HOST_DETECTION=False)
+    alone = ImpactProjector(config, node_infos=_kind_nodes()[:1]).pool.nodes["kind-control-plane"]
+    together = ImpactProjector(config, node_infos=_kind_nodes()).pool.nodes["kind-control-plane"]
+    assert together.idle_watts == pytest.approx(alone.idle_watts)

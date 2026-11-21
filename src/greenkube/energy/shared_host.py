@@ -37,6 +37,35 @@ class SharedHost:
         )
 
 
+@dataclass(frozen=True)
+class HostShareScaled:
+    """A node's power and embodied inputs once scaled to its share of a shared host."""
+
+    idle_watts: float
+    max_watts: float
+    memory_watts_per_gib: float
+    embodied_g_per_hour: float
+
+
+def scale_to_host_share(
+    *, idle_watts: float, max_watts: float, memory_watts_per_gib: float, embodied_g_per_hour: float, share: float
+) -> HostShareScaled:
+    """Scale idle power, memory power and embodied emissions by ``share``; keep the dynamic range.
+
+    The one rule for collection, ``greenkube recompute`` and projections (NRG-15): utilisation is
+    already a fraction of the host capacity, so only the baseline is split. A share outside
+    (0, 1] counts as 1.
+    """
+    share = share if 0.0 < share <= 1.0 else 1.0
+    idle = max(idle_watts, 0.0)
+    return HostShareScaled(
+        idle_watts=idle * share,
+        max_watts=idle * share + max(max_watts - idle_watts, 0.0),
+        memory_watts_per_gib=max(memory_watts_per_gib, 0.0) * share,
+        embodied_g_per_hour=max(embodied_g_per_hour, 0.0) * share,
+    )
+
+
 def _host_key(info: Any) -> Optional[str]:
     host_id = getattr(info, "host_id", None)
     if host_id:
