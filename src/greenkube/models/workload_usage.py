@@ -284,3 +284,13 @@ class BaselineMetric(CombinedMetric):
     memory_usage_p90: Optional[float] = Field(None, exclude=True)
     memory_usage_p95: Optional[float] = Field(None, exclude=True)
     memory_usage_p99: Optional[float] = Field(None, exclude=True)
+    #: Seconds of the row whose cost carries a CPU/RAM split (``cost_cpu`` or
+    #: ``cost_ram``); ``cost_cpu`` and ``cost_ram`` cover these seconds only.
+    cost_split_duration_seconds: Optional[float] = Field(None, exclude=True)
+    #: Seconds of the row with a positive ``total_cost`` and no CPU/RAM split
+    #: (hours re-aggregated from 0.3.x rows, F-03); hours with no cost at all
+    #: are in neither this nor ``cost_split_duration_seconds``.
+    cost_unsplit_duration_seconds: Optional[float] = Field(None, exclude=True)
+    #: ``total_cost`` of the hours without a CPU/RAM split (hours re-aggregated
+    #: from 0.3.x rows, F-03).
+    cost_unsplit_total: Optional[float] = Field(None, exclude=True)

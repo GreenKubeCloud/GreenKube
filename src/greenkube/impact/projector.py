@@ -21,6 +21,7 @@ from greenkube.impact.pricing import (
     CustomRates,
     PricingCatalog,
     UnitPriceResolver,
+    cost_split_share,
     observed_rates_from_rows,
     row_hours,
 )
@@ -161,9 +162,11 @@ def sample_from_metric(metric: Any, ref: WorkloadRef, default_hours: float) -> R
         return float(value)
 
     total_cost = _cost("total_cost")
+    hours = row_hours(metric, default_hours)
+    split_hours, unsplit_hours, unsplit_total = _cost_split_coverage(metric, hours)
     return ResourceSample(
         ref=ref,
-        hours=row_hours(metric, default_hours),
+        hours=hours,
         cpu_request_cores=max(_cores(getattr(metric, "cpu_request", 0)) or 0.0, 0.0),
         cpu_usage_cores=_cores(getattr(metric, "cpu_usage_millicores", None)),
         mem_request_gib=max(_gib(getattr(metric, "memory_request", 0)) or 0.0, 0.0),
@@ -179,8 +182,33 @@ def sample_from_metric(metric: Any, ref: WorkloadRef, default_hours: float) -> R
         observed_cost_network=_cost("cost_network"),
         observed_cost_lb=_cost("cost_lb"),
         observed_cost_source=getattr(metric, "cost_source", None),
+        observed_cost_split_hours=split_hours,
+        observed_cost_unsplit_hours=unsplit_hours,
+        observed_cost_unsplit_total=unsplit_total,
         gpu_watts=_positive(getattr(metric, "gpu_power_watts", None)),
     )
+
+
+def _cost_split_coverage(metric: Any, hours: float) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Split hours, unsplit hours with a cost, and the total of the latter, of an aggregated row (F-03).
+
+    Returns ``(None, None, None)`` when the row says nothing about it (raw
+    rows), when the split covers the whole row, or when no hour carries a
+    split, so such samples keep the per-sample pricing rules unchanged.
+    """
+    share = cost_split_share(metric)
+    if share is None or share >= 1.0 or share <= 0.0:
+        return None, None, None
+    duration = float(getattr(metric, "duration_seconds"))
+    unsplit_seconds = getattr(metric, "cost_unsplit_duration_seconds", None)
+    unsplit_share = (
+        min(max(float(unsplit_seconds) / duration, 0.0), 1.0 - share)
+        if isinstance(unsplit_seconds, (int, float)) and not isinstance(unsplit_seconds, bool)
+        else 1.0 - share
+    )
+    unsplit_total = getattr(metric, "cost_unsplit_total", None)
+    unsplit = float(unsplit_total) if isinstance(unsplit_total, (int, float)) and unsplit_total > 0 else 0.0
+    return hours * share, hours * unsplit_share, unsplit
 
 
 def _utc(value: Any) -> Optional[datetime]:

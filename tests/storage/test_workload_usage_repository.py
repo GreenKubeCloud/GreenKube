@@ -967,3 +967,123 @@ async def test_a_spiky_replica_flags_a_proposal_on_the_rollup_path_as_on_the_row
 
     assert profile.replica_cpu_p95_max is not None and profile.replica_cpu_p95_max >= 1000
     assert "replica_p95_exceeds_proposal" in assess(vpa, None, Config(), profile).risk_factors
+
+
+def _unit_prices(rows: list[BaselineMetric]) -> tuple[float, float]:
+    """Reserved CPU and RAM unit prices the Impact Model derives from baseline rows."""
+    from greenkube.impact.model import sample_prices
+    from greenkube.impact.projector import sample_from_metric
+    from greenkube.impact.types import NodeImpactProfile, UnitPrices, WorkloadRef
+    from greenkube.models.provenance import CostSource
+
+    # The node's CPU/RAM price ratio matches the observed split (2:1 per core-hour and GiB-hour).
+    node = NodeImpactProfile(
+        name="node-a",
+        cpu_capacity_cores=4,
+        mem_capacity_gib=16,
+        idle_watts=10,
+        max_watts=50,
+        embodied_g_per_hour=0,
+        prices=UnitPrices(0.02, 0.01, "USD", CostSource.PRICING_CATALOG),
+        pue=1.2,
+        grid_intensity_g_per_kwh=100,
+    )
+    ref = WorkloadRef("c", "shop", "Deployment", "api", "")
+    cpu_cost = cpu_hours = ram_cost = ram_hours = 0.0
+    for row in rows:
+        sample = sample_from_metric(row, ref, 1.0)
+        prices = sample_prices(sample, node, "USD")
+        assert prices.observed
+        cpu_cost += prices.cpu_reserved_core_hour * sample.cpu_reserved_cores * sample.hours
+        cpu_hours += sample.cpu_reserved_cores * sample.hours
+        ram_cost += prices.ram_reserved_gib_hour * sample.mem_reserved_gib * sample.hours
+        ram_hours += sample.mem_reserved_gib * sample.hours
+    return cpu_cost / cpu_hours, ram_cost / ram_hours
+
+
+async def _mixed_split_baselines(db) -> tuple[list[BaselineMetric], list[BaselineMetric]]:
+    """Pod baselines of one split hour alone, and of that hour plus an unsplit (0.3.x) hour the day before."""
+    start = _base_hour() - timedelta(days=1)
+    rows = []
+    for day in range(2):
+        for step in range(12):
+            ts = start + timedelta(days=day, minutes=5 * step)
+            if day == 0:
+                rows.append(_row(ts, total_cost=0.009, cost_cpu=None, cost_ram=None))
+            else:
+                rows.append(_row(ts, total_cost=0.009, cost_cpu=0.006, cost_ram=0.003))
+    repository, _ = await _rolled(db, rows, start, hours=25)
+
+    split_window = (start + timedelta(days=1), start + timedelta(days=1, hours=1))
+    snapshot = await repository.read_usage_snapshot(*split_window)
+    split_pods, _ = await repository.read_baseline_rows(*split_window, snapshot=snapshot)
+    mixed_window = (start, start + timedelta(days=1, hours=1))
+    snapshot = await repository.read_usage_snapshot(*mixed_window)
+    mixed_pods, _ = await repository.read_baseline_rows(*mixed_window, snapshot=snapshot)
+    return split_pods, mixed_pods
+
+
+async def test_baseline_mixing_split_and_unsplit_hours_keeps_the_split_unit_prices(db):
+    """F-03: hours re-aggregated from 0.3.x rows carry only ``total_cost``.
+
+    A lookback that mixes them with split hours must give the unit prices of
+    the split hours alone (within 1 %), not dilute the CPU and RAM cost over
+    every hour of the window.
+    """
+    split_pods, mixed_pods = await _mixed_split_baselines(db)
+
+    split_cpu, split_ram = _unit_prices(split_pods)
+    mixed_cpu, mixed_ram = _unit_prices(mixed_pods)
+    # 0.006 USD per 5 minutes for 0.5 core, 0.003 USD for 0.5 GiB.
+    assert split_cpu == pytest.approx(0.144, rel=1e-3)
+    assert split_ram == pytest.approx(0.072, rel=1e-3)
+    assert mixed_cpu == pytest.approx(split_cpu, rel=0.01)
+    assert mixed_ram == pytest.approx(split_ram, rel=0.01)
+
+
+async def test_node_observed_prices_from_mixed_baselines_keep_the_split_prices(db):
+    """F-03, tier 1: per-node observed prices divide the split cost by the split hours only."""
+    from greenkube.impact.projector import ImpactProjector
+    from greenkube.models.node import NodeInfo
+
+    split_pods, mixed_pods = await _mixed_split_baselines(db)
+    nodes = [NodeInfo(name="node-a", cpu_capacity_cores=4, memory_capacity_bytes=16 * 1024 * MIB)]
+
+    def _projector(rows):
+        return ImpactProjector(Config(), node_infos=nodes, rows=rows)
+
+    split, mixed = _projector(split_pods), _projector(mixed_pods)
+    split_prices = split.pool.nodes["node-a"].prices
+    mixed_prices = mixed.pool.nodes["node-a"].prices
+    assert split_prices.source.value == "opencost"
+    assert split_prices.cpu_core_hour == pytest.approx(0.144, rel=1e-3)
+    assert mixed_prices.cpu_core_hour == pytest.approx(split_prices.cpu_core_hour, rel=0.01)
+    assert mixed_prices.ram_gib_hour == pytest.approx(split_prices.ram_gib_hour, rel=0.01)
+    split_hourly, mixed_hourly = split.node_hourly_price("node-a"), mixed.node_hourly_price("node-a")
+    assert split_hourly is not None and mixed_hourly is not None
+    assert mixed_hourly == pytest.approx(split_hourly, rel=0.01)
+
+
+async def test_baseline_rows_report_split_unsplit_and_zero_cost_hours(db):
+    """F-03: hours without any cost count neither as split nor as unsplit hours."""
+    start = _base_hour() - timedelta(days=2)
+    days = [
+        {"total_cost": 0.0, "cost_cpu": None, "cost_ram": None},
+        {"total_cost": 0.009, "cost_cpu": None, "cost_ram": None},
+        {"total_cost": 0.009, "cost_cpu": 0.006, "cost_ram": 0.003},
+    ]
+    rows = [
+        _row(start + timedelta(days=day, minutes=5 * step), **costs)
+        for day, costs in enumerate(days)
+        for step in range(12)
+    ]
+    repository, _ = await _rolled(db, rows, start, hours=49)
+
+    window = (start, start + timedelta(days=2, hours=1))
+    snapshot = await repository.read_usage_snapshot(*window)
+    pods, _ = await repository.read_baseline_rows(*window, snapshot=snapshot)
+    (row,) = pods
+    assert row.duration_seconds == 3 * 3600
+    assert row.cost_split_duration_seconds == pytest.approx(3600)
+    assert row.cost_unsplit_duration_seconds == pytest.approx(3600)
+    assert row.cost_unsplit_total == pytest.approx(0.108)

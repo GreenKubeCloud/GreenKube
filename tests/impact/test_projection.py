@@ -136,7 +136,26 @@ class TestContainerRequestProperties:
             # Rows without cost, OpenCost totals only (dev rows), and totals
             # with a CPU/RAM split (possibly partial or larger than the total).
             # Totals range from far below to far above the modeled node prices.
-            shape = rng.choice(["none", "total", "split", "partial"])
+            # Every fourth seed uses only partly split aggregates, so their bound is
+            # not hidden by the slack of samples priced at the node prices.
+            shape = "mixed" if seed % 4 == 0 else rng.choice(["none", "total", "split", "partial", "mixed"])
+            if shape == "mixed":
+                # An aggregate partly split (F-03), with unsplit hours and hours
+                # whose observed total is zero.
+                # Costs below the node prices, so zero-cost hours priced at the
+                # node prices would break the bound.
+                split_hours = hours * rng.uniform(0.05, 0.6)
+                unsplit_hours = (hours - split_hours) * rng.uniform(0, 0.5)
+                split_total = split_hours * rng.uniform(1e-4, 1.0) * rng.choice([0.001, 0.01])
+                unsplit_total = unsplit_hours * rng.uniform(0, 1.0) * rng.choice([0.001, 0.01])
+                return {
+                    "cost_total": split_total + unsplit_total,
+                    "cost_cpu": split_total * rng.uniform(0, 0.8),
+                    "cost_ram": split_total * rng.uniform(0, 0.2),
+                    "split_hours": split_hours,
+                    "unsplit_hours": unsplit_hours,
+                    "unsplit_total": unsplit_total,
+                }
             if shape == "none":
                 return {}
             total = hours * rng.uniform(1e-4, 1.0) * rng.choice([0.001, 0.05, 1.0])
@@ -152,15 +171,25 @@ class TestContainerRequestProperties:
 
         samples = []
         for _ in range(rng.randint(1, 30)):
-            hours = rng.choice([1 / 12, 1.0])
+            hours = rng.choice([1 / 12, 1.0, 24.0])
+            costs = observed_costs(hours)
+            split_hours = costs.pop("split_hours", None)
+            unsplit_hours = costs.pop("unsplit_hours", None)
+            unsplit_total = costs.pop("unsplit_total", None)
+            sample = _sample(
+                cpu_req,
+                rng.choice([None, rng.uniform(0, 2 * cpu_req)]),
+                mem_req,
+                rng.choice([None, rng.uniform(0, 2 * mem_req)]),
+                hours=hours,
+                **costs,
+            )
             samples.append(
-                _sample(
-                    cpu_req,
-                    rng.choice([None, rng.uniform(0, 2 * cpu_req)]),
-                    mem_req,
-                    rng.choice([None, rng.uniform(0, 2 * mem_req)]),
-                    hours=hours,
-                    **observed_costs(hours),
+                replace(
+                    sample,
+                    observed_cost_split_hours=split_hours,
+                    observed_cost_unsplit_hours=unsplit_hours,
+                    observed_cost_unsplit_total=unsplit_total,
                 )
             )
         baseline = _baseline(samples, window_hours=rng.choice([24.0, 168.0]))
@@ -242,6 +271,91 @@ class TestContainerRequestProperties:
         (prices,) = delta.assumptions["unit_prices"]
         assert (prices["source"], prices["detail"]) == ("opencost", "observed_total_apportioned")
         assert delta.assumptions["observed_cost_sources"] == {"opencost": 1}
+
+    def test_partly_split_aggregate_prices_components_over_their_own_hours(self):
+        """F-03: a split covering 1 of 4 hours is not spread over the 4; the unsplit total is apportioned."""
+        node, pool = _profile()
+        # 1 split hour (CPU 0.08, RAM 0.04) and 3 hours with a total only (0.36).
+        sample = replace(
+            _sample(2, 0.1, 8, 1, hours=4.0, cost_total=0.48, cost_cpu=0.08, cost_ram=0.04),
+            observed_cost_split_hours=1.0,
+            observed_cost_unsplit_hours=3.0,
+            observed_cost_unsplit_total=0.36,
+        )
+        delta = MODEL.project(_baseline([sample], 4.0), ContainerResourceChange(cpu_request_cores=(2, 1)), pool)
+        cpu_weight = 2 * node.prices.cpu_core_hour
+        ram_weight = 8 * node.prices.ram_gib_hour
+        unsplit_cpu = 0.36 * cpu_weight / (cpu_weight + ram_weight)
+        (prices,) = delta.assumptions["unit_prices"]
+        assert prices["detail"] == "observed_components_partly_apportioned"
+        assert prices["cpu_core_hour"] == pytest.approx((0.08 + unsplit_cpu) / (2 * 4))
+        assert prices["ram_gib_hour"] == pytest.approx((0.04 + 0.36 - unsplit_cpu) / (8 * 4))
+        assert delta.assumptions["unsplit_cost_hours_share"] == pytest.approx(0.75)
+        assert delta.confidence == pytest.approx(0.8)
+
+    def test_partly_split_aggregate_apportions_unsplit_hours_at_the_node_ratio_not_the_observed_one(self):
+        """F-03: the unsplit total follows the node's CPU/RAM ratio (8:1 here) even when the split says 1:1."""
+        node, pool = _profile()
+        # Split hour: 0.02 for 2 cores and 0.08 for 8 GiB, i.e. 0.01 per core-hour and per GiB-hour.
+        sample = replace(
+            _sample(2, 0.1, 8, 1, hours=2.0, cost_total=0.2, cost_cpu=0.02, cost_ram=0.08),
+            observed_cost_split_hours=1.0,
+            observed_cost_unsplit_hours=1.0,
+            observed_cost_unsplit_total=0.1,
+        )
+        delta = MODEL.project(_baseline([sample], 2.0), ContainerResourceChange(cpu_request_cores=(2, 1)), pool)
+        cpu_weight = 2 * node.prices.cpu_core_hour
+        ram_weight = 8 * node.prices.ram_gib_hour
+        unsplit_cpu = 0.1 * cpu_weight / (cpu_weight + ram_weight)
+        (prices,) = delta.assumptions["unit_prices"]
+        assert prices["cpu_core_hour"] == pytest.approx((0.02 + unsplit_cpu) / (2 * 2))
+        assert prices["ram_gib_hour"] == pytest.approx((0.08 + 0.1 - unsplit_cpu) / (8 * 2))
+        assert prices["cpu_core_hour"] != pytest.approx(0.01, rel=0.05)
+
+    def test_partly_split_aggregate_with_only_the_cpu_component(self):
+        """F-03: ``cost_cpu`` set and ``cost_ram`` NULL on the split hours."""
+        node, pool = _profile()
+        # Split hour: CPU 0.08 of a 0.12 total (the 0.04 left goes to RAM); unsplit hour: 0.12 total.
+        sample = replace(
+            _sample(2, 0.1, 8, 1, hours=2.0, cost_total=0.24, cost_cpu=0.08),
+            observed_cost_split_hours=1.0,
+            observed_cost_unsplit_hours=1.0,
+            observed_cost_unsplit_total=0.12,
+        )
+        delta = MODEL.project(_baseline([sample], 2.0), ContainerResourceChange(cpu_request_cores=(2, 1)), pool)
+        cpu_weight = 2 * node.prices.cpu_core_hour
+        ram_weight = 8 * node.prices.ram_gib_hour
+        unsplit_cpu = 0.12 * cpu_weight / (cpu_weight + ram_weight)
+        (prices,) = delta.assumptions["unit_prices"]
+        assert prices["detail"] == "observed_components_partly_apportioned"
+        assert prices["cpu_core_hour"] == pytest.approx((0.08 + unsplit_cpu) / (2 * 2))
+        assert prices["ram_gib_hour"] == pytest.approx((0.04 + 0.12 - unsplit_cpu) / (8 * 2))
+        assert delta.confidence == pytest.approx(0.8)
+
+    def test_partly_split_aggregate_with_zero_cost_unsplit_hours(self):
+        """Hours whose observed total is zero cost nothing: not node-priced, not unsplit, nothing apportioned."""
+        node, pool = _profile()
+        # 1 split hour (0.08 CPU, 0.04 RAM) and 1 hour without any cost.
+        sample = replace(
+            _sample(2, 0.1, 8, 1, hours=2.0, cost_total=0.12, cost_cpu=0.08, cost_ram=0.04),
+            observed_cost_split_hours=1.0,
+            observed_cost_unsplit_hours=0.0,
+            observed_cost_unsplit_total=0.0,
+        )
+        delta = MODEL.project(_baseline([sample], 2.0), ContainerResourceChange(cpu_request_cores=(2, 1)), pool)
+        (prices,) = delta.assumptions["unit_prices"]
+        assert prices["detail"] == "observed_components"
+        assert prices["cpu_core_hour"] == pytest.approx(0.08 / (2 * 2))
+        assert prices["ram_gib_hour"] == pytest.approx(0.04 / (8 * 2))
+        # Bounded by the observed cost (BUG-15): a full cut never projects more than a deletion.
+        cut = MODEL.project(
+            _baseline([sample], 2.0), ContainerResourceChange(cpu_request_cores=(2, 0), mem_request_gib=(8, 0)), pool
+        )
+        deletion = MODEL.project(_baseline([sample], 2.0), WorkloadDeletion(), pool)
+        assert cut.allocated_cost_annual <= deletion.allocated_cost_annual + 1e-9
+        assert "unsplit_cost_hours_share" not in delta.assumptions
+        # Nothing was apportioned: the observed-components confidence is kept.
+        assert delta.confidence == pytest.approx(0.9)
 
     def test_unknown_observed_cost_source_is_recorded(self):
         _, pool = _profile()
