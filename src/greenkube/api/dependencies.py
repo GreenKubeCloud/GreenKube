@@ -492,9 +492,10 @@ async def authenticate(request: Request, response: Response) -> None:
         principal = None
         if request.cookies.get(settings.cookie_name):
             if auth_public:
-                # The sign-in pages ignore a leftover cookie (the sign-in route keeps its own
-                # throttle); it is cleared without counting against the address.
-                if path not in _SIGN_IN_PATHS:
+                # The sign-in pages ignore a leftover cookie that no longer verifies (the sign-in
+                # route keeps its own throttle): it is cleared without counting against the address.
+                principal = await _browser_key_principal(request, settings, service)
+                if principal is None and path not in _SIGN_IN_PATHS:
                     clear_session_cookie(response, request, settings)
             else:
                 throttle, ip, bucket = _enforce_credential_throttle(request, settings, path)

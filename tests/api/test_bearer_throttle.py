@@ -193,3 +193,21 @@ def test_the_key_throttle_has_its_own_failure_reason(tmp_path, monkeypatch):
     assert blocked.status_code == 429
     assert AUTH_FAILURES.labels(reason="key_rate_limited")._value.get() == before + 1
     assert "key_rate_limited" in FAILURE_REASONS
+
+
+def test_a_valid_cookie_on_public_auth_paths_is_kept(tmp_path, monkeypatch):
+    """Only a cookie that no longer verifies is cleared: a signed-in browser stays signed in."""
+    with auth_harness(tmp_path, monkeypatch, client_address=PROXY, base_url="https://testserver", **_env()) as h:
+        login = h.client.post(
+            "/api/v1/auth/api-key-login",
+            json={"key": LEGACY_KEY},
+            headers={"Origin": "https://testserver", "X-Forwarded-For": OPERATOR},
+        )
+        assert h.client.cookies.get("greenkube_session")
+        providers = h.client.get("/api/v1/auth/providers", headers={"X-Forwarded-For": OPERATOR})
+        after = h.client.get("/api/v1/version", headers={"X-Forwarded-For": OPERATOR})
+
+    assert login.status_code == 200, login.text
+    assert providers.status_code == 200
+    assert not _cleared(providers)
+    assert after.status_code == 200
