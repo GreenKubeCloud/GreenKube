@@ -1,6 +1,6 @@
 # Savings measurement — methodology
 
-**Strategy:** `request_rightsizing` version `2.5` (`greenkube.verify.strategy.RequestRightsizingStrategy`) · **Code:** `src/greenkube/verify/` · **Roadmap:** C1–C9, N9
+**Strategy:** `request_rightsizing` version `2.6` (`greenkube.verify.strategy.RequestRightsizingStrategy`) · **Code:** `src/greenkube/verify/` · **Roadmap:** C1–C9, N9
 
 GreenKube measures every applied change once, against a counterfactual: what the workload would have cost **without** the change. The method follows the spirit of IPMVP Option B (retrofit isolation with measurement of the affected system): a baseline period before the change, a reporting period after it, a model that adjusts the baseline to the reporting period's conditions, and an uncertainty statement.
 
@@ -74,12 +74,18 @@ Rows of the workload (pod level, all containers) are reduced to one bucket per U
 - **CPU and RAM cost components** (`cost_cpu`, `cost_ram`) when every trusted row carries them.
 - **Requested capacity** — requested CPU cores and memory GiB summed over replicas.
 - **Charged capacity** (`charged_core_hours`, `charged_gib_hours`, MEA-02) — `max(request, usage)` per sample, summed over replicas: the quantity OpenCost charges. A sample without trusted usage counts its request. Hourly rollup rows carry a mean usage, so their charged quantity is `max(request, mean usage)`, a lower bound when usage peaked above the request inside the hour. Snapshots frozen before it was measured have no value for it (absent from their hours and digest).
-- **Replicas** — the mean number of pods covering the hour (pod-seconds over covered seconds).
+- **Replicas** — the mean number of pods in the hour (pod-seconds over collected seconds, MEA-13).
 - **CPU usage**, **energy**, **CO₂e** (only from rows with measured intensity and a profiled node), and the node **instance types** running the pods.
 - **Embodied CO₂e** (`embodied_co2e_grams`, the hardware manufacturing emissions the Impact Model allocates by reservation). It does not depend on the grid intensity, so it needs no measured intensity. Snapshots frozen before it was measured have no value for it (`embodied_co2e_g` is absent from their hours and from their digest, which therefore still verifies).
 - **Carbon factor** (`carbon_factor`, MEA-03) — the time-weighted grid intensity × PUE of the hour's trusted-carbon rows (rows with a positive intensity and PUE), in gCO₂e/kWh, independent of energy. Absent from snapshots frozen before it was recorded (and from their digest).
 
 An hour counts for a quantity when at least half of it is covered by qualifying data.
+
+### Collected time and presence (version 2.6, MEA-13)
+
+The rates above are spread over the **collected** time of the hour, not over the time the workload's own rows cover. The collected time of an hour is the time with at least one row of the workload's namespace (any pod; hourly rollup rows count the union of their sample spans), capped at the hour. A step collected without a row of the workload means the workload was not running: it adds zero cost, zero replicas and zero emissions. An hour collected without any row of the workload is a zero bucket (coverage = its collected share), where version 2.5 left it out. Only the uncollected part of an hour (no row of the namespace at all: the collector was down) is extrapolated at the covered rate, and an hour counts only when collection covered at least half of it. A batch workload that runs 35 minutes of every collected hour at 0.001 per 5-minute sample costs 0.007 per clock hour (2.5 reported 0.012, 1.71×), and a 50% request cut of it saves 0.0035 per clock hour. Coverages are scaled the same way: `coverage` is the collected share of the hour and `cost_coverage` the trusted share of it.
+
+Every annualisation (change measurement, deletion measurement, interim verifier) uses **8760 hours**, the Impact Model constant (`greenkube.impact.types.HOURS_PER_YEAR`); version 2.5, deletion 1.1 and interim `c0.2` used 8766 (+0.07%). Measurements decided before keep their stored values and versions; snapshots frozen before keep their buckets (rated per covered time), so a change whose snapshot was frozen with 2.5 compares a covered-time baseline with a collected-time post-window: for a workload present all the time the two agree, for a part-time workload such a change is biased low and should be re-measured. `projection_accuracy` still divides by the Impact Model projection: with both sides on the clock-hour basis they agree when the projection's own annualisation is right (see IMP-04 in [impact-model.md](impact-model.md)).
 
 ### Constant prices (version 2.4, MEA-02)
 
@@ -159,7 +165,7 @@ The fitted elasticities and the number of matched hours of the week are stored i
 
 ## 5. Quantities
 
-The `request_rightsizing` strategy (version 2.5) measures, per hour:
+The `request_rightsizing` strategy (version 2.6) measures, per hour:
 
 **Per replica.** A request change moves what each replica is charged, not how many replicas run. Every quantity below is fitted *per replica* (each hour's value over its replica count) and the per-replica saving is multiplied by the mean replica count of the aligned post-window hours: `saving = Δ(per-replica rate) × post replica-hours`, which is `Σ Δrequest × replica-hours` for requested capacity. A replica count that drops for another reason (an HPA scaling 4 → 2 during the post-window) is therefore never credited to the change: it saves nothing per replica. It is reported by the `replica_shift` confounder (moderate). Hours without a replica count are left out. The interval and counterfactual are scaled by the same replica count, so the outcome rule decides exactly as it would per replica. Measurements decided by version 2.0 compared workload totals (stated by `strategy_version`).
 

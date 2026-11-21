@@ -32,7 +32,7 @@ from greenkube.models.metrics import (
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 
-HOURS_PER_YEAR = 8766.0
+HOURS_PER_YEAR = 8760.0
 BEFORE_COST = 0.01  # per 5-minute sample and replica
 AFTER_COST = 0.008  # -20% after the CPU request cut
 TRUE_COST_SAVING_PER_REPLICA = (BEFORE_COST - AFTER_COST) * 12 * HOURS_PER_YEAR

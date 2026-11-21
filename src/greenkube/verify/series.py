@@ -222,19 +222,23 @@ def _add_trusted_rollup_cost(acc: "_Accumulator", members: Sequence[Any], covera
     return True
 
 
-def hourly_buckets(
-    rows: Iterable[Any], window: TimeWindow, step_seconds: int, *, slot_seconds: int = 3600
-) -> List[HourBucket]:
-    """Aggregate pod-level rows of one workload into hour buckets inside ``window``.
+def _group_coverage(
+    members: Sequence[Any], rollup: Optional[bool], step_seconds: int, slot: datetime, slot_seconds: int
+) -> Optional[float]:
+    """Covered seconds of the rows of one timestamp, ``None`` when the group must be left out."""
+    if rollup is None:
+        # Hourly rows without their sample bounds (written before migration 0172) of several
+        # pods that each lived part of the hour: the covered time is unknown, and the longest
+        # pod would inflate the rates. The hour is left out (ROL-03).
+        if len(members) > 1 and max(_coverage_seconds(row, step_seconds) for row in members) < slot_seconds:
+            return None
+        return max(_coverage_seconds(row, step_seconds) for row in members)
+    if rollup:
+        return _rollup_coverage(members, step_seconds, slot, slot_seconds)
+    return max(_coverage_seconds(row, step_seconds) for row in members)
 
-    Every hour of the window is returned, with ``coverage == 0`` when it has no
-    data, so callers can compute coverage against the full window. With
-    ``slot_seconds`` below an hour (accelerated demo windows only, MEA-10) the
-    buckets are slots of that length; coverages are shares of the slot and
-    rates stay per hour.
-    """
-    start = ensure_utc(window.start)
-    end = ensure_utc(window.end)
+
+def _timestamp_groups_in(rows: Iterable[Any], start: datetime, end: datetime) -> Dict[datetime, List[Any]]:
     groups: Dict[datetime, List[Any]] = defaultdict(list)
     for row in rows:
         timestamp = getattr(row, "timestamp", None)
@@ -244,22 +248,66 @@ def hourly_buckets(
         if moment < start or moment >= end:
             continue
         groups[moment].append(row)
+    return groups
+
+
+def collected_seconds(
+    rows: Iterable[Any], window: TimeWindow, step_seconds: int, *, slot_seconds: int = 3600
+) -> Dict[datetime, float]:
+    """Seconds of each hour (or slot) of ``window`` in which metrics were collected (MEA-13).
+
+    ``rows`` are every collected row of the scope (the workload's namespace): a
+    step with at least one row was collected, whichever pod it belongs to.
+    Hourly rollup rows count the union of their sample spans. The result
+    separates "no data" (a step nobody collected) from "not running" (a
+    collected step without a row of the workload), see :func:`hourly_buckets`.
+    """
+    start = ensure_utc(window.start)
+    end = ensure_utc(window.end)
+    seconds: Dict[datetime, float] = defaultdict(float)
+    for moment, members in _timestamp_groups_in(rows, start, end).items():
+        slot = floor_slot(moment, slot_seconds)
+        coverage = _group_coverage(members, _is_rollup_group(members), step_seconds, slot, slot_seconds)
+        if coverage is not None:
+            seconds[slot] += coverage
+    return {slot: min(value, float(slot_seconds)) for slot, value in sorted(seconds.items())}
+
+
+def hourly_buckets(
+    rows: Iterable[Any],
+    window: TimeWindow,
+    step_seconds: int,
+    *,
+    slot_seconds: int = 3600,
+    collected: Optional[Dict[datetime, float]] = None,
+) -> List[HourBucket]:
+    """Aggregate pod-level rows of one workload into hour buckets inside ``window``.
+
+    Every hour of the window is returned, with ``coverage == 0`` when it has no
+    data, so callers can compute coverage against the full window. With
+    ``slot_seconds`` below an hour (accelerated demo windows only, MEA-10) the
+    buckets are slots of that length; coverages are shares of the slot and
+    rates stay per hour.
+
+    ``collected`` (from :func:`collected_seconds`, MEA-13) gives the seconds of
+    each hour in which the workload's scope was collected. Rates then divide by
+    the collected time, not by the workload's covered time: a collected step
+    without a row of the workload counts as zero cost and zero replicas (the
+    workload was not running), and an hour collected without any row of the
+    workload is a zero bucket. Only the uncollected part of an hour is
+    extrapolated. Without ``collected`` the rates are per covered time.
+    """
+    start = ensure_utc(window.start)
+    end = ensure_utc(window.end)
+    groups = _timestamp_groups_in(rows, start, end)
 
     accumulators: Dict[datetime, _Accumulator] = defaultdict(_Accumulator)
     for moment, members in groups.items():
         slot = floor_slot(moment, slot_seconds)
         rollup = _is_rollup_group(members)
-        if rollup is None:
-            # Hourly rows without their sample bounds (written before migration 0172) of several
-            # pods that each lived part of the hour: the covered time is unknown, and the longest
-            # pod would inflate the rates. The hour is left out (ROL-03).
-            if len(members) > 1 and max(_coverage_seconds(row, step_seconds) for row in members) < slot_seconds:
-                continue
-            coverage = max(_coverage_seconds(row, step_seconds) for row in members)
-        elif rollup:
-            coverage = _rollup_coverage(members, step_seconds, slot, slot_seconds)
-        else:
-            coverage = max(_coverage_seconds(row, step_seconds) for row in members)
+        coverage = _group_coverage(members, rollup, step_seconds, slot, slot_seconds)
+        if coverage is None:
+            continue
         acc = accumulators[slot]
         acc.covered += coverage
         for row in members:
@@ -321,39 +369,72 @@ def hourly_buckets(
     buckets: List[HourBucket] = []
     for hour in window_hours(TimeWindow(start=start, end=end), slot_seconds):
         acc = accumulators.get(hour)
+        collected_here = float((collected or {}).get(hour) or 0.0)
         if acc is None or acc.covered <= 0:
-            buckets.append(HourBucket(hour=hour))
+            if collected_here > 0:
+                # Collected, but the workload had no row: it was not running (MEA-13).
+                buckets.append(_absent_bucket(hour, min(collected_here / slot_seconds, 1.0)))
+            else:
+                buckets.append(HourBucket(hour=hour))
             continue
         covered = acc.covered
-        per_hour = 3600.0 / covered
+        # The time the rates are spread over: the collected time of the hour when known (MEA-13).
+        basis = max(covered, collected_here)
+        presence = covered / basis
+        scale = basis / covered
+        per_hour = 3600.0 / basis
         has_components = acc.components and acc.cost_seconds > 0 and (acc.cost_cpu + acc.cost_ram > 0 or acc.cost <= 0)
         buckets.append(
             HourBucket(
                 hour=hour,
-                coverage=min(covered / slot_seconds, 1.0),
-                replicas=acc.pod_seconds / covered,
-                core_hours=acc.cpu_request / covered,
-                gib_hours=acc.memory_request / covered,
-                charged_core_hours=acc.cpu_charged / covered,
-                charged_gib_hours=acc.memory_charged / covered,
-                cpu_usage_cores=acc.cpu_usage / acc.usage_seconds * (acc.pod_seconds / covered)
+                coverage=min(basis / slot_seconds, 1.0),
+                replicas=acc.pod_seconds / basis,
+                core_hours=acc.cpu_request / basis,
+                gib_hours=acc.memory_request / basis,
+                charged_core_hours=acc.cpu_charged / basis,
+                charged_gib_hours=acc.memory_charged / basis,
+                cpu_usage_cores=acc.cpu_usage / acc.usage_seconds * (acc.pod_seconds / basis)
                 if acc.usage_seconds > 0
                 else None,
-                cost=acc.cost / acc.cost_seconds * 3600.0 if acc.cost_seconds > 0 else None,
-                cost_cpu=acc.cost_cpu / acc.cost_seconds * 3600.0 if has_components else None,
-                cost_ram=acc.cost_ram / acc.cost_seconds * 3600.0 if has_components else None,
-                cost_coverage=min(acc.cost_seconds / slot_seconds, 1.0),
+                cost=acc.cost / acc.cost_seconds * 3600.0 * presence if acc.cost_seconds > 0 else None,
+                cost_cpu=acc.cost_cpu / acc.cost_seconds * 3600.0 * presence if has_components else None,
+                cost_ram=acc.cost_ram / acc.cost_seconds * 3600.0 * presence if has_components else None,
+                cost_coverage=min(acc.cost_seconds * scale / slot_seconds, 1.0),
                 energy_kwh=acc.energy_joules / _JOULES_PER_KWH * per_hour,
-                co2e_g=acc.co2e / acc.co2e_seconds * 3600.0 if acc.co2e_seconds > 0 else None,
-                co2e_coverage=min(acc.co2e_seconds / slot_seconds, 1.0),
-                embodied_co2e_g=acc.embodied / acc.embodied_seconds * 3600.0 if acc.embodied_seconds > 0 else None,
-                embodied_coverage=min(acc.embodied_seconds / slot_seconds, 1.0),
+                co2e_g=acc.co2e / acc.co2e_seconds * 3600.0 * presence if acc.co2e_seconds > 0 else None,
+                co2e_coverage=min(acc.co2e_seconds * scale / slot_seconds, 1.0),
+                embodied_co2e_g=acc.embodied / acc.embodied_seconds * 3600.0 * presence
+                if acc.embodied_seconds > 0
+                else None,
+                embodied_coverage=min(acc.embodied_seconds * scale / slot_seconds, 1.0),
                 carbon_factor=acc.factor / acc.factor_seconds if acc.factor_seconds > 0 else None,
                 instance_types={key: value * per_hour for key, value in acc.instance_types.items()},
                 cost_bases=_shares(acc.cost_bases),
             )
         )
     return buckets
+
+
+def _absent_bucket(hour: datetime, coverage: float) -> HourBucket:
+    """A collected hour without any row of the workload: zero cost, replicas and emissions (MEA-13)."""
+    return HourBucket(
+        hour=hour,
+        coverage=coverage,
+        replicas=0.0,
+        core_hours=0.0,
+        gib_hours=0.0,
+        charged_core_hours=0.0,
+        charged_gib_hours=0.0,
+        cost=0.0,
+        cost_cpu=0.0,
+        cost_ram=0.0,
+        cost_coverage=coverage,
+        energy_kwh=0.0,
+        co2e_g=0.0,
+        co2e_coverage=coverage,
+        embodied_co2e_g=0.0,
+        embodied_coverage=coverage,
+    )
 
 
 def untrusted_cost_hours(buckets: Sequence[HourBucket], *, slot_seconds: int = 3600) -> float:

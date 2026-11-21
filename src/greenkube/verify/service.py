@@ -72,6 +72,7 @@ from greenkube.verify.model import (
     ChangeMeasurement,
     ChangeOutcome,
     ChangeStatus,
+    HourBucket,
     MeasurementState,
     SavingsEstimate,
     TimeWindow,
@@ -79,7 +80,14 @@ from greenkube.verify.model import (
     WorkloadRef,
     WorkloadSpecObservation,
 )
-from greenkube.verify.series import floor_hour, hourly_buckets, price_card, untrusted_cost_hours, utc_hour
+from greenkube.verify.series import (
+    collected_seconds,
+    floor_hour,
+    hourly_buckets,
+    price_card,
+    untrusted_cost_hours,
+    utc_hour,
+)
 from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
     OBJECTIVE_RELIABILITY,
@@ -273,6 +281,32 @@ class ChangeMeasurementService:
         except Exception as exc:
             raise MeasurementReadError(f"metrics of {'/'.join(target.key)} could not be read: {exc}") from exc
         return [row for row in rows or [] if target_key(row) == target.key]
+
+    async def _workload_buckets(self, target: WorkloadRef, window: TimeWindow) -> Tuple[List[Any], List[HourBucket]]:
+        """The workload's rows in ``window`` and their hour buckets, rated per collected hour (MEA-13).
+
+        The collection coverage of each hour comes from every row of the
+        workload's namespace: a step collected without a row of the workload
+        means the workload was not running (zero cost), a step without any row
+        was not collected (extrapolated).
+        """
+        from greenkube.core.optimization.targeting import target_key
+
+        if window.end <= window.start:
+            return [], hourly_buckets([], window, self._step(), slot_seconds=self.settings.slot_seconds)
+        try:
+            rows = await self.combined_repo.read_combined_metrics_smart(
+                start_time=window.start, end_time=window.end, namespace=target.namespace
+            )
+        except Exception as exc:
+            raise MeasurementReadError(f"metrics of {'/'.join(target.key)} could not be read: {exc}") from exc
+        namespace_rows = list(rows or [])
+        workload_rows = [row for row in namespace_rows if target_key(row) == target.key]
+        slot = self.settings.slot_seconds
+        collected = collected_seconds(namespace_rows, window, self._step(), slot_seconds=slot)
+        return workload_rows, hourly_buckets(
+            workload_rows, window, self._step(), slot_seconds=slot, collected=collected
+        )
 
     async def _pool_samples(self, window: TimeWindow) -> List[Tuple[datetime, List[Any]]]:
         """Active nodes every :data:`POOL_SAMPLE_INTERVAL` over ``window`` (node snapshots, SCD2)."""
@@ -689,8 +723,7 @@ class ChangeMeasurementService:
         from greenkube.impact import IMPACT_MODEL_VERSION
 
         plan = self._strategy(change).required_windows(change, self.settings)
-        rows = await self._read_workload(change.target, plan.pre)
-        buckets = hourly_buckets(rows, plan.pre, self._step(), slot_seconds=self.settings.slot_seconds)
+        rows, buckets = await self._workload_buckets(change.target, plan.pre)
         collected = await self._collect_load(
             change, plan.pre, buckets, retry_until=ensure_utc(change.created_at) + LOAD_DRIVER_RETRY, now=now
         )
@@ -1151,8 +1184,7 @@ class ChangeMeasurementService:
     ) -> ChangeMeasurement:
         strategy = self._strategy(change)
         snapshot = await self._ensure_snapshot(change, now)
-        post_rows = await self._read_workload(change.target, plan.post)
-        post_buckets = hourly_buckets(post_rows, plan.post, self._step(), slot_seconds=self.settings.slot_seconds)
+        post_rows, post_buckets = await self._workload_buckets(change.target, plan.post)
         collected = await self._collect_load(
             change,
             plan.post,

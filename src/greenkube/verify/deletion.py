@@ -33,6 +33,7 @@ import math
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence
 
+from greenkube.impact.types import HOURS_PER_YEAR as IMPACT_HOURS_PER_YEAR
 from greenkube.models.provenance import TRUSTED_COST_SOURCES
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.confounders import is_contaminated
@@ -51,7 +52,7 @@ if TYPE_CHECKING:
     from greenkube.verify.strategy import MeasurementSettings, StrategyResult
 
 #: Same constant as ``greenkube.verify.strategy`` (which registers this strategy, so it is not imported here).
-HOURS_PER_YEAR = 365.25 * 24
+HOURS_PER_YEAR = float(IMPACT_HOURS_PER_YEAR)  # one annualisation constant with the Impact Model (MEA-13)
 METHOD_PRE_WINDOW = "pre_window_mean"
 METHOD_ALLOCATED_RATE = "allocated_rate_at_decision"
 #: Rate source of a rate measured on the resource's own trusted cost rows before the change.
@@ -81,7 +82,7 @@ class ResourceDeletionStrategy:
     """Measures a resource deletion: the released allocated rate once the resource is absent."""
 
     key = "resource_deletion"
-    version = "1.1"
+    version = "1.2"
     primary = "allocated_cost"
 
     def required_windows(self, change: ChangeEvent, settings: MeasurementSettings) -> WindowPlan:
