@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from greenkube.core.config import get_config
 from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.models.metrics import RecommendationRecord, RecommendationType
 from greenkube.models.savings import SavingsAccrualTotal
@@ -14,7 +13,14 @@ from greenkube.models.savings import SavingsAccrualTotal
 
 async def _scan(combined_repo, node_repo, reco_repo, namespace=None) -> list[dict]:
     """Run one controller-style scan (the API itself never scans, E1) and serialize its output."""
-    recommendations = await OptimizationEngine().refresh(combined_repo, node_repo, reco_repo, namespace=namespace)
+    from greenkube.core.db import get_db_manager
+
+    try:
+        recommendations = await OptimizationEngine().refresh(combined_repo, node_repo, reco_repo, namespace=namespace)
+    finally:
+        # The scan opens the process-wide database manager (aiosqlite runs a worker thread per
+        # connection): close it so no thread outlives the test session.
+        await get_db_manager().close()
     return [RecommendationRecord.from_recommendation(rec).model_dump(mode="json") for rec in recommendations]
 
 
@@ -78,13 +84,19 @@ class TestRecommendationsEndpoint:
         data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
 
         zombie_rec = next(r for r in data if r["type"] == "ZOMBIE_POD")
-        annualization_factor = 365 / get_config().RECOMMENDATION_LOOKBACK_DAYS
+        # IMP-04: annualized over the hours the collector observed the cluster. The only row of the
+        # cluster is this 5-minute sample, so the minimum coverage applies.
+        from greenkube.impact.model import MIN_COVERAGE_HOURS
+
+        annualization_factor = 8760 / MIN_COVERAGE_HOURS
         assert zombie_rec["potential_savings_cost"] == pytest.approx(0.05 * annualization_factor)
         # CO2e comes from the Impact Model (allocated idle, dynamic and embodied
         # share released by deleting the pod), returned with its provenance.
         impact = zombie_rec["impact"]
         assert impact["kind"] == "workload_deletion"
         assert impact["assumptions"]["annualization_factor"] == pytest.approx(annualization_factor)
+        # One 5-minute sample, plus at most one step of alignment tolerance.
+        assert 300 / 3600 <= impact["assumptions"]["collected_hours"] <= 600 / 3600 + 1e-9
         assert zombie_rec["potential_savings_co2e_grams"] == pytest.approx(impact["co2e_expected_annual_g"])
         assert zombie_rec["potential_savings_co2e_grams"] > 0
 

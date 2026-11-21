@@ -40,7 +40,7 @@ from tests.core.optimization.verification_fixtures import (  # pyrefly: ignore[m
 )
 
 WINDOW = timedelta(hours=6)
-HOURS_PER_YEAR = 8766.0
+HOURS_PER_YEAR = 8760.0
 
 
 @pytest.fixture(params=["sqlite", "postgres"], ids=["sqlite", "postgres"])

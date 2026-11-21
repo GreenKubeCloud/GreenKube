@@ -139,4 +139,4 @@ def test_a_legacy_spec_drift_is_flagged_as_unverified():
 
 def test_the_strategy_version_is_bumped():
     """A template change with identical resources no longer contaminates: outcomes change (MEA-08)."""
-    assert RequestRightsizingStrategy.version == "2.5"
+    assert RequestRightsizingStrategy.version == "2.6"

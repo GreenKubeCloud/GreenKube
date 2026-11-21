@@ -56,6 +56,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, cast
 
 from greenkube.impact.comparison import measurable_co2e_projection
+from greenkube.impact.types import HOURS_PER_YEAR as IMPACT_HOURS_PER_YEAR
 from greenkube.models.measurement import (
     INTERIM_METHOD,
     MeasurementOutcome,
@@ -82,8 +83,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SECONDS_PER_YEAR = 365.25 * 24 * 3600
-_HOURS_PER_YEAR = _SECONDS_PER_YEAR / 3600
+_HOURS_PER_YEAR = float(IMPACT_HOURS_PER_YEAR)  # one annualisation constant with the Impact Model (MEA-13)
 
 #: Statuses that are candidates for verification.
 VERIFIABLE_STATUSES = ["applied", "verifying"]
@@ -1390,6 +1390,11 @@ class RecommendationVerifier:
         if missing:
             logger.info("Verification of %s: health signals not available: %s", record.id, ", ".join(missing))
 
+        if stored.windows.get("method") == INTERIM_METHOD and not stored.change_id:
+            # MEA-16: the savings totals report interim verdicts apart from change measurements.
+            updated_baseline["measurement_method"] = INTERIM_METHOD
+        else:
+            updated_baseline.pop("measurement_method", None)
         if stored.change_id:
             updated_baseline["change_id"] = stored.change_id
             updated_baseline["change_measurement_id"] = stored.group_id

@@ -67,7 +67,9 @@ class FakeLedger(SavingsLedgerRepository):
                 floors[record.recommendation_id] = max(current, record.period_end) if current else record.period_end
         return floors
 
-    async def get_accrual_breakdown(self, cluster_name, start_time=None, end_time=None, namespace=None):
+    async def get_accrual_breakdown(
+        self, cluster_name, start_time=None, end_time=None, namespace=None, recommendation_ids=None
+    ):
         totals: Dict[tuple, SavingsAccrualTotal] = {}
         for record in self.rows.values():
             key = (record.namespace, record.recommendation_type, record.measurement_method)

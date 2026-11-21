@@ -71,9 +71,9 @@ OBSERVED_COMPONENTS_PARTLY_APPORTIONED = "observed_components_partly_apportioned
 MAX_LISTED_PRICES = 10
 
 #: Shortest coverage a projection is annualized over: a target observed for a
-#: few minutes is annualized as if observed for one hour, never extrapolated
+#: few minutes is annualized as if observed for half an hour (one hour before IMP-04), never extrapolated
 #: from a single scrape.
-MIN_COVERAGE_HOURS = 1.0
+MIN_COVERAGE_HOURS = 0.5
 
 #: Coverage below one week is short: weekly cycles are not seen yet. Short
 #: coverage is reported and lowers the projection's confidence.
@@ -389,6 +389,12 @@ class _Accumulator:
         )
 
 
+#: Share of the coverage span the collector must have observed before a projection loses confidence (IMP-04).
+MIN_COLLECTED_SHARE = 0.9
+#: Lowest confidence scale a collection gap applies.
+COLLECTION_GAP_CONFIDENCE_FLOOR = 0.5
+
+
 @dataclass(frozen=True)
 class Annualization:
     """Hours a projection's window totals are annualized over, and why."""
@@ -427,6 +433,19 @@ def annualization(baseline: WorkloadBaseline) -> Annualization:
         assumptions["first_observed_at"] = coverage.first_observed.isoformat()
     notes: List[str] = []
     scale = 1.0
+    if coverage.collected_hours is not None and coverage.span_hours is not None:
+        # IMP-04: hours without collection stay out of the annualization, and say so.
+        gap = max(coverage.span_hours - coverage.collected_hours, 0.0)
+        assumptions["coverage_span_hours"] = coverage.span_hours
+        assumptions["collected_hours"] = coverage.collected_hours
+        assumptions["collection_gap_hours"] = gap
+        share = coverage.collected_hours / coverage.span_hours if coverage.span_hours > 0 else 1.0
+        if share < MIN_COLLECTED_SHARE:
+            scale *= max(share, COLLECTION_GAP_CONFIDENCE_FLOOR)
+            notes.append(
+                f"The collector observed {coverage.collected_hours:.1f} h of the {coverage.span_hours:.1f} h "
+                "since the target was first seen: the projection is annualized over the observed hours only."
+            )
     if observed < MIN_COVERAGE_HOURS:
         assumptions["minimum_coverage_applied"] = True
     if observed < SHORT_COVERAGE_HOURS and observed < lookback:

@@ -252,6 +252,10 @@ async def test_breakdown_keeps_methods_apart(ledger_db: LedgerDatabase):
     breakdown = await ledger_db.repo.get_accrual_breakdown(CLUSTER, slot, slot + HOUR)
     by_method = {row.method: row.co2e_saved_grams for row in breakdown}
     assert by_method == {"projected": pytest.approx(1.0), "measured": 2.0, "user_declared": -4.0}
+    # MEA-16: the v1 fallback can report the interim recommendations apart.
+    only = await ledger_db.repo.get_accrual_breakdown(CLUSTER, slot, slot + HOUR, recommendation_ids=[2])
+    assert {row.method: row.co2e_saved_grams for row in only} == {"measured": 2.0}
+    assert await ledger_db.repo.get_accrual_breakdown(CLUSTER, recommendation_ids=[]) == []
 
 
 @pytest.mark.asyncio

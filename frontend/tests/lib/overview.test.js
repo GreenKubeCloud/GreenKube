@@ -9,6 +9,8 @@ import {
 	deliveryHint,
 	etaFrom,
 	opportunityOf,
+	OPPORTUNITY_LABEL,
+	serverOpportunity,
 	targetName,
 	warmUpOf
 } from '$lib/overview.js';
@@ -115,6 +117,48 @@ describe('opportunityOf', () => {
 		expect(result.ev).toBe(40);
 		expect(result.cost).toBe(0);
 		expect(result.allocatedOnly).toBe(2);
+	});
+});
+
+describe('de-duplicated opportunity (IMP-07)', () => {
+	// Audit fixture: IDLE_NAMESPACE ns1 (100) + RIGHTSIZING_CPU ns1 (20, 30) + a memory increase in ns2 (-5)
+	// + RIGHTSIZING_CPU ns2 (10). The server answers 110 and a reliability cost of 5.
+	const recs = [
+		{ type: 'IDLE_NAMESPACE', namespace: 'ns1', potential_savings_cost: 100, potential_savings_co2e_grams: 1000 },
+		{ type: 'RIGHTSIZING_CPU', namespace: 'ns1', potential_savings_cost: 20, potential_savings_co2e_grams: 200 },
+		{ type: 'RIGHTSIZING_CPU', namespace: 'ns1', potential_savings_cost: 30, potential_savings_co2e_grams: 300 },
+		{ type: 'RIGHTSIZING_MEMORY', namespace: 'ns2', potential_savings_cost: -5, value: { lane: 'reliability' } },
+		{ type: 'RIGHTSIZING_CPU', namespace: 'ns2', potential_savings_cost: 10, potential_savings_co2e_grams: 100 }
+	];
+	const report = {
+		...savings,
+		opportunity: {
+			cost_annual: 110,
+			allocated_cost_annual: 110,
+			co2e_grams_annual: 1100,
+			reliability_cost_annual: 5,
+			reliability_count: 1,
+			recommendation_count: 4,
+			label: OPPORTUNITY_LABEL
+		}
+	};
+
+	it('the dashboard and the recommendations page show the server figure, not the client sum', () => {
+		const dashboard = buildSavingsOverview(report, recs).opportunity;
+		const page = serverOpportunity(report);
+		expect(dashboard.cost).toBe(110);
+		expect(page.cost).toBe(110);
+		expect(dashboard.co2eGrams).toBe(page.co2eGrams);
+		expect(dashboard.reliabilityCost).toBe(5);
+		expect(page.reliabilityCost).toBe(5);
+		expect(dashboard.label).toBe(OPPORTUNITY_LABEL);
+		// Without the server figure the client sum adds the overlapping namespace and workloads.
+		expect(opportunityOf(recs).cost).toBe(160);
+	});
+
+	it('is null without a server figure', () => {
+		expect(serverOpportunity(savings)).toBeNull();
+		expect(serverOpportunity({ opportunity: { cost_annual: 'x' } })).toBeNull();
 	});
 });
 

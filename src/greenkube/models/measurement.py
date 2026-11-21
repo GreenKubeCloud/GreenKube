@@ -18,9 +18,10 @@ from pydantic import BaseModel, Field
 from greenkube.models.verification import HealthGateResult
 
 #: Version of the interim request-rightsizing measurement method (C0). ``c0.2`` (MEA-16) decides on a
-#: 90% interval of the before/after difference instead of its point estimate.
+#: 90% interval of the before/after difference instead of its point estimate. ``c0.3`` (MEA-13) annualises
+#: over 8760 hours, the Impact Model constant.
 MEASUREMENT_STRATEGY_KEY = "legacy_before_after"
-MEASUREMENT_STRATEGY_VERSION = "c0.2"
+MEASUREMENT_STRATEGY_VERSION = "c0.3"
 #: ``windows.method`` of interim measurements: two window means, no counterfactual (MEA-16).
 INTERIM_METHOD = "interim_before_after"
 

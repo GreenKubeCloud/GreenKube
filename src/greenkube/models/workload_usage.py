@@ -152,6 +152,12 @@ class WorkloadUsageSummary:
     container_name: str = POD_LEVEL
     first_hour: Optional[datetime] = None
     last_hour: Optional[datetime] = None
+    #: Steps of the target in its first observed hour (IMP-04): its samples run from
+    #: ``first_hour + 1h - first_hour_steps x step`` to the end of that hour. 0 when unknown.
+    first_hour_steps: int = 0
+    #: Seconds from ``first_hour`` to the target's latest sample in that hour (IMP-04 review): the
+    #: steps run up to the end of the hour only when it sits in the hour's last step. None when unknown.
+    first_hour_last_offset: Optional[float] = None
     hours_observed: int = 0
     sample_count: int = 0
     step_count: int = 0
@@ -260,6 +266,9 @@ class UsageSnapshot:
     source: str = "rows"
     #: First observed hour across all targets (None when unknown).
     first_hour: Optional[datetime] = None
+    #: Collection steps of each hour bucket: the most steps any target had in the hour (IMP-04).
+    #: An hour missing here was not collected at all; empty when unknown (older readers).
+    collected_steps_by_hour: Dict[datetime, int] = field(default_factory=dict)
     #: Outcome of each reliability signal read by the scan (``oom_kills``, ``restarts``,
     #: ``throttling``): ``ok``, ``failed`` (the query failed) or ``unavailable`` (no source).
     #: Empty when the scan did not read them.

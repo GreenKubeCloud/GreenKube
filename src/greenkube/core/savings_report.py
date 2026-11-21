@@ -19,6 +19,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Iterable, List, Optional
 
+from ..models.measurement import INTERIM_METHOD
 from ..models.metrics import RecommendationRecord
 from ..models.savings import (
     METHOD_MEASURED,
@@ -29,6 +30,7 @@ from ..models.savings import (
     SavingsBlock,
     SavingsReport,
 )
+from .opportunity import optional_opportunity
 from .savings_attributor import InvalidSavingsRecord, accrual_components, annual_rates_by_method
 
 LEGACY_COMPRESSED_DIAGNOSTIC = (
@@ -42,13 +44,49 @@ def _status(record: RecommendationRecord) -> str:
     return str(status.value if hasattr(status, "value") else status)
 
 
-def _annual_block(rates: dict, method: str) -> SavingsBlock:
+def is_interim(record: RecommendationRecord) -> bool:
+    """Whether the record's latest decision came from the interim verifier (MEA-16).
+
+    Records decided since MEA-16 carry ``baseline.measurement_method``. Before
+    it, every measurement without a change id came from the interim verifier:
+    a record with a ``latest_measurement_id`` and no ``change_id`` is interim too.
+    """
+    baseline = record.baseline
+    if baseline is None:
+        return False
+    if baseline.get("measurement_method") == INTERIM_METHOD:
+        return True
+    return bool(baseline.get("latest_measurement_id")) and not baseline.get("change_id")
+
+
+def interim_recommendation_ids(records: Iterable[RecommendationRecord]) -> List[int]:
+    """Ids of the records decided by the interim verifier (MEA-16), reported apart from measured totals."""
+    return sorted(int(record.id) for record in records if record.id is not None and is_interim(record))
+
+
+def _value_basis(records: Iterable[RecommendationRecord], method: str) -> Optional[str]:
+    """Basis of the ``method`` components of ``records`` (IMP-06): one basis, ``mixed`` or ``None``."""
+    bases = set()
+    for record in records:
+        try:
+            components = accrual_components(record)
+        except (InvalidSavingsRecord, ValueError):
+            continue
+        bases.update(component.basis for component in components if component.method == method)
+    if not bases:
+        return None
+    return bases.pop() if len(bases) == 1 else "mixed"
+
+
+def _annual_block(rates: dict, method: str, records: Iterable[RecommendationRecord] = ()) -> SavingsBlock:
     values = rates.get(method, {})
+    basis = _value_basis(records, method)
     return SavingsBlock(
         method=method,  # type: ignore[arg-type]
         basis="annual_rate",
         co2e_grams=float(values.get("co2e_grams", 0.0)),
         cost=float(values.get("cost", 0.0)),
+        value_basis=basis,  # type: ignore[arg-type]
         recommendation_count=int(values.get("count", 0)),
     )
 
@@ -160,6 +198,9 @@ def assemble_savings_report(
     source: str = "ledger_v2",
     projected_unverified: Optional[List[SavingsAccrualTotal]] = None,
     cost_of_fix: Optional[List[SavingsAccrualTotal]] = None,
+    interim: Optional[List[SavingsAccrualTotal]] = None,
+    active: Optional[List[RecommendationRecord]] = None,
+    interim_accrued_only: Optional[List[SavingsAccrualTotal]] = None,
 ) -> SavingsReport:
     """Build the report from applied recommendations and ledger totals.
 
@@ -170,11 +211,35 @@ def assemble_savings_report(
     measurement was inconclusive: reported apart and left out of
     ``projected_to_date`` (LED-03). ``cost_of_fix`` holds the measured cost of
     reliability fixes, reported in ``reliability_cost_to_date``, never netted
-    into a saving.
+    into a saving. ``interim`` holds the ledger totals of the recommendations
+    decided by the interim verifier (MEA-16): their measured amounts are
+    reported in ``interim_run_rate_annual``/``interim_realized_to_date`` and
+    left out of every measured figure. ``active`` are the active
+    recommendations: their de-duplicated projected opportunity is reported in
+    ``opportunity`` (IMP-07).
     """
+    interim_records = [record for record in applied_records if is_interim(record)]
+    measured_records = [record for record in applied_records if not is_interim(record)]
     rates = annual_rates_by_method(applied_records)
+    # MEA-16: interim verdicts (two window means, no counterfactual) never join the measured run rate.
+    rates[METHOD_MEASURED] = annual_rates_by_method(measured_records).get(METHOD_MEASURED, {})
+    interim_rates = annual_rates_by_method(interim_records)
     blocks = {"source": source, "accrued_only": accrued_only}
     realized = _accrued_block(breakdown, METHOD_MEASURED, start, end, **blocks)  # type: ignore[arg-type]
+    interim_block: Optional[SavingsBlock] = None
+    if interim is not None:
+        interim_block = _accrued_block(
+            interim, METHOD_MEASURED, start, end, source=source, accrued_only=interim_accrued_only
+        )
+        update = {
+            "cost": realized.cost - interim_block.cost,
+            "co2e_grams": realized.co2e_grams - interim_block.co2e_grams,
+        }
+        if realized.accrued_only_cost is not None and interim_block.accrued_only_cost is not None:
+            update["accrued_only_cost"] = realized.accrued_only_cost - interim_block.accrued_only_cost
+        if realized.accrued_only_co2e_grams is not None and interim_block.accrued_only_co2e_grams is not None:
+            update["accrued_only_co2e_grams"] = realized.accrued_only_co2e_grams - interim_block.accrued_only_co2e_grams
+        realized = realized.model_copy(update=update)
     projected_to_date = _accrued_block(breakdown, METHOD_PROJECTED, start, end, **blocks)  # type: ignore[arg-type]
     unverified_block: Optional[SavingsBlock] = None
     if projected_unverified is not None:
@@ -215,12 +280,15 @@ def assemble_savings_report(
         namespace=namespace,
         window_start=start,
         window_end=end,
-        projected_annual=_annual_block(rates, METHOD_PROJECTED),
-        run_rate_annual=_annual_block(rates, METHOD_MEASURED),
+        projected_annual=_annual_block(rates, METHOD_PROJECTED, applied_records),
+        run_rate_annual=_annual_block(rates, METHOD_MEASURED, measured_records),
         realized_to_date=realized,
         projected_to_date=projected_to_date,
-        user_declared_annual=_annual_block(rates, METHOD_USER_DECLARED),
+        user_declared_annual=_annual_block(rates, METHOD_USER_DECLARED, applied_records),
         projected_unverified_to_date=unverified_block,
+        interim_run_rate_annual=_annual_block(interim_rates, METHOD_MEASURED) if interim_records else None,
+        interim_realized_to_date=interim_block,
+        opportunity=optional_opportunity(active),
         reliability_cost_to_date=(
             _accrued_block(cost_of_fix, METHOD_MEASURED, start, end, source=source) if cost_of_fix is not None else None
         ),
@@ -232,9 +300,9 @@ def assemble_savings_report(
             **blocks,  # type: ignore[arg-type]
         ),
         applied_count=len(applied_records),
-        verified_count=sum(1 for record in applied_records if _status(record) == "verified"),
+        verified_count=sum(1 for record in measured_records if _status(record) == "verified"),
         diagnostics=diagnostics,
-        realization=realization_summary(applied_records),
+        realization=realization_summary(measured_records),
         total_carbon_saved_co2e_grams=realized.co2e_grams,
         total_cost_saved=realized.cost,
         measured_carbon_saved_co2e_grams=realized.co2e_grams,

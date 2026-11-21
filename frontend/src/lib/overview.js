@@ -47,11 +47,41 @@ export function currencyOf(recommendations = []) {
 	return getDisplayCurrency();
 }
 
+/** Label of the de-duplicated opportunity (IMP-07), shown on every page that renders it. */
+export const OPPORTUNITY_LABEL = 'Projected (not additive across overlapping recommendations)';
+
+/**
+ * The de-duplicated opportunity the server computed once (`opportunity` of
+ * `GET /recommendations/savings`, IMP-07), or null when the server sent none.
+ * Overlapping recommendations (a namespace deletion and the rightsizing of its
+ * workloads, an off-peak schedule and a rightsizing of one workload, a node
+ * removal and its pods) are counted once and request increases apart, so the
+ * dashboard and the recommendations page show the same figure.
+ */
+export function serverOpportunity(savings) {
+	const value = savings?.opportunity;
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+	const cost = finite(value.cost_annual);
+	if (cost === null) return null;
+	return {
+		cost,
+		allocatedCost: finite(value.allocated_cost_annual),
+		co2eGrams: finite(value.co2e_grams_annual) ?? 0,
+		reliabilityCost: finite(value.reliability_cost_annual) ?? 0,
+		reliabilityCount: finite(value.reliability_count) ?? 0,
+		count: finite(value.recommendation_count) ?? 0,
+		label: typeof value.label === 'string' ? value.label : OPPORTUNITY_LABEL
+	};
+}
+
 /**
  * Projected opportunity of active recommendations (savings lane only).
  * Reliability recommendations cost money on purpose and are counted apart.
+ * With the server's de-duplicated opportunity (`server`, from
+ * {@link serverOpportunity}) its totals replace the client-side sums, which
+ * would add overlapping recommendations.
  */
-export function opportunityOf(recommendations = []) {
+export function opportunityOf(recommendations = [], server = null) {
 	let cost = 0;
 	let co2eGrams = 0;
 	let ev = 0;
@@ -82,6 +112,18 @@ export function opportunityOf(recommendations = []) {
 			if (savingEv > 0) ev += savingEv;
 		}
 	}
+	if (server) {
+		return {
+			cost: server.cost,
+			co2eGrams: server.co2eGrams,
+			ev: hasEv ? ev : null,
+			count: server.count,
+			reliabilityCount: server.reliabilityCount,
+			reliabilityCost: server.reliabilityCost,
+			allocatedOnly,
+			label: server.label
+		};
+	}
 	return { cost, co2eGrams, ev: hasEv ? ev : null, count, reliabilityCount, allocatedOnly };
 }
 
@@ -110,7 +152,7 @@ export function buildSavingsOverview(savings, recommendations = []) {
 			annual: pending,
 			appliedCount: finite(savings?.applied_count) ?? 0
 		},
-		opportunity: opportunityOf(recommendations),
+		opportunity: opportunityOf(recommendations, serverOpportunity(savings)),
 		diagnostics: Array.isArray(savings?.diagnostics) ? savings.diagnostics.filter((item) => typeof item === 'string') : []
 	};
 }

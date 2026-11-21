@@ -72,6 +72,8 @@ COVERAGE_FROM_LOOKBACK = "lookback"
 
 #: Looks up when a target was first observed (None when unknown).
 FirstObservedLookup = Callable[["WorkloadRef"], Optional[datetime]]
+#: Returns the collection steps of each hour bucket of the cluster (None or empty when unknown, IMP-04).
+CollectedStepsLookup = Callable[[], Optional[Mapping[datetime, float]]]
 
 #: Fallbacks used only when the configuration object lacks a setting.
 _FALLBACK_INTENSITY = 500.0
@@ -227,12 +229,17 @@ def _is_aggregated(row: Any) -> bool:
     return isinstance(row, BaselineMetric)
 
 
-def first_observed_from_summaries(snapshot: Any, ref: WorkloadRef) -> Optional[datetime]:
-    """First observed hour of a target in a usage snapshot (``UsageSnapshot``), or None.
+def first_observed_from_summaries(
+    snapshot: Any, ref: WorkloadRef, step_seconds: Optional[float] = None
+) -> Optional[datetime]:
+    """First observation of a target in a usage snapshot (``UsageSnapshot``), or None.
 
     A container ref reads its container summary, then the pod-level one; a
     workload ref the pod-level summary, then the earliest of its containers;
-    a ``Namespace`` ref the earliest target of the namespace.
+    a ``Namespace`` ref the earliest target of the namespace. With
+    ``step_seconds`` and the steps of the target's first hour
+    (``first_hour_steps``, IMP-04) the first hour counts from the first sample
+    (``first_hour + 1 h - steps x step``), not from the hour floor.
     """
     summaries = getattr(snapshot, "summaries", None)
     if not isinstance(summaries, Mapping):
@@ -254,18 +261,44 @@ def first_observed_from_summaries(snapshot: Any, ref: WorkloadRef) -> Optional[d
                 break
         if not candidates:
             candidates = list(containers.values())
-    hours = [hour for hour in (_utc(getattr(summary, "first_hour", None)) for summary in candidates) if hour]
-    return min(hours) if hours else None
+    firsts: List[datetime] = []
+    for summary in candidates:
+        hour = _utc(getattr(summary, "first_hour", None))
+        if hour is None:
+            continue
+        steps = getattr(summary, "first_hour_steps", 0)
+        last = getattr(summary, "first_hour_last_offset", None)
+        # The first hour's steps run up to its end only when its latest sample sits in the hour's
+        # last step; a target that ran 10:00-10:10 keeps 10:00 (IMP-04 review).
+        contiguous = isinstance(last, (int, float)) and step_seconds and last >= 3600 - 1.5 * step_seconds
+        if (
+            contiguous
+            and step_seconds
+            and isinstance(steps, int)
+            and not isinstance(steps, bool)
+            and 0 < steps * step_seconds < 3600
+        ):
+            hour += timedelta(seconds=3600 - steps * step_seconds)
+        firsts.append(hour)
+    return min(firsts) if firsts else None
 
 
-def _context_first_observed(context: Any) -> Optional[FirstObservedLookup]:
-    """First-observation lookup over the context's usage summaries (computed once, on first use)."""
+def _context_snapshot_reader(context: Any) -> Optional[Callable[[], Any]]:
+    """Reads the context's usage snapshot lazily (``None`` when the context has none)."""
     reader = getattr(context, "usage_snapshot", None)
-    if not callable(reader):
-        snapshot = getattr(context, "usage", None)
-        if snapshot is None:
-            return None
-        return lambda ref: first_observed_from_summaries(snapshot, ref)
+    if callable(reader):
+        return reader
+    snapshot = getattr(context, "usage", None)
+    if snapshot is None:
+        return None
+    return lambda: snapshot
+
+
+def _context_first_observed(context: Any, step_seconds: Optional[float] = None) -> Optional[FirstObservedLookup]:
+    """First-observation lookup over the context's usage summaries (computed once, on first use)."""
+    reader = _context_snapshot_reader(context)
+    if reader is None:
+        return None
 
     def lookup(ref: WorkloadRef) -> Optional[datetime]:
         try:
@@ -273,9 +306,78 @@ def _context_first_observed(context: Any) -> Optional[FirstObservedLookup]:
         except Exception:  # pragma: no cover - defensive: coverage falls back to samples
             logger.debug("Usage snapshot unavailable for coverage of %s", ref, exc_info=True)
             return None
-        return first_observed_from_summaries(snapshot, ref)
+        return first_observed_from_summaries(snapshot, ref, step_seconds)
 
     return lookup
+
+
+def _context_collected_steps(context: Any) -> Optional[CollectedStepsLookup]:
+    """The collection steps per hour of the context's usage snapshot (IMP-04), read lazily."""
+    reader = _context_snapshot_reader(context)
+    if reader is None:
+        return None
+
+    def lookup() -> Optional[Mapping[datetime, float]]:
+        try:
+            snapshot = reader()
+        except Exception:  # pragma: no cover - defensive: coverage falls back to the span
+            logger.debug("Usage snapshot unavailable for the collection coverage", exc_info=True)
+            return None
+        steps = getattr(snapshot, "collected_steps_by_hour", None)
+        return steps if isinstance(steps, Mapping) and steps else None
+
+    return lookup
+
+
+def collected_steps_from_rows(rows: Sequence[Any], step_seconds: float) -> Dict[datetime, float]:
+    """Collected steps of each UTC hour from metric rows of the whole scope (IMP-04).
+
+    Each distinct row timestamp covers the longest row at that time (one step
+    for a raw row, its ``duration_seconds`` for an hourly row read for older
+    hours), capped at the hour. Empty for rollup baseline rows, whose
+    timestamps are not sample times (the usage snapshot gives their collection).
+    """
+    if step_seconds <= 0:
+        return {}
+    covered: Dict[datetime, Dict[datetime, float]] = {}
+    for row in rows:
+        if _is_aggregated(row):
+            return {}
+        stamp = _utc(getattr(row, "timestamp", None))
+        if stamp is None:
+            continue
+        duration = getattr(row, "duration_seconds", None)
+        seconds = float(duration) if isinstance(duration, (int, float)) and duration > 0 else step_seconds
+        hour = covered.setdefault(stamp.replace(minute=0, second=0, microsecond=0), {})
+        hour[stamp] = max(hour.get(stamp, 0.0), seconds)
+    return {hour: min(sum(values.values()), 3600.0) / step_seconds for hour, values in sorted(covered.items())}
+
+
+def collected_hours(
+    steps_by_hour: Mapping[datetime, float], step_seconds: float, start: datetime, end: datetime
+) -> float:
+    """Hours of ``[start, end)`` in which the collector observed the cluster (IMP-04).
+
+    The span minus the uncollected time of each hour: an hour with no row of
+    any target is a gap of its whole overlap with the span, a partly collected
+    hour misses its overlap minus its collected time (steps x step), less one
+    step of tolerance (samples are not aligned on the hour). A CronJob's idle
+    hours are collected when other targets have rows in them.
+    """
+    if end <= start:
+        return 0.0
+    steps = {
+        bucket: value for bucket, value in ((_utc(hour), value) for hour, value in steps_by_hour.items()) if bucket
+    }
+    missing = 0.0
+    hour = start.replace(minute=0, second=0, microsecond=0)
+    while hour < end:
+        overlap = (min(hour + timedelta(hours=1), end) - max(hour, start)).total_seconds()
+        collected = max(float(steps.get(hour, 0.0)), 0.0) * step_seconds
+        tolerance = step_seconds if collected > 0 else 0.0
+        missing += max(overlap - collected - tolerance, 0.0)
+        hour += timedelta(hours=1)
+    return max((end - start).total_seconds() - missing, 0.0) / 3600.0
 
 
 def observed_window_hours(samples: Sequence[ResourceSample]) -> float:
@@ -306,10 +408,14 @@ class ImpactProjector:
         catalog: Optional[PricingCatalog] = None,
         window_end: Optional[datetime] = None,
         first_observed: Optional[FirstObservedLookup] = None,
+        collected_steps: Optional[CollectedStepsLookup] = None,
     ):
         """``window_end`` is the end of the analysis window and ``first_observed``
         finds when a target was first observed; with them, projections are
         annualized over each target's observed coverage (Impact Model 2.0.0).
+        ``collected_steps`` gives the collection steps of each hour of the
+        cluster (IMP-04); without it they are read from raw ``rows``. Coverage
+        then counts only the hours the collector observed.
         """
         self.config = config
         self.model: ImpactModel = model if model is not None else DEFAULT_IMPACT_MODEL
@@ -324,6 +430,10 @@ class ImpactProjector:
         self.window_end = _utc(window_end)
         self._first_observed = first_observed
         rows = list(rows)
+        self._collected_steps = collected_steps
+        self._rows_collected: Optional[Dict[datetime, float]] = (
+            None if collected_steps is not None else collected_steps_from_rows(rows, self.default_hours * 3600.0)
+        )
         self.resolver = UnitPriceResolver(
             catalog=catalog if catalog is not None else PricingCatalog(),
             custom_rates=CustomRates.from_config(config),
@@ -348,7 +458,10 @@ class ImpactProjector:
             rows=rows,
             analysis_window_seconds=getattr(context, "analysis_window_seconds", None),
             window_end=getattr(context, "window_end", None),
-            first_observed=_context_first_observed(context),
+            first_observed=_context_first_observed(
+                context, parse_query_step_seconds(_setting(context.config, "PROMETHEUS_QUERY_RANGE_STEP", "5m"))
+            ),
+            collected_steps=_context_collected_steps(context),
         )
         try:
             setattr(context, _CONTEXT_CACHE_ATTR, projector)
@@ -577,13 +690,32 @@ class ImpactProjector:
             return ObservedCoverage(
                 lookback_hours=lookback_hours, observed_hours=lookback_hours, basis=COVERAGE_FROM_LOOKBACK
             )
-        observed = max((end - first).total_seconds() / 3600.0, 0.0)
+        observed = min(max((end - first).total_seconds() / 3600.0, 0.0), lookback_hours)
+        steps = self._collection_steps()
+        if not steps:
+            return ObservedCoverage(
+                lookback_hours=lookback_hours, observed_hours=observed, basis=basis, first_observed=first
+            )
+        # IMP-04: only the hours the collector observed the cluster count.
+        collected = min(collected_hours(steps, self.default_hours * 3600.0, first, end), observed)
         return ObservedCoverage(
             lookback_hours=lookback_hours,
-            observed_hours=min(observed, lookback_hours),
+            observed_hours=collected,
             basis=basis,
             first_observed=first,
+            span_hours=observed,
+            collected_hours=collected,
         )
+
+    def _collection_steps(self) -> Optional[Mapping[datetime, float]]:
+        """Collection steps per hour of the cluster: from the usage snapshot, else from raw rows."""
+        if self._collected_steps is not None:
+            try:
+                return self._collected_steps()
+            except Exception:  # pragma: no cover - defensive: coverage falls back to the span
+                logger.debug("Collection coverage unavailable", exc_info=True)
+                return None
+        return self._rows_collected or None
 
     # ------------------------------------------------------------------ #
     # Projections                                                         #

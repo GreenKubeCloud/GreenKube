@@ -176,6 +176,14 @@ class SavingsBlock(BaseModel):
     )
     co2e_grams: float = 0.0
     cost: float = 0.0
+    value_basis: Optional[Literal["allocated", "billable_expected", "declared", "mixed"]] = Field(
+        None,
+        description=(
+            "Basis of the values of an annual block (IMP-06): 'allocated' (Impact Model allocated projection, the "
+            "basis measurements are compared with), 'billable_expected' (legacy records without an Impact Model "
+            "projection), 'declared', or 'mixed'. Null when no record contributes or for accrued blocks."
+        ),
+    )
     recommendation_count: int = Field(0, description="Recommendations contributing to an annual rate.")
     start: Optional[datetime] = Field(None, description="Window start for accrued blocks (None means all time).")
     end: Optional[datetime] = Field(None, description="Window end for accrued blocks.")
@@ -282,6 +290,29 @@ class SavingsReport(BaseModel):
             "and left out of projected_to_date. Projections refuted by a not-realized verdict are reversed."
         ),
     )
+    interim_run_rate_annual: Optional[SavingsBlock] = Field(
+        None,
+        description=(
+            "Yearly savings of recommendations decided by the interim verifier (CHANGE_MEASUREMENT_ENABLED=false: "
+            "two window means, no counterfactual, no confounder check, MEA-16). Never part of run_rate_annual; "
+            "null when there is none."
+        ),
+    )
+    interim_realized_to_date: Optional[SavingsBlock] = Field(
+        None,
+        description=(
+            "Measured ledger accruals of the interim-method recommendations over the window (MEA-16), left out "
+            "of realized_to_date."
+        ),
+    )
+    opportunity: Optional["OpportunitySummary"] = Field(
+        None,
+        description=(
+            "Projected opportunity of the active recommendations, de-duplicated across overlapping "
+            "recommendations (IMP-07): the one figure the dashboard and the recommendations page show. Null when "
+            "the active recommendations could not be read."
+        ),
+    )
     applied_count: int = Field(0, description="Recommendations in an applied, verifying, verified or review state.")
     verified_count: int = Field(0, description="Recommendations with a verified (measured) outcome.")
     diagnostics: List[str] = Field(default_factory=list, description="Caveats that apply to these figures.")
@@ -306,3 +337,8 @@ class SavingsReport(BaseModel):
         description="Deprecated: realized accruals per namespace.",
         json_schema_extra={"deprecated": True},
     )
+
+
+from greenkube.core.opportunity import OpportunitySummary  # noqa: E402  (after SavingsReport: no import cycle)
+
+SavingsReport.model_rebuild()

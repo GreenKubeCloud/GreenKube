@@ -21,6 +21,7 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence
 
 from greenkube.impact.types import CO2E_COMPONENTS, MEASURED_CO2E_COMPONENTS
+from greenkube.impact.types import HOURS_PER_YEAR as IMPACT_HOURS_PER_YEAR
 from greenkube.models.verification import HealthGateResult, HealthGateStatus
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.confounders import is_contaminated
@@ -56,7 +57,7 @@ from greenkube.verify.statistics import (
     with_between_week,
 )
 
-HOURS_PER_YEAR = 365.25 * 24
+HOURS_PER_YEAR = float(IMPACT_HOURS_PER_YEAR)  # one annualisation constant with the Impact Model (MEA-13)
 #: The hour-of-week MVP counterfactual (C3), the fallback of the regression.
 MVP_METHOD = "hour_of_week_mean"
 #: Projection key of the CO2e of every component, embodied included (component matching).
@@ -252,7 +253,7 @@ class RequestRightsizingStrategy:
     """
 
     key = "request_rightsizing"
-    version = "2.5"
+    version = "2.6"
     primary = "allocated_cost"
 
     QUANTITIES = (

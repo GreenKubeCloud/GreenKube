@@ -54,7 +54,7 @@ from greenkube.core.optimization.scoring import normalize_profile, profile_names
 from greenkube.core.optimization.track_record import load_track_record
 from greenkube.core.recommendation_ranking import DecisionRequest, decide_records, rank_recommendations
 from greenkube.core.savings_attributor import record_user_declared_savings, validate_user_declared_savings
-from greenkube.core.savings_report import assemble_savings_report
+from greenkube.core.savings_report import assemble_savings_report, interim_recommendation_ids
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
@@ -366,9 +366,17 @@ async def get_savings_summary(
     except Exception as exc:
         logger.error("Could not load applied recommendations for the savings report: %s", exc)
         raise HTTPException(status_code=503, detail="Recommendation store unavailable.") from exc
+    try:
+        # IMP-07: the de-duplicated opportunity of the active recommendations, one figure for every page.
+        active = list(await reco_repo.get_active_recommendations(namespace=namespace, include_pr_open=True))
+    except Exception as exc:
+        logger.warning("Could not load active recommendations for the savings opportunity: %s", exc)
+        active = None
     accrued_only = None
     unverified = None
     fixes = None
+    interim = None
+    interim_accrued = None
     source = "ledger_v2"
     try:
         cluster_name = _get_savings_cluster_name()
@@ -390,9 +398,34 @@ async def get_savings_summary(
             fixes = await ledger_repo.accrual_breakdown(
                 identity[0], start, end, namespace=namespace, reasons=("cost_of_fix",)
             )
+            # MEA-16: interim-method verdicts are reported apart from the measured totals.
+            interim_ids = interim_recommendation_ids(applied)
+            interim = (
+                await ledger_repo.accrual_breakdown(
+                    identity[0], start, end, namespace=namespace, recommendation_ids=interim_ids
+                )
+                if interim_ids
+                else []
+            )
+            interim_accrued = (
+                await ledger_repo.accrual_breakdown(
+                    identity[0], start, end, namespace=namespace, recommendation_ids=interim_ids, books=("accrued",)
+                )
+                if interim_ids
+                else []
+            )
         else:
             source = "ledger_v1"
             breakdown = await savings_repo.get_accrual_breakdown(cluster_name, start, end, namespace=namespace)
+            # MEA-16: interim verdicts are reported apart in the v1 fallback too.
+            interim_ids = interim_recommendation_ids(applied)
+            interim = (
+                await savings_repo.get_accrual_breakdown(
+                    cluster_name, start, end, namespace=namespace, recommendation_ids=interim_ids
+                )
+                if interim_ids
+                else []
+            )
         legacy = await savings_repo.has_legacy_compressed_rows(cluster_name, start, end, namespace=namespace)
     except Exception as exc:
         logger.error("Could not read the savings ledger: %s", exc)
@@ -408,6 +441,9 @@ async def get_savings_summary(
         source=source,
         projected_unverified=unverified,
         cost_of_fix=fixes,
+        interim=interim,
+        active=active,
+        interim_accrued_only=interim_accrued,
     )
 
 

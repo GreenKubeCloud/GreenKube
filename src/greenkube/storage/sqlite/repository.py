@@ -10,7 +10,7 @@ import aiosqlite
 from greenkube.core.observability import record_metric_provenance
 from greenkube.models.metrics import CombinedMetric
 from greenkube.models.provenance import INTENSITY_FALLBACK_REASON_PREFIX
-from greenkube.storage.base_repository import WindowStepProfile, window_step_profiles
+from greenkube.storage.base_repository import WindowStepProfile, merge_collected_seconds, window_step_profiles
 from greenkube.storage.container_rows import complete_container_rows, container_rows_of
 from greenkube.storage.write_guards import (
     IDLE_COST_COLUMNS,
@@ -639,6 +639,28 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                 f" AND container_name NOT IN ({placeholders})",
                 (*key, *keep),
             )
+
+    async def collected_seconds_by_hour(
+        self, start: datetime, end: datetime, step_seconds: int
+    ) -> dict[datetime, float]:
+        """See :meth:`CombinedMetricsRepository.collected_seconds_by_hour`."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                async with conn.execute(
+                    """SELECT DISTINCT "timestamp" FROM combined_metrics
+                    WHERE "timestamp" >= ? AND "timestamp" < ?""",
+                    (to_iso_z(start), to_iso_z(end)),
+                ) as cursor:
+                    raw = [row[0] for row in await cursor.fetchall()]
+                async with conn.execute(
+                    """SELECT hour_bucket, MAX(duration_seconds) FROM combined_metrics_hourly
+                    WHERE hour_bucket >= ? AND hour_bucket < ? GROUP BY hour_bucket""",
+                    (to_iso_z(start), to_iso_z(end)),
+                ) as cursor:
+                    hourly = [(row[0], row[1]) for row in await cursor.fetchall()]
+        except sqlite3.Error as e:
+            raise QueryError(f"Could not read the collected time of a window: {e}") from e
+        return merge_collected_seconds(raw, hourly, step_seconds)
 
     async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, WindowStepProfile]:
         """See :meth:`CombinedMetricsRepository.stored_window_profile`."""

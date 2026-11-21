@@ -346,7 +346,7 @@ def _estimate(quantity, rate=1.0):
         claimed=quantity == "allocated_cost",
         rate_per_hour=rate,
         aligned_hours=150,
-        annualized=rate * 8766,
+        annualized=rate * 8760,
         outcome=ChangeOutcome.REALIZED,
     )
 

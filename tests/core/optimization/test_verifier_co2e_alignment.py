@@ -24,7 +24,7 @@ from greenkube.models.metrics import CombinedMetric, RecommendationRecord, Recom
 from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendationRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 
-HOURS_PER_YEAR = 8766.0
+HOURS_PER_YEAR = 8760.0
 
 
 def _impact(idle: float, embodied: float) -> dict:

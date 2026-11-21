@@ -29,7 +29,7 @@ from .verification_fixtures import (  # pyrefly: ignore[missing-import]
     rows,
 )
 
-HOURS_PER_YEAR = 8766.0
+HOURS_PER_YEAR = 8760.0
 WINDOW = timedelta(hours=6)
 
 

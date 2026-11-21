@@ -195,12 +195,17 @@ async def test_sql_snapshot_matches_the_reference_summary(db):
 
     assert snapshot.source == "rollup"
     assert set(snapshot.summaries) == set(reference.summaries)
+    # IMP-04: the collection steps of each hour, the same in SQL and in the reference.
+    assert snapshot.collected_steps_by_hour == reference.collected_steps_by_hour
+    assert len(snapshot.collected_steps_by_hour) == 5
     for target, containers in reference.summaries.items():
         assert set(snapshot.summaries[target]) == set(containers)
         for container, expected in containers.items():
             actual = snapshot.summaries[target][container]
             assert actual.hours_observed == expected.hours_observed == 5
             assert actual.first_hour == expected.first_hour
+            assert actual.first_hour_steps == expected.first_hour_steps > 0  # IMP-04
+            assert actual.first_hour_last_offset == pytest.approx(expected.first_hour_last_offset)
             assert actual.last_hour == expected.last_hour
             assert actual.sample_count == expected.sample_count
             assert actual.step_count == expected.step_count
@@ -284,6 +289,10 @@ async def test_namespace_filter_is_applied_in_sql(db):
     snapshot = await repository.read_usage_snapshot(start, start + timedelta(hours=2), namespace="tools")
 
     assert set(snapshot.summaries) == {("tools", "Pod", "debug-shell")}
+    # IMP-04: the collection of each hour stays cluster-wide, so a lone CronJob keeps its duty cycle.
+    unscoped = await repository.read_usage_snapshot(start, start + timedelta(hours=2))
+    assert snapshot.collected_steps_by_hour == unscoped.collected_steps_by_hour
+    assert len(snapshot.collected_steps_by_hour) == 2
 
 
 async def test_baseline_rows_keep_current_requests_on_the_newest_rows(db):

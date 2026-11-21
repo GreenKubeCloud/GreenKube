@@ -80,8 +80,52 @@ export function savingsFigures(savings) {
 		expectedBilledCo2eAnnual: finite(realization.realized_billed_co2e_grams_annual_expected),
 		projectedAnnual: firstBlock(savings?.projected_annual),
 		projectedToDate: firstBlock(savings?.projected_to_date),
-		userDeclaredAnnual: firstBlock(savings?.user_declared_annual)
+		userDeclaredAnnual: firstBlock(savings?.user_declared_annual),
+		// Measured cost of reliability fixes (negative ledger entries, MEA-14): a cost, never netted into a saving.
+		reliabilityCostToDate: firstBlock(savings?.reliability_cost_to_date)
 	};
+}
+
+function raisesRequest(rec) {
+	if (rec?.value?.lane === 'reliability') return true;
+	const pairs = {
+		RIGHTSIZING_CPU: ['current_cpu_request_millicores', 'recommended_cpu_request_millicores'],
+		RIGHTSIZING_MEMORY: ['current_memory_request_bytes', 'recommended_memory_request_bytes']
+	}[rec?.type];
+	if (!pairs) return false;
+	const current = finite(rec?.[pairs[0]]);
+	const recommended = finite(rec?.[pairs[1]]);
+	return current !== null && recommended !== null && recommended > current;
+}
+
+/**
+ * The cost figure of an applied recommendation's card. A reliability fix (a
+ * request increase, MEA-14) is judged on its OOM-kill rate, not on a saving:
+ * once verified it reads "Fix confirmed, costs" with what the fix costs per
+ * year (positive: the measured cost, else the allocated projection, else the
+ * billable one), never as a measured saving of 0. Other records keep "Cost
+ * Measured" once verified, else "Cost Projected".
+ * @returns {{label: string, value: number|null, reliability: boolean}}
+ */
+export function appliedCostFigure(rec) {
+	const verified = rec?.status === 'verified';
+	if (raisesRequest(rec)) {
+		// Measured cost once verified, else the allocated projection (non-zero on fixed nodes, where
+		// the billable one is 0), else the billable projection. Savings are signed: a cost is negative.
+		const measured = verified ? finite(rec?.measured_cost_saved) : null;
+		const allocated = finite(rec?.projected_allocated_cost_annual ?? rec?.impact?.allocated_cost_annual);
+		const billable = finite(rec?.cost_saved);
+		const saving = [measured, allocated, billable].find((value) => value !== null && value !== 0) ?? null;
+		return {
+			label: verified ? 'Fix confirmed, costs' : 'Fix projected to cost',
+			value: saving === null ? null : -saving,
+			reliability: true
+		};
+	}
+	const measured = verified ? finite(rec?.measured_cost_saved) : null;
+	return measured !== null
+		? { label: 'Cost Measured', value: measured, reliability: false }
+		: { label: 'Cost Projected', value: finite(rec?.cost_saved), reliability: false };
 }
 
 /** "Realization factor 45%: about this share of an allocated saving reaches the bill." or ''. */

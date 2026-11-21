@@ -25,7 +25,7 @@ from greenkube.storage.sqlite.recommendation_repository import SQLiteRecommendat
 
 from .verification_fixtures import WindowedMetricsRepo, baseline_of, rec_id, rows  # pyrefly: ignore[missing-import]
 
-HOURS_PER_YEAR = 8766.0
+HOURS_PER_YEAR = 8760.0
 WINDOW = timedelta(hours=6)
 BEFORE_COST, AFTER_COST = 0.01, 0.007
 #: Annual saving of the whole workload: the most the CPU and memory records may claim together.

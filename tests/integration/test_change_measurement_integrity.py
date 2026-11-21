@@ -43,7 +43,7 @@ async def test_a_cpu_cut_with_a_memory_increase_books_the_net_saving(database): 
     assert record_status(records[cpu_id]) == "verified"
     # The CPU recommendation claims the change's net saving, not the gross CPU saving.
     assert records[cpu_id].measured_cost_saved == pytest.approx(net.annualized, rel=1e-6)
-    assert records[cpu_id].measured_cost_saved == pytest.approx(2 * (0.7 * 0.08 - 0.01) * 8766, rel=0.02)
+    assert records[cpu_id].measured_cost_saved == pytest.approx(2 * (0.7 * 0.08 - 0.01) * 8760, rel=0.02)
     claimed = sum(
         float(records[rec_id].measured_cost_saved or 0.0)
         for rec_id in (cpu_id, memory_id)
@@ -76,8 +76,8 @@ async def test_projection_accuracy_compares_the_measurement_with_the_allocated_p
     scenario.add_rows(
         TimeWindow(start=completed, end=completed + timedelta(days=9)), cpu_request=300, memory_request=1024**3
     )
-    cpu_allocated = 2 * 0.7 * 0.08 * 8766
-    memory_allocated = 2 * 0.01 * 8766
+    cpu_allocated = 2 * 0.7 * 0.08 * 8760
+    memory_allocated = 2 * 0.01 * 8760
     fields = {
         RecommendationType.RIGHTSIZING_CPU: {
             "impact": _projection(cpu_allocated, 0.25),

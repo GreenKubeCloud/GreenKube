@@ -11,7 +11,7 @@ also exposes the ``legacy_compressed`` hourly rows left by releases before 0.4.
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from ..models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord
 
@@ -103,8 +103,11 @@ class SavingsLedgerRepository(ABC):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         namespace: Optional[str] = None,
+        recommendation_ids: Optional[Sequence[int]] = None,
     ) -> List[SavingsAccrualTotal]:
         """Return net accruals grouped by namespace, recommendation type and method.
+
+        ``recommendation_ids`` restricts the rows to those recommendations (MEA-16).
 
         Superseded rows are excluded. With a window, each row contributes the
         share of its period that overlaps ``[start_time, end_time)``, so a

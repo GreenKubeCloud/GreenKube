@@ -13,7 +13,7 @@ from greenkube.models.metrics import RecommendationRecord, RecommendationStatus,
 from greenkube.verify.attribution import allocate, allocated_projection, component_cap
 from greenkube.verify.model import ChangeOutcome, SavingsEstimate
 
-HOURS = 8766.0
+HOURS = 8760.0
 
 
 def _record(rec_id: int, rec_type: RecommendationType, **values) -> RecommendationRecord:

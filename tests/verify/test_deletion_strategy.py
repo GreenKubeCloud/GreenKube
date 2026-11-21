@@ -50,7 +50,7 @@ def test_an_absent_resource_realizes_its_allocated_rate_at_decision() -> None:
     assert estimate.actual_per_hour == 0.0
     assert estimate.projection_accuracy == pytest.approx(1.0)
     assert estimate.rate_source == "opencost"
-    assert result.strategy_version == "1.1:allocated_rate_at_decision:opencost"
+    assert result.strategy_version == "1.2:allocated_rate_at_decision:opencost"
 
 
 @pytest.mark.parametrize("source", ["custom_rate", "none", "unknown"])

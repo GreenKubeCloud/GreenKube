@@ -46,8 +46,8 @@
 	import DataState from '$lib/components/DataState.svelte';
 	import OomHistoryWarning from '$lib/components/OomHistoryWarning.svelte';
 	import { capacitySummary } from '$lib/releasedCapacity.js';
-	import { etaFrom } from '$lib/overview.js';
-	import { SAVINGS_TERMS, realizationText, savingPhrase, savingsFigures, visibleDiagnostics } from '$lib/savingsVocabulary.js';
+	import { etaFrom, OPPORTUNITY_LABEL, serverOpportunity } from '$lib/overview.js';
+	import { SAVINGS_TERMS, appliedCostFigure, realizationText, savingPhrase, savingsFigures, visibleDiagnostics } from '$lib/savingsVocabulary.js';
 
 	// --- State ---
 	let activeRecs = [];
@@ -380,13 +380,22 @@
 		sortMode = mode;
 	}
 
-	$: totalSavingsCO2 = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
+	// IMP-07: the server's de-duplicated opportunity, the same figure as the dashboard. The client-side
+	// sums (which add overlapping recommendations and net increases) are only a fallback.
+	// The server figure covers every active recommendation: with source/risk filters the page sums the matches.
+	$: opportunity = serverFiltersActive ? null : serverOpportunity(savings);
+	// Fallback (filters on): the matching savings recommendations only, never increases or negatives.
+	$: fallbackRecs = actionableActiveRecs.filter((r) => r?.value?.lane !== 'reliability');
+	$: totalSavingsCO2 =
+		opportunity?.co2eGrams ?? fallbackRecs.reduce((s, r) => s + Math.max(r.potential_savings_co2e_grams ?? 0, 0), 0);
 	// An unknown billable saving (cluster not observed yet) is the allocated value: never summed as projected.
-	$: totalSavingsCost = actionableActiveRecs.reduce(
-		(s, r) => s + (r.projected_billable_cost_annual === null ? 0 : (r.potential_savings_cost ?? 0)),
-		0
-	);
-	$: potentialSavingsPeriod = 'per year';
+	$: totalSavingsCost =
+		opportunity?.cost ??
+		fallbackRecs.reduce(
+			(s, r) => s + (r.projected_billable_cost_annual === null ? 0 : Math.max(r.potential_savings_cost ?? 0, 0)),
+			0
+		);
+	$: potentialSavingsPeriod = `per year · ${opportunity?.label ?? OPPORTUNITY_LABEL}`;
 	$: savingsTabFigures = savingsFigures(savings);
 
 	function switchTab(tab) {
@@ -2001,6 +2010,11 @@
 						<div class="card-compact text-center" data-testid="savings-tab-cost">
 							<p class="stat-label">{SAVINGS_TERMS.measuredAllocated}</p>
 							<p class="stat-value text-2xl text-blue-400">{formatCost(savingsTabFigures.measuredAllocatedToDate?.cost ?? savings.measured_cost_saved ?? 0)}</p>
+							{#if savingsTabFigures.reliabilityCostToDate?.cost}
+								<p class="text-[10px] text-purple-300 mt-1" data-testid="savings-tab-reliability-cost">
+									Reliability fixes cost {formatCost(-savingsTabFigures.reliabilityCostToDate.cost)} to date (not netted)
+								</p>
+							{/if}
 							<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">
 								measured, to date · projected separately {formatCost(savingsTabFigures.projectedToDate?.cost ?? savings.prorated_cost_saved ?? 0)}
 							</p>
@@ -2106,13 +2120,12 @@
 														</p>
 													</div>
 												{/if}
-												{#if rec.cost_saved}
+												{#if appliedCostFigure(rec).value}
+													{@const costFigure = appliedCostFigure(rec)}
 													<div>
-														<p class="text-[10px] uppercase text-dark-600">
-															{rec.status === 'verified' && rec.measured_cost_saved != null ? 'Cost Measured' : 'Cost Projected'}
-														</p>
-														<p class="text-xs text-blue-400 font-semibold">
-															{formatCost(rec.status === 'verified' && rec.measured_cost_saved != null ? rec.measured_cost_saved : rec.cost_saved)}
+														<p class="text-[10px] uppercase text-dark-600">{costFigure.label}</p>
+														<p class="text-xs font-semibold {costFigure.reliability ? 'text-purple-300' : 'text-blue-400'}">
+															{costFigure.reliability ? '+' : ''}{formatCost(costFigure.value ?? 0)}{costFigure.reliability ? '/yr' : ''}
 														</p>
 													</div>
 												{/if}
@@ -2225,6 +2238,11 @@
 						<p class="stat-label">Potential Cost Savings</p>
 						<p class="stat-value text-2xl text-blue-400">{formatCost(totalSavingsCost)}</p>
 						<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">{potentialSavingsPeriod}</p>
+						{#if opportunity?.reliabilityCost}
+							<p class="text-[10px] text-dark-500 mt-1" data-testid="opportunity-reliability-cost">
+								Reliability fixes cost {formatCost(opportunity.reliabilityCost)}/yr (not counted)
+							</p>
+						{/if}
 					</div>
 				</div>
 			{/if}

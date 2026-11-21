@@ -115,7 +115,9 @@ V1_METHODS = {
 
 #: Version of the ledger writer; part of every entry's ``method_version`` for v1 projections.
 #: ``ledger/2`` entries carry their ``basis`` (part of the hash payload); ``ledger/1`` entries have none.
-LEDGER_WRITER_VERSION = "ledger/2"
+#: ``ledger/3`` (IMP-06) scales the allocated projection of a rightsizing applied more conservatively than
+#: recommended by the share of the cut it realizes.
+LEDGER_WRITER_VERSION = "ledger/3"
 
 _NAMESPACE = uuid.UUID("6f1d3c52-5a0e-4c39-9a51-3b8ad0c4f6e1")
 

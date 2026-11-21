@@ -104,6 +104,9 @@
 				<p class="text-sm text-dark-500" role="status">Loading…</p>
 			{:else if opportunity?.count}
 				<p class="text-2xl font-bold text-yellow-300" data-testid="opportunity-cost">{money(opportunity.cost)}/yr</p>
+				{#if opportunity.label}
+					<p class="text-[10px] text-dark-500" data-testid="opportunity-label">{opportunity.label}</p>
+				{/if}
 				<p class="text-sm text-dark-200" data-testid="opportunity-co2e">{formatCO2(opportunity.co2eGrams)} CO₂e/yr</p>
 				<p class="text-xs text-dark-500">
 					Projected savings of {opportunity.count} open {opportunity.count === 1 ? 'recommendation' : 'recommendations'}.

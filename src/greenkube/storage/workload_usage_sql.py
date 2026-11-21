@@ -246,6 +246,7 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
             SELECT {_KEY}, hour_bucket,
                 SUM(sample_count) AS sample_count,
                 MAX(step_count) AS step_count,
+                MAX(row_offset) AS latest_offset,
                 SUM(pod_count) AS pod_count,
                 SUM(CASE WHEN hour_offset - row_offset <= {latest_step_tolerance_seconds()}
                     THEN COALESCE(latest_pod_count, pod_count) ELSE 0 END) AS latest_pod_count,
@@ -277,6 +278,7 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
         ranked AS (
             SELECT hourly.*,
                 MAX(hour_bucket) OVER ({partition}) AS last_hour,
+                MIN(hour_bucket) OVER ({partition}) AS first_hour_w,
                 SUM(CASE WHEN cpu_n > 0 THEN 1 ELSE 0 END) OVER ({partition}) AS cpu_hours,
                 SUM(CASE WHEN mem_n > 0 THEN 1 ELSE 0 END) OVER ({partition}) AS mem_hours,
                 {", ".join(current_config)},
@@ -285,6 +287,9 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
         )
         SELECT {_KEY},
             MIN(hour_bucket) AS first_hour,
+            MAX(CASE WHEN hour_bucket = first_hour_w THEN step_count END) AS first_hour_steps,
+            MAX(CASE WHEN hour_bucket = first_hour_w AND latest_offset >= 0 THEN latest_offset END)
+                AS first_hour_last_offset,
             MAX(hour_bucket) AS latest_hour,
             COUNT(*) AS hours_observed,
             SUM(sample_count) AS sample_count,
@@ -317,6 +322,18 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
             MAX(emaps_zone) AS emaps_zone
         FROM ranked
         GROUP BY {_KEY}
+    """
+
+
+def collection_sql(
+    ph: Callable[[int], str], namespace: Optional[str], namespaces: Optional[Sequence[str]] = None
+) -> str:
+    """Collection steps of each hour bucket of the window: the most steps any target had (IMP-04)."""
+    return f"""
+        SELECT hour_bucket, MAX(step_count) AS steps
+        FROM workload_usage_hourly
+        WHERE {_window_filter(ph, namespace, namespaces=namespaces)}
+        GROUP BY hour_bucket
     """
 
 
@@ -455,6 +472,8 @@ def summary_from_row(row: Mapping[str, Any], decode_time: Callable[[Any], Option
         target_name=row["target_name"],
         container_name=row["container_name"] or POD_LEVEL,
         first_hour=decode_time(row["first_hour"]),
+        first_hour_steps=int(row["first_hour_steps"] or 0) if "first_hour_steps" in row.keys() else 0,
+        first_hour_last_offset=_f(row["first_hour_last_offset"]) if "first_hour_last_offset" in row.keys() else None,
         last_hour=decode_time(row["latest_hour"]),
         hours_observed=int(row["hours_observed"] or 0),
         sample_count=int(row["sample_count"] or 0),
@@ -490,8 +509,13 @@ def build_snapshot(
     profile_rows: Sequence[Mapping[str, Any]],
     node_rows: Sequence[Mapping[str, Any]],
     decode_time: Callable[[Any], Optional[datetime]],
+    collection_rows: Sequence[Mapping[str, Any]] = (),
 ) -> UsageSnapshot:
     snapshot = UsageSnapshot(source="rollup")
+    for row in collection_rows:
+        hour = decode_time(row["hour_bucket"])
+        if hour is not None:
+            snapshot.collected_steps_by_hour[hour] = int(row["steps"] or 0)
     for row in summary_rows:
         summary = summary_from_row(row, decode_time)
         snapshot.summaries.setdefault(summary.target, {})[summary.container_name] = summary
