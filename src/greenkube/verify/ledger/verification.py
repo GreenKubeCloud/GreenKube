@@ -15,6 +15,8 @@ Each cluster's chain is walked in ``seq`` order. An entry passes when:
   (``chain_key_mismatch``);
 * its ``entry_id`` derives from its cluster and ``entry_key``, and it
   belongs to the chain's cluster;
+* on a full pass, ``savings_ledger_totals`` (what the summary and the
+  report read) equals a fold of the entries (``totals_mismatch``; LED-09);
 * a reversal cancels its target exactly (opposite value, same quantity and
   unit; ``reversal_mismatch``) and only once per book (``double_reversal``), drift
   reversals excepted (LED-05).
@@ -43,7 +45,7 @@ the whole chain once per :data:`FULL_VERIFICATION_INTERVAL` and on start.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Set, Tuple
 
@@ -300,6 +302,11 @@ async def verify_ledger(
             result = await verify_chain(repo, cluster_uid)
         if result.ok:
             result = await _tail_lost(repo, result, previous) or result
+        if result.ok and not incremental:
+            # The totals users read are not chained: the full pass re-derives them from the entries (LED-09).
+            mismatch = await repo.totals_mismatch(cluster_uid)
+            if mismatch is not None:
+                result = replace(result, ok=False, reason="totals_mismatch", detail=mismatch)
         if result.ok:
             full_at = checkpoint[2] if incremental and checkpoint is not None else moment
             marks[cluster_uid] = (result.head_seq or 0, result.head_hash, full_at)

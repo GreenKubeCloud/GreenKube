@@ -442,6 +442,40 @@ class LedgerRepository:
         for key, (value, positive, negative, count) in groups.items():
             await self._execute(conn, upsert, [cluster_uid, *key, value, positive, negative, int(count)])
 
+    async def totals_mismatch(self, cluster_uid: str, tolerance: float = 1e-9) -> Optional[str]:
+        """Compare ``savings_ledger_totals`` with a fold of the cluster's entries (LED-09).
+
+        The totals are what users see; they are not chained, so the full
+        verification re-derives them from the chained entries. Returns a
+        description of the first group that differs, or ``None``.
+        """
+        keys = ", ".join(_TOTAL_KEYS)
+        folded = await self._select(
+            f"SELECT {keys}, SUM(value) AS value, COUNT(*) AS entries FROM ("
+            "SELECT COALESCE(namespace, '') AS namespace, "
+            "COALESCE(recommendation_type, '') AS recommendation_type, method, quantity, COALESCE(unit, '') AS unit, "
+            f"book, entry_kind, {_BASIS_SQL} AS basis, "
+            f"CASE WHEN {_COST_OF_FIX_SQL} THEN 'cost_of_fix' ELSE '' END AS reason_group, value "
+            f"FROM savings_ledger_entries WHERE cluster_uid = ?) AS grouped GROUP BY {keys}",
+            [cluster_uid],
+        )
+        stored = await self._select(
+            f"SELECT {keys}, value, entries FROM savings_ledger_totals WHERE cluster_uid = ?", [cluster_uid]
+        )
+        expected = {tuple(row[key] for key in _TOTAL_KEYS): row for row in folded}
+        actual = {tuple(row[key] for key in _TOTAL_KEYS): row for row in stored if int(row["entries"] or 0)}
+        for key in sorted(set(expected) | set(actual)):
+            want, have = expected.get(key), actual.get(key)
+            if want is None or have is None:
+                return f"group {key} is {'missing from the totals' if have is None else 'not in the entries'}"
+            value, total = float(want["value"] or 0.0), float(have["value"] or 0.0)
+            if int(want["entries"]) != int(have["entries"]) or abs(value - total) > tolerance * max(1.0, abs(value)):
+                return (
+                    f"group {key}: totals {total!r} over {have['entries']} entries, "
+                    f"entries sum {value!r} over {want['entries']}"
+                )
+        return None
+
     async def get_watermarks(self, cluster_uid: str) -> Dict[str, int]:
         rows = await self._select(
             "SELECT source_table, position FROM ledger_projection_watermarks WHERE cluster_uid = ?", [cluster_uid]

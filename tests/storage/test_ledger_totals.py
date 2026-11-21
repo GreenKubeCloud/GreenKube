@@ -75,3 +75,16 @@ async def test_upgrade_backfills_totals_from_entries_written_before_them(ledger:
     backfill = script[script.index("INSERT INTO savings_ledger_totals") :].split(";")[0]
     await ledger.execute(backfill)
     await _assert_totals_match_entries(ledger)
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_an_edited_total_fails_the_full_verification(ledger: LedgerDb):  # noqa: F811
+    from greenkube.verify.ledger.verification import verify_ledger
+
+    await _accrue_realistic(ledger)
+    await _projector(ledger).sync()
+    assert (await verify_ledger(ledger.repo, checkpoints={}, full=True))[CLUSTER_UID].ok
+    await ledger.execute("UPDATE savings_ledger_totals SET value = value * 100 WHERE quantity = 'cost'")
+    result = (await verify_ledger(ledger.repo, checkpoints={}, full=True))[CLUSTER_UID]
+    assert not result.ok and result.reason == "totals_mismatch"
