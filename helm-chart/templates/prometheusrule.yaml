@@ -226,6 +226,21 @@ spec:
           annotations:
             summary: The GreenKube savings ledger v2 does not reconcile with the v1 staging ledger
             description: {{ `The accrued book of the savings ledger v2 of cluster {{ $labels.cluster_uid }} differs from the non-superseded v1 accrual rows for 3 hours (an unprojected row or an unreversed supersession); the controller logs name the method and quantity.` | quote }}
+        - alert: GreenKubeAttributionClockSkew
+          expr: sum(increase(greenkube_attribution_errors_total{reason="clock_skew"}[1h])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: GreenKube refused to accrue savings because of a clock skew
+            description: {{ `The controller's clock is more than 5 minutes away from the PostgreSQL clock, so savings attribution writes nothing (LED-06). Fix the node's time synchronisation; accrual catches up afterwards.` | quote }}
+        - alert: GreenKubeAccrualWatermarkAhead
+          expr: max by (cluster_name) (greenkube_accrual_watermark_ahead_seconds) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The GreenKube savings accrual watermark is in the future
+            description: {{ `The accrual watermark of cluster {{ $labels.cluster_name }} is {{ $value }} s ahead of the current hour: an earlier run used a wrong clock and may have booked future hours. Recommendations keep accruing from their own cursors.` | quote }}
     {{- end }}
     {{- $ops := .Values.monitoring.prometheusRule.operations | default dict }}
     {{- if ne (toString $ops.enabled) "false" }}
