@@ -120,6 +120,11 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - **GPU nodes without DCGM (NRG-13):** GPUs declared in the node capacity (`nvidia.com/gpu`, `amd.com/gpu`, `gpu.intel.com/*`) are detected; when DCGM has no sample, each GPU a pod requests (container requests or limits) is charged to that pod at `idle + util × (TDP − idle)` of its TDP profile (`nvidia.com/gpu.product` label) with an assumed utilisation of 50 % (Helm `config.power.gpuAssumedUtilizationPct`, `GPU_ASSUMED_UTILIZATION_PCT`); the other GPUs are counted at the idle floor on the node's idle row. Rows carry "GPU power estimated from TDP". GPUs of an unknown model are flagged "GPU power not measured" and counted by `greenkube_gpu_nodes_unmeasured`. Pod snapshots store the GPU request of containers that request GPUs; other pods keep their snapshot hash. Pod, container and idle rows carry `gpu_source` (`dcgm`, `gpu_tdp_estimate`, `unmeasured`, NULL without GPUs; migration 0182).
 - **CPU used outside pods (NRG-12):** node utilisation now takes the kubelet root cgroup (`container_cpu_usage_seconds_total{id="/"}`) when it exceeds the pods' sum, so kubelet, container runtime and kernel CPU count in dynamic node power; that system share goes to the node's `__idle__` row, pods keep their own share. Without the series nothing changes.
 - `consensus.floor` (also in `evidence.consensus`): the native lower bound of a consensus (`source_id`, `signal_id`, `value`, `reason` `oom_kills`, `policy_value`, `applied`).
+- `/report/export?include_idle=true` (CSV and JSON) appends, for a cluster-wide export, one `idle` row (`__idle__`, the node idle share) and one `cluster_total` row (`__cluster_total__`, allocated + idle) per selected range, labelled in the new `row_kind` column (`allocated` on workload rows). Off by default, so existing exports keep their rows. Their values are empty or `null`, never zero, when the idle history does not cover the range (NRG-02, WP-05.3). The Report page has an "Include node idle share" checkbox.
+- Prometheus gauges for the node idle share of the latest collection (`greenkube_cluster_idle_co2e_grams`, `greenkube_cluster_idle_embodied_co2e_grams`, `greenkube_cluster_idle_cost_dollars`, `greenkube_cluster_idle_energy_joules`) and the cluster totals (`greenkube_cluster_with_idle_*` = allocated + idle). The allocated series are unchanged; the idle and cluster-total series are absent when the idle history does not cover the snapshot (NRG-02).
+- The dashboard summary cache (`/metrics/dashboard-summary`) keeps the idle share, the cluster totals and `idle_data_since` of its cluster-wide windows (migration 0250).
+- The Footprint page shows the allocated totals, the node idle share and the cluster total side by side for CO₂e, cost and energy, with "not available" and the reason when the idle share is unknown.
+- Each decided change measurement records `untrusted_cost_hours` and `baseline_untrusted_cost_hours`, the workload hours of each window without trusted cost (migration 0251, MEA-05). The API returns them with the measurements and the change detail page shows them. Measurements decided earlier keep `null` and a valid evidence digest.
 
 ### Changed
 
@@ -189,6 +194,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - Upgrade note: a 0.3.1 install in `api_key` mode keeps browser access with its key, or moves to `session` for accounts (docs/upgrading.md).
 - Hourly compression waits for the longer of `METRICS_COMPRESSION_AGE_HOURS` and `COLLECTION_MAX_BACKFILL`, so an hour the collection may still backfill stays raw; a backfill longer than the age logs one warning at start instead of being refused. `METRICS_COMPRESSION_AGE_HOURS` must be at least 1: startup fails otherwise (ROL-02).
 - **Impact Model 4.0.0:** embodied emissions change for every node. Rows stored before keep the flat 100 kg per node with `embodied_source` NULL; run `greenkube recompute --since <raw retention>` to re-allocate raw rows. Hourly aggregates keep the old values.
+- `/report/export` rows carry a `row_kind` column (always `allocated` without `include_idle`).
 
 ### Deprecated
 - `refresh=true` on recommendation reads (only queues a run).
@@ -298,6 +304,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - Revision hysteresis no longer holds a stored value below the OOM floor (stored 580 Mi, new floor 600 Mi), an external ballot tied with the floor no longer carries the record, and the reason now ends with the consensus summary ("oom_kills floor 600Mi") when the floor applied.
 - Test runs no longer hang at interpreter exit. Optimization scan tests registered the realization context store (IMP-12) bound to their own database manager and left it registered; a later `refresh_realization_context` test persisted through that closed manager, which reopened an aiosqlite connection nobody closed, and its non-daemon worker thread blocked exit. An autouse fixture now clears the registered store around every test.
 - The test session now reports every non-daemon thread still alive at the end (name, target, and the test that started it) and exits with a failure instead of hanging, so a future leak shows up in CI.
+- `/report/export` lost the sample on each 7-day chunk boundary (closed windows followed by a cursor one second later); chunks are now half-open.
 
 ### Security
 - Wildcard CORS is never combined with credentials; CORS is same-origin by default.
