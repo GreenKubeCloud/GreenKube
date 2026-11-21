@@ -797,8 +797,9 @@ sources:
     vpa:
       cpu: 15m
       memory: 100Mi
-  # Smallest change an external source (VPA, KRR, push) must propose to count as
-  # a vote: both the relative and the absolute minimum must be reached.
+  # Smallest change an external source (VPA, KRR, push) must propose to vote for
+  # its own value: both the relative and the absolute minimum must be reached.
+  # A smaller change votes to keep the current request.
   minChange:
     percent: 5
     cpuMillicores: 10

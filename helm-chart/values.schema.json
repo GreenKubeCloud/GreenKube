@@ -390,7 +390,8 @@
           "type": "object",
           "properties": {
             "minSampleHours": {"type": "number", "minimum": 0}
-          }
+          },
+          "additionalProperties": false
         },
         "polaris": {
           "type": "object",

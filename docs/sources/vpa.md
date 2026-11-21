@@ -37,9 +37,9 @@ An immature VPA yields neither a signal nor a recommendation and is counted in t
 
 ## Tool floors and small changes
 
-The VPA recommender never proposes less than its per-pod minimum (`--pod-recommendation-min-memory-mb`, `--pod-recommendation-min-cpu-millicores`), split evenly between the pod's containers. The Fairwinds `vpa` chart sets 100 MB (the recommender reads it as MiB) and 15m. A target equal to that minimum says "the floor", not "the need", so it is **not counted as a vote** in the consensus: it can never win over GreenKube's measured value. In the field, seaweedfs-volume measured 42 Mi while VPA and KRR both proposed 100 Mi; the retained value is GreenKube's 42 Mi plus headroom.
+The VPA recommender never proposes less than its per-pod minimum (`--pod-recommendation-min-memory-mb`, `--pod-recommendation-min-cpu-millicores`), split evenly between the pod's containers. GreenKube divides the floor by the number of containers the VPA recommends for; when that number is unknown it compares with the whole-pod floor only, so a small sidecar value is never mistaken for a split floor. The Fairwinds `vpa` chart sets 100 MB (the recommender reads it as MiB) and 15m. A target equal to that minimum says "the floor", not "the need", so it is **not counted as a vote** in the consensus: it can never win over GreenKube's measured value. In the field, seaweedfs-volume measured 42 Mi while VPA and KRR both proposed 100 Mi; the retained value is GreenKube's 42 Mi plus headroom.
 
-The floors are set per engine family with `sources.toolFloors.vpa` (`SIGNAL_TOOL_FLOORS`, default `{cpu: 15m, memory: 100Mi}`); set them to the flags your recommender runs with. A VPA target that changes the current request by less than `sources.minChange` (5 % and 10m CPU or 16 MiB memory by default) is not a vote either. Both cases are kept in the recommendation's `consensus.ignored_votes` (`reason: tool_floor` or `below_min_change`).
+The floors are set per engine family with `sources.toolFloors.vpa` (`SIGNAL_TOOL_FLOORS`, default `{cpu: 15m, memory: 100Mi}`); set them to the flags your recommender runs with. A VPA target that changes the current request by less than `sources.minChange` (5 % and 10m CPU or 16 MiB memory by default) counts as a "keep the current request" vote instead of its own value. Both cases are kept in the recommendation's `consensus.ignored_votes` (`reason: tool_floor` or `below_min_change`).
 
 ## What is skipped, and why
 
@@ -78,7 +78,7 @@ The run is recorded under `vpa` (`GET /api/v1/sources/vpa/runs`); Goldilocks sig
 |---|---|---|
 | `sources.vpa.minSampleHours` (`VPA_MIN_SAMPLE_HOURS`) | `24` | Hours of samples before a VPA votes; `0` disables the check. |
 | `sources.toolFloors.vpa` (`SIGNAL_TOOL_FLOORS`) | `{cpu: 15m, memory: 100Mi}` | The recommender's per-pod minimum; a target on it is not a vote. |
-| `sources.minChange.*` (`SIGNAL_MIN_CHANGE_*`) | 5 %, 10m, 16 MiB | Smallest change that counts as a vote. |
+| `sources.minChange.*` (`SIGNAL_MIN_CHANGE_*`) | 5 %, 10m, 16 MiB | Smallest change that votes for its own value; a smaller one votes to keep the current request. |
 
 ## Limitations
 

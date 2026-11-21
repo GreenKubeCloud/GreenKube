@@ -577,11 +577,11 @@ class TestToolFloorSettings:
 
 class TestPerPodVpaFloor:
     @staticmethod
-    def _ballot(value: int, containers=None):
+    def _ballot(value: int, containers=None, source_id: str = "vpa"):
         from greenkube.signals.consensus import ballots_for_signal
 
         signal = SourceSignal(
-            source_id="vpa",
+            source_id=source_id,
             engine_family="vpa",
             target=TargetRef.for_kind(
                 "c1", "Deployment", "csi-nfs-controller", namespace="kube-system", container="nfs"
@@ -607,5 +607,41 @@ class TestPerPodVpaFloor:
         assert screen.reason(self._ballot(int(100 * MIB / 3), containers=3)) == "tool_floor"
         assert screen.reason(self._ballot(50 * MIB, containers=3)) is None
         assert screen.reason(self._ballot(100 * MIB, containers=3)) is None
-        # Unknown container count: any even split of the floor is a floor value.
-        assert screen.reason(self._ballot(50 * MIB)) == "tool_floor"
+        # Unknown container count: only the whole pod floor is recognised (one container).
+        assert screen.reason(self._ballot(100 * MIB)) == "tool_floor"
+        assert screen.reason(self._ballot(50 * MIB)) is None
+
+    def test_a_small_sidecar_value_is_not_mistaken_for_a_split_floor(self):
+        from greenkube.signals.consensus import VoteScreen, ballots_for_signal
+
+        signal = SourceSignal(
+            source_id="vpa",
+            engine_family="vpa",
+            target=TargetRef.for_kind("c1", "Deployment", "csi-nfs-controller", namespace="kube-system", container="p"),
+            capability=Capability.CONTAINER_REQUESTS,
+            kind="RIGHTSIZING_CPU",
+            proposal=ContainerResourcesProposal(
+                container="p", current=ResourceSpec(cpu_request_m=100), proposed=ResourceSpec(cpu_request_m=8)
+            ),
+            algorithm=AlgorithmInfo(name="vpa-recommender"),
+        )
+        [ballot] = ballots_for_signal(signal)
+
+        assert VoteScreen().reason(ballot) is None
+
+    def test_a_goldilocks_floor_overrides_the_vpa_family_floor(self):
+        from greenkube.signals.consensus import VoteScreen
+
+        screen = VoteScreen(
+            floors={"vpa": {"memory_request_bytes": 100 * MIB}, "goldilocks": {"memory_request_bytes": 64 * MIB}}
+        )
+
+        assert screen.reason(self._ballot(100 * MIB, containers=1, source_id="goldilocks")) is None
+        assert screen.reason(self._ballot(64 * MIB, containers=1, source_id="goldilocks")) == "tool_floor"
+
+    def test_a_source_floor_without_the_resource_falls_through_to_the_family(self):
+        from greenkube.signals.consensus import VoteScreen
+
+        screen = VoteScreen(floors={"vpa": {"memory_request_bytes": 100 * MIB}, "goldilocks": {"cpu_request_m": 25}})
+
+        assert screen.reason(self._ballot(100 * MIB, containers=1, source_id="goldilocks")) == "tool_floor"

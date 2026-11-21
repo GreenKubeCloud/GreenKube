@@ -284,8 +284,6 @@ DEFAULT_TOOL_FLOORS: Dict[str, Dict[str, int]] = {
 }
 #: Families whose floor applies per pod and is split evenly between its containers (the VPA recommender).
 PER_POD_FLOOR_FAMILIES = frozenset({"vpa"})
-#: Largest container count a per-pod floor is divided by when the signal does not say.
-MAX_POD_CONTAINERS = 8
 
 #: Why an external ballot was set aside.
 IGNORED_TOOL_FLOOR = "tool_floor"
@@ -334,12 +332,16 @@ class VoteScreen:
     require_native: bool = True
 
     def floor_for(self, ballot: "Ballot") -> Optional[int]:
-        """The known tool minimum of a ballot's resource, or None."""
-        for key in (ballot.family, ballot.source_id, ballot.source):
-            floors = self.floors.get(key)
-            if floors is not None:
-                value = floors.get(str(ballot.resource))
-                return int(value) if value else None
+        """The known tool minimum of a ballot's resource, or None.
+
+        The most specific key wins: the source id (``goldilocks``), then the
+        reconciliation unit, then the engine family (``vpa``); a key without
+        this resource falls through to the next.
+        """
+        for key in (ballot.source_id, ballot.source, ballot.family):
+            value = (self.floors.get(key) or {}).get(str(ballot.resource))
+            if value:
+                return int(value)
         return None
 
     def on_floor(self, ballot: "Ballot") -> bool:
@@ -351,16 +353,12 @@ class VoteScreen:
             return True
         raw = ballot.signal.raw if isinstance(ballot.signal.raw, dict) else {}
         containers = raw.get("containers")
-        counts = [int(containers)] if isinstance(containers, int) and containers > 0 else []
-        if ballot.family in PER_POD_FLOOR_FAMILIES and not counts:
-            counts = list(range(1, MAX_POD_CONTAINERS + 1))
-        counts = counts or [1]
-        for count in counts:
-            share = floor / count
-            # The recommender rounds a split floor up to the next unit (7.5m -> 8m).
-            if abs(ballot.value - share) <= max(1.0, share * 0.01):
-                return True
-        return False
+        # An unknown container count is taken as one: guessing a split would discard
+        # small sidecar values (8m is 15m / 2, but also a plausible measured need).
+        count = int(containers) if isinstance(containers, int) and containers > 0 else 1
+        share = floor / count
+        # The recommender rounds a split floor up to the next unit (7.5m -> 8m).
+        return abs(ballot.value - share) <= max(1.0, share * 0.01)
 
     def below_min_change(self, ballot: "Ballot") -> bool:
         """Whether the ballot changes its current value by less than the minimum.

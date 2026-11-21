@@ -546,8 +546,9 @@ class Config(BaseSettings):
     # equal to it is the tool's floor, not a signal of need, and is not counted as a vote.
     # JSON object; blank means the built-in KRR simple and Fairwinds VPA chart floors.
     SIGNAL_TOOL_FLOORS: str = '{"krr": {"cpu": "10m", "memory": "100Mi"}, "vpa": {"cpu": "15m", "memory": "100Mi"}}'
-    # Smallest change an external source must propose to count as a vote: both the
+    # Smallest change an external source must propose to vote for its own value: both the
     # relative change (percent of the current request) and the absolute one are needed.
+    # A smaller change votes to keep the current request.
     SIGNAL_MIN_CHANGE_PERCENT: float = 5.0
     SIGNAL_MIN_CHANGE_CPU_MILLICORES: int = 10
     SIGNAL_MIN_CHANGE_MEMORY_BYTES: int = 16 * 1024 * 1024

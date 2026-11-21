@@ -25,7 +25,7 @@ A resource with `"?"` (not enough data) or no recommendation is skipped, as is o
 
 ## Floors and small changes
 
-KRR `simple` never proposes less than `--mem-min` (100 MB, which KRR reads as MiB) and `--cpu-min` (10m). A KRR value equal to that minimum is its floor, not a measured need, so it is **not counted as a vote**: under the `safest` policy it would otherwise win over GreenKube's lower measured value (51 of 94 memory recommendations sat exactly on 100 Mi in the field). Set `sources.toolFloors.krr` (`SIGNAL_TOOL_FLOORS`, default `{cpu: 10m, memory: 100Mi}`) to the minimums your KRR runs with. A KRR value that changes the current request by less than `sources.minChange` (5 % and 10m CPU or 16 MiB by default) is not a vote either. Both are listed in the recommendation's `consensus.ignored_votes`.
+KRR `simple` never proposes less than `--mem-min` (100 MB, which KRR reads as MiB) and `--cpu-min` (10m). A KRR value equal to that minimum is its floor, not a measured need, so it is **not counted as a vote**: under the `safest` policy it would otherwise win over GreenKube's lower measured value (51 of 94 memory recommendations sat exactly on 100 Mi in the field). Set `sources.toolFloors.krr` (`SIGNAL_TOOL_FLOORS`, default `{cpu: 10m, memory: 100Mi}`) to the minimums your KRR runs with. A KRR value that changes the current request by less than `sources.minChange` (5 % and 10m CPU or 16 MiB by default) counts as a "keep the current request" vote instead of its own value. Both are listed in the recommendation's `consensus.ignored_votes`.
 
 The `krr` source is `unavailable` until a report was pushed, and `degraded` once the newest report is older than `max_age_hours`.
 
@@ -71,7 +71,7 @@ The CronJob runs the KRR image pinned by digest (`sources.krr.job.image.digest`,
 | `sources.settings.krr.max_age_hours` | `168` | Reports older than this are no longer used. |
 | `sources.settings.krr.enabled` | `auto` | `false` ignores pushed reports. |
 | `sources.toolFloors.krr` | `{cpu: 10m, memory: 100Mi}` | KRR's `--cpu-min`/`--mem-min`: a value on them is not a consensus vote. |
-| `sources.minChange.*` | 5 %, 10m, 16 MiB | Smallest change a KRR value must propose to count as a vote. |
+| `sources.minChange.*` | 5 %, 10m, 16 MiB | Smallest change a KRR value must propose to vote for its own value; a smaller one votes to keep the current request. |
 | `sources.krr.job.*` | disabled | The CronJob above (`schedule`, `strategy`, `image`, `prometheusUrl`, `extraArgs`, `apiKeySecret`, `resources`, `activeDeadlineSeconds`, `rbac`). |
 
 ## Limitations
