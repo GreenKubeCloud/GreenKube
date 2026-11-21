@@ -120,6 +120,7 @@ def mock_combined_metrics_repo():
     repo = AsyncMock()
     repo.read_combined_metrics = AsyncMock(return_value=[])
     repo.write_combined_metrics = AsyncMock(return_value=0)
+    repo.read_latest_idle_gpu_sources = AsyncMock(return_value={})
 
     # aggregate_summary and aggregate_timeseries default to the base class
     # Python-side implementation which delegates to read_combined_metrics.

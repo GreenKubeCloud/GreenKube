@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from greenkube.data.instance_profiles import INSTANCE_PROFILES
@@ -168,6 +168,10 @@ def _stored_reason(rows: Sequence[CombinedMetric], prefixes: Tuple[str, ...]) ->
     return None
 
 
+def _lacks_host_ids(info: Any) -> bool:
+    return not getattr(info, "host_id", None) and not getattr(info, "provider_id", None)
+
+
 class MetricRecomputer:
     """Re-allocates stored raw rows with the current Impact Model."""
 
@@ -190,11 +194,14 @@ class MetricRecomputer:
         #: Stored Boavizta profiles (``instance_carbon_profiles``); ``None`` uses the fallbacks only.
         self.embodied_repository = embodied_repository
         self._embodied_profiles: Dict[tuple, dict] = {}
+        #: Current node snapshots, read once per :meth:`run` when a pre-0183 snapshot needs them.
+        self._current_nodes_cache: Optional[Mapping[str, Any]] = None
 
     async def run(
         self, start: datetime, end: datetime, *, only_outdated: bool = True, dry_run: bool = False
     ) -> RecomputeReport:
         report = RecomputeReport(start=start, end=end, dry_run=dry_run)
+        self._current_nodes_cache = None
         chunk_start = start
         while chunk_start < end:
             chunk_end = min(chunk_start + RECOMPUTE_CHUNK, end)
@@ -209,6 +216,23 @@ class MetricRecomputer:
             logger.warning("Could not read node snapshots before %s: %s", end.isoformat(), error)
             return {}
         return {info.name: info for info in snapshots or [] if getattr(info, "name", None)}
+
+    async def _current_nodes(self) -> Mapping[str, Any]:
+        """The latest snapshot of every node, active or not (host ids for pre-0183 snapshots).
+
+        Read once per :meth:`run`: the current snapshots do not change between chunks.
+        """
+        if self._current_nodes_cache is not None:
+            return self._current_nodes_cache
+        try:
+            snapshots = await self.node_repository.get_latest_snapshots_before(
+                datetime.now(timezone.utc), include_inactive=True
+            )
+        except Exception as error:
+            logger.warning("Could not read the current node snapshots: %s", error)
+            return {}
+        self._current_nodes_cache = {info.name: info for info in snapshots or [] if getattr(info, "name", None)}
+        return self._current_nodes_cache
 
     def _spec(
         self,
@@ -276,6 +300,23 @@ class MetricRecomputer:
         """
         gpu_source = previous_idle.gpu_source if previous_idle is not None else None
         gpu_reason = _stored_reason(rows, (GPU_TDP_ESTIMATE_REASON_PREFIX, GPU_UNMEASURED_REASON_PREFIX))
+        shared_now = shared_hosts.get(node_name)
+        if (
+            previous_idle is not None
+            and previous_idle.host_share is not None
+            and previous_idle.host_share >= 1.0
+            and shared_now is not None
+            and shared_now.borrowed_ids
+        ):
+            # A share of 1 next to this node's snapshot without ids was written by a recompute that
+            # could not group it (collections since 0183 store the ids): use the group (A.9).
+            return NodeInputs(
+                shared_now.share,
+                shared_now.reason(node_name),
+                previous_idle.node_cpu_used_cores,
+                gpu_source,
+                gpu_reason,
+            )
         if previous_idle is not None and previous_idle.host_share is not None:
             share = previous_idle.host_share
             host_reason = _stored_reason(rows, (SHARED_HOST_REASON_PREFIX,)) if share < 1.0 else None
@@ -314,7 +355,11 @@ class MetricRecomputer:
         nodes = await self._nodes_at(end)
         self._embodied_profiles = await load_cached_profiles(self.embodied_repository, nodes, self.config)
         # Shared hosts from the snapshots' host and provider ids (0183), for rows without recorded inputs.
-        shared_hosts = shared_host_groups(nodes) if getattr(self.config, "SHARED_HOST_DETECTION", True) else {}
+        # A snapshot stored before 0183 has no ids: the node's current snapshot gives them (A.9).
+        shared_hosts: Mapping[str, SharedHost] = {}
+        if getattr(self.config, "SHARED_HOST_DETECTION", True):
+            current = await self._current_nodes() if any(_lacks_host_ids(info) for info in nodes.values()) else None
+            shared_hosts = shared_host_groups(nodes, current)
 
         groups: Dict[Tuple[str, Optional[datetime]], List[CombinedMetric]] = defaultdict(list)
         for row in pods:

@@ -141,6 +141,24 @@ def _sum_optional(total: Optional[float], value: Any) -> Optional[float]:
     return number if total is None else total + number
 
 
+def _is_unsplit_cost(row: Any) -> bool:
+    """A row with a positive total cost and no CPU/RAM split (a 0.3.x row, F-03)."""
+    return (
+        _number(getattr(row, "cost_cpu", None)) is None
+        and _number(getattr(row, "cost_ram", None)) is None
+        and (_number(getattr(row, "total_cost", 0)) or 0.0) > 0
+    )
+
+
+def _split_or_none(value: Optional[float], has_unsplit: bool) -> Optional[float]:
+    """A summed CPU or RAM cost, NULL when unsplit rows were summed with it (A.9, F-03).
+
+    The hour then reads as unsplit: readers price its ``total_cost`` and take the rates
+    from fully split hours, instead of a component that covers part of the hour.
+    """
+    return None if has_unsplit else value
+
+
 @dataclass
 class _SyntheticPodRow:
     """Pod-level row rebuilt from the container rows of a pod without a pod row."""
@@ -167,6 +185,8 @@ class _SyntheticPodRow:
     cost_network: Optional[float] = None
     cost_lb: Optional[float] = None
     cost_sources: List[Optional[str]] = field(default_factory=list)
+    #: A summed row without a CPU/RAM split: ``cost_cpu`` and ``cost_ram`` read as NULL.
+    has_unsplit_cost: bool = False
     co2e_grams: float = 0.0
     embodied_co2e_grams: float = 0.0
     joules: float = 0.0
@@ -197,6 +217,9 @@ class _SyntheticPodRow:
         self.total_cost += _number(getattr(row, "total_cost", 0)) or 0.0
         for name in ("cost_cpu", "cost_ram", "cost_storage", "cost_network", "cost_lb"):
             setattr(self, name, _sum_optional(getattr(self, name), getattr(row, name, None)))
+        self.has_unsplit_cost = self.has_unsplit_cost or _is_unsplit_cost(row)
+        if self.has_unsplit_cost:
+            self.cost_cpu = self.cost_ram = None
         self.cost_sources.append(getattr(row, "cost_source", None))
         self.co2e_grams += _number(getattr(row, "co2e_grams", 0)) or 0.0
         self.embodied_co2e_grams += _number(getattr(row, "embodied_co2e_grams", 0)) or 0.0
@@ -242,6 +265,8 @@ class _HourAccumulator:
     cost_network: Optional[float] = None
     cost_lb: Optional[float] = None
     cost_sources: List[Optional[str]] = field(default_factory=list)
+    #: The hour summed rows without a CPU/RAM split (the 0.3.x upgrade hour).
+    has_unsplit_cost: bool = False
     co2e_grams: float = 0.0
     embodied_co2e_grams: float = 0.0
     joules: float = 0.0
@@ -311,6 +336,7 @@ class _HourAccumulator:
         self.total_cost += _number(getattr(row, "total_cost", 0)) or 0.0
         for name in ("cost_cpu", "cost_ram", "cost_storage", "cost_network", "cost_lb"):
             setattr(self, name, _sum_optional(getattr(self, name), getattr(row, name, None)))
+        self.has_unsplit_cost = self.has_unsplit_cost or _is_unsplit_cost(row)
         self.cost_sources.append(getattr(row, "cost_source", None))
         self.co2e_grams += _number(getattr(row, "co2e_grams", 0)) or 0.0
         self.embodied_co2e_grams += _number(getattr(row, "embodied_co2e_grams", 0)) or 0.0
@@ -393,8 +419,8 @@ class _HourAccumulator:
             restart_count=self.restart_count,
             restart_increase=self.restart_increase,
             total_cost=self.total_cost,
-            cost_cpu=self.cost_cpu,
-            cost_ram=self.cost_ram,
+            cost_cpu=_split_or_none(self.cost_cpu, self.has_unsplit_cost),
+            cost_ram=_split_or_none(self.cost_ram, self.has_unsplit_cost),
             cost_storage=self.cost_storage,
             cost_network=self.cost_network,
             cost_lb=self.cost_lb,

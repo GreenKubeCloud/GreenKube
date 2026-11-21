@@ -64,3 +64,36 @@ class TestNodesEndpoint:
         ]
         for field in expected_fields:
             assert field in node, f"Missing field: {field}"
+
+
+class TestNodesGpuSource:
+    """GET /api/v1/nodes exposes where each node's GPU power came from (NRG-13 badge)."""
+
+    def test_nodes_carry_the_gpu_source_of_their_latest_idle_row(
+        self, client, mock_node_repo, mock_combined_metrics_repo, sample_node_infos
+    ):
+        mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=sample_node_infos)
+        mock_combined_metrics_repo.read_latest_idle_gpu_sources = AsyncMock(
+            return_value={"node-1": "gpu_tdp_estimate", "node-2": None}
+        )
+        data = client.get("/api/v1/nodes").json()
+        by_name = {node["name"]: node for node in data}
+        assert by_name["node-1"]["gpu_source"] == "gpu_tdp_estimate"
+        assert by_name["node-2"]["gpu_source"] is None
+
+    def test_paginated_nodes_carry_the_gpu_source(
+        self, client, mock_node_repo, mock_combined_metrics_repo, sample_node_infos
+    ):
+        mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=sample_node_infos)
+        mock_combined_metrics_repo.read_latest_idle_gpu_sources = AsyncMock(return_value={"node-2": "unmeasured"})
+        data = client.get("/api/v1/nodes", params={"limit": 10}).json()
+        assert {node["name"]: node["gpu_source"] for node in data["items"]} == {"node-1": None, "node-2": "unmeasured"}
+
+    def test_unreadable_idle_rows_leave_the_gpu_source_unknown(
+        self, client, mock_node_repo, mock_combined_metrics_repo, sample_node_infos
+    ):
+        mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=sample_node_infos)
+        mock_combined_metrics_repo.read_latest_idle_gpu_sources = AsyncMock(side_effect=RuntimeError("db down"))
+        response = client.get("/api/v1/nodes")
+        assert response.status_code == 200
+        assert all(node["gpu_source"] is None for node in response.json())

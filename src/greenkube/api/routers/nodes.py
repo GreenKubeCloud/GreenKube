@@ -7,18 +7,38 @@ import base64
 import binascii
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from greenkube.api.dependencies import get_node_repository
-from greenkube.api.schemas import PaginatedNodesResponse
-from greenkube.storage.base_repository import NodeRepository
+from greenkube.api.dependencies import get_combined_metrics_repository, get_node_repository
+from greenkube.api.schemas import NodeResponse, PaginatedNodesResponse
+from greenkube.storage.base_repository import CombinedMetricsRepository, NodeRepository
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: How far back the latest idle row of a node is looked up for its GPU power source.
+GPU_SOURCE_LOOKBACK = timedelta(hours=1)
+
+
+async def _latest_gpu_sources(repo: Any, now: datetime) -> Dict[str, Optional[str]]:
+    """``{node: gpu_source}`` from each node's latest idle row of the last hour (NRG-13)."""
+    try:
+        return await repo.read_latest_idle_gpu_sources(now - GPU_SOURCE_LOOKBACK, now + timedelta(seconds=1))
+    except Exception as error:
+        logger.warning("Could not read idle rows for the node GPU power sources: %s", error)
+        return {}
+
+
+def _with_gpu_source(nodes: List[Any], sources: Dict[str, Optional[str]]) -> List[NodeResponse]:
+    responses = []
+    for node in nodes:
+        fields = node.model_dump(exclude=set(type(node).model_computed_fields))
+        responses.append(NodeResponse(**fields, gpu_source=sources.get(node.name)))
+    return responses
 
 
 @router.get("/nodes", response_model=None)
@@ -27,10 +47,12 @@ async def list_nodes(
     limit: Optional[int] = Query(None, ge=1, le=1000, description="Maximum nodes in a cursor page."),
     cursor: Optional[str] = Query(None, description="Opaque cursor from a previous page."),
     repo: NodeRepository = Depends(get_node_repository),
+    metrics_repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
-    """Return the latest snapshot of all known Kubernetes nodes."""
+    """Return the latest snapshot of all known Kubernetes nodes, with their GPU power source."""
     now = datetime.now(timezone.utc)
-    nodes = await repo.get_latest_snapshots_before(now, include_inactive=include_inactive)
+    snapshots = await repo.get_latest_snapshots_before(now, include_inactive=include_inactive)
+    nodes = _with_gpu_source(list(snapshots or []), await _latest_gpu_sources(metrics_repo, now))
     if limit is None and cursor is None:
         return nodes
     cursor_name = None
