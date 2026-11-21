@@ -58,3 +58,15 @@ async def test_unset_default_zone_warns_once_per_node(caplog):
 
     warnings = [r for r in caplog.records if r.name == LOGGER and r.levelno == logging.WARNING]
     assert len(warnings) == 2
+
+
+@pytest.mark.asyncio
+async def test_default_zone_log_state_is_bounded(monkeypatch):
+    """Node churn cannot grow the once-per-node log state without bound."""
+    monkeypatch.setattr(node_zone_mapper, "MAX_DEFAULT_ZONE_LOGGED_NODES", 3, raising=False)
+    mapper = NodeZoneMapper(MagicMock(), config=Config(DEFAULT_ZONE="FR", CLUSTER_NAME="test"))
+
+    for index in range(10):
+        name = f"node-{index}"
+        await mapper.map_nodes({name: NodeInfo(name=name, zone=None, region=None, cloud_provider="unknown")})
+        assert len(node_zone_mapper._default_zone_logged) <= 3

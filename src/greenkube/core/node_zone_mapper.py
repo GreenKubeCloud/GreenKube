@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 # Nodes whose default-zone fallback was already logged by this process (F-10):
 # the fallback is logged once per node, then at DEBUG on every later collection.
-# Each row still records it in its estimation reasons.
+# Each row still records it in its estimation reasons. Bounded: past
+# MAX_DEFAULT_ZONE_LOGGED_NODES entries (node churn) the state is reset, so
+# each node logs its fallback once more instead of the set growing forever.
+MAX_DEFAULT_ZONE_LOGGED_NODES = 4096
 _default_zone_logged: set[tuple[str, str]] = set()
 
 
@@ -120,6 +123,8 @@ class NodeZoneMapper:
                     is_estimated = True
                     log_key = (node_name, self._config.DEFAULT_ZONE)
                     first_time = log_key not in _default_zone_logged
+                    if first_time and len(_default_zone_logged) >= MAX_DEFAULT_ZONE_LOGGED_NODES:
+                        _default_zone_logged.clear()
                     _default_zone_logged.add(log_key)
                     if not first_time:
                         logger.debug(
