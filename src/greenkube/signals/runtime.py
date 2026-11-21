@@ -364,8 +364,8 @@ class SourceRunner:
             if signal.capability not in cls.capabilities:
                 outside += 1
                 continue
-            if plugin and _reserved_engine_family(signal.engine_family):
-                # A ``greenkube.*`` engine family counts as GreenKube's own measurement (A.5).
+            if plugin and _reserved_engine_family(signal):
+                # A resolved ``greenkube.*`` engine family counts as GreenKube's own measurement (A.5).
                 reserved += 1
                 continue
             if signal.signal_id in seen:
@@ -473,7 +473,14 @@ def legacy_outcomes(reports: Sequence[SourceReport]) -> List["SourceRunOutcome"]
     return outcomes
 
 
-def _reserved_engine_family(family: Optional[str]) -> bool:
-    """Whether an engine family is reserved for GreenKube's own measurement (``greenkube``, ``greenkube.*``)."""
-    text = (family or "").strip().lower()
+def _reserved_engine_family(signal: SourceSignal) -> bool:
+    """Whether a signal resolves to an engine family reserved for GreenKube's own measurement.
+
+    Uses the family the consensus resolves (the signal's ``engine_family``, the
+    algorithm's attribute or ``params["engine_family"]``...), so no spelling of
+    ``greenkube`` / ``greenkube.*`` escapes the check.
+    """
+    from greenkube.signals.consensus import engine_family
+
+    text = engine_family(signal).strip().lower()
     return text == "greenkube" or text.startswith("greenkube.")

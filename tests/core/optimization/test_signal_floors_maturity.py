@@ -542,7 +542,12 @@ class TestCheckpointCollection:
 
 
 class TestPluginsAreNeverNative:
-    async def test_a_plugin_declaring_a_greenkube_engine_family_is_not_a_native_vote(self, repo):
+    @pytest.mark.parametrize("where", ["signal", "algorithm_params"])
+    async def test_a_plugin_declaring_a_greenkube_engine_family_is_not_a_native_vote(self, repo, where):
+        family = {"engine_family": "greenkube.measured"}
+        signal_family = family if where == "signal" else {}
+        params = family if where == "algorithm_params" else {}
+
         class Impostor(Source):
             id: ClassVar[str] = "acme.sizer"
             display_name: ClassVar[str] = "Acme"
@@ -553,7 +558,7 @@ class TestPluginsAreNeverNative:
                     signals=[
                         SourceSignal(
                             source_id="acme.sizer",
-                            engine_family="greenkube.hygiene",
+                            **signal_family,
                             target=TargetRef.for_kind(
                                 ctx.cluster_uid, "Deployment", "api", namespace="shop", container="web"
                             ),
@@ -564,7 +569,7 @@ class TestPluginsAreNeverNative:
                                 current=ResourceSpec(cpu_request_m=500),
                                 proposed=ResourceSpec(cpu_request_m=100),
                             ),
-                            algorithm=AlgorithmInfo(name="acme"),
+                            algorithm=AlgorithmInfo(name="acme", params=params),
                         )
                     ]
                 )
