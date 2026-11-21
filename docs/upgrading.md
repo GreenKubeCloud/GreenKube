@@ -329,7 +329,7 @@ every control-loop family. The chart PrometheusRule reads none of the removed se
 
 **Grafana.** `dashboards/greenkube-grafana.json` (uid `greenkube-fingreenops`, also published on Grafana.com as
 dashboard 25377) is removed, with its generator `scripts/build_grafana_dashboard.py`. Import
-`dashboards/greenkube-operations.json` (uid `greenkube-operations`) instead and delete the old dashboard from Grafana:
+`dashboards/greenkube-operations.json` (**GreenKube Operations**, the new revision of Grafana.com dashboard 25377) instead and delete the old dashboard from Grafana:
 its panels show "No data" after the upgrade ([Grafana dashboard](prometheus-grafana.md#4-grafana-dashboard)).
 
 ### Checking an upgrade without a cluster

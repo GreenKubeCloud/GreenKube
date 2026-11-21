@@ -39,7 +39,7 @@ helm upgrade greenkube greenkube/greenkube \
   --set monitoring.networkPolicy.enabled=true
 ```
 
-The `ServiceMonitor` scrapes the `http` port (8000) at `/prometheus/metrics` on the configured interval. It restores the exported `cluster`, `region`, `namespace`, and `pod` labels that Prometheus would otherwise rename because of scrape-target labels.
+The `ServiceMonitor` scrapes the `http` port (8000) at `/prometheus/metrics` on the configured interval. It restores the exported `cluster` label that Prometheus would otherwise rename because of a scrape-target label. No API series carries a `namespace`, `pod` or `region` label of its own, so `namespace` and `pod` are the scraped GreenKube target's.
 
 When NetworkPolicy is enabled, the chart covers the API, controller and (optional) worker pods. It permits DNS and the bundled PostgreSQL connection, and allows Prometheus to scrape the API, controller or worker metrics port. Other ingress is denied unless configured with `additionalIngress`; external database, Git provider, and Kubernetes API traffic require narrow `additionalEgress` rules. The chart does not add unrestricted internet egress.
 
@@ -74,7 +74,7 @@ Set `CLUSTER_NAME` (Helm: `config.clusterName`) to use a stable cluster label. W
 
 The name also keys the collection watermark, the GitOps bindings and the savings ledger: set it before the first install of a multi-node cluster rather than after.
 
-The API metric families (collection freshness and savings counters) use the resolved cluster value. Control-loop metrics have their own labels, documented below, and do not all include `cluster`. The chart's `ServiceMonitor` restores `cluster`, `region`, `namespace`, and `pod` labels after Prometheus target-label renaming, and replaces an empty `cluster` label with `default`. Static scrape configurations do not get those chart relabelings.
+The API metric families (collection freshness and savings counters) use the resolved cluster value. Control-loop metrics have their own labels, documented below, and do not all include `cluster`. The chart's API `ServiceMonitor` restores the `cluster` label after Prometheus target-label renaming, and replaces an empty `cluster` label with `default`. Static scrape configurations do not get those chart relabelings.
 
 ---
 
@@ -236,7 +236,7 @@ openly, as before. Outside Kubernetes, `greenkube start` also listens on
 
 ## 4. Grafana dashboard
 
-`dashboards/greenkube-operations.json` (**GreenKube - Operations**, uid `greenkube-operations`) is a small operations dashboard on the metrics above:
+`dashboards/greenkube-operations.json` (**GreenKube Operations**, published on Grafana.com as dashboard 25377) is a small operations dashboard on the metrics above. [dashboards/README.md](../dashboards/README.md) covers import and publishing.
 
 | Row | Panels |
 |---|---|
@@ -246,7 +246,7 @@ openly, as before. Outside Kubernetes, `greenkube start` also listens on
 | **Savings (ledger v2)** | Net cost and CO₂e accrued by method (attributed − reversed), measured share |
 | **Automation** | Automation backlog by queue and state |
 
-It needs the API and controller ServiceMonitors (`monitoring.serviceMonitor.enabled=true`) and no Grafana plugin. The `cluster` variable filters the API families; control-loop families have no `cluster` label.
+It needs the API and controller ServiceMonitors (`monitoring.serviceMonitor.enabled=true`) and no Grafana plugin. The **Namespace** variable (the release namespace, a target label) scopes every panel; **Cluster** filters the API families. Control-loop families have no `cluster` label: their panels are titled *(all clusters)*. The savings panels take `max` per series before summing, because every API replica serves the same database-backed counters.
 
 The previous, larger dashboard is removed together with the series it read ([Upgrading](upgrading.md)).
 
