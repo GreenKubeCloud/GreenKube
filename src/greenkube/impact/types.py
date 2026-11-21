@@ -378,6 +378,9 @@ class ResourceSample:
     #: re-aggregated from 0.3.x rows, F-03). None: the split, when present,
     #: covers every hour of the sample.
     observed_cost_split_hours: Optional[float] = None
+    #: Hours with an observed total but no CPU/RAM split (set with
+    #: ``observed_cost_split_hours``); the remaining hours had no observed cost.
+    observed_cost_unsplit_hours: Optional[float] = None
     #: Observed ``total_cost`` of the hours without a CPU/RAM split.
     observed_cost_unsplit_total: Optional[float] = None
     #: GPU power attributed to the sample by DCGM (average W over ``hours``).

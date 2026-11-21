@@ -354,6 +354,8 @@ _HOD = f"CASE WHEN container_name = '{POD_LEVEL}' THEN hour_of_day ELSE -1 END"
 #: unsplit hours travel with the row for the Impact Model to price each part.
 _COST_SPLIT_COLUMNS = """SUM(CASE WHEN cost_cpu IS NOT NULL OR cost_ram IS NOT NULL
                 THEN COALESCE(duration_seconds, 0) ELSE 0 END) AS cost_split_seconds,
+            SUM(CASE WHEN cost_cpu IS NULL AND cost_ram IS NULL AND COALESCE(total_cost, 0) > 0
+                THEN COALESCE(duration_seconds, 0) ELSE 0 END) AS cost_unsplit_seconds,
             SUM(CASE WHEN cost_cpu IS NULL AND cost_ram IS NULL
                 THEN COALESCE(total_cost, 0) ELSE 0 END) AS cost_unsplit_total"""
 
@@ -564,6 +566,7 @@ def baseline_from_row(
         "cost_cpu": _f(row["cost_cpu"]),
         "cost_ram": _f(row["cost_ram"]),
         "cost_split_duration_seconds": _f(row["cost_split_seconds"]),
+        "cost_unsplit_duration_seconds": _f(row["cost_unsplit_seconds"]),
         "cost_unsplit_total": _f(row["cost_unsplit_total"]),
         "cost_storage": _f(row["cost_storage"]),
         "cost_network": _f(row["cost_network"]),

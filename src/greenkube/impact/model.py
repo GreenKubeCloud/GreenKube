@@ -196,7 +196,10 @@ def sample_prices(sample: ResourceSample, node: NodeImpactProfile, currency: str
         # priced over the hours that carry it, and the total of the unsplit
         # hours is apportioned like a sample with a total only.
         split_hours = max(split_hours, 0.0)
-        unsplit_hours = hours - split_hours
+        rest = hours - split_hours
+        given = sample.observed_cost_unsplit_hours
+        unsplit_hours = rest if given is None else min(max(given, 0.0), rest)
+        free_hours = rest - unsplit_hours
         unsplit_total = min(max(sample.observed_cost_unsplit_total or 0.0, 0.0), observed.other)
         cpu_cost, ram_cost, apportioned = _observed_cpu_ram_cost(
             observed.cpu if cpu_known else None,
@@ -212,10 +215,15 @@ def sample_prices(sample: ResourceSample, node: NodeImpactProfile, currency: str
             sample.cpu_reserved_cores * unsplit_hours * node_cpu,
             sample.mem_reserved_gib * unsplit_hours * node_ram,
         )
-        cpu_cost += unsplit_cpu
-        ram_cost += unsplit_ram
+        # Hours without any observed cost are priced like samples without one:
+        # at the node's unit prices.
+        cpu_cost += unsplit_cpu + sample.cpu_reserved_cores * free_hours * node_cpu
+        ram_cost += unsplit_ram + sample.mem_reserved_gib * free_hours * node_ram
         detail = OBSERVED_COMPONENTS_PARTLY_APPORTIONED
-        confidence = min(confidence, APPORTIONED_CONFIDENCE)
+        if unsplit_total > 0 or apportioned:
+            confidence = min(confidence, APPORTIONED_CONFIDENCE)
+        else:
+            unsplit_hours = 0.0
     else:
         cpu_cost, ram_cost, apportioned = _observed_cpu_ram_cost(
             observed.cpu if cpu_known else None,

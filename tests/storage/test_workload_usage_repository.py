@@ -888,3 +888,28 @@ async def test_node_observed_prices_from_mixed_baselines_keep_the_split_prices(d
     split_hourly, mixed_hourly = split.node_hourly_price("node-a"), mixed.node_hourly_price("node-a")
     assert split_hourly is not None and mixed_hourly is not None
     assert mixed_hourly == pytest.approx(split_hourly, rel=0.01)
+
+
+async def test_baseline_rows_report_split_unsplit_and_zero_cost_hours(db):
+    """F-03: hours without any cost count neither as split nor as unsplit hours."""
+    start = _base_hour() - timedelta(days=2)
+    days = [
+        {"total_cost": 0.0, "cost_cpu": None, "cost_ram": None},
+        {"total_cost": 0.009, "cost_cpu": None, "cost_ram": None},
+        {"total_cost": 0.009, "cost_cpu": 0.006, "cost_ram": 0.003},
+    ]
+    rows = [
+        _row(start + timedelta(days=day, minutes=5 * step), **costs)
+        for day, costs in enumerate(days)
+        for step in range(12)
+    ]
+    repository, _ = await _rolled(db, rows, start, hours=49)
+
+    window = (start, start + timedelta(days=2, hours=1))
+    snapshot = await repository.read_usage_snapshot(*window)
+    pods, _ = await repository.read_baseline_rows(*window, snapshot=snapshot)
+    (row,) = pods
+    assert row.duration_seconds == 3 * 3600
+    assert row.cost_split_duration_seconds == pytest.approx(3600)
+    assert row.cost_unsplit_duration_seconds == pytest.approx(3600)
+    assert row.cost_unsplit_total == pytest.approx(0.108)
