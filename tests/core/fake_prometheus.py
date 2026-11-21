@@ -15,9 +15,9 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
-Value = Union[float, Callable[[float], float]]
+Value = Union[float, Callable[[float], Optional[float]]]
 
 _MATCHER_RE = re.compile(r"""([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)\s*["']([^"']*)["']""")
 _BY_RE = re.compile(r"by\s*\(([^)]*)\)")
@@ -29,7 +29,7 @@ class RawSeries:
     labels: dict[str, str]
     value: Value
 
-    def at(self, ts: float) -> float:
+    def at(self, ts: float) -> Optional[float]:
         return self.value(ts) if callable(self.value) else float(self.value)
 
 
@@ -147,7 +147,7 @@ class FakePrometheus:
                 if raw.metric != metric_name or not _matches(raw.labels, matchers):
                     continue
                 labels = {k: v for k, v in raw.labels.items() if v}
-                values = {ts: raw.at(ts) for ts in timestamps if raw.at(ts) is not None}
+                values = {ts: value for ts in timestamps if (value := raw.at(ts)) is not None}
                 series[tuple(sorted(labels.items()))] = (labels, values)
             return series
         op, inner, by_clause = match.groups()

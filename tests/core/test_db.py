@@ -72,5 +72,6 @@ async def test_use_after_close_raises_instead_of_reopening(tmp_path):
     await manager.connect()
     async with manager.connection_scope() as connection:
         async with connection.execute("SELECT 1") as cursor:
-            assert (await cursor.fetchone())[0] == 1
+            row = await cursor.fetchone()
+            assert row is not None and row[0] == 1
     await manager.close()
