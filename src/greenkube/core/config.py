@@ -1029,23 +1029,14 @@ class Config(BaseSettings):
     # ------------------------------------------------------------------ #
 
     @model_validator(mode="after")
-    def _validate_backfill_against_compression(self) -> "Config":
-        """Keep the collection backfill inside the raw part of the metric tables (ROL-02).
+    def _validate_compression_age(self) -> "Config":
+        """Refuse a compression age below one hour (ROL-02).
 
-        An hour older than ``METRICS_COMPRESSION_AGE_HOURS`` is compressed; a
-        backfill that reaches further would write most of its rows into hours
-        already compressed.
+        A backfill longer than the age is not refused: the compressor uses
+        :attr:`metrics_compression_age` (the longer of the two) and logs it once.
         """
-        age = int(self.METRICS_COMPRESSION_AGE_HOURS)
-        if age < 1:
+        if int(self.METRICS_COMPRESSION_AGE_HOURS) < 1:
             raise ValueError("METRICS_COMPRESSION_AGE_HOURS must be at least 1.")
-        backfill = str(self.COLLECTION_MAX_BACKFILL)
-        seconds = int(backfill[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[backfill[-1]]
-        if seconds > age * 3600:
-            raise ValueError(
-                f"COLLECTION_MAX_BACKFILL ({backfill}) must not exceed METRICS_COMPRESSION_AGE_HOURS ({age}h): "
-                "older windows would land in hours that are already compressed."
-            )
         return self
 
     @model_validator(mode="after")
@@ -1326,6 +1317,21 @@ class Config(BaseSettings):
     def gitops_local_cluster_aliases(self) -> tuple[str, ...]:
         """Extra Argo CD server URLs or cluster names of the local cluster (delivery safety)."""
         return parse_local_cluster_aliases(self.GITOPS_LOCAL_CLUSTER_ALIASES)
+
+    @property
+    def collection_max_backfill(self) -> timedelta:
+        """Catch-up horizon of the metric collection (``COLLECTION_MAX_BACKFILL``)."""
+        backfill = str(self.COLLECTION_MAX_BACKFILL)
+        return timedelta(seconds=int(backfill[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[backfill[-1]])
+
+    @property
+    def metrics_compression_age(self) -> timedelta:
+        """Effective compression age: the longer of ``METRICS_COMPRESSION_AGE_HOURS`` and the backfill.
+
+        An hour the collection may still backfill is never compressed, so its
+        rows land in raw hours instead of being re-aggregated later (ROL-02).
+        """
+        return max(timedelta(hours=int(self.METRICS_COMPRESSION_AGE_HOURS)), self.collection_max_backfill)
 
     @property
     def intensity_max_age(self) -> timedelta:

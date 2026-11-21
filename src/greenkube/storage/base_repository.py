@@ -214,7 +214,7 @@ class RawHourlySplitMixin:
         from ..core.config import get_config
         from .raw_hourly_split import floor_hour
 
-        return floor_hour(datetime.now(timezone.utc) - timedelta(hours=get_config().METRICS_COMPRESSION_AGE_HOURS))
+        return floor_hour(datetime.now(timezone.utc) - get_config().metrics_compression_age)
 
     async def _raw_hourly_split(self, start_time: datetime, end_time: datetime, raw_table: str):
         """Split ``[start_time, end_time)`` between raw and hourly rows at :meth:`compression_boundary`."""

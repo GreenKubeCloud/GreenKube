@@ -285,6 +285,8 @@ class MetricsCompressor:
 
     #: The short-compression-age warning is logged once per process.
     _short_age_warned = False
+    #: The backfill-over-age warning is logged once per process.
+    _backfill_age_warned = False
 
     def __init__(
         self,
@@ -388,7 +390,7 @@ class MetricsCompressor:
         from .observability import METRICS_COMPRESSION_LAG
 
         now = now or self._now()
-        reachable = floor_hour(now - timedelta(hours=self._config.METRICS_COMPRESSION_AGE_HOURS))
+        reachable = floor_hour(now - self._config.metrics_compression_age)
         tables: dict[str, Any] = {}
         worst: Optional[float] = None
         for table in TABLES:
@@ -411,6 +413,16 @@ class MetricsCompressor:
 
     def _warn_if_compression_precedes_recompute(self) -> None:
         age = self._config.METRICS_COMPRESSION_AGE_HOURS
+        effective = self._config.metrics_compression_age
+        if effective > timedelta(hours=age) and not MetricsCompressor._backfill_age_warned:
+            MetricsCompressor._backfill_age_warned = True
+            logger.warning(
+                "COLLECTION_MAX_BACKFILL (%s) is longer than METRICS_COMPRESSION_AGE_HOURS=%d: hours are "
+                "compressed only once they leave the backfill horizon (effective age %.0fh).",
+                self._config.COLLECTION_MAX_BACKFILL,
+                age,
+                effective.total_seconds() / 3600,
+            )
         if age >= CARBON_RECOMPUTE_HORIZON_HOURS or MetricsCompressor._short_age_warned:
             return
         MetricsCompressor._short_age_warned = True
@@ -425,7 +437,7 @@ class MetricsCompressor:
 
     async def _compression_limit(self, now: datetime) -> datetime:
         """Exclusive end of the closed hours that may be compressed."""
-        limit = now - timedelta(hours=self._config.METRICS_COMPRESSION_AGE_HOURS)
+        limit = now - self._config.metrics_compression_age
         if self._collection_watermark_provider is not None:
             try:
                 watermark = await self._collection_watermark_provider()

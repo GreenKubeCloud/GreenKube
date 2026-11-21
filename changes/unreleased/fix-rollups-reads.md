@@ -4,7 +4,7 @@
 - `greenkube_metrics_compression_lag_seconds{table}` and a `compression` block in `/api/v1/health` (watermarks, lag, `degraded` above two hours); a failed compression step marks the `metrics-compression` loop tick failed (ROL-01).
 
 ### Changed
-- `COLLECTION_MAX_BACKFILL` may not exceed `METRICS_COMPRESSION_AGE_HOURS`, which must be at least 1: startup fails with a clear message otherwise (ROL-02).
+- Hourly compression waits for the longer of `METRICS_COMPRESSION_AGE_HOURS` and `COLLECTION_MAX_BACKFILL`, so an hour the collection may still backfill stays raw; a backfill longer than the age logs one warning at start instead of being refused. `METRICS_COMPRESSION_AGE_HOURS` must be at least 1: startup fails otherwise (ROL-02).
 
 ### Fixed
 - Change measurements read from hourly rollup rows give the same hour buckets as from raw rows: the hourly tables keep each pod's first and last sample and the trusted part of its cost (migration 0172), the covered time of an hour is the union of the pods' sample spans instead of the longest pod (rollouts, evictions) and one untrusted cost sample no longer drops the whole pod-hour. Compressed hours still in raw retention are rebuilt once to fill the new columns; older rollup hours where several pods each covered part of the hour are left out of measurements instead of inflating them (ROL-03, MEA-05, MEA-04).
