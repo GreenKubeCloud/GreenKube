@@ -54,13 +54,29 @@ def interim_recommendation_ids(records: Iterable[RecommendationRecord]) -> List[
     return sorted(int(record.id) for record in records if record.id is not None and is_interim(record))
 
 
-def _annual_block(rates: dict, method: str) -> SavingsBlock:
+def _value_basis(records: Iterable[RecommendationRecord], method: str) -> Optional[str]:
+    """Basis of the ``method`` components of ``records`` (IMP-06): one basis, ``mixed`` or ``None``."""
+    bases = set()
+    for record in records:
+        try:
+            components = accrual_components(record)
+        except (InvalidSavingsRecord, ValueError):
+            continue
+        bases.update(component.basis for component in components if component.method == method)
+    if not bases:
+        return None
+    return bases.pop() if len(bases) == 1 else "mixed"
+
+
+def _annual_block(rates: dict, method: str, records: Iterable[RecommendationRecord] = ()) -> SavingsBlock:
     values = rates.get(method, {})
+    basis = _value_basis(records, method)
     return SavingsBlock(
         method=method,  # type: ignore[arg-type]
         basis="annual_rate",
         co2e_grams=float(values.get("co2e_grams", 0.0)),
         cost=float(values.get("cost", 0.0)),
+        value_basis=basis,  # type: ignore[arg-type]
         recommendation_count=int(values.get("count", 0)),
     )
 
@@ -245,11 +261,11 @@ def assemble_savings_report(
         namespace=namespace,
         window_start=start,
         window_end=end,
-        projected_annual=_annual_block(rates, METHOD_PROJECTED),
-        run_rate_annual=_annual_block(rates, METHOD_MEASURED),
+        projected_annual=_annual_block(rates, METHOD_PROJECTED, applied_records),
+        run_rate_annual=_annual_block(rates, METHOD_MEASURED, measured_records),
         realized_to_date=realized,
         projected_to_date=projected_to_date,
-        user_declared_annual=_annual_block(rates, METHOD_USER_DECLARED),
+        user_declared_annual=_annual_block(rates, METHOD_USER_DECLARED, applied_records),
         projected_unverified_to_date=unverified_block,
         interim_run_rate_annual=_annual_block(interim_rates, METHOD_MEASURED) if interim_records else None,
         interim_realized_to_date=interim_block,

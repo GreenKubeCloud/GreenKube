@@ -173,6 +173,21 @@ def _realized_share(
     return None
 
 
+def applied_share(record: RecommendationRecord) -> float | None:
+    """Share of a rightsizing's recommended cut that the applied request realizes, ``None`` when unknown.
+
+    Read from the record's ``actual_*`` request (recorded at apply time), so
+    every projection of an applied record is scaled the same way (IMP-06).
+    """
+    return _realized_share(
+        record,
+        ApplyRecommendationRequest(
+            actual_cpu_request_millicores=record.actual_cpu_request_millicores,
+            actual_memory_request_bytes=record.actual_memory_request_bytes,
+        ),
+    )
+
+
 def _scaled_share(
     *,
     current_value: int | None,

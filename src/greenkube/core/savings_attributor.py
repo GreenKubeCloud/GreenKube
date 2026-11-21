@@ -176,7 +176,9 @@ def projected_allocated_rates(record: RecommendationRecord) -> Optional[tuple[fl
     ``measured_allocated`` accruals are one quantity before and after
     measurement (LED-01). The realization factor is never applied: the
     billable expectation is reported apart (``realization``) and never accrued.
-    A projection that does not model CO2e accrues no CO2e.
+    A projection that does not model CO2e accrues no CO2e. A rightsizing
+    applied more conservatively than recommended is scaled by the share of the
+    cut it realizes, like its billable value (IMP-06).
     """
     impact = _impact(record)
     cost = _impact_number(impact, "allocated_cost_annual")
@@ -184,9 +186,13 @@ def projected_allocated_rates(record: RecommendationRecord) -> Optional[tuple[fl
         return None
     from ..impact.comparison import measurable_co2e_projection
     from ..impact.types import MEASURED_CO2E_COMPONENTS
+    from .recommendation_realization import applied_share
 
     co2e = measurable_co2e_projection(impact, MEASURED_CO2E_COMPONENTS, allocated=True)
     co2e = float(co2e) if co2e is not None and isfinite(float(co2e)) else 0.0
+    share = applied_share(record)
+    if share is not None:
+        cost, co2e = cost * share, co2e * share
     return cost, co2e
 
 
@@ -293,8 +299,10 @@ def validate_user_declared_savings(
     """Validate savings a user declares on ``PATCH /apply`` (roadmap C0.8).
 
     Values must be finite and at most ten times the recommendation's projection
-    in magnitude. Negative values are accepted and flagged. Returns ``None``
-    when nothing was declared.
+    in magnitude. The projection is the allocated one when the record has an
+    Impact Model projection (IMP-06): a rightsizing on fixed nodes, whose
+    billable projection is 0, still accepts a declaration. Negative values are
+    accepted and flagged. Returns ``None`` when nothing was declared.
 
     Raises:
         ValueError: with a user-facing explanation when a value is rejected.
@@ -302,9 +310,15 @@ def validate_user_declared_savings(
     if co2e_grams_per_year is None and cost_per_year is None:
         return None
     flags: List[str] = []
+    allocated = projected_allocated_rates(record)
+    projected_co2e, projected_cost = (
+        (allocated[1], allocated[0])
+        if allocated is not None
+        else (record.potential_savings_co2e_grams, record.potential_savings_cost)
+    )
     checks = (
-        ("carbon_saved_co2e_grams", co2e_grams_per_year, record.potential_savings_co2e_grams),
-        ("cost_saved", cost_per_year, record.potential_savings_cost),
+        ("carbon_saved_co2e_grams", co2e_grams_per_year, projected_co2e),
+        ("cost_saved", cost_per_year, projected_cost),
     )
     for label, value, projection in checks:
         if value is None:
@@ -329,8 +343,8 @@ def validate_user_declared_savings(
     return UserDeclaredSavings(
         co2e_grams_per_year=co2e_grams_per_year,
         cost_per_year=cost_per_year,
-        projected_co2e_grams_per_year=record.potential_savings_co2e_grams,
-        projected_cost_per_year=record.potential_savings_cost,
+        projected_co2e_grams_per_year=projected_co2e,
+        projected_cost_per_year=projected_cost,
         flags=flags,
     )
 

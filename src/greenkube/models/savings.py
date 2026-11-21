@@ -176,6 +176,14 @@ class SavingsBlock(BaseModel):
     )
     co2e_grams: float = 0.0
     cost: float = 0.0
+    value_basis: Optional[Literal["allocated", "billable_expected", "declared", "mixed"]] = Field(
+        None,
+        description=(
+            "Basis of the values of an annual block (IMP-06): 'allocated' (Impact Model allocated projection, the "
+            "basis measurements are compared with), 'billable_expected' (legacy records without an Impact Model "
+            "projection), 'declared', or 'mixed'. Null when no record contributes or for accrued blocks."
+        ),
+    )
     recommendation_count: int = Field(0, description="Recommendations contributing to an annual rate.")
     start: Optional[datetime] = Field(None, description="Window start for accrued blocks (None means all time).")
     end: Optional[datetime] = Field(None, description="Window end for accrued blocks.")
