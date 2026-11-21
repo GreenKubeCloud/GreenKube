@@ -6,8 +6,13 @@ Each cluster's chain is walked in ``seq`` order. An entry passes when:
 * its ``seq`` is the next position (a removed row leaves a gap);
 * its ``prev_hash`` is the previous entry's ``hash`` (a reordered or forged row
   breaks the link);
-* its ``hash`` equals ``sha256(prev_hash || canonical_json(entry))`` (a
-  modified column changes it);
+* its ``hash`` equals ``sha256(prev_hash || canonical_json(entry))``, or
+  ``HMAC-SHA256(key, ...)`` for an entry chained with ``LEDGER_CHAIN_KEY`` (a
+  modified column changes it; LED-05);
+* once an entry was chained with the key, every later entry is too (an
+  unkeyed entry after a keyed one is a forgery: ``hash_mismatch``); a keyed
+  entry needs the key (``chain_key_missing``) and the same key
+  (``chain_key_mismatch``);
 * its ``entry_id`` derives from its cluster and ``entry_key``, and it
   belongs to the chain's cluster;
 * a reversal cancels its target exactly (opposite value, same quantity and
@@ -16,8 +21,9 @@ Each cluster's chain is walked in ``seq`` order. An entry passes when:
 
 The verified head is published as ``greenkube_ledger_chain_head_seq`` and
 ``greenkube_ledger_chain_head_info`` (hash label), so Prometheus retention is a
-witness outside the database. The chain uses no secret: anyone who can write
-to the database can still recompute it (see the methodology's limits).
+witness outside the database. Without ``LEDGER_CHAIN_KEY`` the chain uses no
+secret: anyone who can write to the database can recompute it. With the key,
+only its holder can (see the methodology's limits).
 
 The head verified last is stored in ``ledger_chain_status``: a chain that is
 shorter than that head, or whose entry at that position has another hash,
@@ -45,7 +51,7 @@ from prometheus_client import Counter, Gauge
 
 from greenkube.core.observability import REGISTRY as OBSERVABILITY_REGISTRY
 from greenkube.storage.ledger_repository import ChainStatus, LedgerRepository
-from greenkube.verify.ledger.model import entry_id_for
+from greenkube.verify.ledger.model import chain_key_id, entry_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +81,13 @@ CHAIN_HEAD = Gauge(
     "greenkube_ledger_chain_head_info",
     "Hash of the last verified entry of the cluster's savings ledger chain (value 1; the hash is a label).",
     ["cluster_uid", "head_seq", "head_hash"],
+    registry=OBSERVABILITY_REGISTRY,
+)
+CHAIN_HEAD_KEYED = Gauge(
+    "greenkube_ledger_chain_head_keyed",
+    "1 when the last verified entry of the cluster's chain is chained with LEDGER_CHAIN_KEY (HMAC), 0 otherwise. "
+    "Prometheus retention keeps its history: a drop from 1 to 0 means the chain was re-written without the key.",
+    ["cluster_uid"],
     registry=OBSERVABILITY_REGISTRY,
 )
 CHAIN_OK = Gauge(
@@ -116,6 +129,8 @@ class ChainVerification:
     failure_seq: Optional[int] = None
     reason: Optional[str] = None
     detail: Optional[str] = None
+    #: Whether the verified head is chained with the key (LED-05).
+    head_keyed: bool = False
 
 
 async def verify_chain(
@@ -130,6 +145,13 @@ async def verify_chain(
     expected_seq = after_seq + 1
     prev_hash = after_hash
     verified = after_seq
+    key = repo.chain_key
+    key_id = chain_key_id(key) if key else None
+    #: Whether an entry walked was chained with the key: later entries must be too.
+    keyed_seen = False
+    if after_seq and after_hash is not None:
+        anchor = await repo.chain_page(cluster_uid, after_seq - 1, 1)
+        keyed_seen = bool(anchor) and anchor[0].chain_key_id is not None
     #: entry id -> (value, quantity, unit) of the entries walked, for the reversal checks.
     seen: Dict[str, Tuple[float, str, str]] = {}
     #: ids reversed (non-drift) by the entries walked.
@@ -144,7 +166,13 @@ async def verify_chain(
                 failure = ("missing_entry", f"expected seq {expected_seq}, found {entry.seq}")
             elif entry.prev_hash != prev_hash:
                 failure = ("broken_link", f"seq {entry.seq} does not follow the previous entry's hash")
-            elif entry.hash != entry.computed_hash():
+            elif entry.chain_key_id is None and keyed_seen:
+                failure = ("hash_mismatch", f"seq {entry.seq} ({entry.entry_id}) drops the chain key")
+            elif entry.chain_key_id is not None and key_id is None:
+                failure = ("chain_key_missing", f"seq {entry.seq} is chained with a key and LEDGER_CHAIN_KEY is unset")
+            elif entry.chain_key_id is not None and entry.chain_key_id != key_id:
+                failure = ("chain_key_mismatch", f"seq {entry.seq} is chained with another key")
+            elif entry.hash != entry.computed_hash(key):
                 failure = ("hash_mismatch", f"seq {entry.seq} ({entry.entry_id}) was modified")
             elif entry.entry_id != entry_id_for(cluster_uid, entry.entry_key):
                 failure = ("identity_mismatch", f"seq {entry.seq} has an entry id that does not match its key")
@@ -164,12 +192,13 @@ async def verify_chain(
                     detail=failure[1],
                 )
             prev_hash = entry.hash
+            keyed_seen = keyed_seen or entry.chain_key_id is not None
             seen[entry.entry_id] = (entry.value, entry.quantity, entry.unit)
             verified = entry.seq
             expected_seq += 1
         if len(page) < page_size:
             break
-    return ChainVerification(cluster_uid, True, verified, verified or None, prev_hash)
+    return ChainVerification(cluster_uid, True, verified, verified or None, prev_hash, head_keyed=keyed_seen)
 
 
 async def _reversal_mismatch(
@@ -287,6 +316,7 @@ async def verify_ledger(
         CHAIN_OK.labels(cluster_uid=cluster_uid).set(1 if result.ok else 0)
         if result.ok:
             _publish_head(cluster_uid, result.head_seq or 0, result.head_hash)
+            CHAIN_HEAD_KEYED.labels(cluster_uid=cluster_uid).set(1 if result.head_keyed else 0)
         total += result.entries
         # A failure keeps the last head that passed as the anchor of the next verification.
         if result.ok:

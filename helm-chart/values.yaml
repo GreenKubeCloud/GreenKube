@@ -1015,6 +1015,14 @@ secrets:
   # with its GREENKUBE_API_KEY (deprecated).
   existingSecretHasMetricsToken: false
 
+  # Key of the savings ledger hash chain (LEDGER_CHAIN_KEY): new ledger entries
+  # are chained with HMAC-SHA256 so that a database writer without the key
+  # cannot rewrite them and keep a valid chain. Left empty, it is generated once
+  # by the credentials bootstrap Job. Never rotate or lose it: entries chained
+  # with a key only verify with that key. With secrets.existingSecret, add a
+  # LEDGER_CHAIN_KEY key to that Secret to enable it.
+  ledgerChainKey: ''
+
   # PostgreSQL connection string, only used with postgres.enabled=false
   # (bring your own PostgreSQL instance)
   # Example: "postgresql://user:password@host:port/dbname"

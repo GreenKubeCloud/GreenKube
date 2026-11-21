@@ -18,7 +18,12 @@ Generated keys:
                                             secrets.apiKey is empty (an existing key
                                             is kept, never removed);
   POSTGRES_PASSWORD, DB_CONNECTION_STRING   for the bundled PostgreSQL when
-                                            postgres.auth.password is empty.
+                                            postgres.auth.password is empty;
+  LEDGER_CHAIN_KEY                          the key of the savings ledger hash
+                                            chain (LED-05), when
+                                            secrets.ledgerChainKey is empty. It is
+                                            never rotated: entries chained with it
+                                            only verify with it.
 
 With GREENKUBE_INITIAL_ADMIN_SECRET set, the script also creates that Secret
 once with a random first-admin password (keys ``username`` and ``password``,
@@ -58,11 +63,13 @@ from typing import Any, Protocol
 
 API_KEY = "GREENKUBE_API_KEY"
 METRICS_TOKEN = "GREENKUBE_METRICS_TOKEN"
+LEDGER_CHAIN_KEY = "LEDGER_CHAIN_KEY"
 POSTGRES_PASSWORD = "POSTGRES_PASSWORD"
 DB_CONNECTION_STRING = "DB_CONNECTION_STRING"
 
 API_KEY_LENGTH = 64
 METRICS_TOKEN_LENGTH = 64
+LEDGER_CHAIN_KEY_LENGTH = 64
 POSTGRES_PASSWORD_LENGTH = 24
 INITIAL_ADMIN_PASSWORD_LENGTH = 24
 _ALPHABET = string.ascii_letters + string.digits
@@ -105,6 +112,7 @@ class Settings:
     generate_api_key: bool = False
     generate_metrics_token: bool = False
     generate_postgres_password: bool = False
+    generate_ledger_chain_key: bool = False
     postgres_user: str = ""
     postgres_database: str = ""
     postgres_host: str = ""
@@ -135,6 +143,7 @@ class Settings:
             generate_api_key=_flag(env.get("GREENKUBE_GENERATE_API_KEY")),
             generate_metrics_token=_flag(env.get("GREENKUBE_GENERATE_METRICS_TOKEN")),
             generate_postgres_password=_flag(env.get("GREENKUBE_GENERATE_POSTGRES_PASSWORD")),
+            generate_ledger_chain_key=_flag(env.get("GREENKUBE_GENERATE_LEDGER_CHAIN_KEY")),
             postgres_user=env.get("GREENKUBE_POSTGRES_USER", "").strip(),
             postgres_database=env.get("GREENKUBE_POSTGRES_DATABASE", "").strip(),
             postgres_host=env.get("GREENKUBE_POSTGRES_HOST", "").strip(),
@@ -186,6 +195,8 @@ def missing_credentials(
         additions[API_KEY] = token(API_KEY_LENGTH)
     if settings.generate_metrics_token and not current.get(METRICS_TOKEN):
         additions[METRICS_TOKEN] = token(METRICS_TOKEN_LENGTH)
+    if settings.generate_ledger_chain_key and not current.get(LEDGER_CHAIN_KEY):
+        additions[LEDGER_CHAIN_KEY] = token(LEDGER_CHAIN_KEY_LENGTH)
     if settings.generate_postgres_password:
         password = current.get(POSTGRES_PASSWORD, "")
         if not password:

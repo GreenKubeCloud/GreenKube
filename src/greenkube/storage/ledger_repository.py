@@ -92,6 +92,7 @@ _COLUMNS = (
     "prev_hash",
     "hash",
     "basis",
+    "chain_key_id",
 )
 _TIME_COLUMNS = ("period_start", "period_end", "slot_start", "created_at")
 _SELECT = ", ".join(_COLUMNS)
@@ -176,11 +177,31 @@ class Provenance:
     currency: Optional[str] = None
 
 
-class LedgerRepository:
-    """Append-only savings ledger entries, their chain and their projections."""
+def configured_chain_key() -> Optional[bytes]:
+    """The ledger chain key from ``LEDGER_CHAIN_KEY`` (LED-05), or ``None`` when none is configured."""
+    from greenkube.core.config import get_config
 
-    def __init__(self, db_manager):
+    raw = getattr(get_config(), "LEDGER_CHAIN_KEY", None)
+    return raw.encode("utf-8") if raw else None
+
+
+class LedgerRepository:
+    """Append-only savings ledger entries, their chain and their projections.
+
+    ``chain_key`` keys the hash chain (LED-05); by default it is read from
+    ``LEDGER_CHAIN_KEY``. An empty value means no key.
+    """
+
+    def __init__(self, db_manager, chain_key: Optional[bytes] = None):
         self.db_manager = db_manager
+        self._chain_key = chain_key
+
+    @property
+    def chain_key(self) -> Optional[bytes]:
+        """Key of the hash chain: the one given, else ``LEDGER_CHAIN_KEY``; ``None`` without a key."""
+        if self._chain_key is not None:
+            return self._chain_key or None
+        return configured_chain_key()
 
     # ------------------------------------------------------------------
     # Dialect helpers
@@ -332,6 +353,7 @@ class LedgerRepository:
                 await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"ledger:{cluster_uid}")
             existing = await self._existing_keys(conn, cluster_uid, list(unique))
             seq, prev_hash = await self._head(conn, cluster_uid)
+            chain_key = self.chain_key
             placeholders = ", ".join("?" for _ in _COLUMNS)
             insert = f"INSERT INTO savings_ledger_entries ({_SELECT}) VALUES ({placeholders})"
             for key, draft in unique.items():
@@ -345,6 +367,7 @@ class LedgerRepository:
                     seq=seq,
                     prev_hash=prev_hash,
                     created_at=moment,
+                    chain_key=chain_key,
                 )
                 await self._execute(conn, insert, self._params(entry))
                 prev_hash = entry.hash
@@ -1076,5 +1099,6 @@ __all__ = [
     "V1_HOURLY_TABLE",
     "V1_RAW_TABLE",
     "V1_TABLES",
+    "configured_chain_key",
     "get_ledger_repository",
 ]

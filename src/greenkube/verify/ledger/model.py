@@ -24,11 +24,21 @@ counters and the dashboard gauges show.
 Each cluster's entries form a hash chain: ``seq`` is a gap-free position and
 ``hash = sha256(prev_hash || canonical_json(entry))``, where the canonical
 JSON covers every column except ``hash`` and ``prev_hash``.
+
+With a chain key (``LEDGER_CHAIN_KEY``, a Kubernetes Secret never stored in
+the database; LED-05) entries are chained with
+``hash = HMAC-SHA256(key, prev_hash || canonical_json(entry))`` and carry
+``chain_key_id``, a keyed fingerprint of the key that is part of the canonical
+JSON. Someone who can write to the database but does not hold the key cannot
+recompute the chain. Entries without ``chain_key_id`` (written before the key
+existed, or without one) keep the plain sha256 rule, so their hash never
+changes.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import uuid
@@ -215,6 +225,8 @@ class LedgerEntry(LedgerEntryDraft):
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     prev_hash: Optional[str] = None
     hash: str = ""
+    #: Fingerprint of the key the entry was chained with (LED-05); ``None`` for the plain sha256 rule.
+    chain_key_id: Optional[str] = None
 
     def canonical(self) -> str:
         """Canonical JSON of every column except ``hash`` and ``prev_hash``."""
@@ -227,6 +239,9 @@ class LedgerEntry(LedgerEntryDraft):
         if data.get("basis") is None:
             # Entries stored before the basis column keep the payload (and hash) they were chained with.
             data.pop("basis", None)
+        if data.get("chain_key_id") is None:
+            # Entries chained without a key keep the payload (and hash) of the release before LED-05.
+            data.pop("chain_key_id", None)
         for key in ("period_start", "period_end", "slot_start", "created_at"):
             data[key] = format_time(data[key])
         data["value"] = float(self.value)
@@ -241,7 +256,12 @@ class LedgerEntry(LedgerEntryDraft):
         """The stored basis, or the one inferred from the method for entries stored before it existed."""
         return basis_of(self.method, self.basis)
 
-    def computed_hash(self) -> str:
+    def computed_hash(self, key: Optional[bytes] = None) -> str:
+        """The entry's hash: HMAC-SHA256 with ``key`` when it was chained with one, sha256 otherwise."""
+        if self.chain_key_id is not None:
+            if not key:
+                raise ValueError("the entry was chained with a key and no key was given")
+            return keyed_chain_hash(key, self.prev_hash, self.canonical())
         return chain_hash(self.prev_hash, self.canonical())
 
     def as_dict(self) -> Dict[str, Any]:
@@ -261,6 +281,16 @@ def chain_hash(prev_hash: Optional[str], canonical: str) -> str:
     return hashlib.sha256(((prev_hash or "") + canonical).encode("utf-8")).hexdigest()
 
 
+def keyed_chain_hash(key: bytes, prev_hash: Optional[str], canonical: str) -> str:
+    """HMAC-SHA256 chain rule (LED-05): only a holder of ``key`` can compute it."""
+    return hmac.new(key, ((prev_hash or "") + canonical).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def chain_key_id(key: bytes) -> str:
+    """Public fingerprint of a chain key: names the key without revealing it."""
+    return hmac.new(key, b"greenkube-ledger-chain-key-id", hashlib.sha256).hexdigest()[:16]
+
+
 def place(
     draft: LedgerEntryDraft,
     *,
@@ -269,8 +299,9 @@ def place(
     seq: int,
     prev_hash: Optional[str],
     created_at: datetime,
+    chain_key: Optional[bytes] = None,
 ) -> LedgerEntry:
-    """Put ``draft`` on the chain after ``prev_hash`` at position ``seq``."""
+    """Put ``draft`` on the chain after ``prev_hash`` at position ``seq`` (HMAC-chained with ``chain_key``)."""
     values = {name: getattr(draft, name) for name in LedgerEntryDraft.__dataclass_fields__}
     entry = LedgerEntry(
         **values,
@@ -280,8 +311,9 @@ def place(
         seq=seq,
         created_at=ensure_utc(created_at),
         prev_hash=prev_hash,
+        chain_key_id=chain_key_id(chain_key) if chain_key else None,
     )
-    return replace(entry, hash=entry.computed_hash())
+    return replace(entry, hash=entry.computed_hash(chain_key))
 
 
 __all__ = [
@@ -327,6 +359,8 @@ __all__ = [
     "REASON_SUPERSESSION",
     "canonical_json",
     "chain_hash",
+    "chain_key_id",
+    "keyed_chain_hash",
     "entry_id_for",
     "format_time",
     "parse_time",
