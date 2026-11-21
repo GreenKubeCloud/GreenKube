@@ -16,11 +16,12 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Optional, Protocol, cast
 
-from fastapi import Depends, HTTPException, Query, Request
+from fastapi import Depends, HTTPException, Query, Request, Response
 
 from greenkube.auth import browser_key
 from greenkube.auth.http import (
     CSRF_HEADER,
+    clear_session_cookie,
     cleared_session_cookie_header,
     client_ip,
     from_trusted_proxy,
@@ -165,6 +166,8 @@ _AUTH_PUBLIC_PATHS = (
 )
 # What a user who must still change the initial password may call.
 _PASSWORD_CHANGE_ALLOWED = ("/api/v1/auth/me", "/api/v1/auth/password", "/api/v1/auth/logout", "/api/v1/version")
+# Public routes that set the auth cookie themselves on success: a stale cookie is left for them to replace.
+_SIGN_IN_PATHS = ("/api/v1/auth/login", "/api/v1/auth/api-key-login")
 _UNAUTHORIZED = "Authentication required."
 _INVALID_KEY = "Invalid or missing API key."
 
@@ -434,7 +437,7 @@ def _enforce_credential_throttle(
     bucket = "scrape" if path == _SCRAPE_PATH else "api"
     retry_after = throttle.retry_after(ip, bucket)
     if retry_after:
-        record_auth_failure("rate_limited")
+        record_auth_failure("key_rate_limited")
         raise HTTPException(
             status_code=429,
             detail={
@@ -451,7 +454,7 @@ def _remember(request: Request, principal: Principal) -> None:
     request.state.authenticated_actor = principal.actor
 
 
-async def authenticate(request: Request) -> None:
+async def authenticate(request: Request, response: Response) -> None:
     """Resolve the request's :class:`Principal` and enforce scopes and CSRF (F14, F15).
 
     Order: a Bearer API key (the deprecated ``GREENKUBE_API_KEY`` bootstrap key,
@@ -486,13 +489,22 @@ async def authenticate(request: Request) -> None:
                 throttle.record_failure(ip, bucket)
             raise
     elif settings.mode == "api_key":
+        principal = None
         if request.cookies.get(settings.cookie_name):
-            throttle, ip, bucket = _enforce_credential_throttle(request, settings, path)
-            principal = await _browser_key_principal(request, settings, service)
-            if principal is None:
-                throttle.record_failure(ip, bucket)
-        else:
-            principal = None
+            if auth_public:
+                # The sign-in pages ignore a leftover cookie (the sign-in route keeps its own
+                # throttle); it is cleared without counting against the address.
+                if path not in _SIGN_IN_PATHS:
+                    clear_session_cookie(response, request, settings)
+            else:
+                throttle, ip, bucket = _enforce_credential_throttle(request, settings, path)
+                principal = await _browser_key_principal(request, settings, service)
+                if principal is None:
+                    if await _open_access(settings, service):
+                        # Served anyway: a stale cookie is not a failed authentication.
+                        clear_session_cookie(response, request, settings)
+                    else:
+                        throttle.record_failure(ip, bucket)
     else:
         principal = await _session_principal(request, settings, service)
         if settings.proxy_enabled and not auth_public:

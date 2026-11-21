@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import time
 
+from greenkube.auth.metrics import AUTH_FAILURES, FAILURE_REASONS
 from greenkube.auth.throttle import IP_LIMIT_MULTIPLIER
-from tests.api.auth_support import auth_harness  # pyrefly: ignore[missing-import]
+from tests.api.auth_support import ORIGIN, auth_harness  # pyrefly: ignore[missing-import]
 
 LEGACY_KEY = "operator-chosen-bootstrap"
 SCRAPE_TOKEN = "scrape-token-abcdef0123456789"
@@ -132,3 +133,63 @@ def test_an_open_development_instance_is_never_throttled(tmp_path, monkeypatch):
         statuses = _guess(h, ATTACKER, BUDGET * 2)
 
     assert statuses == [200] * (BUDGET * 2)
+
+
+def _cleared(response) -> bool:
+    header = response.headers.get("set-cookie", "")
+    return header.startswith("greenkube_session=") and "Max-Age=0" in header
+
+
+def test_a_stale_cookie_on_an_open_development_instance_is_never_counted_and_is_cleared(tmp_path, monkeypatch):
+    """Open access serves the request: a leftover cookie is not a failed authentication."""
+    with auth_harness(
+        tmp_path,
+        monkeypatch,
+        users=[],
+        client_address=PROXY,
+        API_AUTH_MODE="api_key",
+        GREENKUBE_API_KEY="",
+        AUTH_LOGIN_RATE_LIMIT="1/minute",
+        TRUSTED_PROXY_IPS="10.0.0.0/8",
+    ) as h:
+        responses = []
+        for _ in range(BUDGET + 2):
+            h.client.cookies.set("greenkube_session", "v1.legacy.123.stale")
+            responses.append(h.client.get("/api/v1/version", headers={"X-Forwarded-For": ATTACKER}))
+
+    assert [r.status_code for r in responses] == [200] * (BUDGET + 2)
+    assert all(_cleared(r) for r in responses)
+
+
+def test_a_stale_cookie_on_public_auth_paths_is_ignored_and_cleared(tmp_path, monkeypatch):
+    """A browser with a stale cookie must still be able to sign in again with the right key."""
+    with auth_harness(tmp_path, monkeypatch, client_address=PROXY, **_env()) as h:
+        providers = []
+        for _ in range(BUDGET + 1):
+            h.client.cookies.set("greenkube_session", "stale")
+            providers.append(h.client.get("/api/v1/auth/providers", headers={"X-Forwarded-For": OPERATOR}))
+        h.client.cookies.set("greenkube_session", "stale")
+        login = h.client.post(
+            "/api/v1/auth/api-key-login",
+            json={"key": LEGACY_KEY},
+            headers={"Origin": ORIGIN, "X-Forwarded-For": OPERATOR, "X-Forwarded-Proto": "https"},
+        )
+        h.client.cookies.clear()
+        bearer = _get(h, "/api/v1/version", LEGACY_KEY, OPERATOR)
+
+    assert [r.status_code for r in providers] == [200] * (BUDGET + 1)
+    assert all(_cleared(r) for r in providers)
+    assert login.status_code == 200, login.text
+    # The stale cookies never consumed the address's failed-key budget.
+    assert bearer.status_code == 200
+
+
+def test_the_key_throttle_has_its_own_failure_reason(tmp_path, monkeypatch):
+    with auth_harness(tmp_path, monkeypatch, client_address=PROXY, **_env()) as h:
+        _guess(h, ATTACKER, BUDGET)
+        before = AUTH_FAILURES.labels(reason="key_rate_limited")._value.get()
+        blocked = _get(h, "/api/v1/version", "wrong-again", ATTACKER)
+
+    assert blocked.status_code == 429
+    assert AUTH_FAILURES.labels(reason="key_rate_limited")._value.get() == before + 1
+    assert "key_rate_limited" in FAILURE_REASONS
