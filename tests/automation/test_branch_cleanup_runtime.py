@@ -446,3 +446,13 @@ async def test_branches_of_externally_delivered_plans_are_never_deleted(mode):
     assert provider.calls == []
     assert repository.completed == {("plan-cleanup-1", "gitea-main", "acme/manifests", branch)}
     assert (await runtime.cleanup_once()).selected == 0
+
+
+def test_storage_branch_cleanup_statuses_match_the_runtime_terminal_statuses():
+    """The storage query selects the same terminal plans the runtime cleans up, ``cancelled`` included."""
+    from greenkube.automation import branch_cleanup_runtime
+    from greenkube.storage.base_pull_request_repository import BRANCH_CLEANUP_PLAN_STATUSES
+
+    expected = {status.value for status in branch_cleanup_runtime._TERMINAL_PLAN_STATUSES}
+    assert set(BRANCH_CLEANUP_PLAN_STATUSES) == expected
+    assert "cancelled" in BRANCH_CLEANUP_PLAN_STATUSES
