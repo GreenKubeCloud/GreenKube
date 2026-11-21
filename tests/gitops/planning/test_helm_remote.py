@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from ruamel.yaml import YAML
 
+from greenkube.gitops.bindings.resolver import WorkloadBindingResolver
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     BindingStatus,
@@ -42,6 +43,7 @@ from greenkube.gitops.renderers.charts import ChartReference, FetchedChart, Remo
 from greenkube.gitops.renderers.helm import HelmRenderer
 from greenkube.gitops.renderers.sandbox import BoundedSubprocessRunner, SandboxResult
 from greenkube.gitops.snapshots import RepositorySnapshot, snapshot_from_files
+from greenkube.storage.base_gitops_repository import WorkloadBinding
 from tests.gitops.chart_registry import (  # pyrefly: ignore[missing-import]
     FakeChartRegistry,
     chart_files,
@@ -806,5 +808,135 @@ def test_flux_helm_repository_chart_renders_the_deployed_version_of_a_range():
             "remote Helm chart https://charts.bitnami.com/bitnami nginx@18.3.1 rendered from "
             f"sha256:{hashlib.sha256(registry.archive).hexdigest()}"
         ]
+    finally:
+        snapshot.close()
+
+
+# F-02: a chart from a Helm repository, a ``ref: values`` source and a ``path`` source of
+# non-workload kinds. The chart and the path source are both candidate owners.
+_HELM_LABELS = {"app.kubernetes.io/managed-by": "Helm", "helm.sh/chart": "nginx-18.3.1"}
+
+
+def _chart_values_manifests_application() -> dict[str, Any]:
+    with (DISCOVERY_FIXTURES / "argo-multi-source-chart-values-manifests.yaml").open(encoding="utf-8") as stream:
+        return _load(stream.read())
+
+
+def _live_deployment(labels: Mapping[str, str], annotations: Mapping[str, str] | None = None) -> dict[str, Any]:
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": "web-nginx",
+            "namespace": "web",
+            "labels": dict(labels),
+            "annotations": dict(annotations or {}),
+        },
+    }
+
+
+def _discover_web(application: Mapping[str, Any], live: Sequence[Mapping[str, Any]] = ()) -> list[WorkloadSource]:
+    return [
+        source
+        for source in discover_argo_application(
+            application, cluster="prod", provider_id="github-main", live_resources=live
+        )
+        if source.workload_kind == "Deployment"
+    ]
+
+
+def _bound(sources: Sequence[WorkloadSource]) -> WorkloadBinding:
+    return WorkloadBindingResolver().resolve(sources, now=sources[0].observed_at)
+
+
+def test_chart_values_manifests_app_without_ownership_evidence_stays_ambiguous():
+    binding = _bound(_discover_web(_chart_values_manifests_application()))
+
+    assert binding.status is BindingStatus.AMBIGUOUS
+    assert binding.reason == "conflicting-equal-priority-source-units"
+
+
+@pytest.mark.parametrize(
+    ("labels", "annotations"),
+    [
+        (_HELM_LABELS, {}),
+        ({"heritage": "Helm", "chart": "nginx-18.3.1"}, {}),
+        ({}, {"meta.helm.sh/release-name": "web"}),
+    ],
+)
+def test_helm_ownership_labels_bind_the_workload_to_the_values_source(labels, annotations):
+    sources = _discover_web(_chart_values_manifests_application(), [_live_deployment(labels, annotations)])
+    binding = _bound(sources)
+
+    assert binding.status is BindingStatus.RESOLVED
+    assert binding.source is not None
+    assert binding.source.repo_url == VALUES_REPO
+    assert binding.source.renderer is RendererKind.HELM_VALUES
+    assert binding.source.renderer_config["values_files"] == [VALUES_PATH]
+    assert binding.source.evidence["owner_selection"]["by"] == "helm-ownership-labels"
+
+
+def test_helm_release_annotation_of_another_release_keeps_the_workload_ambiguous():
+    live = [_live_deployment(_HELM_LABELS, {"meta.helm.sh/release-name": "other"})]
+
+    binding = _bound(_discover_web(_chart_values_manifests_application(), live))
+
+    assert binding.status is BindingStatus.AMBIGUOUS
+
+
+def test_helm_labels_do_not_break_a_tie_against_a_kustomize_path_source():
+    application = _chart_values_manifests_application()
+    application["status"]["sourceTypes"][2] = "Kustomize"
+
+    binding = _bound(_discover_web(application, [_live_deployment(_HELM_LABELS)]))
+
+    assert binding.status is BindingStatus.AMBIGUOUS
+
+
+def test_helm_values_mapping_source_index_selects_the_owner_without_labels():
+    application = _chart_values_manifests_application()
+    application["metadata"]["annotations"] = {
+        "greenkube.cloud/helm-values-mapping": (
+            '{"file_path": "environments/prod/nginx.yaml", "container": "nginx", '
+            '"path": ["resources"], "source_index": 1}'
+        )
+    }
+
+    binding = _bound(_discover_web(application))
+
+    assert binding.status is BindingStatus.RESOLVED
+    assert binding.source is not None
+    assert binding.source.repo_url == VALUES_REPO
+    assert binding.source.renderer_config["values_mapping"]["source_index"] == 1
+    assert binding.source.evidence["owner_selection"] == {"by": "helm-values-mapping", "source_index": 1}
+
+
+def test_helm_values_mapping_source_index_matching_no_owner_stays_ambiguous():
+    application = _chart_values_manifests_application()
+    application["metadata"]["annotations"] = {
+        "greenkube.cloud/helm-values-mapping": (
+            '{"file_path": "environments/prod/other.yaml", "container": "nginx", '
+            '"path": ["resources"], "source_index": 7}'
+        )
+    }
+
+    binding = _bound(_discover_web(application))
+
+    assert binding.status is BindingStatus.AMBIGUOUS
+
+
+def test_chart_values_manifests_app_plans_end_to_end():
+    registry = FakeChartRegistry()
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, "environments/prod/manifests/route.yaml": "kind: HTTPRoute\n"})
+    action = _action([_op("nginx", cpu="50m", memory="64Mi"), _op("metrics", cpu="20m")])
+    binding = _bound(_discover_web(_chart_values_manifests_application(), [_live_deployment(_HELM_LABELS)]))
+    assert binding.source is not None
+
+    try:
+        plan = _planner(_BitnamiRunner(), _fetcher(registry)).plan(action, binding.source, snapshot, VALUES_REVISION)
+
+        assert [edit.path for edit in plan.files] == [VALUES_PATH]
+        assert plan.files[0].content == EXPECTED_VALUES
+        assert plan.validation.passed
     finally:
         snapshot.close()

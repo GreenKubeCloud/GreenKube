@@ -1,0 +1,57 @@
+# Field pattern (F-02): a chart from a Helm repository, its values in a Git `ref: values`
+# source, and a Git `path` source that holds only non-workload kinds (HTTPRoute, ConfigMap).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: web
+  namespace: argocd
+  uid: 0c8f2a51-7d3e-4b6a-9e21-5a4f3b2c1d0e
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: web
+  sources:
+    - repoURL: registry-1.docker.io/bitnamicharts
+      chart: nginx
+      targetRevision: 18.3.*
+      helm:
+        releaseName: web
+        valueFiles:
+          - $values/environments/prod/nginx.yaml
+    - repoURL: https://github.com/acme/env-config.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/acme/env-config.git
+      targetRevision: main
+      path: environments/prod/manifests
+status:
+  sourceTypes:
+    - Helm
+    - Directory
+    - Directory
+  sync:
+    status: Synced
+    revisions:
+      - 18.3.1
+      - cccccccccccccccccccccccccccccccccccccccc
+      - cccccccccccccccccccccccccccccccccccccccc
+  resources:
+    - version: v1
+      kind: Service
+      namespace: web
+      name: web-nginx
+    - group: apps
+      version: v1
+      kind: Deployment
+      namespace: web
+      name: web-nginx
+    - group: gateway.networking.k8s.io
+      version: v1
+      kind: HTTPRoute
+      namespace: web
+      name: web
+    - version: v1
+      kind: ConfigMap
+      namespace: web
+      name: web-extra
