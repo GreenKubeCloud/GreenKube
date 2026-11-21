@@ -1,6 +1,6 @@
 # GreenKube roadmap
 
-> **Revision 3, 2026-11-20.** Baseline: `dev` @ `82b3bee1` (pushed).
+> **Revision 3, updated 2026-11-21.** Baseline: local `dev` after the phase A merges (not pushed; origin `dev` is still `82b3bee1`).
 > **Audience:** the maintainer, contributors and coding agents. Each task says what to do, where, and how to prove it is done.
 > **Inputs:**
 > - the data-quality audit, [`docs/reviews/data-quality-audit.md`](reviews/data-quality-audit.md): mechanism, evidence and fix of every finding cited here;
@@ -24,17 +24,16 @@
 - **Measurement:** valid verdict statistics with a documented one-week limit, health gates against the baseline, constant prices, per-hour carbon normalisation.
 - **Released capacity:** CPU cores and memory freed, projected and measured, with a capacity verdict and ledger accrual.
 - **Ledger:** ledger v2 is the single source for every user-facing savings figure.
+- **Phase A (section 4):** every field issue of the first field test is fixed and merged:
+  - GitLab merge requests (F-01);
+  - Argo CD multi-source and upstream-chart bindings (F-02, F-11, F-13);
+  - projected savings after an upgrade (F-03);
+  - VPA and KRR floors and maturity, no source-only recommendations, and an OOM floor under every policy (F-12);
+  - API-key sign-in (F-09);
+  - static pods, eligibility, singletons and the small items (F-04 to F-10);
+  - the two stopped branches, rollups and reads (WP-05) and energy and carbon (WP-04).
 
-**Not merged:** two branches were stopped mid-run and are neither reviewed nor gated:
-- `fix/rollups-reads`: WP-05, 5 commits;
-- `fix/energy-carbon`: WP-04, 11 commits.
-
-**Field test (section 4):**
-- Upgrade, collection, scan, NetworkPolicies and plan previews work.
-- No merge request could be opened on GitLab (F-01).
-- 31 of 56 workloads are not bindable because of Argo CD multi-source apps (F-02).
-- Projected savings are about 550 times too low during the 14 days after an upgrade (F-03).
-- VPA and KRR tool floors and VPA immaturity distort the consensus (F-12).
+**Field test (section 4):** the issues found on 2026-11-16 are fixed on `dev`, but not yet re-tested on the field cluster. Follow-ups found while fixing them are listed in A.9.
 
 **The core promise has still never been observed end to end on a real cluster:** merge request merged, change measured, verdict decided, ledger entry written.
 
@@ -132,70 +131,25 @@ Everything else is either a dimension of those numbers (cost, carbon, capacity),
 
 ## 4. Phase A: make the core loop work on a real cluster
 
-Goal: on the field cluster (kubeadm, Cilium, Argo CD, self-hosted GitLab), open merge requests, merge them, and get measured verdicts and ledger entries. Each item below comes from the field report of 2026-11-16 and is checked against the code before fixing.
+Goal: on the field cluster (kubeadm, Cilium, Argo CD, self-hosted GitLab), open merge requests, merge them, and get measured verdicts and ledger entries.
 
-### A.0 Merge or re-scope the two stopped branches (lane: review)
-- `fix/rollups-reads` (WP-05: raw/hourly seam at the compression watermark, late rows re-aggregated, idle share exposed, faithful hourly rows):
-  - review it independently, gate it, merge it. These are correctness fixes for numbers shown today.
-  - the per-pod hourly tables stay (C.3), so these fixes are permanent.
-- `fix/energy-carbon` (WP-04: NRG-01 embodied value per instance type, NRG-04 dated intensity defaults, NRG-05 one power model for collection and projection, NRG-12 non-pod CPU charged to idle, NRG-13 GPU nodes without DCGM flagged (partly), NRG-15 nodes sharing a host):
-  - carbon stays as it is (section 2.1), so the whole branch applies;
-  - review it independently, gate it, merge it.
+**Status, 2026-11-21:**
+- A.0 to A.7 are implemented and merged into `dev`, with every field issue F-01 to F-13 covered.
+- Each branch went through an independent review, the reviewer's findings were fixed, and the gates passed on SQLite and PostgreSQL. Every review found real defects; all were fixed before merge.
+- Nothing is confirmed on the field cluster yet: that is A.8.
 
-### A.1 F-01: no merge request can be opened on GitLab (blocker) (lane: git)
-- Every approved plan goes `stale` with "Plan branch moved during atomic commit". `GitLabProvider.create_commit` sends `start_sha` for a branch GreenKube has just created, and GitLab refuses it ("already exists").
-- The test fake (`tests/automation/fake_git_servers.py`) accepted it, which is why CI never saw it.
-- A fix exists on the maintainer's machine (local branch `fix/gitlab-commit-existing-branch`, not committed). Bring it in, or redo it the same way:
-  - do not send `start_sha` for an existing branch;
-  - rely on the branch-head check, `last_commit_id` per file and the post-commit parent check;
-  - make the fake reproduce GitLab's refusal.
-- **Acceptance:** the five GitLab end-to-end tests fail on `dev` with the strict fake and pass with the fix; a real merge request opens on the field cluster.
-
-### A.2 F-11: an Argo CD app reading a chart from an upstream Git repository targets the upstream repository (lane: gitops)
-- `_git_values_binding_source` (`gitops/discovery/argo.py`) switches to the values source only for Helm-repository charts. For a chart read from a Git `path` whose values all come from one `$ref` source, the edit target must be the values source.
-- The suggestion screen must never offer a repository that only provides a chart.
-- The maintainer's local branch also carries this fix and the test `test_argo_upstream_git_chart_binds_to_the_ref_values_source`.
-
-### A.3 F-02: Argo CD apps "chart + values + manifests" are ambiguous (lane: gitops)
-- 31 of 56 workloads are `ambiguous / conflicting-equal-priority-source-units`: the chart source and a `path` source holding only HTTPRoutes or ConfigMaps are both candidate owners.
-- **Fix:**
-  - break the tie with evidence: Helm ownership labels and annotations on the workload (`helm.sh/chart`, `app.kubernetes.io/managed-by: Helm`, `meta.helm.sh/release-name`), and whether the `path` source actually renders a resource of that kind and name;
-  - make the `greenkube.cloud/helm-values-mapping` annotation with `source_index` override `forced_status` (`argo.py` around 130 and 528);
-  - keep failing closed when the evidence is really ambiguous.
-- **Acceptance:** a fixture of the field pattern (chart from a Helm repository, `ref: values`, `path: .../manifests` with non-workload kinds) binds the workloads to the values source.
-
-### A.4 F-03: projected savings about 550 times too low after an upgrade from 0.3.x (lane: impact)
-- `baseline_sql` (`storage/workload_usage_sql.py`) sums `cost_cpu` and `cost_ram` (NULL on hours re-aggregated from 0.3.x rows, which only carry `total_cost`). It then divides by `SUM(duration_seconds)` over all hours. As a result, `impact/model.py` treats the component as known and does not reallocate `total_cost`.
-- **Fix:** divide each component by the duration of the rows that carry it; when a share of the hours has no split, reallocate `total_cost` for those hours with the node's CPU/RAM price ratio; and record the share on the projection.
-- **Acceptance:** a lookback mixing split and unsplit hours gives the same unit prices as the split hours alone, within 1 %.
-
-### A.5 F-12: VPA and KRR floors and VPA immaturity distort the consensus (lane: signals)
-- **Tool floors:**
-  - KRR `simple` has a 100 Mi memory floor; the Fairwinds VPA chart has 100 MB and 15m;
-  - with the `safest` policy these floors win: 51 of 94 memory recommendations sat exactly on 100 Mi, 13 of them increases;
-  - a value equal to a known tool minimum is not a signal of need: ignore it as a vote, or never let it win over a measured native proposal;
-  - make the known floors configurable per source.
-- **VPA maturity:** read `status.conditions` and the checkpoint `totalSamplesCount`, and ignore a VPA vote until it is mature (configurable, default 24 hours of samples). Ignore changes below a minimum (for example 5 % and 10m or 16 Mi).
-- **Source-only recommendations:**
-  - an external source alone, with no native measurement of the target, never creates an active recommendation (78 KRR-only recommendations flooded the list);
-  - it stays visible as a signal on the Sources page.
-- **Acceptance:** the field scenarios become tests (seaweedfs-volume: native 42 Mi, VPA and KRR 100 Mi, retained value 42 Mi plus headroom; csi-nfs sidecar: no recommendation from KRR alone).
-
-### A.6 F-09: the UI is unusable in `apiAuthMode: api_key` (lane: auth)
-- The login form shows no field: `password: false` and no API-key input.
-- **Fix:** in `api_key` mode, show an API-key field. Also add an upgrade note: a 0.3.1 install in `api_key` mode keeps browser access through the key, or should move to `session`.
-- **Acceptance:** a frontend test for `api_key` mode, and an API test that the key logs in.
-
-### A.7 Other field issues
-| ID | Issue | Fix | Lane |
-|---|---|---|---|
-| F-04 | kubeadm static pods appear as `Node` workloads (12 of 84 recommendations; an HPA proposed for a node) | Exclude mirror pods (`kubernetes.io/config.mirror` annotation, owner `Node`) from rightsizing, with a diagnostic. Same as audit REC-09. | recommendations |
-| F-05 | Rewritten values files are wrapped at 80 columns | Set `yaml.width = 4096` in `gitops/planning/helm.py` like the other planners. Golden test. | gitops |
-| F-06 | False Prometheus ERROR at each controller start | Run discovery before the first instant query (`collectors/prometheus_collector.py` around 75), as `collect_range` does. | collection |
-| F-07 | `can_open_pr: true` but plan creation refuses (`policy_evidence_missing`, `sample_count_coverage`) | Eligibility must evaluate the same policy gates as plan creation: one shared function, and a test that the two agree. | recommendations |
-| F-08 | `singleton_workload` warning on a 3-replica StatefulSet | Read the replica count from the spec or observed replicas, not from one pod. Test. | recommendations |
-| F-10 | Small items | <ul><li>Chart version and UI banner still say 0.3.1;</li><li>NOTES suggest the default credentials Secret when a provider is configured;</li><li>`metrics-compression` shows `runs: 0` after its first pass;</li><li>`cloudProvider: on-premise` has no PUE profile;</li><li>`defaultZone` warns once per node and collection (log it once at start);</li><li>cancel returns `stale` and drops `cancelled_by_user`.</li></ul> | various |
-| F-13 | Default allowlist `["@discovered"]` allowed a public third-party repository | With F-11, never auto-allow a repository discovered only as a chart source. Document the default. | gitops |
+| Task | What was done | Branch |
+|---|---|---|
+| A.0 | WP-05 (raw/hourly seam, dirty-hour rebuild with PostgreSQL locking, idle share kept and exposed, faithful hourly rows) and WP-04 (Boavizta embodied values, live intensity per zone, one power model, CPU outside pods, GPUs without DCGM, shared hosts in collection, recompute and projection) | `fix/rollups-reads`, `fix/energy-carbon` |
+| A.1 (F-01) | GitLab commits no longer send `start_sha`; the fake GitLab server now refuses what GitLab refuses (stale `last_commit_id`, existing file, missing file); a commit without a parent list fails closed | `fix/gitlab-commit-existing-branch` |
+| A.2 (F-11, F-13) | A Git chart whose values come from one `$ref` source in another repository is bound to the values repository and blocked as `cross-repository-git-chart` (planning such charts is not supported); repositories that only serve a chart are never suggested or auto-allowed | `fix/gitlab-commit-existing-branch` |
+| A.3 (F-02), F-05 | Ties broken by Helm ownership labels or the `helm-values-mapping` annotation, with a plan-time check that no manifests directory declares the same workload (Jsonnet fails closed); one normalized repository identity; values files no longer wrapped | `fix/argo-multi-source-binding` |
+| A.4 (F-03) | Each CPU/RAM cost component is priced over the hours that carry it, for samples and for node prices; zero-cost hours count as zero, so a projection never exceeds the observed cost; Impact Model 4.0.0 | `fix/projection-unsplit-cost` |
+| A.5 (F-12) | Tool floors ignored as votes (configurable), immature VPAs ignored, changes below a minimum count as "keep", no recommendation from an external source alone, plugins cannot pose as native | `fix/signal-floors-maturity` |
+| A.5 follow-up | An OOM-driven native memory increase is a floor under every consensus policy; malformed request signals are rejected at push time and dropped from consensus | `fix/oom-floor-consensus` |
+| A.6 (F-09) | API-key sign-in in the UI with a signed, expiring cookie (never the key), per-key throttling, HTTPS required (or the chart's secure-cookie setting, or loopback), sign-out for key sessions | `fix/api-key-login` |
+| A.7 (F-04, F-07, F-08) | Static pods excluded with a diagnostic; eligibility and plan creation share one policy gate function; replicas counted at the hour's latest step, so a rollout does not hide a singleton; per-replica p95 guard correct on the rollup path; batched sibling lookups | `fix/recommendation-field-issues` |
+| A.7 (F-06, F-10) | Prometheus discovered before the first query; one version source with a check; NOTES per provider Secret; loop counters for startup passes; on-premises PUE; default-zone fallback logged once; a user cancel ends in `cancelled` with its reason | `fix/field-small-issues` |
 
 ### A.8 First measured verdicts on the field cluster
 After A.1 to A.5, open merge requests for the eligible recommendations (metrics-server, seaweedfs, superset, opencost, datahub...), merge them, and wait for the baseline (7 days) and post-window (5 days).
@@ -206,6 +160,17 @@ After A.1 to A.5, open merge requests for the eligible recommendations (metrics-
 - any inconclusive reason.
 
 Every surprise becomes an issue in this roadmap. **This is the release gate of phase E.**
+
+### A.9 Follow-ups found during phase A (lane noted; do before or with phase D)
+- **Test hygiene (lane: tests, in progress):** pytest runs can hang at exit on a leaked non-daemon thread (an unclosed `aiosqlite` connection or executor). Fix the leak and keep a session-end guard (`fix/test-thread-leak`).
+- **Bearer key guessing (lane: auth):** wrong Bearer keys are not login-throttled; only the global rate limit applies. Generated keys are 256-bit, so the risk is low, but an operator-chosen bootstrap key is not. Throttle failed Bearer attempts per IP.
+- **Idle share (lane: API, with WP-10):** still missing from `/report/export`, the Prometheus gauges and the Footprint UI (WP-05.3).
+- **Untrusted cost hours (lane: measurement):** expose `untrusted_cost_hours` per change (MEA-05 rest).
+- **Hourly provenance (lane: storage, with C.3):** the hourly tables do not keep `embodied_source` or `gpu_source`.
+- **Shared-host history (lane: impact):** rows collected before migration 0183 on kind, k3d or multi-node minikube cannot be split per host on recompute; use the current snapshot ids of the same node when the historical snapshot has none.
+- **Energy findings left (lane: impact):** NRG-14 (operators set server power: annotation, node profiles, measured tier), NRG-16 (Wattnet 15-minute points, proxy zones), NRG-17 (doc and code drift, PUE overrides), the NRG-13 UI badge.
+- **Upgrade hour (lane: storage):** the hourly rollup of the single upgrade hour from 0.3.x still sums split and unsplit 5-minute cost rows.
+- **Cross-repository Git charts (lane: gitops):** blocked with a clear reason; planning them (chart in one repository, values in another) is a feature to design.
 
 ## 5. Phase B: cut the scope
 
@@ -338,7 +303,7 @@ The appendix lists all 173 audit findings with their status:
 - to re-check after C.3;
 - open.
 
-Open findings are done in this order, each with its audit fix specification:
+Open findings and the A.9 follow-ups are done in this order, each with its audit fix specification:
 1. **WP-10 (API and exposition):** API-01, API-02, API-09, API-13, API-08, API-10, API-11, API-07 and API-14; after B.7 trims the exposition.
 2. **Remaining WP-01 tasks:**
    - pod metadata gaps and the repair migration;
@@ -396,7 +361,6 @@ Open findings are done in this order, each with its audit fix specification:
 Status meanings:
 - **addressed on dev (WP-x.y):** the task of the previous roadmap revision that covers the finding was implemented, independently reviewed and merged. Its acceptance tests are in the suite. It has not yet been confirmed on a real cluster.
 - **partly addressed:** the note says what is missing.
-- **branch (not merged):** the work is on a stopped branch (A.0).
 - **obsolete:** the subject leaves the product (section 2.1).
 - **open; re-check after C3:** to re-check once the storage tiers of C.3 land.
 - **open:** to do in phase D.
@@ -474,32 +438,32 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-03 | COST-12 | low | Projections read every stored positive cost as an observed cost: default-rate rows get confidence 0.7 instead of 0.5 ... | open |
 | WP-03 | COST-11 | low | Currencies are labels, not checked values: the USD default rates are relabelled with IMPACT_PRICING_CURRENCY, OpenCos... | open |
 | WP-03 | COST-08 | medium | Cost provenance stops at the database: the API and UI show one cost figure that mixes OpenCost costs, list prices, ge... | open |
-| WP-04 | NRG-01 | critical | The Boavizta response model does not match the real API (gwp.embedded/use are objects), so every lookup fails and eve... | branch fix/energy-carbon (not merged) |
-| WP-04 | NRG-03 | high | The hourly carbon-intensity job never fetches DEFAULT_ZONE: clusters whose nodes carry no mappable zone/region label ... | branch fix/energy-carbon (not merged) |
-| WP-04 | NRG-04 | high | The bundled zone-default intensity table is a one-day snapshot with 251 of 349 zones empty and malformed rows (ES, SE... | branch fix/energy-carbon (not merged) |
-| WP-04 | NRG-05 | high | Projections use a different node power model from collection: for every node without a bundled instance profile the p... | branch fix/energy-carbon (not merged) |
-| WP-04 | NRG-12 | medium | Node CPU utilisation is the sum of pod CPU only: kubelet, container runtime, kernel and other non-pod CPU are ignored... | branch fix/energy-carbon (not merged) |
-| WP-04 | NRG-13 | medium | GPU energy is counted only when DCGM series exist; GPU nodes without the DCGM exporter are neither detected nor flagg... | branch fix/energy-carbon (not merged) |
-| WP-04 | NRG-15 | medium | Nodes that share one physical host (kind, k3d, minikube multi-node, nested clusters) are each charged the full host c... | branch fix/energy-carbon (not merged) |
+| WP-04 | NRG-01 | critical | The Boavizta response model does not match the real API (gwp.embedded/use are objects), so every lookup fails and eve... | addressed on dev (WP-04.1) |
+| WP-04 | NRG-03 | high | The hourly carbon-intensity job never fetches DEFAULT_ZONE: clusters whose nodes carry no mappable zone/region label ... | addressed on dev (WP-04.2) |
+| WP-04 | NRG-04 | high | The bundled zone-default intensity table is a one-day snapshot with 251 of 349 zones empty and malformed rows (ES, SE... | addressed on dev (WP-04.2) |
+| WP-04 | NRG-05 | high | Projections use a different node power model from collection: for every node without a bundled instance profile the p... | addressed on dev (WP-04.3) |
+| WP-04 | NRG-12 | medium | Node CPU utilisation is the sum of pod CPU only: kubelet, container runtime, kernel and other non-pod CPU are ignored... | partly addressed on dev (WP-04.4): NRG-12 and NRG-15 done; NRG-13 done except the UI badge |
+| WP-04 | NRG-13 | medium | GPU energy is counted only when DCGM series exist; GPU nodes without the DCGM exporter are neither detected nor flagg... | partly addressed on dev (WP-04.4): NRG-12 and NRG-15 done; NRG-13 done except the UI badge |
+| WP-04 | NRG-15 | medium | Nodes that share one physical host (kind, k3d, minikube multi-node, nested clusters) are each charged the full host c... | partly addressed on dev (WP-04.4): NRG-12 and NRG-15 done; NRG-13 done except the UI badge |
 | WP-04 | NRG-14 | medium | On-prem and bare-metal nodes are modelled with hyperscaler per-vCPU averages and the operator cannot supply real serv... | open |
 | WP-04 | NRG-16 | low | Wattnet's 15-minute intensities are stored but only the :00 point of each hour is ever used (default hour normalisati... | open |
 | WP-04 | NRG-17 | low | Methodology docs and code disagree, and dead legacy estimator code with a different model is still shipped. | open |
-| WP-05 | ROL-01 | high | Every reader that combines raw and hourly tables splits at wall-clock now - METRICS_COMPRESSION_AGE_HOURS instead of ... | branch fix/rollups-reads (not merged) |
-| WP-05 | RECON-03 | high | Every aggregate that spans the raw/hourly boundary uses `now - METRICS_COMPRESSION_AGE_HOURS` instead of the compress... | branch fix/rollups-reads (not merged) |
-| WP-05 | API-03 | high | Every API aggregate that spans more than 24 hours reads hourly rows up to wall-clock now - 24 h and raw rows after it... | branch fix/rollups-reads (not merged) |
-| WP-05 | MEA-18 | low | read_combined_metrics_smart splits raw and hourly data at a cutoff that is not hour-aligned, so each measurement read... | branch fix/rollups-reads (not merged) |
-| WP-05 | ROL-02 | high | Rows written or updated in an already compressed hour never reach combined_metrics_hourly / container_metrics_hourly ... | branch fix/rollups-reads (not merged) |
-| WP-05 | STO-02 | medium | Hourly compression is not bounded by the collection watermark in production (the provider is never passed), so hours ... | branch fix/rollups-reads (not merged) |
-| WP-05 | RECON-02 | high | Raw rows written into an already compressed hour (late backfill, greenkube start --last, greenkube recompute, repaire... | branch fix/rollups-reads (not merged) |
-| WP-05 | NRG-02 | high | Cluster totals (API, UI Footprint page, yearly report) silently exclude the node __idle__ share; idle rows are write-... | branch fix/rollups-reads (not merged) |
-| WP-05 | ROL-07 | medium | node_idle_metrics has no hourly aggregate and is deleted with raw retention, so node totals (pods + idle) cannot be r... | branch fix/rollups-reads (not merged) |
-| WP-05 | NRG-09 | medium | The intensity consolidation recompute updates pod and container rows but not node_idle_metrics, so idle rows keep the... | branch fix/rollups-reads (not merged) |
-| WP-05 | COST-13 | low | Idle cost is always priced with the model, does not reconcile with OpenCost pod costs (pods + idle differ from the no... | branch fix/rollups-reads (not merged) |
-| WP-05 | API-04 | high | No API total, chart, breakdown, report or Prometheus series includes the node idle share (node_idle_metrics is read b... | branch fix/rollups-reads (not merged) |
-| WP-05 | RECON-13 | low | Node idle rows have no hourly aggregate and are deleted at raw retention, and the carbon-intensity recompute skips th... | branch fix/rollups-reads (not merged) |
-| WP-05 | ROL-03 | high | Change measurements built from compressed hourly rows overstate cost rate, replicas and core-hours for every hour in ... | branch fix/rollups-reads (not merged) |
-| WP-05 | MEA-05 | high | One untrusted cost sample makes the whole pod-hour untrusted once the hour is compressed (cost_source becomes 'mixed'... | branch fix/rollups-reads (not merged) |
-| WP-05 | MEA-04 | high | Hour buckets built from hourly rollup rows (all production data older than 24 h) take the longest single pod as the c... | branch fix/rollups-reads (not merged) |
+| WP-05 | ROL-01 | high | Every reader that combines raw and hourly tables splits at wall-clock now - METRICS_COMPRESSION_AGE_HOURS instead of ... | addressed on dev (WP-05.1) |
+| WP-05 | RECON-03 | high | Every aggregate that spans the raw/hourly boundary uses `now - METRICS_COMPRESSION_AGE_HOURS` instead of the compress... | addressed on dev (WP-05.1) |
+| WP-05 | API-03 | high | Every API aggregate that spans more than 24 hours reads hourly rows up to wall-clock now - 24 h and raw rows after it... | addressed on dev (WP-05.1) |
+| WP-05 | MEA-18 | low | read_combined_metrics_smart splits raw and hourly data at a cutoff that is not hour-aligned, so each measurement read... | addressed on dev (WP-05.1) |
+| WP-05 | ROL-02 | high | Rows written or updated in an already compressed hour never reach combined_metrics_hourly / container_metrics_hourly ... | addressed on dev (WP-05.2) |
+| WP-05 | STO-02 | medium | Hourly compression is not bounded by the collection watermark in production (the provider is never passed), so hours ... | addressed on dev (WP-05.2) |
+| WP-05 | RECON-02 | high | Raw rows written into an already compressed hour (late backfill, greenkube start --last, greenkube recompute, repaire... | addressed on dev (WP-05.2) |
+| WP-05 | NRG-02 | high | Cluster totals (API, UI Footprint page, yearly report) silently exclude the node __idle__ share; idle rows are write-... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
+| WP-05 | ROL-07 | medium | node_idle_metrics has no hourly aggregate and is deleted with raw retention, so node totals (pods + idle) cannot be r... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
+| WP-05 | NRG-09 | medium | The intensity consolidation recompute updates pod and container rows but not node_idle_metrics, so idle rows keep the... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
+| WP-05 | COST-13 | low | Idle cost is always priced with the model, does not reconcile with OpenCost pod costs (pods + idle differ from the no... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
+| WP-05 | API-04 | high | No API total, chart, breakdown, report or Prometheus series includes the node idle share (node_idle_metrics is read b... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
+| WP-05 | RECON-13 | low | Node idle rows have no hourly aggregate and are deleted at raw retention, and the carbon-intensity recompute skips th... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
+| WP-05 | ROL-03 | high | Change measurements built from compressed hourly rows overstate cost rate, replicas and core-hours for every hour in ... | addressed on dev (WP-05.4) |
+| WP-05 | MEA-05 | high | One untrusted cost sample makes the whole pod-hour untrusted once the hour is compressed (cost_source becomes 'mixed'... | addressed on dev (WP-05.4) |
+| WP-05 | MEA-04 | high | Hour buckets built from hourly rollup rows (all production data older than 24 h) take the longest single pod as the c... | addressed on dev (WP-05.4) |
 | WP-05 | ROL-04 | medium | Lookback usage percentiles used for rightsizing are nearest-rank percentiles of hourly percentiles, and with a 5-minu... | open; re-check after C3 |
 | WP-05 | REC-07 | medium | Lookback 'p95/p99' are nearest-rank percentiles of hourly percentiles (themselves nearly hourly maxima), so the value... | open |
 | WP-05 | ROL-11 | low | A usage-rollup hour rebuilt from compressed rows uses each pod's hourly maximum as its only point, so p50-p99 of that... | open; re-check after C3 |
@@ -526,7 +490,7 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-06 | REC-13 | medium | Evidence coverage_ratio divides replica-samples by single-series expected steps, so a workload with N replicas report... | open |
 | WP-06 | REC-15 | medium | Native rightsizing ignores HorizontalPodAutoscalers: a CPU/memory request change on an HPA-scaled workload moves the ... | open |
 | WP-06 | REC-17 | low | The minimum-request floor is applied to increases after the step cap, so containers with tiny requests get 'reliabili... | open |
-| WP-06 | REC-09 | medium | Static (mirror) control-plane pods are merged into one fake workload 'Node/<node name>' and receive rightsizing and '... | open |
+| WP-06 | REC-09 | medium | Static (mirror) control-plane pods are merged into one fake workload 'Node/<node name>' and receive rightsizing and '... | addressed on dev (F-04) |
 | WP-06 | REC-10 | medium | Zombie and idle-namespace detection compare an absolute energy total over a variable window (1000 J) instead of a rat... | obsolete: zombie and idle-namespace analyzers removed |
 | WP-06 | REC-11 | medium | Off-peak 'scale to zero N h/day' recommendations are issued from a single day of data (6 samples in total suffice): e... | obsolete: off-peak analyzer removed |
 | WP-06 | REC-14 | medium | AUTOSCALING_CANDIDATE is driven by relative noise on near-zero CPU: 3 samples suffice, there is no minimum absolute u... | obsolete: autoscaling-candidate analyzer removed |
