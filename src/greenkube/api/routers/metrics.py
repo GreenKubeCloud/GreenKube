@@ -7,7 +7,7 @@ import base64
 import binascii
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -141,6 +141,35 @@ async def metrics_summary(
     return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3, **idle_fields)
 
 
+def _bucket_start(label) -> Optional[datetime]:
+    """Start of a time-series bucket from its label (a datetime or an ISO string)."""
+    if isinstance(label, datetime):
+        return label if label.tzinfo else label.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(label).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+async def _drop_partial_idle_buckets(repo: CombinedMetricsRepository, idle_by_bucket: dict) -> None:
+    """Remove the idle share of a bucket that starts before the idle history and has earlier pod rows.
+
+    Such a bucket (the one that straddles ``idle_data_since``) would show an
+    idle share, and a cluster total, covering only part of it (NRG-02 review).
+    """
+    since = await repo.idle_data_since()
+    if since is None:
+        return
+    for label in list(idle_by_bucket):
+        start = _bucket_start(label)
+        if start is None or start >= since:
+            continue
+        before = await repo.aggregate_summary(start_time=start, end_time=since, namespace=None)
+        if before.get("row_count"):
+            del idle_by_bucket[label]
+
+
 async def idle_history_gap(
     repo: CombinedMetricsRepository, start: datetime, end: datetime
 ) -> tuple[Optional[datetime], bool]:
@@ -215,6 +244,8 @@ async def metrics_timeseries(
         }
         for row in idle_rows
     }
+    if idle_by_bucket:
+        await _drop_partial_idle_buckets(repo, idle_by_bucket)
     by_bucket = {row["timestamp"]: row for row in rows}
     empty = {"co2e_grams": 0.0, "embodied_co2e_grams": 0.0, "total_cost": 0.0, "energy_joules": 0.0}
     for bucket in idle_by_bucket.keys() - by_bucket.keys():
