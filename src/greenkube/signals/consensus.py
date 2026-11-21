@@ -28,6 +28,10 @@ the others (the former ``dedup.arbitrate``).
   :attr:`Consensus.ignored_votes`. A container-resources group without a
   native (GreenKube-measured) ballot never becomes a recommendation: an
   external source alone stays a signal.
+* A native increase with a ``floor_reason`` (``oom_kills``: an OOM kill proves
+  the need) is a lower bound under every policy: no external ballot can bring
+  the consolidated value below it (:func:`native_floor`). The floor is recorded
+  in :attr:`Consensus.floor`, with ``applied`` true when it raised the value.
 * A :class:`ConsensusPolicy` picks the consolidated proposal:
 
   ``safest`` (default)
@@ -187,6 +191,8 @@ class Ballot:
     current: Optional[int] = None
     #: Caller data carried through (the engine passes the source's v1 recommendation).
     payload: Any = None
+    #: Why this ballot is a lower bound of the consensus (``oom_kills``); only honoured on a native increase.
+    floor_reason: Optional[str] = None
 
     @property
     def source_id(self) -> str:
@@ -226,6 +232,7 @@ def ballots_for_signal(
     source: Optional[str] = None,
     payload: Any = None,
     payload_kind: Optional[str] = None,
+    floor_reason: Optional[str] = None,
 ) -> List[Ballot]:
     """The ballots of one signal.
 
@@ -234,6 +241,8 @@ def ballots_for_signal(
     own groups). ``payload_kind`` restricts it to the resource of a v1 finding
     kind, so a built-in source's v1 recommendation is only ever the base of
     its own group. Any other proposal is one ballot in its finding kind's group.
+    ``floor_reason`` marks the numeric ballots as a consensus lower bound
+    (:func:`native_floor`: honoured only on a native increase).
     """
     group_source = source or signal.provenance.legacy_source or signal.source_id
     family = engine_family(signal)
@@ -262,6 +271,7 @@ def ballots_for_signal(
                     value=int(value),
                     current=getattr(proposal.current, resource),
                     payload=payload,
+                    floor_reason=floor_reason,
                 )
             )
         if ballots:
@@ -275,6 +285,9 @@ NATIVE_SOURCE = "greenkube"
 #: Capabilities whose groups need a native ballot to become a recommendation (A.5).
 NATIVE_MEASURED_CAPABILITIES = frozenset({Capability.CONTAINER_REQUESTS, Capability.CONTAINER_LIMITS})
 
+#: Group kinds that compare numeric request or limit values: a non-numeric ballot there is dropped.
+VALUE_GROUP_KINDS = frozenset({*REQUEST_RESOURCE_KINDS.values(), *LIMIT_RESOURCE_KINDS.values()})
+
 #: Known minimum each tool applies to its proposals, per engine family (``SIGNAL_TOOL_FLOORS``):
 #: KRR ``simple`` (``--mem-min 100``, ``--cpu-min 10``) and the Fairwinds VPA chart
 #: (``pod-recommendation-min-memory-mb: 100``, ``pod-recommendation-min-cpu-millicores: 15``).
@@ -285,10 +298,16 @@ DEFAULT_TOOL_FLOORS: Dict[str, Dict[str, int]] = {
 #: Families whose floor applies per pod and is split evenly between its containers (the VPA recommender).
 PER_POD_FLOOR_FAMILIES = frozenset({"vpa"})
 
+#: ``floor_reason`` of a native memory increase driven by OOM kills (the analyzer's ``oom_kills`` trigger).
+OOM_FLOOR_REASON = "oom_kills"
+
 #: Why an external ballot was set aside.
 IGNORED_TOOL_FLOOR = "tool_floor"
 IGNORED_MIN_CHANGE = "below_min_change"
 IGNORED_MATURITY_UNKNOWN = "maturity_unknown"
+#: A container requests or limits ballot without a value for the group's resource (a limit-only,
+#: advisory or replicas proposal): compared by identity it would turn the whole group categorical.
+IGNORED_NOT_NUMERIC = "not_numeric"
 
 
 def maturity_unknown(ballot: "Ballot") -> bool:
@@ -408,8 +427,26 @@ class IgnoredVote(BaseModel):
     source_id: str
     signal_id: str
     value: Optional[int] = None
-    #: ``tool_floor``, ``below_min_change`` (still a "keep" vote at the current value) or ``maturity_unknown``.
+    #: ``tool_floor``, ``below_min_change`` (still a "keep" vote at the current value), ``maturity_unknown``
+    #: or ``not_numeric`` (a container requests or limits proposal without a value for the resource).
     reason: str
+
+
+class ConsensusFloor(BaseModel):
+    """A native increase that bounds the consolidated value from below (an OOM-driven memory increase)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    source_id: str
+    signal_id: str
+    #: The floor: the native proposal.
+    value: int
+    #: Why it is a floor (``oom_kills``).
+    reason: str
+    #: The value the policy picked before the floor.
+    policy_value: Optional[int] = None
+    #: True when the floor raised the policy's value.
+    applied: bool = False
 
 
 class ConsensusVote(BaseModel):
@@ -462,6 +499,8 @@ class Consensus(BaseModel):
     last_known: Dict[str, int] = Field(default_factory=dict)
     #: External proposals set aside before the policy ran (tool floors, insignificant changes, A.5).
     ignored_votes: List[IgnoredVote] = Field(default_factory=list)
+    #: The native lower bound of the group (an OOM-driven increase), whether or not it changed the value.
+    floor: Optional[ConsensusFloor] = None
 
     @property
     def confidence_bonus(self) -> float:
@@ -483,6 +522,8 @@ class Consensus(BaseModel):
         ]
         text = " · ".join(parts) + f" → {fmt(self.resource, self.value)}"
         text += f" ({self.policy}, agreement {self.agreement:.2f}"
+        if self.floor is not None and self.floor.applied:
+            text += f", {self.floor.reason} floor {fmt(self.resource, self.floor.value)}"
         return text + (", contested)" if self.contested else ")")
 
 
@@ -761,6 +802,61 @@ def _unique(items) -> List[str]:
     return result
 
 
+def native_floor(ballots: Sequence[Ballot]) -> Optional[Ballot]:
+    """The highest native increase marked as a lower bound (``floor_reason``), or None.
+
+    Only GreenKube's own measurement can prove a need (an OOM kill): a marker
+    on an external ballot, or on a native decrease, is ignored.
+    """
+    floors = [
+        ballot
+        for ballot in ballots
+        if ballot.floor_reason
+        and is_native(ballot)
+        and ballot.numeric
+        and ballot.current is not None
+        and int(ballot.value or 0) > ballot.current
+    ]
+    return max(floors, key=lambda ballot: int(ballot.value or 0)) if floors else None
+
+
+def _apply_floor(outcome: ConsensusOutcome, floor: Ballot) -> None:
+    """Raises the outcome's value to the native floor when the policy chose less, and records the floor."""
+    consensus = outcome.consensus
+    if consensus.resource is None or consensus.resource != floor.resource or floor.value is None:
+        return
+    policy_value = consensus.value
+    applied = policy_value is None or policy_value < floor.value
+    consensus.floor = ConsensusFloor(
+        source_id=floor.source_id,
+        signal_id=floor.signal.signal_id,
+        value=floor.value,
+        reason=str(floor.floor_reason),
+        policy_value=policy_value,
+        applied=applied,
+    )
+    if not applied:
+        return
+    value = floor.value
+    # The native record carries the OOM explanation and projection: it is the base even when an
+    # external ballot proposes the same value (that source stays in chosen_from).
+    chosen = floor
+    outcome.chosen = chosen
+    consensus.value = value
+    consensus.chosen_from = _unique(ballot.source_id for ballot in outcome.ballots if ballot.value == value)
+    for vote in consensus.votes:
+        vote.supports_chosen = vote.value == value
+    consensus.source_ids = _unique([chosen.source_id, *consensus.source_ids])
+    logger.info(
+        "Consensus for %s: the %s policy chose %s below the native %s floor %s; the floor holds.",
+        outcome.key,
+        consensus.policy,
+        policy_value,
+        floor.floor_reason,
+        value,
+    )
+
+
 def group_ballots(ballots: Sequence[Ballot]) -> "OrderedDict[GroupKey, List[Ballot]]":
     """Ballots by group, in order of first appearance."""
     groups: "OrderedDict[GroupKey, List[Ballot]]" = OrderedDict()
@@ -784,7 +880,11 @@ def consolidate(
     ``ignored_votes``: a tool floor or a decrease of unknown maturity under a
     policy other than ``safest`` is dropped, a change below the minimum votes
     "keep the current value". A container-resources group without a native
-    ballot produces no outcome: its signals stay signals.
+    ballot produces no outcome: its signals stay signals. In a request or
+    limit group with numeric ballots, a ballot without a value for the
+    resource is listed as ``not_numeric`` and dropped before the policy runs. A native increase
+    marked as a floor (an OOM-driven one, :func:`native_floor`) is a lower
+    bound of the value under every policy.
     """
     outcomes = []
     source_only = 0
@@ -794,6 +894,26 @@ def consolidate(
         if not admitted:
             continue
         ignored: List[IgnoredVote] = []
+        if (
+            admitted[0].signal.capability in NATIVE_MEASURED_CAPABILITIES
+            and admitted[0].kind in VALUE_GROUP_KINDS
+            and any(ballot.numeric for ballot in admitted)
+        ):
+            # A ballot without a value for the resource would turn a numeric group categorical.
+            numeric = []
+            for ballot in admitted:
+                if ballot.numeric:
+                    numeric.append(ballot)
+                    continue
+                ignored.append(
+                    IgnoredVote(
+                        source_id=ballot.source_id,
+                        signal_id=ballot.signal.signal_id,
+                        value=ballot.value,
+                        reason=IGNORED_NOT_NUMERIC,
+                    )
+                )
+            admitted = numeric
         if screen is not None:
             if (
                 screen.require_native
@@ -832,6 +952,9 @@ def consolidate(
                 continue
         outcome = combine(admitted, policy, priorities=priorities, weight_for=weight_for)
         outcome.consensus.ignored_votes = ignored
+        floor = native_floor(admitted)
+        if floor is not None:
+            _apply_floor(outcome, floor)
         outcomes.append(outcome)
     if source_only:
         logger.info(

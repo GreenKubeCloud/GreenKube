@@ -39,6 +39,7 @@ from greenkube.signals.model import (
     SourceSignal,
     TargetRef,
     TimeWindow,
+    missing_resource_value,
     trim_raw,
 )
 
@@ -208,6 +209,16 @@ def parse_batch(
                     pointer=f"/signals/{index}/target/namespace",
                     message=f"a {kind} target needs its namespace",
                     type="missing_namespace",
+                )
+            )
+        missing = missing_resource_value(pushed.capability, pushed.proposal, pushed.kind)
+        if missing is not None:
+            errors.append(
+                PointerError(
+                    pointer=f"/signals/{index}/proposal"
+                    + ("/proposed" if getattr(pushed.proposal, "kind", None) == "container_resources" else ""),
+                    message=missing,
+                    type="missing_resource_value",
                 )
             )
         uid = pushed.target.cluster_uid

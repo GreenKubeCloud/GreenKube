@@ -24,6 +24,7 @@ from greenkube.core.optimization.targeting import owner_fields, scope_for_target
 from greenkube.impact.projector import ImpactProjector, impact_fields
 from greenkube.models.metrics import Recommendation, RecommendationType
 from greenkube.models.workload_usage import POD_LEVEL
+from greenkube.signals.consensus import OOM_FLOOR_REASON
 
 if TYPE_CHECKING:
     from greenkube.core.config import Config
@@ -362,6 +363,10 @@ class MemoryRightsizingAnalyzer(Analyzer):
                     priority=priority,
                     current_memory_request_bytes=proposal.current,
                     recommended_memory_request_bytes=proposal.proposed,
+                    # An OOM kill proves the need: the increase is a lower bound of every consensus policy.
+                    floor_reason=OOM_FLOOR_REASON
+                    if proposal.direction == "increase" and "oom_kills" in proposal.triggers
+                    else None,
                     **impact_fields(delta),
                 )
             )

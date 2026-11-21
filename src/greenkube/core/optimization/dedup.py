@@ -281,6 +281,7 @@ def apply_consensus_assessment(recs: Sequence[Recommendation], config: "Config")
 
 
 def ballots_for_entries(entries: Sequence[SignalEntry]) -> List[Ballot]:
+    """The consensus ballots of every entry, carrying each v1 recommendation's floor marker."""
     ballots: List[Ballot] = []
     for signal, source, rec in entries:
         ballots.extend(
@@ -289,6 +290,8 @@ def ballots_for_entries(entries: Sequence[SignalEntry]) -> List[Ballot]:
                 source=source,
                 payload=rec,
                 payload_kind=_type_value(rec) if rec is not None else None,
+                # A native analyzer marks an OOM-driven increase as a consensus lower bound.
+                floor_reason=getattr(rec, "floor_reason", None) if rec is not None else None,
             )
         )
     return ballots
@@ -421,6 +424,10 @@ def materialize(outcome: ConsensusOutcome, refine: Optional[Refine] = None) -> O
         )
     if restated:
         rec = _describe(rec, outcome)
+    elif consensus.floor is not None and consensus.floor.applied:
+        # The record is the native one, but the policy chose less: say the OOM floor held.
+        note = f"Consensus across sources: {consensus.summary()}."
+        rec = rec.model_copy(update={"reason": f"{rec.reason} {note}" if rec.reason else note})
 
     update: Dict[str, Any] = {
         "source": coerce_recommendation_source(chosen.source),
@@ -603,6 +610,9 @@ def apply_revision_hysteresis(
     Until then the stored advice is held and ``pending_revision`` records the
     candidate and its count, so proposals that alternate between two values
     never flip the revision at every scan.
+
+    A stored value below the native OOM floor of the new proposal
+    (``consensus.floor`` or an OOM-driven ``floor_reason``) is never held.
     """
     cpu_floor = getattr(config, "RECOMMENDATION_MIN_CPU_MILLICORES", None) if config is not None else None
     by_fingerprint = {record.fingerprint: record for record in previous if record.fingerprint}
@@ -617,6 +627,10 @@ def apply_revision_hysteresis(
         resource, _current, proposed, stored = change
         floor = cpu_floor if resource == "cpu_request_m" else None
         if proposed == stored:
+            held.append(rec)
+            continue
+        if proposed > stored and _floor_value(rec) is not None and stored < int(_floor_value(rec) or 0):
+            # An OOM-driven increase is a lower bound: a stored value below it is never held.
             held.append(rec)
             continue
         if proposed > stored:
@@ -648,6 +662,18 @@ def apply_revision_hysteresis(
         )
         held.append(_hold(rec, before, {"value": proposed, "scans": scans}))
     return held
+
+
+def _floor_value(rec: Recommendation) -> Optional[int]:
+    """The native lower bound of a consolidated request (``consensus.floor``, else the OOM increase itself)."""
+    floor = (rec.consensus or {}).get("floor") if isinstance(rec.consensus, dict) else None
+    if isinstance(floor, dict) and isinstance(floor.get("value"), int):
+        return int(floor["value"])
+    if rec.floor_reason:
+        resource = KIND_REQUEST_RESOURCES.get(_type_value(rec))
+        if resource is not None:
+            return getattr(rec, RESOURCE_FIELDS[resource][1])
+    return None
 
 
 def legacy_fingerprint(rec: Recommendation) -> Optional[str]:

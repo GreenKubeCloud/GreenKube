@@ -66,6 +66,8 @@ Schema errors answer `422` with an RFC 6901 JSON pointer per problem:
              "message": "Input should be greater than or equal to 0", "type": "greater_than_equal"}]}
 ```
 
+A `container_requests` signal must propose a CPU or memory request, and a `container_limits` signal a CPU or memory limit (a limit-only `container_resources` proposal under `container_requests` is rejected), and a signal of kind `RIGHTSIZING_CPU` or `RIGHTSIZING_MEMORY` must carry a `container_resources` proposal: otherwise the batch is rejected with type `missing_resource_value` at `/signals/<n>/proposal/proposed` (or `/signals/<n>/proposal`). Advice of another kind (`WORKLOAD_UNDERPROVISIONED` with an `advisory` proposal) is accepted.
+
 Other answers: `400` (not JSON), `403` (key without `signals:write`, or a `source_id` other than the key's own client: `push_client_mismatch`), `409` (an incomplete batch would make the client hold more than 50,000 signals: send a complete batch), `413` (body over 8 MiB), `503` (database unavailable).
 
 ## Configuration

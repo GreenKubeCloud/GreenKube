@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
-from greenkube.signals.model import MAX_RAW_BYTES, SourceSignal, raw_size, trim_raw
+from greenkube.signals.model import MAX_RAW_BYTES, SourceSignal, missing_resource_value, raw_size, trim_raw
 from greenkube.signals.sdk import (
     PLUGIN_ORIGIN,
     CollectContext,
@@ -352,7 +352,7 @@ class SourceRunner:
         diagnostics = list(batch.diagnostics)
         kept: List[SourceSignal] = []
         seen: set[str] = set()
-        foreign = outside = duplicates = trimmed = bounded = invalid = reserved = 0
+        foreign = outside = duplicates = trimmed = bounded = invalid = reserved = valueless = 0
         plugin = getattr(source, "registry_origin", None) == PLUGIN_ORIGIN
         for signal in batch.signals:
             if not isinstance(signal, SourceSignal):
@@ -363,6 +363,11 @@ class SourceRunner:
                 continue
             if signal.capability not in cls.capabilities:
                 outside += 1
+                continue
+            if plugin and missing_resource_value(signal.capability, signal.proposal, signal.kind) is not None:
+                # A plugin's request or limit signal without a value would turn the consensus categorical
+                # (built-in v1 connectors keep their legacy advisory rows; consensus drops such a ballot).
+                valueless += 1
                 continue
             if plugin and _reserved_engine_family(signal):
                 # A resolved ``greenkube.*`` engine family counts as GreenKube's own measurement (A.5).
@@ -386,6 +391,11 @@ class SourceRunner:
             (foreign, "foreign_source_id", "signals carrying another source id were dropped"),
             (outside, "undeclared_capability", "signals outside the declared capabilities were dropped"),
             (reserved, "reserved_engine_family", "signals declaring a greenkube engine family were dropped"),
+            (
+                valueless,
+                "missing_resource_value",
+                "container requests or limits signals proposing no request or limit value were dropped",
+            ),
         ):
             if count:
                 rejected = True
