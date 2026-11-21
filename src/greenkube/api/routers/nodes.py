@@ -27,19 +27,10 @@ GPU_SOURCE_LOOKBACK = timedelta(hours=1)
 async def _latest_gpu_sources(repo: Any, now: datetime) -> Dict[str, Optional[str]]:
     """``{node: gpu_source}`` from each node's latest idle row of the last hour (NRG-13)."""
     try:
-        idle_rows = await repo.read_idle_metrics(now - GPU_SOURCE_LOOKBACK, now + timedelta(seconds=1))
+        return await repo.read_latest_idle_gpu_sources(now - GPU_SOURCE_LOOKBACK, now + timedelta(seconds=1))
     except Exception as error:
         logger.warning("Could not read idle rows for the node GPU power sources: %s", error)
         return {}
-    latest: Dict[str, Any] = {}
-    for row in idle_rows or []:
-        node = getattr(row, "node", None)
-        timestamp = getattr(row, "timestamp", None)
-        if not node or timestamp is None:
-            continue
-        if node not in latest or timestamp >= latest[node].timestamp:
-            latest[node] = row
-    return {node: getattr(row, "gpu_source", None) for node, row in latest.items()}
 
 
 def _with_gpu_source(nodes: List[Any], sources: Dict[str, Optional[str]]) -> List[NodeResponse]:

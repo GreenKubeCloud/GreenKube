@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
 
 from ...core.exceptions import QueryError
 from ...core.observability import record_metric_provenance
@@ -914,6 +914,24 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
         except Exception as e:
             logger.error("Error reading node idle metrics from Postgres: %s", e)
             raise QueryError(f"Error reading node idle metrics: {e}") from e
+
+    async def read_latest_idle_gpu_sources(self, start_time: datetime, end_time: datetime) -> Dict[str, Optional[str]]:
+        """``{node: gpu_source}`` of each node's latest idle row in ``[start_time, end_time)`` (NRG-13)."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT ON (node) node, gpu_source FROM node_idle_metrics
+                    WHERE timestamp >= $1 AND timestamp < $2
+                    ORDER BY node, timestamp DESC
+                    """,
+                    start_time,
+                    end_time,
+                )
+            return {row["node"]: row["gpu_source"] for row in rows}
+        except Exception as e:
+            logger.error("Error reading node GPU power sources from Postgres: %s", e)
+            raise QueryError(f"Error reading node GPU power sources: {e}") from e
 
     async def _idle_parts(self, start_time: datetime, end_time: datetime, ts_raw: str, ts_hourly: str):
         """UNION ALL branches of the idle rows of a window, split at the idle compression watermark."""

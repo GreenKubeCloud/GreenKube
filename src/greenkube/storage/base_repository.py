@@ -408,6 +408,15 @@ class CombinedMetricsRepository(RawHourlySplitMixin, ABC):
         """Reads ``__idle__`` rows whose timestamp is in ``[start_time, end_time)``."""
         return []
 
+    async def read_latest_idle_gpu_sources(self, start_time: datetime, end_time: datetime) -> Dict[str, Optional[str]]:
+        """``{node: gpu_source}`` of each node's latest idle row in ``[start_time, end_time)`` (NRG-13)."""
+        latest: Dict[str, Any] = {}
+        for row in await self.read_idle_metrics(start_time, end_time) or []:
+            node = getattr(row, "node", None)
+            if node and (node not in latest or row.timestamp >= latest[node].timestamp):
+                latest[node] = row
+        return {node: getattr(row, "gpu_source", None) for node, row in latest.items()}
+
     async def aggregate_idle_summary(self, start_time: datetime, end_time: datetime) -> Optional[dict]:
         """Totals of the node idle share (``idle_co2e_grams``, ``idle_embodied_co2e_grams``,
         ``idle_cost``, ``idle_energy_joules``) in ``[start, end)``; ``None`` when unknown (NRG-02)."""
