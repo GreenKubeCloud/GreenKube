@@ -13,7 +13,14 @@ from greenkube.models.savings import SavingsAccrualTotal
 
 async def _scan(combined_repo, node_repo, reco_repo, namespace=None) -> list[dict]:
     """Run one controller-style scan (the API itself never scans, E1) and serialize its output."""
-    recommendations = await OptimizationEngine().refresh(combined_repo, node_repo, reco_repo, namespace=namespace)
+    from greenkube.core.db import get_db_manager
+
+    try:
+        recommendations = await OptimizationEngine().refresh(combined_repo, node_repo, reco_repo, namespace=namespace)
+    finally:
+        # The scan opens the process-wide database manager (aiosqlite runs a worker thread per
+        # connection): close it so no thread outlives the test session.
+        await get_db_manager().close()
     return [RecommendationRecord.from_recommendation(rec).model_dump(mode="json") for rec in recommendations]
 
 
@@ -88,7 +95,8 @@ class TestRecommendationsEndpoint:
         impact = zombie_rec["impact"]
         assert impact["kind"] == "workload_deletion"
         assert impact["assumptions"]["annualization_factor"] == pytest.approx(annualization_factor)
-        assert impact["assumptions"]["collected_hours"] == pytest.approx(300 / 3600)
+        # One 5-minute sample, plus at most one step of alignment tolerance.
+        assert 300 / 3600 <= impact["assumptions"]["collected_hours"] <= 600 / 3600 + 1e-9
         assert zombie_rec["potential_savings_co2e_grams"] == pytest.approx(impact["co2e_expected_annual_g"])
         assert zombie_rec["potential_savings_co2e_grams"] > 0
 

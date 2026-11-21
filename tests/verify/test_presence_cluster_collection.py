@@ -22,6 +22,7 @@ from greenkube.storage.postgres.repository import PostgresCombinedMetricsReposit
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 from greenkube.verify.model import TimeWindow, WorkloadRef
 from greenkube.verify.service import ChangeMeasurementService
+from greenkube.verify.strategy import MeasurementSettings
 
 H0 = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
 STEP = 300
@@ -110,7 +111,7 @@ async def test_a_cronjob_alone_in_its_namespace_counts_its_idle_steps_as_zero(re
     service = ChangeMeasurementService.__new__(ChangeMeasurementService)
     service.combined_repo = repo
     service.config = SimpleNamespace(PROMETHEUS_QUERY_RANGE_STEP="5m")
-    service.settings = SimpleNamespace(slot_seconds=3600)
+    service.settings = MeasurementSettings()
     window = TimeWindow(start=H0, end=H0 + timedelta(hours=2))
     _, buckets = await service._workload_buckets(WorkloadRef(namespace="batch", kind="CronJob", name="job"), window)
     first, second = buckets
