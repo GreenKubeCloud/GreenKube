@@ -125,8 +125,11 @@ V1_METHODS = {
 
 #: Version of the ledger writer; part of every entry's ``method_version`` for v1 projections.
 #: ``ledger/2`` entries carry their ``basis`` (part of the hash payload); ``ledger/1`` entries have none.
-#: ``ledger/3`` accruals also carry the ``annual_rate`` they were computed from (LED-11).
-LEDGER_WRITER_VERSION = "ledger/3"
+#: ``ledger/3`` projected accruals are the allocated projection scaled by the applied share (IMP-06, branch
+#: fix/measurement-impact-remaining). ``ledger/4`` accruals and restatements also carry the ``annual_rate``
+#: they were computed from (LED-11). The version is a label in ``method_version`` (part of the hash
+#: payload), never compared by verification: entries of every version verify by the same rules.
+LEDGER_WRITER_VERSION = "ledger/4"
 
 _NAMESPACE = uuid.UUID("6f1d3c52-5a0e-4c39-9a51-3b8ad0c4f6e1")
 
@@ -200,7 +203,7 @@ class LedgerEntryDraft:
     #: Accounting basis (LED-01); ``None`` only on entries stored before migration 0160.
     basis: Optional[str] = None
     #: Annual rate the value was accrued from: ``value == annual_rate x seconds / year`` (LED-11).
-    #: ``None`` on entries stored before ledger/3 and on corrections.
+    #: ``None`` on entries stored before ledger/4 and on corrections.
     annual_rate: Optional[float] = None
 
     def __post_init__(self) -> None:
@@ -244,7 +247,7 @@ class LedgerEntry(LedgerEntryDraft):
             # Entries stored before the basis column keep the payload (and hash) they were chained with.
             data.pop("basis", None)
         if data.get("annual_rate") is None:
-            # Entries stored before ledger/3 keep the payload (and hash) they were chained with.
+            # Entries stored before ledger/4 keep the payload (and hash) they were chained with.
             data.pop("annual_rate", None)
         else:
             data["annual_rate"] = float(data["annual_rate"])

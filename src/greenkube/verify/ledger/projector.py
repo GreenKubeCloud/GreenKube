@@ -364,7 +364,7 @@ class LedgerProjector:
         measured = method == METHOD_MEASURED_ALLOCATED
         # The currency the recommendation was priced in, not today's configuration (a later currency
         # change must not relabel past accruals); the configured currency only when it is unknown.
-        # Rows written since ledger/3 carry the currency and measurement read at accrual time (LED-11).
+        # Rows written since ledger/4 carry the currency and measurement read at accrual time (LED-11).
         currency_of_row = row.get("currency") or source.currency or self.currency
         measurement_of_row = row.get("measurement_id") or source.measurement_id
         for quantity, amount, unit, currency, rate in (

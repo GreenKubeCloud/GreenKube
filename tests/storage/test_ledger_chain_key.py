@@ -177,3 +177,18 @@ async def test_an_operator_accepts_the_head_after_a_restore_lost_the_tail(ledger
     assert not refused.ok and refused.reason == "hash_mismatch"
     status = await repo.get_chain_status(CLUSTER_UID)
     assert status is not None and status.head_seq == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_entries_of_every_writer_version_verify(ledger: LedgerDb):  # noqa: F811
+    """ledger/3 (IMP-06) and ledger/4 (LED-11) entries share one chain; the version is only a label."""
+    from greenkube.verify.ledger.model import LEDGER_WRITER_VERSION
+
+    assert LEDGER_WRITER_VERSION == "ledger/4"
+    drafts = [replace(_draft(f"v{version}"), method_version=f"ledger/{version}:projected") for version in (1, 2, 3, 4)]
+    await LedgerRepository(ledger.manager, chain_key=KEY).append(CLUSTER_UID, CLUSTER, drafts)
+    result = (await verify_ledger(LedgerRepository(ledger.manager, chain_key=KEY), checkpoints={}, full=True))[
+        CLUSTER_UID
+    ]
+    assert result.ok and result.entries == 4
