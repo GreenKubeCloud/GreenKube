@@ -11,6 +11,16 @@ from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
 
 logger = logging.getLogger(__name__)
 
+# Nodes whose default-zone fallback was already logged by this process (F-10):
+# the fallback is logged once per node, then at DEBUG on every later collection.
+# Each row still records it in its estimation reasons.
+_default_zone_logged: set[tuple[str, str]] = set()
+
+
+def reset_default_zone_log_state() -> None:
+    """Forget which nodes had their default-zone fallback logged (tests and restarts)."""
+    _default_zone_logged.clear()
+
 
 class NodeZoneMapper:
     """Resolves cloud provider zones to Electricity Maps zones for each node."""
@@ -108,7 +118,18 @@ class NodeZoneMapper:
                         f"Used default zone '{self._config.DEFAULT_ZONE}'"
                     )
                     is_estimated = True
-                    if self._config.DEFAULT_ZONE == "unknown":
+                    log_key = (node_name, self._config.DEFAULT_ZONE)
+                    first_time = log_key not in _default_zone_logged
+                    _default_zone_logged.add(log_key)
+                    if not first_time:
+                        logger.debug(
+                            "Node '%s' (cloud zone '%s', region '%s') uses default zone '%s'.",
+                            node_name,
+                            cloud_zone,
+                            region,
+                            self._config.DEFAULT_ZONE,
+                        )
+                    elif self._config.DEFAULT_ZONE == "unknown":
                         logger.warning(
                             "⚠️  DEFAULT_ZONE is not set (or set to 'unknown'). Carbon intensity will use the global "
                             "fallback (%s gCO2e/kWh) for node '%s' (cloud zone '%s', region '%s'). "
@@ -120,8 +141,10 @@ class NodeZoneMapper:
                             region,
                         )
                     else:
-                        logger.warning(
-                            "Could not map cloud zone '%s' or region '%s' for node '%s'. Using default: '%s'",
+                        # A configured DEFAULT_ZONE is the intended setting: INFO, once per node.
+                        logger.info(
+                            "Could not map cloud zone '%s' or region '%s' for node '%s'. Using default: '%s' "
+                            "(logged once per node).",
                             cloud_zone,
                             region,
                             node_name,
