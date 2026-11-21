@@ -491,7 +491,17 @@ _UNKEYED_WARNED = False
 def warn_if_unkeyed(repo: LedgerRepository) -> bool:
     """Warn once per process when no ``LEDGER_CHAIN_KEY`` is configured; returns True when it warned."""
     global _UNKEYED_WARNED
-    if _UNKEYED_WARNED or repo.chain_key:
+    if _UNKEYED_WARNED:
+        return False
+    if repo.chain_key:
+        if repo.key_since is None:
+            _UNKEYED_WARNED = True
+            logger.warning(
+                "LEDGER_CHAIN_KEY is set without LEDGER_CHAIN_KEY_SINCE: a chain rewritten entirely without the key "
+                "cannot be told from entries written before it. Set secrets.ledgerChainKeySince to the key's UTC "
+                "creation time (LED-05)."
+            )
+            return True
         return False
     _UNKEYED_WARNED = True
     logger.warning(

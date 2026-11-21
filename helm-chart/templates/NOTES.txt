@@ -204,6 +204,9 @@ Welcome to
 {{- if .Values.secrets.existingSecret }}
 * Savings ledger chain key: add LEDGER_CHAIN_KEY to Secret {{ .Values.secrets.existingSecret }} to key the
   ledger hash chain; without it the chain uses plain sha256 (warning in the controller logs).
+{{- else if and .Values.secrets.ledgerChainKey (not .Values.secrets.ledgerChainKeySince) }}
+* Savings ledger chain key supplied without secrets.ledgerChainKeySince: set it to the key's UTC
+  creation time so a chain rewritten without the key is detected (warning in the controller logs).
 {{- else if not (or .Values.secrets.ledgerChainKey .Values.rbac.create) }}
 * Savings ledger chain key: not configured (rbac.create=false, so it is not generated). Set
   secrets.ledgerChainKey to key the ledger hash chain; without it the chain uses plain sha256.

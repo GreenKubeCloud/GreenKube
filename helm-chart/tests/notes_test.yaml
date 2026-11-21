@@ -82,6 +82,14 @@ tests:
           path: raw
           pattern: "Savings ledger chain key: not configured"
 
+  - it: asks for the key creation time with a supplied ledger chain key
+    set:
+      secrets.ledgerChainKey: supplied-key
+    asserts:
+      - matchRegex:
+          path: raw
+          pattern: "without secrets.ledgerChainKeySince"
+
   - it: does not warn about the ledger chain key when the chart generates it
     asserts:
       - notMatchRegex:

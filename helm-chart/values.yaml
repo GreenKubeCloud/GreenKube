@@ -1027,6 +1027,12 @@ secrets:
   # controller continues the chain with the new ledgerChainKey. Without them, a
   # changed or lost key stops the ledger writer (nothing is appended).
   ledgerChainPreviousKeys: ''
+  # UTC creation time of the chain key (LEDGER_CHAIN_KEY_SINCE, e.g.
+  # 2026-11-21T00:00:00Z), an anchor outside the database: unkeyed entries and
+  # unsigned status rows later than it (plus 2 h) fail verification. Written
+  # with a generated key by the bootstrap Job; set it when you supply
+  # ledgerChainKey, and set it to the rotation time when you rotate.
+  ledgerChainKeySince: ''
 
   # PostgreSQL connection string, only used with postgres.enabled=false
   # (bring your own PostgreSQL instance)

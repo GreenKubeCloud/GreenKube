@@ -52,6 +52,25 @@ tests:
           path: data.LEDGER_CHAIN_PREVIOUS_KEYS
           value: b2xkLWtleQ==
 
+  - it: renders a supplied key creation time in the values Secret
+    templates:
+      - templates/secret.yaml
+    set:
+      secrets.ledgerChainKey: supplied-key
+      secrets.ledgerChainKeySince: "2026-11-21T00:00:00Z"
+    asserts:
+      - equal:
+          path: data.LEDGER_CHAIN_KEY_SINCE
+          value: MjAyNi0xMS0yMVQwMDowMDowMFo=
+
+  - it: rejects a key creation time that is not a UTC timestamp
+    templates:
+      - templates/secret.yaml
+    set:
+      secrets.ledgerChainKeySince: yesterday
+    asserts:
+      - failedTemplate: {}
+
   - it: projects the ledger chain key into the controller and the API, not the worker
     templates:
       - templates/components.yaml
