@@ -108,9 +108,10 @@ class EmbodiedEmissionsService:
         async def _fetch(provider: str, instance_type: str) -> Optional[tuple]:
             error = "Boavizta returned no embodied value"
             try:
-                impact = await self.boavizta_collector.get_server_impact(
+                lookup = await self.boavizta_collector.lookup_server_impact(
                     provider=provider, instance_type=instance_type, verbose=False
                 )
+                impact = lookup.response
                 gwp_kg = impact.embedded_kg() if impact is not None else None
                 if gwp_kg is not None:
                     await self.embodied_repository.save_profile(
@@ -126,7 +127,7 @@ class EmbodiedEmissionsService:
                         "source": EmbodiedSource.BOAVIZTA.value,
                     }
                 if impact is None:
-                    error = getattr(self.boavizta_collector, "last_error", None) or "Boavizta lookup failed"
+                    error = lookup.error or "Boavizta lookup failed"
             except Exception as exc:  # noqa: BLE001 - a lookup failure must never stop collection
                 error = f"{type(exc).__name__}: {exc}"
             logger.warning(

@@ -43,7 +43,8 @@ class BoaviztaGwp(BaseModel):
 
     unit: Optional[str] = None
     embedded: Optional[Union[BoaviztaImpactValue, float]] = None
-    use: Optional[Union[BoaviztaImpactValue, float]] = None
+    #: Not used by GreenKube: kept as received so a non-numeric value never rejects ``embedded``.
+    use: Optional[Any] = None
     manufacture: Optional[float] = None
 
     def embedded_kg(self) -> Optional[float]:

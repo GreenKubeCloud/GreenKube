@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from greenkube.collectors.boavizta_collector import BoaviztaLookup
 from greenkube.collectors.metrics_server_collector import MetricsServerCollector
 from greenkube.core.calculator import CarbonCalculationResult
 from greenkube.core.config import Config, config
@@ -230,6 +231,7 @@ def mock_boavizta_collector():
 
     mock = MagicMock()
     mock.get_server_impact = AsyncMock(return_value=None)
+    mock.lookup_server_impact = AsyncMock(return_value=BoaviztaLookup(None, "unavailable"))
     return mock
 
 

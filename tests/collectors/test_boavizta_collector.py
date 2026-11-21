@@ -109,3 +109,40 @@ async def test_client_reuse_and_close(collector):
     collector._client = closed_client
     await collector.close()
     closed_client.aclose.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_lookups_each_report_their_own_error(collector):
+    """The error of a failed lookup is not overwritten by a concurrent successful one."""
+    import asyncio
+
+    import httpx
+
+    async def get(url, params: dict):
+        if params["instance_type"] == "bad.type":
+            await asyncio.sleep(0)
+            raise httpx.ConnectError("refused")
+        await asyncio.sleep(0.01)
+        return Response(
+            200,
+            json={"impacts": {"gwp": {"unit": "kgCO2eq", "embedded": {"value": 24.0}}}},
+            request=httpx.Request("GET", url),
+        )
+
+    client = MagicMock()
+    client.get = get
+    collector._get_client = AsyncMock(return_value=client)
+    bad, good = await asyncio.gather(
+        collector.lookup_server_impact(provider="aws", instance_type="bad.type"),
+        collector.lookup_server_impact(provider="aws", instance_type="m5.large"),
+    )
+    assert bad.response is None and "refused" in (bad.error or "")
+    assert good.error is None and good.response is not None and good.response.embedded_kg() == 24.0
+
+
+def test_a_non_numeric_use_value_keeps_the_embedded_value():
+    from greenkube.models.boavizta import BoaviztaResponse
+
+    for use in ("not implemented", {"value": "n/a"}):
+        payload = {"impacts": {"gwp": {"unit": "kgCO2eq", "embedded": {"value": 24.0}, "use": use}}}
+        assert BoaviztaResponse.model_validate(payload).embedded_kg() == 24.0

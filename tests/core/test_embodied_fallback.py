@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from greenkube.collectors.boavizta_collector import BoaviztaLookup
 from greenkube.core.config import Config
 from greenkube.core.embodied_service import EmbodiedEmissionsService
 from greenkube.models.boavizta import BoaviztaResponse
@@ -28,7 +29,7 @@ def mock_config():
 def service(mock_config):
     """EmbodiedEmissionsService wired with mocks."""
     boavizta = MagicMock()
-    boavizta.get_server_impact = AsyncMock(return_value=None)
+    boavizta.lookup_server_impact = AsyncMock(return_value=BoaviztaLookup(None, "HTTP error: boom"))
     embodied_repo = MagicMock()
     embodied_repo.get_profile = AsyncMock(return_value=None)
     embodied_repo.save_profile = AsyncMock()
@@ -87,7 +88,7 @@ async def test_prepare_embodied_data_no_fallback_when_api_succeeds(mock_config):
     impact = BoaviztaResponse.model_validate({"impacts": {"gwp": {"unit": "kgCO2eq", "embedded": {"value": 500.0}}}})
 
     boavizta = MagicMock()
-    boavizta.get_server_impact = AsyncMock(return_value=impact)
+    boavizta.lookup_server_impact = AsyncMock(return_value=BoaviztaLookup(impact, None))
     embodied_repo = MagicMock()
     embodied_repo.get_profile = AsyncMock(return_value=None)
     embodied_repo.save_profile = AsyncMock()
@@ -125,7 +126,7 @@ async def test_prepare_embodied_data_no_fallback_when_api_succeeds(mock_config):
 async def test_prepare_embodied_data_no_fallback_when_cached_in_db(mock_config):
     """When the profile exists in the DB cache, no fallback should be used."""
     boavizta = MagicMock()
-    boavizta.get_server_impact = AsyncMock()
+    boavizta.lookup_server_impact = AsyncMock()
     embodied_repo = MagicMock()
     embodied_repo.get_profile = AsyncMock(return_value={"gwp_manufacture": 400.0, "lifespan_hours": 35040})
     node_repo = MagicMock()
@@ -157,7 +158,7 @@ async def test_prepare_embodied_data_no_fallback_when_cached_in_db(mock_config):
     assert key in cache
     assert cache[key].get("is_fallback") is not True
     # API should NOT have been called
-    boavizta.get_server_impact.assert_not_called()
+    boavizta.lookup_server_impact.assert_not_called()
 
 
 # ------------------------------------------------------------------
