@@ -22,6 +22,7 @@ from greenkube.auth import browser_key
 from greenkube.auth.http import (
     CSRF_HEADER,
     cleared_session_cookie_header,
+    client_ip,
     from_trusted_proxy,
     is_same_origin,
     peer_address,
@@ -41,6 +42,7 @@ from greenkube.auth.proxy import UntrustedProxyHeader, read_proxy_identity
 from greenkube.auth.scrape import METRICS_SCRAPE_ACTOR
 from greenkube.auth.service import AuthError, AuthService, api_key_principal, user_principal
 from greenkube.auth.settings import AUTH_MODES, AuthSettings
+from greenkube.auth.throttle import CredentialThrottle
 from greenkube.auth.tokens import constant_time_equals, sha256_hex
 from greenkube.gitops.contracts import Operation, Plan
 from greenkube.gitops.discovery.kubernetes import KubernetesDiscoverySource
@@ -402,6 +404,48 @@ async def _open_access(settings: AuthSettings, service: AuthService | None) -> b
         return False
 
 
+_SCRAPE_PATH = "/prometheus/metrics"
+
+
+def _credential_throttle(request: Request, settings: AuthSettings) -> CredentialThrottle:
+    """The per-process :class:`CredentialThrottle`, rebuilt when ``AUTH_LOGIN_RATE_LIMIT`` changes."""
+    state = request.app.state
+    current = getattr(state, "credential_throttle", None)
+    if not isinstance(current, CredentialThrottle) or getattr(state, "credential_throttle_limit", None) != (
+        settings.login_rate_limit
+    ):
+        current = CredentialThrottle(settings.login_rate_limit)
+        state.credential_throttle = current
+        state.credential_throttle_limit = settings.login_rate_limit
+    return current
+
+
+def _enforce_credential_throttle(
+    request: Request, settings: AuthSettings, path: str
+) -> tuple[CredentialThrottle, str, str]:
+    """Refuse a machine credential with ``429`` while its client address has spent its failure budget (A.9).
+
+    Prometheus scrapes (``/prometheus/metrics``) have their own bucket, so that
+    failures on the API routes never stop a correct scrape. Returns what
+    :meth:`CredentialThrottle.record_failure` needs if the credential fails.
+    """
+    throttle = _credential_throttle(request, settings)
+    ip = client_ip(request, settings)
+    bucket = "scrape" if path == _SCRAPE_PATH else "api"
+    retry_after = throttle.retry_after(ip, bucket)
+    if retry_after:
+        record_auth_failure("rate_limited")
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "TOO_MANY_ATTEMPTS",
+                "message": "Too many failed authentication attempts. Try again later.",
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+    return throttle, ip, bucket
+
+
 def _remember(request: Request, principal: Principal) -> None:
     request.state.principal = principal
     request.state.authenticated_actor = principal.actor
@@ -433,9 +477,21 @@ async def authenticate(request: Request) -> None:
     auth_public = path in _AUTH_PUBLIC_PATHS
 
     if request.headers.get("Authorization"):
-        principal: Principal | None = await _bearer_principal(request, settings, service)
+        throttle, ip, bucket = _enforce_credential_throttle(request, settings, path)
+        try:
+            principal: Principal | None = await _bearer_principal(request, settings, service)
+        except HTTPException as error:
+            if error.status_code == 401:
+                throttle.record_failure(ip, bucket)
+            raise
     elif settings.mode == "api_key":
-        principal = await _browser_key_principal(request, settings, service)
+        if request.cookies.get(settings.cookie_name):
+            throttle, ip, bucket = _enforce_credential_throttle(request, settings, path)
+            principal = await _browser_key_principal(request, settings, service)
+            if principal is None:
+                throttle.record_failure(ip, bucket)
+        else:
+            principal = None
     else:
         principal = await _session_principal(request, settings, service)
         if settings.proxy_enabled and not auth_public:
