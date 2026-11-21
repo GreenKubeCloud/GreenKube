@@ -115,13 +115,44 @@ def test_listeners_accept_the_scrape_token(monkeypatch, factory):
 
 
 @pytest.mark.parametrize("factory", [create_controller_metrics_app, create_worker_metrics_app])
-def test_listeners_keep_accepting_the_bootstrap_key_during_the_upgrade(monkeypatch, factory):
-    """A Prometheus still scraping with the bootstrap key works until its ServiceMonitor is updated."""
-    _listener_config(monkeypatch, API_KEY=LEGACY_KEY, METRICS_TOKEN=SCRAPE_TOKEN)
+def test_listeners_accept_the_bootstrap_key_while_no_scrape_token_exists(monkeypatch, factory):
+    """Without a scrape token the chart's ServiceMonitors scrape with the bootstrap key."""
+    _listener_config(monkeypatch, API_KEY=LEGACY_KEY)
 
     with TestClient(factory()) as client:
         assert client.get("/prometheus/metrics", headers=_bearer(LEGACY_KEY)).status_code == 200
+
+
+@pytest.mark.parametrize("factory", [create_controller_metrics_app, create_worker_metrics_app])
+def test_listeners_stop_accepting_the_bootstrap_key_once_a_scrape_token_exists(monkeypatch, factory):
+    """The chart projects the scrape token exactly when its ServiceMonitors use it (roadmap A.9).
+
+    The admin bootstrap key then has no business on a metrics listener, where it could be guessed.
+    """
+    _listener_config(monkeypatch, API_KEY=LEGACY_KEY, METRICS_TOKEN=SCRAPE_TOKEN)
+
+    with TestClient(factory()) as client:
+        assert client.get("/prometheus/metrics", headers=_bearer(LEGACY_KEY)).status_code == 401
         assert client.get("/prometheus/metrics", headers=_bearer(SCRAPE_TOKEN)).status_code == 200
+
+
+@pytest.mark.parametrize("factory", [create_controller_metrics_app, create_worker_metrics_app])
+def test_listeners_throttle_failed_scrape_credentials_per_peer(monkeypatch, factory):
+    """Failed Bearer attempts on a listener feed a per-peer budget (4x AUTH_LOGIN_RATE_LIMIT), then 429."""
+    _listener_config(monkeypatch, API_KEY=LEGACY_KEY, AUTH_LOGIN_RATE_LIMIT="1/minute")
+    app = factory()
+
+    with TestClient(app, client=("203.0.113.66", 1)) as attacker, TestClient(app, client=("10.0.0.9", 1)) as scraper:
+        statuses = [attacker.get("/prometheus/metrics", headers=_bearer(f"guess-{i}")).status_code for i in range(4)]
+        blocked = attacker.get("/prometheus/metrics", headers=_bearer(LEGACY_KEY))
+        other_peer = scraper.get("/prometheus/metrics", headers=_bearer(LEGACY_KEY))
+        repeated = [scraper.get("/prometheus/metrics", headers=_bearer(LEGACY_KEY)).status_code for _ in range(8)]
+
+    assert statuses == [401] * 4
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["retry-after"]) <= 60
+    assert other_peer.status_code == 200
+    assert repeated == [200] * 8
 
 
 @pytest.mark.parametrize("factory", [create_controller_metrics_app, create_worker_metrics_app])
