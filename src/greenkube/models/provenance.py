@@ -120,6 +120,10 @@ class MetadataSource(StrEnum):
     after the pod and its history are gone re-runs the allocation with them."""
     MISSING = "missing"
     """No pod metadata at all: requests are not known, the owner is NULL."""
+    REPAIRED = "repaired"
+    """Owner and requests filled by migration 0270 from the nearest row of the same pod that had metadata
+    (the last known values); the row's ``model_version`` is marked outdated so ``greenkube recompute``
+    re-runs its allocation."""
 
 
 #: Cost sources whose figures may back a measured cost saving (C0.3).

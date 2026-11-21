@@ -1095,7 +1095,8 @@ class CombinedMetric(BaseModel):
         None,
         description=(
             "Where the pod requests, owner and container list of the sample came from: k8s_snapshot "
-            "(pod history or the live pod list) or missing (WP-01.1)."
+            "(pod history or the live pod list), kube_state_metrics, stored_row, repaired (filled from another "
+            "row of the same pod by migration 0270) or missing (WP-01.1)."
         ),
     )
     embodied_source: Optional[str] = Field(
