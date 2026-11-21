@@ -366,6 +366,12 @@ async def get_savings_summary(
     except Exception as exc:
         logger.error("Could not load applied recommendations for the savings report: %s", exc)
         raise HTTPException(status_code=503, detail="Recommendation store unavailable.") from exc
+    try:
+        # IMP-07: the de-duplicated opportunity of the active recommendations, one figure for every page.
+        active = list(await reco_repo.get_active_recommendations(namespace=namespace, include_pr_open=True))
+    except Exception as exc:
+        logger.warning("Could not load active recommendations for the savings opportunity: %s", exc)
+        active = None
     accrued_only = None
     unverified = None
     fixes = None
@@ -419,6 +425,7 @@ async def get_savings_summary(
         projected_unverified=unverified,
         cost_of_fix=fixes,
         interim=interim,
+        active=active,
     )
 
 

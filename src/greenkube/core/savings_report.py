@@ -30,6 +30,7 @@ from ..models.savings import (
     SavingsBlock,
     SavingsReport,
 )
+from .opportunity import optional_opportunity
 from .savings_attributor import InvalidSavingsRecord, accrual_components, annual_rates_by_method
 
 LEGACY_COMPRESSED_DIAGNOSTIC = (
@@ -189,6 +190,7 @@ def assemble_savings_report(
     projected_unverified: Optional[List[SavingsAccrualTotal]] = None,
     cost_of_fix: Optional[List[SavingsAccrualTotal]] = None,
     interim: Optional[List[SavingsAccrualTotal]] = None,
+    active: Optional[List[RecommendationRecord]] = None,
 ) -> SavingsReport:
     """Build the report from applied recommendations and ledger totals.
 
@@ -202,7 +204,9 @@ def assemble_savings_report(
     into a saving. ``interim`` holds the ledger totals of the recommendations
     decided by the interim verifier (MEA-16): their measured amounts are
     reported in ``interim_run_rate_annual``/``interim_realized_to_date`` and
-    left out of every measured figure.
+    left out of every measured figure. ``active`` are the active
+    recommendations: their de-duplicated projected opportunity is reported in
+    ``opportunity`` (IMP-07).
     """
     interim_records = [record for record in applied_records if is_interim(record)]
     measured_records = [record for record in applied_records if not is_interim(record)]
@@ -269,6 +273,7 @@ def assemble_savings_report(
         projected_unverified_to_date=unverified_block,
         interim_run_rate_annual=_annual_block(interim_rates, METHOD_MEASURED) if interim_records else None,
         interim_realized_to_date=interim_block,
+        opportunity=optional_opportunity(active),
         reliability_cost_to_date=(
             _accrued_block(cost_of_fix, METHOD_MEASURED, start, end, source=source) if cost_of_fix is not None else None
         ),

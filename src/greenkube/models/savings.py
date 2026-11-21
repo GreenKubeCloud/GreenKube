@@ -305,6 +305,14 @@ class SavingsReport(BaseModel):
             "of realized_to_date."
         ),
     )
+    opportunity: Optional["OpportunitySummary"] = Field(
+        None,
+        description=(
+            "Projected opportunity of the active recommendations, de-duplicated across overlapping "
+            "recommendations (IMP-07): the one figure the dashboard and the recommendations page show. Null when "
+            "the active recommendations could not be read."
+        ),
+    )
     applied_count: int = Field(0, description="Recommendations in an applied, verifying, verified or review state.")
     verified_count: int = Field(0, description="Recommendations with a verified (measured) outcome.")
     diagnostics: List[str] = Field(default_factory=list, description="Caveats that apply to these figures.")
@@ -329,3 +337,8 @@ class SavingsReport(BaseModel):
         description="Deprecated: realized accruals per namespace.",
         json_schema_extra={"deprecated": True},
     )
+
+
+from greenkube.core.opportunity import OpportunitySummary  # noqa: E402  (after SavingsReport: no import cycle)
+
+SavingsReport.model_rebuild()

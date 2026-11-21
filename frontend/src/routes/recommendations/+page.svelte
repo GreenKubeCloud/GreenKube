@@ -46,7 +46,7 @@
 	import DataState from '$lib/components/DataState.svelte';
 	import OomHistoryWarning from '$lib/components/OomHistoryWarning.svelte';
 	import { capacitySummary } from '$lib/releasedCapacity.js';
-	import { etaFrom } from '$lib/overview.js';
+	import { etaFrom, OPPORTUNITY_LABEL, serverOpportunity } from '$lib/overview.js';
 	import { SAVINGS_TERMS, realizationText, savingPhrase, savingsFigures, visibleDiagnostics } from '$lib/savingsVocabulary.js';
 
 	// --- State ---
@@ -380,13 +380,20 @@
 		sortMode = mode;
 	}
 
-	$: totalSavingsCO2 = actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
+	// IMP-07: the server's de-duplicated opportunity, the same figure as the dashboard. The client-side
+	// sums (which add overlapping recommendations and net increases) are only a fallback.
+	// The server figure covers every active recommendation: with source/risk filters the page sums the matches.
+	$: opportunity = serverFiltersActive ? null : serverOpportunity(savings);
+	$: totalSavingsCO2 =
+		opportunity?.co2eGrams ?? actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
 	// An unknown billable saving (cluster not observed yet) is the allocated value: never summed as projected.
-	$: totalSavingsCost = actionableActiveRecs.reduce(
-		(s, r) => s + (r.projected_billable_cost_annual === null ? 0 : (r.potential_savings_cost ?? 0)),
-		0
-	);
-	$: potentialSavingsPeriod = 'per year';
+	$: totalSavingsCost =
+		opportunity?.cost ??
+		actionableActiveRecs.reduce(
+			(s, r) => s + (r.projected_billable_cost_annual === null ? 0 : (r.potential_savings_cost ?? 0)),
+			0
+		);
+	$: potentialSavingsPeriod = `per year · ${opportunity?.label ?? OPPORTUNITY_LABEL}`;
 	$: savingsTabFigures = savingsFigures(savings);
 
 	function switchTab(tab) {
@@ -2225,6 +2232,11 @@
 						<p class="stat-label">Potential Cost Savings</p>
 						<p class="stat-value text-2xl text-blue-400">{formatCost(totalSavingsCost)}</p>
 						<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">{potentialSavingsPeriod}</p>
+						{#if opportunity?.reliabilityCost}
+							<p class="text-[10px] text-dark-500 mt-1" data-testid="opportunity-reliability-cost">
+								Reliability fixes cost {formatCost(opportunity.reliabilityCost)}/yr (not counted)
+							</p>
+						{/if}
 					</div>
 				</div>
 			{/if}
