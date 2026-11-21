@@ -68,5 +68,14 @@ def test_distinct_repositories_keep_distinct_identities(other):
     assert not same_repository(other, _GITOPS_HTTPS)
 
 
+@pytest.mark.parametrize(
+    "malformed",
+    ["https://gitlab.example.com:abc/ops/gitops.git", "ssh://git@gitlab.example.com:ops/gitops.git"],
+)
+def test_malformed_remotes_keep_their_canonical_form_and_match_nothing_else(malformed):
+    assert repository_identity(malformed) == canonical_repository_identity(malformed)
+    assert not same_repository(malformed, _GITOPS_HTTPS)
+
+
 def test_unresolved_repositories_are_never_the_same_repository():
     assert not same_repository("unresolved", "unresolved")

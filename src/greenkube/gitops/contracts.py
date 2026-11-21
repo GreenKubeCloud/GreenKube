@@ -270,6 +270,10 @@ def repository_identity(value: str) -> str:
     a trailing ``.git`` or ``/``. Anything else (a Helm or OCI registry, an unparsable
     value) keeps its ``canonical_repository_identity``. Use it to compare repositories,
     never as the persisted form.
+
+    The port is ignored on purpose: a self-hosted forge commonly serves SSH on a custom
+    port (``ssh://git@host:2222/...``) and HTTPS on 443 for the same repository. Two
+    different forges on one host distinguished only by port would compare equal.
     """
     candidate = value.strip()
     host: str | None = None
@@ -278,6 +282,9 @@ def repository_identity(value: str) -> str:
         try:
             parts = urlsplit(candidate)
             parsed_host = parts.hostname
+            # An invalid port (``host:abc``) or a mixed scp/URL form (``ssh://git@host:org/repo``)
+            # raises here and keeps the canonical form instead of matching another repository.
+            _ = parts.port
         except ValueError:
             return canonical_repository_identity(value)
         if parts.scheme.lower() in _GIT_REMOTE_SCHEMES and not parts.query and not parts.fragment:
