@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS metrics_summary (
     pod_count                 INTEGER NOT NULL DEFAULT 0,
     namespace_count           INTEGER NOT NULL DEFAULT 0,
     updated_at  TEXT NOT NULL,
+    idle_co2e_grams REAL,
+    idle_embodied_co2e_grams REAL,
+    idle_cost REAL,
+    idle_energy_joules REAL,
+    idle_data_since TEXT,
     UNIQUE(window_slug, namespace)
 );
 """

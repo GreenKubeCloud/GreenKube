@@ -447,3 +447,109 @@ class TestReportSummaryIdleShare:
         assert data["idle_energy_joules"] is None
         assert data["cluster_total_energy_joules"] is None
         assert data["idle_data_since"] is not None
+
+
+class TestReportExportIdleShare:
+    """With include_idle=true the export adds the node idle share and the cluster totals as labelled rows (NRG-02)."""
+
+    def test_default_export_has_no_idle_rows(self, client, mock_combined_metrics_repo, sample_combined_metrics):
+        """Opt-in: by default the export keeps its workload rows only, so summing a column gives the total."""
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        data = client.get("/api/v1/report/export?format=json").json()
+        assert [item["row_kind"] for item in data] == ["allocated", "allocated"]
+        rows = list(csv.DictReader(io.StringIO(client.get("/api/v1/report/export?format=csv").text)))
+        assert len(rows) == 2
+        assert sum(float(row["joules"]) for row in rows) == pytest.approx(20000.0)
+        mock_combined_metrics_repo.aggregate_idle_summary.assert_not_awaited()
+
+    def _csv(self, client, query=""):
+        response = client.get(f"/api/v1/report/export?format=csv&include_idle=true{query}")
+        assert response.status_code == 200
+        reader = csv.DictReader(io.StringIO(response.text))
+        rows = list(reader)
+        return reader.fieldnames, rows
+
+    def test_csv_export_adds_idle_and_cluster_total_rows(
+        self, client, mock_combined_metrics_repo, sample_combined_metrics
+    ):
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        fieldnames, rows = self._csv(client)
+        assert fieldnames is not None and "row_kind" in fieldnames
+        assert [row["row_kind"] for row in rows] == ["allocated", "allocated", "idle", "cluster_total"]
+        idle = rows[2]
+        assert idle["pod_name"] == "__idle__"
+        assert idle["namespace"] == ""
+        assert float(idle["joules"]) == pytest.approx(7000.0)
+        assert float(idle["co2e_grams"]) == pytest.approx(3.0)
+        assert float(idle["embodied_co2e_grams"]) == pytest.approx(0.5)
+        assert float(idle["total_cost"]) == pytest.approx(0.01)
+        assert "/" in idle["period"]  # the report window the row covers
+        total = rows[3]
+        assert total["pod_name"] == "__cluster_total__"
+        assert float(total["joules"]) == pytest.approx(27000.0)
+        assert float(total["co2e_grams"]) == pytest.approx(5.7 + 3.0, abs=0.01)
+        assert float(total["total_cost"]) == pytest.approx(0.017 + 0.01, abs=0.001)
+
+    def test_json_export_adds_idle_and_cluster_total_rows(
+        self, client, mock_combined_metrics_repo, sample_combined_metrics
+    ):
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        data = client.get("/api/v1/report/export?format=json&include_idle=true").json()
+        assert [item["row_kind"] for item in data] == ["allocated", "allocated", "idle", "cluster_total"]
+        assert data[2]["joules"] == pytest.approx(7000.0)
+        assert data[3]["joules"] == pytest.approx(27000.0)
+        assert data[3]["embodied_co2e_grams"] == pytest.approx(0.17 + 0.5, abs=0.01)
+
+    def test_aggregated_export_adds_the_idle_rows_too(
+        self, client, mock_combined_metrics_repo, sample_combined_metrics
+    ):
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        data = client.get("/api/v1/report/export?format=json&include_idle=true&aggregate=true&granularity=daily").json()
+        assert [item["row_kind"] for item in data][-2:] == ["idle", "cluster_total"]
+
+    def test_one_idle_row_per_selected_year(self, client, mock_combined_metrics_repo):
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        data = client.get("/api/v1/report/export?format=json&include_idle=true&years=2024&years=2025").json()
+        idle = [item for item in data if item["row_kind"] == "idle"]
+        assert len(idle) == 2
+        assert {item["period"].split("/")[0][:4] for item in idle} == {"2024", "2025"}
+
+    def test_short_idle_history_exports_unknown_idle_values(
+        self, client, mock_combined_metrics_repo, sample_combined_metrics
+    ):
+        """Pod rows older than the first idle row: the idle and cluster-total values are null, never zero."""
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        mock_combined_metrics_repo.idle_data_since = AsyncMock(return_value=datetime.now(timezone.utc))
+        data = client.get("/api/v1/report/export?format=json&include_idle=true").json()
+        idle, total = data[-2], data[-1]
+        assert (idle["row_kind"], total["row_kind"]) == ("idle", "cluster_total")
+        for row in (idle, total):
+            assert row["joules"] is None
+            assert row["co2e_grams"] is None
+            assert row["total_cost"] is None
+        _, rows = self._csv(client)
+        assert rows[-1]["joules"] == "" and rows[-2]["co2e_grams"] == ""
+
+    def test_without_idle_rows_the_idle_values_are_unknown(
+        self, client, mock_combined_metrics_repo, sample_combined_metrics
+    ):
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        data = client.get("/api/v1/report/export?format=json&include_idle=true").json()
+        assert [item["row_kind"] for item in data] == ["allocated", "allocated", "idle", "cluster_total"]
+        assert data[2]["joules"] is None and data[3]["joules"] is None
+
+    def test_a_range_without_any_row_exports_nothing(self, client):
+        """No pod row and no idle row: an empty export, as before (no row of unknown values)."""
+        assert client.get("/api/v1/report/export?format=json&include_idle=true").json() == []
+
+    def test_namespace_export_has_no_idle_rows(self, client, mock_combined_metrics_repo, sample_combined_metrics):
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        data = client.get("/api/v1/report/export?format=json&include_idle=true&namespace=default").json()
+        assert data and {item["row_kind"] for item in data} == {"allocated"}
+        mock_combined_metrics_repo.aggregate_idle_summary.assert_not_awaited()

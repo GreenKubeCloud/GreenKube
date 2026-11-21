@@ -162,14 +162,17 @@ After A.1 to A.5, open merge requests for the eligible recommendations (metrics-
 Every surprise becomes an issue in this roadmap. **This is the release gate of phase E.**
 
 ### A.9 Follow-ups found during phase A (lane noted; do before or with phase D)
-- **Test hygiene (lane: tests, in progress):** pytest runs can hang at exit on a leaked non-daemon thread (an unclosed `aiosqlite` connection or executor). Fix the leak and keep a session-end guard (`fix/test-thread-leak`).
-- **Bearer key guessing (lane: auth):** wrong Bearer keys are not login-throttled; only the global rate limit applies. Generated keys are 256-bit, so the risk is low, but an operator-chosen bootstrap key is not. Throttle failed Bearer attempts per IP.
-- **Idle share (lane: API, with WP-10):** still missing from `/report/export`, the Prometheus gauges and the Footprint UI (WP-05.3).
-- **Untrusted cost hours (lane: measurement):** expose `untrusted_cost_hours` per change (MEA-05 rest).
+**Done and merged (2026-11-21), each reviewed and gated:**
+- **Test hygiene:** a process-global realization store left bound to a closed database made tests reopen an `aiosqlite` connection that blocked interpreter exit. Fixed, with a session-end guard that fails the run and names the leaking test (`fix/test-thread-leak`).
+- **Bearer key guessing:** failed API keys are throttled per client IP on the API and on the controller and worker metrics listeners, which stop accepting the bootstrap key once a scrape token exists; stale browser cookies never lock a browser out (`fix/bearer-throttle`).
+- **Idle share and untrusted cost hours:** idle share and cluster totals in the export (opt-in `include_idle`), Prometheus gauges and the Footprint page; export chunks no longer drop a boundary sample; `untrusted_cost_hours` per measurement (`fix/idle-share-exposure`).
+- **Shared-host history, GPU badge, upgrade hour:** recompute groups pre-0183 rows with the current snapshot ids (per node); the nodes page flags estimated or unmeasured GPU power; the 0.3.x upgrade hour leaves CPU/RAM components NULL instead of diluting them (`fix/impact-followups`).
+
+**Still open:**
+- **PostgreSQL compressor stall (lane: storage, in progress, high):** a compressor test can stall mid-run on PostgreSQL, timing-dependent; possibly a lock wait introduced by the dirty-hour locking (`fix/compressor-lock-hang`).
+- **Closed database reopens silently (lane: storage):** a closed `DatabaseManager` reopens a connection on first use. Make use after close an error.
 - **Hourly provenance (lane: storage, with C.3):** the hourly tables do not keep `embodied_source` or `gpu_source`.
-- **Shared-host history (lane: impact):** rows collected before migration 0183 on kind, k3d or multi-node minikube cannot be split per host on recompute; use the current snapshot ids of the same node when the historical snapshot has none.
-- **Energy findings left (lane: impact):** NRG-14 (operators set server power: annotation, node profiles, measured tier), NRG-16 (Wattnet 15-minute points, proxy zones), NRG-17 (doc and code drift, PUE overrides), the NRG-13 UI badge.
-- **Upgrade hour (lane: storage):** the hourly rollup of the single upgrade hour from 0.3.x still sums split and unsplit 5-minute cost rows.
+- **Energy findings left (lane: impact):** NRG-14 (operators set server power: annotation, node profiles, measured tier), NRG-16 (Wattnet 15-minute points, proxy zones), NRG-17 (doc and code drift, PUE overrides).
 - **Cross-repository Git charts (lane: gitops):** blocked with a clear reason; planning them (chart in one repository, values in another) is a feature to design.
 
 ## 5. Phase B: cut the scope
@@ -442,9 +445,9 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-04 | NRG-03 | high | The hourly carbon-intensity job never fetches DEFAULT_ZONE: clusters whose nodes carry no mappable zone/region label ... | addressed on dev (WP-04.2) |
 | WP-04 | NRG-04 | high | The bundled zone-default intensity table is a one-day snapshot with 251 of 349 zones empty and malformed rows (ES, SE... | addressed on dev (WP-04.2) |
 | WP-04 | NRG-05 | high | Projections use a different node power model from collection: for every node without a bundled instance profile the p... | addressed on dev (WP-04.3) |
-| WP-04 | NRG-12 | medium | Node CPU utilisation is the sum of pod CPU only: kubelet, container runtime, kernel and other non-pod CPU are ignored... | partly addressed on dev (WP-04.4): NRG-12 and NRG-15 done; NRG-13 done except the UI badge |
-| WP-04 | NRG-13 | medium | GPU energy is counted only when DCGM series exist; GPU nodes without the DCGM exporter are neither detected nor flagg... | partly addressed on dev (WP-04.4): NRG-12 and NRG-15 done; NRG-13 done except the UI badge |
-| WP-04 | NRG-15 | medium | Nodes that share one physical host (kind, k3d, minikube multi-node, nested clusters) are each charged the full host c... | partly addressed on dev (WP-04.4): NRG-12 and NRG-15 done; NRG-13 done except the UI badge |
+| WP-04 | NRG-12 | medium | Node CPU utilisation is the sum of pod CPU only: kubelet, container runtime, kernel and other non-pod CPU are ignored... | addressed on dev (WP-04.4) |
+| WP-04 | NRG-13 | medium | GPU energy is counted only when DCGM series exist; GPU nodes without the DCGM exporter are neither detected nor flagg... | addressed on dev (WP-04.4) |
+| WP-04 | NRG-15 | medium | Nodes that share one physical host (kind, k3d, minikube multi-node, nested clusters) are each charged the full host c... | addressed on dev (WP-04.4) |
 | WP-04 | NRG-14 | medium | On-prem and bare-metal nodes are modelled with hyperscaler per-vCPU averages and the operator cannot supply real serv... | open |
 | WP-04 | NRG-16 | low | Wattnet's 15-minute intensities are stored but only the :00 point of each hour is ever used (default hour normalisati... | open |
 | WP-04 | NRG-17 | low | Methodology docs and code disagree, and dead legacy estimator code with a different model is still shipped. | open |
@@ -455,12 +458,12 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-05 | ROL-02 | high | Rows written or updated in an already compressed hour never reach combined_metrics_hourly / container_metrics_hourly ... | addressed on dev (WP-05.2) |
 | WP-05 | STO-02 | medium | Hourly compression is not bounded by the collection watermark in production (the provider is never passed), so hours ... | addressed on dev (WP-05.2) |
 | WP-05 | RECON-02 | high | Raw rows written into an already compressed hour (late backfill, greenkube start --last, greenkube recompute, repaire... | addressed on dev (WP-05.2) |
-| WP-05 | NRG-02 | high | Cluster totals (API, UI Footprint page, yearly report) silently exclude the node __idle__ share; idle rows are write-... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
-| WP-05 | ROL-07 | medium | node_idle_metrics has no hourly aggregate and is deleted with raw retention, so node totals (pods + idle) cannot be r... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
-| WP-05 | NRG-09 | medium | The intensity consolidation recompute updates pod and container rows but not node_idle_metrics, so idle rows keep the... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
-| WP-05 | COST-13 | low | Idle cost is always priced with the model, does not reconcile with OpenCost pod costs (pods + idle differ from the no... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
-| WP-05 | API-04 | high | No API total, chart, breakdown, report or Prometheus series includes the node idle share (node_idle_metrics is read b... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
-| WP-05 | RECON-13 | low | Node idle rows have no hourly aggregate and are deleted at raw retention, and the carbon-intensity recompute skips th... | partly addressed on dev (WP-05.3): idle share in summary, report and time series; not in export, Prometheus gauges or the UI |
+| WP-05 | NRG-02 | high | Cluster totals (API, UI Footprint page, yearly report) silently exclude the node __idle__ share; idle rows are write-... | addressed on dev (WP-05.3) |
+| WP-05 | ROL-07 | medium | node_idle_metrics has no hourly aggregate and is deleted with raw retention, so node totals (pods + idle) cannot be r... | addressed on dev (WP-05.3) |
+| WP-05 | NRG-09 | medium | The intensity consolidation recompute updates pod and container rows but not node_idle_metrics, so idle rows keep the... | addressed on dev (WP-05.3) |
+| WP-05 | COST-13 | low | Idle cost is always priced with the model, does not reconcile with OpenCost pod costs (pods + idle differ from the no... | addressed on dev (WP-05.3) |
+| WP-05 | API-04 | high | No API total, chart, breakdown, report or Prometheus series includes the node idle share (node_idle_metrics is read b... | addressed on dev (WP-05.3) |
+| WP-05 | RECON-13 | low | Node idle rows have no hourly aggregate and are deleted at raw retention, and the carbon-intensity recompute skips th... | addressed on dev (WP-05.3) |
 | WP-05 | ROL-03 | high | Change measurements built from compressed hourly rows overstate cost rate, replicas and core-hours for every hour in ... | addressed on dev (WP-05.4) |
 | WP-05 | MEA-05 | high | One untrusted cost sample makes the whole pod-hour untrusted once the hour is compressed (cost_source becomes 'mixed'... | addressed on dev (WP-05.4) |
 | WP-05 | MEA-04 | high | Hour buckets built from hourly rollup rows (all production data older than 24 h) take the longest single pod as the c... | addressed on dev (WP-05.4) |

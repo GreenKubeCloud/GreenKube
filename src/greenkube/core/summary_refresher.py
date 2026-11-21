@@ -33,6 +33,7 @@ from ..storage.base_repository import (
     SummaryRepository,
     TimeseriesCacheRepository,
 )
+from .idle_share import window_idle_share
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,14 @@ class SummaryRefresher:
         )
         scope2 = agg.get("total_co2e_grams", 0.0)
         scope3 = agg.get("total_embodied_co2e_grams", 0.0)
+        # The node idle share belongs to no namespace: cluster-wide rows only (WP-05.3, NRG-02).
+        idle_fields: dict = {}
+        if not namespace:
+            try:
+                idle_fields = await window_idle_share(self._metrics, start, now, agg)
+            except Exception as exc:
+                # The allocated totals stay cached; the idle share reads as unknown (null), not zero.
+                logger.warning("Could not compute the node idle share of summary window '%s': %s", slug, exc)
         row = MetricsSummaryRow(
             window_slug=slug,
             namespace=namespace,
@@ -171,6 +180,7 @@ class SummaryRefresher:
             pod_count=agg.get("pod_count", 0),
             namespace_count=agg.get("namespace_count", 0),
             updated_at=now,
+            **idle_fields,
         )
         await self._summary.upsert_row(row)
         return 1

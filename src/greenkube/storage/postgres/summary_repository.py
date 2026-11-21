@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from greenkube.core.idle_share import stored_summary_idle_fields, summary_idle_values
 from greenkube.models.metrics import MetricsSummaryRow
 
 from ...core.exceptions import QueryError
@@ -43,8 +44,10 @@ class PostgresSummaryRepository(SummaryRepository):
                             (window_slug, namespace,
                              total_co2e_grams, total_embodied_co2e_grams,
                              total_cost, total_energy_joules,
-                             pod_count, namespace_count, updated_at)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                             pod_count, namespace_count, updated_at,
+                             idle_co2e_grams, idle_embodied_co2e_grams, idle_cost,
+                             idle_energy_joules, idle_data_since)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                         """,
                         row.window_slug,
                         None,
@@ -55,6 +58,7 @@ class PostgresSummaryRepository(SummaryRepository):
                         row.pod_count,
                         row.namespace_count,
                         updated_at,
+                        *summary_idle_values(row),
                     )
                 else:
                     await conn.execute(
@@ -63,8 +67,10 @@ class PostgresSummaryRepository(SummaryRepository):
                             (window_slug, namespace,
                              total_co2e_grams, total_embodied_co2e_grams,
                              total_cost, total_energy_joules,
-                             pod_count, namespace_count, updated_at)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                             pod_count, namespace_count, updated_at,
+                             idle_co2e_grams, idle_embodied_co2e_grams, idle_cost,
+                             idle_energy_joules, idle_data_since)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                         ON CONFLICT(window_slug, namespace) DO UPDATE SET
                             total_co2e_grams          = EXCLUDED.total_co2e_grams,
                             total_embodied_co2e_grams = EXCLUDED.total_embodied_co2e_grams,
@@ -72,7 +78,12 @@ class PostgresSummaryRepository(SummaryRepository):
                             total_energy_joules       = EXCLUDED.total_energy_joules,
                             pod_count                 = EXCLUDED.pod_count,
                             namespace_count           = EXCLUDED.namespace_count,
-                            updated_at                = EXCLUDED.updated_at
+                            updated_at                = EXCLUDED.updated_at,
+                            idle_co2e_grams           = EXCLUDED.idle_co2e_grams,
+                            idle_embodied_co2e_grams  = EXCLUDED.idle_embodied_co2e_grams,
+                            idle_cost                 = EXCLUDED.idle_cost,
+                            idle_energy_joules        = EXCLUDED.idle_energy_joules,
+                            idle_data_since           = EXCLUDED.idle_data_since
                         """,
                         row.window_slug,
                         row.namespace,
@@ -83,6 +94,7 @@ class PostgresSummaryRepository(SummaryRepository):
                         row.pod_count,
                         row.namespace_count,
                         updated_at,
+                        *summary_idle_values(row),
                     )
         except Exception as e:
             logger.error("upsert_row failed for slug '%s': %s", row.window_slug, e)
@@ -127,6 +139,7 @@ class PostgresSummaryRepository(SummaryRepository):
                         pod_count=row["pod_count"],
                         namespace_count=row["namespace_count"],
                         updated_at=row["updated_at"],
+                        **stored_summary_idle_fields(row),
                     )
                     for row in rows
                 ]

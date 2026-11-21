@@ -1,6 +1,10 @@
 # tests/conftest.py
 
+import os
 import sqlite3
+import sys
+import threading
+import weakref
 
 import pytest
 
@@ -124,6 +128,23 @@ def reset_savings_metrics_refresh_cache():
 
 
 @pytest.fixture(autouse=True)
+def reset_realization_store():
+    """No test inherits the realization context store another test registered.
+
+    An optimization scan registers a store bound to its database manager
+    (IMP-12). Left registered, a later ``refresh_realization_context`` persists
+    through that manager after its owner closed it, which silently reopens an
+    aiosqlite connection nobody closes: its non-daemon worker thread then
+    blocks interpreter exit forever.
+    """
+    from greenkube.impact.realization import register_realization_store
+
+    register_realization_store(None)
+    yield
+    register_realization_store(None)
+
+
+@pytest.fixture(autouse=True)
 def reset_evidence_history_start():
     """Warm-up gates (F7) start without a known install time: no database read, legacy window."""
     from greenkube.automation.policy import set_history_start
@@ -131,3 +152,88 @@ def reset_evidence_history_start():
     set_history_start(None)
     yield
     set_history_start(None)
+
+
+# --- Leaked non-daemon thread guard -------------------------------------------
+#
+# A non-daemon thread left running (an aiosqlite connection that was never
+# closed, a ThreadPoolExecutor never shut down) makes the interpreter wait for
+# it forever at exit: every test passes, then pytest hangs. The hooks below
+# record which test started each thread and, at the end of the session, report
+# the non-daemon threads still alive and fail the run instead of hanging.
+
+_current_test_nodeid: str | None = None
+_thread_origins: "weakref.WeakKeyDictionary[threading.Thread, str]" = weakref.WeakKeyDictionary()
+_original_thread_start = threading.Thread.start
+
+
+def _recording_thread_start(self: threading.Thread) -> None:
+    """Remember the test that started this thread, then start it."""
+    try:
+        _thread_origins[self] = _current_test_nodeid or "<outside any test>"
+    except TypeError:
+        pass
+    _original_thread_start(self)
+
+
+threading.Thread.start = _recording_thread_start  # type: ignore[method-assign]
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Track the node id of the running test for the thread origin records."""
+    global _current_test_nodeid
+    _current_test_nodeid = item.nodeid
+    try:
+        yield
+    finally:
+        _current_test_nodeid = None
+
+
+def _leaked_threads() -> list[threading.Thread]:
+    """Return the non-daemon threads, other than the main thread, still alive."""
+    main = threading.main_thread()
+    return [t for t in threading.enumerate() if t is not main and not t.daemon and t.is_alive()]
+
+
+def _describe_thread(thread: threading.Thread) -> str:
+    target = getattr(thread, "_target", None)
+    target_name = getattr(target, "__qualname__", repr(target)) if target is not None else type(thread).__qualname__
+    owner = getattr(target, "__self__", None)
+    if owner is not None:
+        target_name = f"{type(owner).__module__}.{type(owner).__qualname__}.{target_name.split('.')[-1]}"
+    origin = _thread_origins.get(thread, "<unknown>")
+    return f"  - {thread.name!r} target={target_name} started by {origin}"
+
+
+_leak_exit_status: int | None = None
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Fail the run when non-daemon threads are still alive at the end of the session."""
+    global _leak_exit_status
+    # Give threads that are already shutting down a brief chance to finish.
+    for thread in _leaked_threads():
+        thread.join(timeout=2.0)
+    leaked = _leaked_threads()
+    if not leaked:
+        return
+    lines = [
+        "",
+        "ERROR: non-daemon threads are still alive at the end of the test session.",
+        "They would block interpreter exit forever. Close the aiosqlite connection",
+        "or shut down the executor that started them:",
+        *(_describe_thread(t) for t in leaked),
+    ]
+    sys.stderr.write("\n".join(lines) + "\n")
+    sys.stderr.flush()
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    _leak_exit_status = int(pytest.ExitCode.TESTS_FAILED)
+
+
+def pytest_unconfigure(config):
+    """Exit without waiting for leaked threads, so the run fails instead of hanging."""
+    if _leak_exit_status is not None:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(_leak_exit_status)

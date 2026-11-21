@@ -408,13 +408,19 @@ class ChangeMeasurement(_Frozen):
     #: decided from the workload specs alone, independent of the cost outcome. ``None`` on
     #: measurements decided before it was recorded.
     capacity: Optional[dict[str, Any]] = None
+    #: Observed workload hours without trusted cost in the post-window and in the baseline window
+    #: (MEA-05, :func:`greenkube.verify.series.untrusted_cost_hours`): why a cost verdict lost hours.
+    #: ``None`` on measurements decided before it was recorded.
+    untrusted_cost_hours: Optional[float] = None
+    baseline_untrusted_cost_hours: Optional[float] = None
 
     def estimate(self, quantity: str) -> Optional[SavingsEstimate]:
         return next((item for item in self.estimates if item.quantity == quantity), None)
 
     def with_evidence_digest(self) -> "ChangeMeasurement":
-        # ``capacity`` is left out when absent so digests of earlier measurements stay valid.
-        exclude = {"evidence_sha256"} | ({"capacity"} if self.capacity is None else set())
+        # Fields added later are left out when absent so digests of earlier measurements stay valid.
+        optional = ("capacity", "untrusted_cost_hours", "baseline_untrusted_cost_hours")
+        exclude = {"evidence_sha256"} | {name for name in optional if getattr(self, name) is None}
         payload = self.model_dump(mode="json", exclude=exclude)
         return self.model_copy(update={"evidence_sha256": sha256_hex(payload)})
 

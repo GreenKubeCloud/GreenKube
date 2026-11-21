@@ -22,7 +22,7 @@ from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 from greenkube.verify.model import TimeWindow
-from greenkube.verify.series import MIN_HOUR_COVERAGE, hourly_buckets
+from greenkube.verify.series import MIN_HOUR_COVERAGE, hourly_buckets, untrusted_cost_hours
 
 H0 = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
 STEP = 300
@@ -210,6 +210,22 @@ def test_a_week_with_one_untrusted_sample_in_30_percent_of_hours_keeps_its_cover
     assert len(costed) / len(hours) >= 0.97
     assert sum(bucket.cost_coverage for bucket in buckets) / len(hours) >= 0.97
     assert all(bucket.cost == pytest.approx(0.012) for bucket in costed)
+
+
+def test_untrusted_cost_hours_count_the_untrusted_samples_of_rollup_hours():
+    """MEA-05 rest: one custom-rate sample in 30% of a week's hourly rows is 1/12 h per tainted hour."""
+    rng = random.Random(7)
+    hours = [H0 + timedelta(hours=index) for index in range(7 * 24)]
+    tainted = set(rng.sample(range(len(hours)), k=round(0.3 * len(hours))))
+    rows = [_rollup_row(hour, untrusted_samples=1 if index in tainted else 0) for index, hour in enumerate(hours)]
+    buckets = hourly_buckets(rows, TimeWindow(start=hours[0], end=hours[-1] + timedelta(hours=1)), STEP)
+    assert untrusted_cost_hours(buckets) == pytest.approx(len(tainted) / 12, abs=0.01)
+    # A fully untrusted hour counts as one hour; an hour without rows counts nothing.
+    rows = [_rollup_row(H0, untrusted_samples=12), _rollup_row(H0 + timedelta(hours=1), untrusted_samples=0)]
+    buckets = hourly_buckets(rows, TimeWindow(start=H0, end=H0 + timedelta(hours=3)), STEP)
+    assert untrusted_cost_hours(buckets) == pytest.approx(1.0)
+    # On an accelerated grid a slot is shorter than an hour.
+    assert untrusted_cost_hours(buckets, slot_seconds=600) == pytest.approx(600 / 3600, abs=1e-4)
 
 
 async def test_a_measurement_read_across_the_compression_watermark_gives_the_raw_buckets(db):

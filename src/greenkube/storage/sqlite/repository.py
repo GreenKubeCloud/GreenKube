@@ -3,7 +3,7 @@ import logging
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
 
 import aiosqlite
 
@@ -1464,6 +1464,28 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
         except sqlite3.Error as e:
             logging.error("Could not read node idle metrics: %s", e)
             raise QueryError(f"Could not read node idle metrics: {e}") from e
+
+    async def read_latest_idle_gpu_sources(self, start_time: datetime, end_time: datetime) -> Dict[str, Optional[str]]:
+        """``{node: gpu_source}`` of each node's latest idle row in ``[start_time, end_time)`` (NRG-13)."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
+                    """
+                    SELECT node, gpu_source FROM (
+                        SELECT node, gpu_source,
+                               ROW_NUMBER() OVER (PARTITION BY node ORDER BY "timestamp" DESC) AS rank
+                        FROM node_idle_metrics
+                        WHERE "timestamp" >= ? AND "timestamp" < ?
+                    ) WHERE rank = 1
+                    """,
+                    (to_iso_z(start_time), to_iso_z(end_time)),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            return {row["node"]: row["gpu_source"] for row in rows}
+        except sqlite3.Error as e:
+            logging.error("Could not read node GPU power sources: %s", e)
+            raise QueryError(f"Could not read node GPU power sources: {e}") from e
 
     async def _idle_parts(self, start_time: datetime, end_time: datetime, ts_raw: str, ts_hourly: str):
         """UNION ALL branches of the idle rows of a window, split at the idle compression watermark."""

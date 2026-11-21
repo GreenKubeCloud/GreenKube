@@ -19,6 +19,8 @@ from typing import Any, Dict, Mapping, Optional
 CONTAINER_NODE_SCHEMES = ("kind://", "k3d://")
 #: ``estimation_reasons`` prefix of rows of a node that shares its host.
 SHARED_HOST_REASON_PREFIX = "Shared host"
+#: Reason suffix of a group formed from the current node snapshots (snapshots stored before 0183).
+CURRENT_SNAPSHOT_NOTE = "grouping from the current node snapshot (the snapshot in force had no host or provider id)"
 
 
 @dataclass(frozen=True)
@@ -28,13 +30,20 @@ class SharedHost:
     key: str
     size: int
     share: float
+    #: ``True`` when the group needed the ids of the current snapshot of at least one member.
+    from_current_snapshot: bool = False
+    #: ``True`` when this node itself took the ids of its current snapshot (its snapshot had none).
+    borrowed_ids: bool = False
 
     def reason(self, node_name: str) -> str:
         """The estimation reason of the rows of ``node_name``."""
-        return (
+        reason = (
             f"{SHARED_HOST_REASON_PREFIX}: {self.size} nodes share one host ({self.key}); host idle power, "
             f"memory power and embodied emissions split 1/{self.size} to node '{node_name}'"
         )
+        if self.from_current_snapshot:
+            reason += f"; {CURRENT_SNAPSHOT_NOTE}"
+        return reason
 
 
 @dataclass(frozen=True)
@@ -77,11 +86,24 @@ def _host_key(info: Any) -> Optional[str]:
     return None
 
 
-def shared_host_groups(nodes: Mapping[str, Any]) -> Dict[str, SharedHost]:
-    """``{node name: SharedHost}`` for the nodes that share a host with at least one other node."""
+def shared_host_groups(nodes: Mapping[str, Any], current: Optional[Mapping[str, Any]] = None) -> Dict[str, SharedHost]:
+    """``{node name: SharedHost}`` for the nodes that share a host with at least one other node.
+
+    ``current`` maps node names to their current snapshots. A node of ``nodes`` without host or
+    provider id (a snapshot stored before migration 0183) takes the ids of its current snapshot;
+    the groups that need it say so in their reason.
+    """
     members: Dict[str, list[str]] = defaultdict(list)
+    borrowed: set[str] = set()
+    borrowing_nodes: set[str] = set()
     for name, info in nodes.items():
         key = _host_key(info)
+        no_ids = not getattr(info, "host_id", None) and not getattr(info, "provider_id", None)
+        if no_ids and current is not None and name in current:
+            key = _host_key(current[name])
+            if key is not None:
+                borrowed.add(key)
+                borrowing_nodes.add(name)
         if key is not None:
             members[key].append(name)
     groups: Dict[str, SharedHost] = {}
@@ -89,5 +111,11 @@ def shared_host_groups(nodes: Mapping[str, Any]) -> Dict[str, SharedHost]:
         if len(names) < 2:
             continue
         for name in names:
-            groups[name] = SharedHost(key=key, size=len(names), share=1.0 / len(names))
+            groups[name] = SharedHost(
+                key=key,
+                size=len(names),
+                share=1.0 / len(names),
+                from_current_snapshot=key in borrowed,
+                borrowed_ids=name in borrowing_nodes,
+            )
     return groups

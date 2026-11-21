@@ -79,7 +79,7 @@ from greenkube.verify.model import (
     WorkloadRef,
     WorkloadSpecObservation,
 )
-from greenkube.verify.series import floor_hour, hourly_buckets, price_card, utc_hour
+from greenkube.verify.series import floor_hour, hourly_buckets, price_card, untrusted_cost_hours, utc_hour
 from greenkube.verify.strategy import (
     CO2E_WITH_EMBODIED,
     OBJECTIVE_RELIABILITY,
@@ -1291,6 +1291,9 @@ class ChangeMeasurementService:
                 post_end=ensure_utc(plan.post.end),
                 slot_seconds=self.settings.slot_seconds,
             ),
+            # MEA-05: workload hours of each window without trusted cost, so a lost cost verdict says why.
+            untrusted_cost_hours=untrusted_cost_hours(post_buckets, slot_seconds=self.settings.slot_seconds),
+            baseline_untrusted_cost_hours=untrusted_cost_hours(snapshot.hours, slot_seconds=self.settings.slot_seconds),
         ).with_evidence_digest()
         stored, _ = await self.changes.insert_measurement(measurement)
         return stored

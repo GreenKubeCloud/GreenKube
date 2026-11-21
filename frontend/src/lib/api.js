@@ -742,9 +742,10 @@ export function getReportYears({ namespace } = {}) {
  * @param {string} [opts.granularity]
  * @param {string} [opts.group_by]
  * @param {string} [opts.format]
+ * @param {boolean} [opts.include_idle] append the node idle share and cluster-total rows (opt-in)
  * @returns {string}
  */
-export function buildReportExportUrl({ namespace, last, start, end, years, aggregate, granularity, group_by, format } = {}) {
+export function buildReportExportUrl({ namespace, last, start, end, years, aggregate, granularity, group_by, format, include_idle } = {}) {
 	const url = new URL(`${BASE}/report/export`, window.location.origin);
 	addSearchParam(url, 'namespace', namespace);
 	addSearchParam(url, 'last', last);
@@ -755,6 +756,7 @@ export function buildReportExportUrl({ namespace, last, start, end, years, aggre
 	addSearchParam(url, 'granularity', granularity);
 	addSearchParam(url, 'group_by', group_by);
 	addSearchParam(url, 'format', format);
+	addSearchParam(url, 'include_idle', include_idle ? 'true' : undefined);
 	return url.toString();
 }
 
@@ -797,9 +799,13 @@ export function refreshDashboardSummary({ namespace } = {}) {
 	return request(`${BASE}/metrics/dashboard-summary/refresh`, { namespace }, { method: 'POST' });
 }
 
-/** Download a report with credentials/headers that anchor navigation cannot send. */
+/**
+ * Download a report with credentials/headers that anchor navigation cannot send.
+ * `include_idle: true` appends the node idle share and cluster-total rows; omitted otherwise.
+ */
 export async function downloadReport(params = {}) {
-	const res = await send(`${BASE}/report/export`, params);
+	const { include_idle: includeIdle, ...rest } = params;
+	const res = await send(`${BASE}/report/export`, includeIdle ? { ...rest, include_idle: 'true' } : rest);
 	const blob = await res.blob();
 	const disposition = res.headers.get('Content-Disposition') || '';
 	const filename = disposition.match(/filename="?([^"]+)"?/)?.[1]

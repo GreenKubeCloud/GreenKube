@@ -107,6 +107,23 @@ _GPU_POWER_AVERAGE = (
 )
 
 
+#: A row whose cost carries no CPU/RAM split: a 0.3.x row with a positive total (F-03).
+_UNSPLIT_COST_ROW = "cost_cpu IS NULL AND cost_ram IS NULL AND COALESCE(total_cost, 0) > 0"
+
+
+def _split_component(expression: str, unsplit_row: str = _UNSPLIT_COST_ROW) -> str:
+    """Hourly sum of a cost component, NULL when the hour also holds unsplit rows (A.9, F-03).
+
+    The single 0.3.x upgrade hour mixes rows with and without the split. Summing the
+    components there covers part of the hour while the hour counts as split, so the F-03
+    readers (``baseline_sql``, ``observed_rates_from_rows``) would dilute the CPU and RAM
+    rates. With NULL components the hour is an unsplit hour: its ``total_cost`` is priced
+    like the other 0.3.x hours and the rates come from fully split hours only.
+    ``unsplit_row`` narrows the rows that count (the trusted ones for the trusted sums).
+    """
+    return f"CASE WHEN SUM(CASE WHEN {unsplit_row} THEN 1 ELSE 0 END) > 0 THEN NULL ELSE SUM({expression}) END"
+
+
 #: SQL form of :func:`greenkube.models.provenance.is_cost_trusted` for one raw row (MEA-05):
 #: an allocated cost source and a non-negative cost, never a zero cost on a row that
 #: requested or used CPU or memory (a missing price, COST-05).
@@ -117,6 +134,8 @@ _TRUSTED_COST = (
     "COALESCE(cpu_request, 0) > 0 OR COALESCE(memory_request, 0) > 0 "
     "OR COALESCE(cpu_usage_millicores, 0) > 0 OR COALESCE(memory_usage_bytes, 0) > 0)))))"
 )
+#: A trusted row without a CPU/RAM split: only these make the trusted components NULL.
+_TRUSTED_UNSPLIT = f"({_UNSPLIT_COST_ROW}) AND {_TRUSTED_COST}"
 
 
 @dataclass(frozen=True)
@@ -162,8 +181,8 @@ class _MetricsTable:
             ),
             ("estimation_reasons", "'[]'"),
             ("calculation_version", "MAX(calculation_version)"),
-            ("cost_cpu", "SUM(cost_cpu)"),
-            ("cost_ram", "SUM(cost_ram)"),
+            ("cost_cpu", _split_component("cost_cpu")),
+            ("cost_ram", _split_component("cost_ram")),
             ("cost_storage", "SUM(cost_storage)"),
             ("cost_network", "SUM(cost_network)"),
             ("cost_lb", "SUM(cost_lb)"),
@@ -180,8 +199,8 @@ class _MetricsTable:
             ("last_sample_at", f"MAX({self.timestamp_column(backend)})"),
             # MEA-05: the trusted part of the hour survives one untrusted sample.
             ("trusted_cost", f"SUM(CASE WHEN {_TRUSTED_COST} THEN total_cost END)"),
-            ("trusted_cost_cpu", f"SUM(CASE WHEN {_TRUSTED_COST} THEN cost_cpu END)"),
-            ("trusted_cost_ram", f"SUM(CASE WHEN {_TRUSTED_COST} THEN cost_ram END)"),
+            ("trusted_cost_cpu", _split_component(f"CASE WHEN {_TRUSTED_COST} THEN cost_cpu END", _TRUSTED_UNSPLIT)),
+            ("trusted_cost_ram", _split_component(f"CASE WHEN {_TRUSTED_COST} THEN cost_ram END", _TRUSTED_UNSPLIT)),
             ("trusted_cost_seconds", f"SUM(CASE WHEN {_TRUSTED_COST} THEN COALESCE(duration_seconds, 0) ELSE 0 END)"),
         ]
         if self.pod_scope:
@@ -259,8 +278,8 @@ class _IdleTable(_MetricsTable):
             ("co2e_grams", "SUM(COALESCE(co2e_grams, 0))"),
             ("embodied_co2e_grams", "SUM(COALESCE(embodied_co2e_grams, 0))"),
             ("total_cost", "SUM(COALESCE(total_cost, 0))"),
-            ("cost_cpu", "SUM(cost_cpu)"),
-            ("cost_ram", "SUM(cost_ram)"),
+            ("cost_cpu", _split_component("cost_cpu")),
+            ("cost_ram", _split_component("cost_ram")),
             ("cost_source", cost_source_aggregate_sql("cost_source")),
             ("cpu_unreserved_cores", _duration_weighted("cpu_unreserved_cores")),
             ("memory_unreserved_bytes", _duration_weighted("memory_unreserved_bytes")),

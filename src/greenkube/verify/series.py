@@ -356,6 +356,18 @@ def hourly_buckets(
     return buckets
 
 
+def untrusted_cost_hours(buckets: Sequence[HourBucket], *, slot_seconds: int = 3600) -> float:
+    """Observed workload time without trusted cost in ``buckets``, in hours (MEA-05).
+
+    Each bucket adds the share of its slot that has metric rows but no trusted
+    cost (``coverage - cost_coverage``). Hourly rollup rows keep the trusted
+    part of an hour (``trusted_cost*``), so one untrusted sample adds its own
+    five minutes, not the hour. Says why a cost verdict lost hours; never a gate.
+    """
+    untrusted = sum(max(bucket.coverage - bucket.cost_coverage, 0.0) for bucket in buckets)
+    return round(untrusted * slot_seconds / 3600.0, 4)
+
+
 #: HourBucket attribute backing each measured quantity, and the coverage that qualifies it.
 QUANTITY_FIELDS: Dict[str, tuple[str, str]] = {
     "allocated_cost": ("cost", "cost_coverage"),
