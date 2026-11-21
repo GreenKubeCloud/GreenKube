@@ -195,6 +195,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - Hourly compression waits for the longer of `METRICS_COMPRESSION_AGE_HOURS` and `COLLECTION_MAX_BACKFILL`, so an hour the collection may still backfill stays raw; a backfill longer than the age logs one warning at start instead of being refused. `METRICS_COMPRESSION_AGE_HOURS` must be at least 1: startup fails otherwise (ROL-02).
 - **Impact Model 4.0.0:** embodied emissions change for every node. Rows stored before keep the flat 100 kg per node with `embodied_source` NULL; run `greenkube recompute --since <raw retention>` to re-allocate raw rows. Hourly aggregates keep the old values.
 - `/report/export` rows carry a `row_kind` column (always `allocated` without `include_idle`).
+- The controller and worker metrics listeners no longer accept the bootstrap key `GREENKUBE_API_KEY` once a scrape token (`GREENKUBE_METRICS_TOKEN`) is configured. The chart's ServiceMonitors already send the scrape token whenever it exists; a scraper of your own that sends the bootstrap key to these listeners must switch to the scrape token.
 
 ### Deprecated
 - `refresh=true` on recommendation reads (only queues a run).
@@ -305,6 +306,9 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - Test runs no longer hang at interpreter exit. Optimization scan tests registered the realization context store (IMP-12) bound to their own database manager and left it registered; a later `refresh_realization_context` test persisted through that closed manager, which reopened an aiosqlite connection nobody closed, and its non-daemon worker thread blocked exit. An autouse fixture now clears the registered store around every test.
 - The test session now reports every non-daemon thread still alive at the end (name, target, and the test that started it) and exits with a failure instead of hanging, so a future leak shows up in CI.
 - `/report/export` lost the sample on each 7-day chunk boundary (closed windows followed by a cursor one second later); chunks are now half-open.
+- Failed `Authorization: Bearer` authentications and rejected API-key browser cookies are now throttled per client IP (four times `AUTH_LOGIN_RATE_LIMIT`, no exponential lockout), answering `429 TOO_MANY_ATTEMPTS` with `Retry-After`; before, only the global `API_RATE_LIMIT` bounded online guessing of an operator-chosen bootstrap key. Prometheus scrapes on `/prometheus/metrics` use a separate bucket, successful authentications never consume the budget, and clients sharing one address share it. Refusals are counted as `greenkube_auth_failures_total{reason="key_rate_limited"}`.
+- The controller and worker metrics listeners throttle failed scrape credentials per TCP peer the same way.
+- In `api_key` mode, a stale browser cookie is no longer counted as a failure on an open development instance or on the public sign-in routes; it is cleared instead, so a browser can always sign in again.
 
 ### Security
 - Wildcard CORS is never combined with credentials; CORS is same-origin by default.
