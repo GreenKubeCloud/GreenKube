@@ -133,6 +133,8 @@ class ChainStatus:
     head_keyed: bool = False
     #: ``<key id>:<HMAC>`` of the anchor with LEDGER_CHAIN_KEY, or None (no key, or a row stored before 0294).
     signature: Optional[str] = None
+    #: Seq of the first keyed entry, recorded at the first keyed append and covered by the signature (0296).
+    first_keyed_seq: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -456,7 +458,9 @@ class LedgerRepository:
         )
         return (int(rows[0]["seq"]), rows[0]["hash"]) if rows else (0, None)
 
-    async def _ensure_status(self, conn, cluster_uid: str, moment: datetime) -> None:
+    async def _ensure_status(
+        self, conn, cluster_uid: str, moment: datetime, first_keyed_seq: Optional[int] = None
+    ) -> None:
         """Create a signed, empty anchor when a keyed chain has no status row yet (LED-05).
 
         A keyed chain then always has a status row, so a deleted one is
@@ -464,7 +468,7 @@ class LedgerRepository:
         """
         rows = await self._fetch(
             conn,
-            "SELECT verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature "
+            "SELECT verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature, first_keyed_seq "
             "FROM ledger_chain_status WHERE cluster_uid = ?",
             [cluster_uid],
         )
@@ -480,16 +484,21 @@ class LedgerRepository:
                 failure=row["failure"],
                 head_keyed=bool(row["head_keyed"]),
                 signature=row["signature"],
+                first_keyed_seq=int(row["first_keyed_seq"]) if row["first_keyed_seq"] is not None else None,
             )
             state = self.status_signature_state(stored)
+            boundary = stored.first_keyed_seq if stored.first_keyed_seq is not None else first_keyed_seq
             since = self.key_since
             in_grace = self.within_key_grace(moment)
             # An unsigned row stored before the key (upgrade), or a row signed with a previous key (rotation), is
             # signed with the current key only inside the grace period of LEDGER_CHAIN_KEY_SINCE; without that
             # anchor, as before (unsigned and not keyed, or a previous key).
-            if (state == "unsigned" and not stored.head_keyed and (since is None or in_grace)) or (
+            resign = (state == "unsigned" and not stored.head_keyed and (since is None or in_grace)) or (
                 state == "previous" and (since is None or in_grace)
-            ):
+            )
+            # The first keyed append records the boundary in a row signed with the current key.
+            record_boundary = state == "current" and stored.first_keyed_seq is None and first_keyed_seq is not None
+            if resign or record_boundary:
                 verified_at = stored.verified_at
                 await self._upsert_status(
                     conn,
@@ -502,6 +511,7 @@ class LedgerRepository:
                         head_hash=row["head_hash"],
                         failure=row["failure"],
                         head_keyed=stored.head_keyed,
+                        first_keyed_seq=boundary,
                     ),
                 )
             return
@@ -516,10 +526,11 @@ class LedgerRepository:
                 head_hash=None,
                 failure=None,
                 head_keyed=True,
+                first_keyed_seq=first_keyed_seq,
             ),
         )
 
-    async def _check_writer_key(self, conn, cluster_uid: str, chain_key: Optional[bytes]) -> None:
+    async def _check_writer_key(self, conn, cluster_uid: str, chain_key: Optional[bytes]) -> bool:
         """Fail closed when the head is keyed and this process lacks that key or a rotation from it (LED-05).
 
         Appending unkeyed or differently keyed entries after keyed ones would
@@ -528,19 +539,26 @@ class LedgerRepository:
         """
         rows = await self._fetch(
             conn,
-            "SELECT chain_key_id FROM savings_ledger_entries WHERE cluster_uid = ? ORDER BY seq DESC LIMIT 1",
+            "SELECT chain_key_id, period_end, created_at FROM savings_ledger_entries WHERE cluster_uid = ? "
+            "ORDER BY seq DESC LIMIT 1",
             [cluster_uid],
         )
         head_key_id = rows[0]["chain_key_id"] if rows else None
         if head_key_id is None:
-            return
+            return False
         current_id = chain_key_id(chain_key) if chain_key else None
         if current_id == head_key_id:
-            return
+            return True
         if current_id is not None and head_key_id in self.chain_keys:
-            # Continuing after a previous key is a rotation; with LEDGER_CHAIN_KEY_SINCE only inside its grace period.
-            if self.key_since is None or self.within_key_grace(datetime.now(timezone.utc)):
-                return
+            # Continuing after a previous key is a rotation. With LEDGER_CHAIN_KEY_SINCE, only when the head was
+            # written before SINCE plus the grace period (whenever the next append comes): a head keyed with the old
+            # key after that is a forgery, and the verifier enforces the key order anyway.
+            head_time = max(
+                ensure_utc(parse_time(rows[0]["period_end"]) or datetime.min.replace(tzinfo=timezone.utc)),
+                ensure_utc(parse_time(rows[0]["created_at"]) or datetime.min.replace(tzinfo=timezone.utc)),
+            )
+            if self.key_since is None or self.within_key_grace(head_time):
+                return True
         from greenkube.verify.ledger.projector import LEDGER_WRITE_ERRORS
 
         LEDGER_WRITE_ERRORS.labels(reason="chain_key").inc()
@@ -577,7 +595,7 @@ class LedgerRepository:
             existing = await self._existing_keys(conn, cluster_uid, list(unique))
             seq, prev_hash = await self._head(conn, cluster_uid)
             chain_key = self.chain_key
-            await self._check_writer_key(conn, cluster_uid, chain_key)
+            head_keyed_before = await self._check_writer_key(conn, cluster_uid, chain_key)
             placeholders = ", ".join("?" for _ in _COLUMNS)
             insert = f"INSERT INTO savings_ledger_entries ({_SELECT}) VALUES ({placeholders})"
             for key, draft in unique.items():
@@ -598,7 +616,8 @@ class LedgerRepository:
                 inserted.append(entry)
             await self._add_totals(conn, cluster_uid, inserted)
             if inserted and chain_key:
-                await self._ensure_status(conn, cluster_uid, moment)
+                boundary = None if head_keyed_before else inserted[0].seq
+                await self._ensure_status(conn, cluster_uid, moment, boundary)
             for source_table, position in (watermarks or {}).items():
                 await self._execute(
                     conn,
@@ -1398,16 +1417,32 @@ class LedgerRepository:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _status_message(cluster_uid: str, head_seq: Optional[int], head_hash: Optional[str], keyed: bool) -> bytes:
-        return f"ledger-status|{cluster_uid}|{head_seq}|{head_hash}|{int(bool(keyed))}".encode("utf-8")
+    def _status_message(
+        cluster_uid: str,
+        head_seq: Optional[int],
+        head_hash: Optional[str],
+        keyed: bool,
+        first_keyed_seq: Optional[int] = None,
+    ) -> bytes:
+        message = f"ledger-status|{cluster_uid}|{head_seq}|{head_hash}|{int(bool(keyed))}"
+        if first_keyed_seq is not None:
+            message += f"|first-keyed:{first_keyed_seq}"
+        return message.encode("utf-8")
 
-    def sign_status(self, cluster_uid: str, head_seq: Optional[int], head_hash: Optional[str], keyed: bool):
+    def sign_status(
+        self,
+        cluster_uid: str,
+        head_seq: Optional[int],
+        head_hash: Optional[str],
+        keyed: bool,
+        first_keyed_seq: Optional[int] = None,
+    ):
         """``<key id>:<HMAC>`` of an anchor with the current chain key, or None without a key (LED-05)."""
         key = self.chain_key
         if not key:
             return None
-        digest = hmac.new(key, self._status_message(cluster_uid, head_seq, head_hash, keyed), hashlib.sha256)
-        return f"{chain_key_id(key)}:{digest.hexdigest()}"
+        message = self._status_message(cluster_uid, head_seq, head_hash, keyed, first_keyed_seq)
+        return f"{chain_key_id(key)}:{hmac.new(key, message, hashlib.sha256).hexdigest()}"
 
     def status_signature_state(self, status: ChainStatus) -> str:
         """``current``, ``previous`` (valid with an older key), ``forged`` or ``unsigned`` (LED-05)."""
@@ -1430,7 +1465,9 @@ class LedgerRepository:
             return False
         expected = hmac.new(
             key,
-            self._status_message(status.cluster_uid, status.head_seq, status.head_hash, status.head_keyed),
+            self._status_message(
+                status.cluster_uid, status.head_seq, status.head_hash, status.head_keyed, status.first_keyed_seq
+            ),
             hashlib.sha256,
         ).hexdigest()
         return hmac.compare_digest(expected, digest)
@@ -1439,15 +1476,20 @@ class LedgerRepository:
         ok: Any = bool(status.ok) if self.postgres else int(bool(status.ok))
         keyed: Any = bool(status.head_keyed) if self.postgres else int(bool(status.head_keyed))
         signature = (
-            self.sign_status(status.cluster_uid, status.head_seq, status.head_hash, status.head_keyed) if sign else None
+            self.sign_status(
+                status.cluster_uid, status.head_seq, status.head_hash, status.head_keyed, status.first_keyed_seq
+            )
+            if sign
+            else None
         )
         await self._execute(
             conn,
             "INSERT INTO ledger_chain_status (cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, "
-            "head_keyed, signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cluster_uid) DO UPDATE SET "
-            "verified_at = excluded.verified_at, ok = excluded.ok, entries = excluded.entries, "
+            "head_keyed, signature, first_keyed_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cluster_uid) "
+            "DO UPDATE SET verified_at = excluded.verified_at, ok = excluded.ok, entries = excluded.entries, "
             "head_seq = excluded.head_seq, head_hash = excluded.head_hash, failure = excluded.failure, "
-            "head_keyed = excluded.head_keyed, signature = excluded.signature",
+            "head_keyed = excluded.head_keyed, signature = excluded.signature, "
+            "first_keyed_seq = excluded.first_keyed_seq",
             [
                 status.cluster_uid,
                 self._ts(status.verified_at),
@@ -1458,6 +1500,7 @@ class LedgerRepository:
                 status.failure,
                 keyed,
                 signature,
+                status.first_keyed_seq,
             ],
         )
 
@@ -1508,8 +1551,8 @@ class LedgerRepository:
 
     async def get_chain_status(self, cluster_uid: str) -> Optional[ChainStatus]:
         rows = await self._select(
-            "SELECT cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature "
-            "FROM ledger_chain_status WHERE cluster_uid = ?",
+            "SELECT cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature, "
+            "first_keyed_seq FROM ledger_chain_status WHERE cluster_uid = ?",
             [cluster_uid],
         )
         if not rows:
@@ -1527,6 +1570,7 @@ class LedgerRepository:
             failure=row["failure"],
             head_keyed=bool(row["head_keyed"]),
             signature=row["signature"],
+            first_keyed_seq=int(row["first_keyed_seq"]) if row["first_keyed_seq"] is not None else None,
         )
 
 

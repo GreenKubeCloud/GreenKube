@@ -136,6 +136,8 @@ class ChainVerification:
     head_keyed: bool = False
     #: Key id of the verified head (None when unkeyed).
     head_key_id: Optional[str] = None
+    #: Seq of the first keyed entry walked (full passes), or None.
+    first_keyed_seq: Optional[int] = None
 
 
 async def verify_chain(
@@ -145,6 +147,7 @@ async def verify_chain(
     after_seq: int = 0,
     after_hash: Optional[str] = None,
     page_size: int = PAGE_SIZE,
+    first_keyed_seq: Optional[int] = None,
 ) -> ChainVerification:
     """Walk the chain of ``cluster_uid`` after position ``after_seq`` (whose hash is ``after_hash``)."""
     expected_seq = after_seq + 1
@@ -165,6 +168,7 @@ async def verify_chain(
             newest_rank = rank.get(head_key_id or "")
     since = repo.key_since
     cutoff = since + CHAIN_KEY_GRACE if since is not None else None
+    first_keyed_walked: Optional[int] = None
     #: entry id -> (value, quantity, unit) of the entries walked, for the reversal checks.
     seen: Dict[str, Tuple[float, str, str]] = {}
     #: ids reversed (non-drift) by the entries walked.
@@ -193,7 +197,12 @@ async def verify_chain(
                 failure = ("chain_key_order", f"seq {entry.seq} uses an older key after a newer one")
             elif entry.hash != entry.computed_hash(keys.get(entry.chain_key_id or "")):
                 failure = ("hash_mismatch", f"seq {entry.seq} ({entry.entry_id}) was modified")
-            elif cutoff is not None and entry.chain_key_id is None and _entry_time(entry) > cutoff:
+            elif (
+                cutoff is not None
+                and entry.chain_key_id is None
+                and (first_keyed_seq is None or entry.seq >= first_keyed_seq)
+                and _entry_time(entry) > cutoff
+            ):
                 failure = ("unkeyed_after_key", f"seq {entry.seq} is unkeyed and later than LEDGER_CHAIN_KEY_SINCE")
             elif (
                 cutoff is not None
@@ -222,6 +231,8 @@ async def verify_chain(
             prev_hash = entry.hash
             keyed_seen = keyed_seen or entry.chain_key_id is not None
             head_key_id = entry.chain_key_id
+            if entry.chain_key_id is not None and first_keyed_walked is None:
+                first_keyed_walked = entry.seq
             if entry.chain_key_id is not None:
                 entry_rank = rank.get(entry.chain_key_id)
                 if entry_rank is not None:
@@ -232,7 +243,14 @@ async def verify_chain(
         if len(page) < page_size:
             break
     return ChainVerification(
-        cluster_uid, True, verified, verified or None, prev_hash, head_keyed=keyed_seen, head_key_id=head_key_id
+        cluster_uid,
+        True,
+        verified,
+        verified or None,
+        prev_hash,
+        head_keyed=keyed_seen,
+        head_key_id=head_key_id,
+        first_keyed_seq=first_keyed_walked,
     )
 
 
@@ -367,6 +385,12 @@ async def verify_ledger(
     total = 0
     for cluster_uid in await repo.clusters():
         previous = await repo.get_chain_status(cluster_uid)
+        # The boundary between unkeyed and keyed entries counts only from a row signed with the current key.
+        boundary = (
+            previous.first_keyed_seq
+            if previous is not None and repo.status_signature_state(previous) == "current"
+            else None
+        )
         checkpoint = marks.get(cluster_uid)
         incremental = not full and checkpoint is not None and moment - checkpoint[2] < FULL_VERIFICATION_INTERVAL
         if incremental:
@@ -376,9 +400,11 @@ async def verify_ledger(
                 incremental = False
         if incremental:
             assert checkpoint is not None
-            result = await verify_chain(repo, cluster_uid, after_seq=checkpoint[0], after_hash=checkpoint[1])
+            result = await verify_chain(
+                repo, cluster_uid, after_seq=checkpoint[0], after_hash=checkpoint[1], first_keyed_seq=boundary
+            )
         else:
-            result = await verify_chain(repo, cluster_uid)
+            result = await verify_chain(repo, cluster_uid, first_keyed_seq=boundary)
         if result.ok:
             result = _status_failure(repo, result, previous, moment) or result
         if result.ok:
@@ -423,6 +449,9 @@ async def verify_ledger(
                 head_hash=anchor_hash,
                 failure=None if result.ok else f"{result.reason}: {result.detail}",
                 head_keyed=result.head_keyed if result.ok else bool(previous and previous.head_keyed),
+                first_keyed_seq=boundary
+                if boundary is not None
+                else (result.first_keyed_seq if result.ok and not incremental else None),
             ),
             # Only a trusted anchor is signed: never a forged, unsigned or missing one carried by a failure.
             sign=result.ok or (previous is not None and repo.status_signature_state(previous) == "current"),
@@ -461,6 +490,7 @@ async def accept_head(
             head_hash=result.head_hash,
             failure=None,
             head_keyed=result.head_keyed,
+            first_keyed_seq=result.first_keyed_seq,
         )
     )
     await repo.record_head_acceptance(

@@ -164,3 +164,59 @@ async def test_a_backdated_downgraded_tail_is_caught_by_the_chain(ledger: Ledger
     await _rechain(ledger, [last], None)
     result = (await verify_ledger(keyed, checkpoints={}, full=True))[CLUSTER_UID]
     assert not result.ok and result.failure_seq == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_rotation_on_an_idle_cluster_still_appends_after_the_grace_period(ledger: LedgerDb):  # noqa: F811
+    from greenkube.verify.ledger.verification import accept_head
+
+    first = LedgerRepository(ledger.manager, chain_key=K1)
+    old = _hour(-10)
+    await first.append(CLUSTER_UID, CLUSTER, [replace(_draft("a0"), period_start=old, period_end=old)], now=old)
+    assert (await verify_ledger(first, checkpoints={}, now=old))[CLUSTER_UID].ok
+    # Rotated at -8 h, nothing appended until now (more than 2 h after SINCE, by the wall clock too).
+    rotated = LedgerRepository(ledger.manager, chain_key=K2, previous_keys=[K1], key_since=_hour(-8))
+    later = _hour(0)
+    await rotated.append(CLUSTER_UID, CLUSTER, [replace(_draft("b0"), period_start=later, period_end=later)], now=later)
+    assert await rotated.count(CLUSTER_UID) == 2
+    result = (await verify_ledger(rotated, checkpoints={}, full=True, now=later))[CLUSTER_UID]
+    if not result.ok:
+        assert result.reason == "status_forged"  # the old-key status row: accepted explicitly
+        assert (await accept_head(rotated, CLUSTER_UID, "rotation after an idle period", now=later)).ok
+    assert (await verify_ledger(rotated, checkpoints={}, full=True, now=later))[CLUSTER_UID].ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_unkeyed_entries_with_future_periods_before_the_upgrade_stay_valid(ledger: LedgerDb):  # noqa: F811
+    """LED-06's forward clock wrote future periods: below the signed first keyed seq they are accepted."""
+    legacy = LedgerRepository(ledger.manager, chain_key=b"")
+    future = _hour(24 * 20)
+    await legacy.append(
+        CLUSTER_UID, CLUSTER, [replace(_draft(f"f{i}"), period_start=future, period_end=future) for i in range(2)]
+    )
+    await verify_ledger(legacy, checkpoints={})
+    keyed = LedgerRepository(ledger.manager, chain_key=K, key_since=_hour(0))
+    await keyed.append(CLUSTER_UID, CLUSTER, [_draft("k0"), _draft("k1")], now=_hour(0))
+    status = await keyed.get_chain_status(CLUSTER_UID)
+    assert status is not None and status.first_keyed_seq == 3
+    assert (await verify_ledger(keyed, checkpoints={}, full=True, now=_hour(30)))[CLUSTER_UID].ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_an_unkeyed_entry_after_the_first_keyed_seq_fails(ledger: LedgerDb):  # noqa: F811
+    keyed = LedgerRepository(ledger.manager, chain_key=K, key_since=_hour(-10))
+    await keyed.append(CLUSTER_UID, CLUSTER, [_draft("k0"), _draft("k1")], now=_hour(-10))
+    entries = await keyed.list_entries(CLUSTER_UID, limit=10, ascending=True)
+    await _disable_triggers(ledger)
+    prev = entries[0].hash
+    forged = replace(entries[1], prev_hash=prev, chain_key_id=None)
+    forged = replace(forged, hash=chain_hash(prev, forged.canonical()))
+    await ledger.execute(
+        f"UPDATE savings_ledger_entries SET hash = '{forged.hash}', chain_key_id = NULL "
+        f"WHERE entry_id = '{forged.entry_id}'"
+    )
+    result = (await verify_ledger(keyed, checkpoints={}, full=True))[CLUSTER_UID]
+    assert not result.ok and result.failure_seq == 2
