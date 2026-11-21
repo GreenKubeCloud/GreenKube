@@ -58,3 +58,27 @@ def test_a_declared_saving_is_bounded_by_the_allocated_projection():
     assert declared.projected_cost_per_year == pytest.approx(236.52)
     with pytest.raises(ValueError):
         validate_user_declared_savings(record, co2e_grams_per_year=None, cost_per_year=3000.0)
+
+
+def test_a_declared_co2e_falls_back_to_the_billable_projection_when_the_allocated_one_has_none():
+    """Reviewer case: an orphaned LoadBalancer models no CO2e in its allocated projection."""
+    record = RecommendationRecord(
+        id=2,
+        pod_name="lb",
+        namespace="prod",
+        type=RecommendationType.ORPHANED_LOAD_BALANCER,
+        description="orphaned lb",
+        status=RecommendationStatus.APPLIED,
+        potential_savings_cost=200.0,
+        potential_savings_co2e_grams=5000.0,
+        impact={"allocated_cost_annual": 200.0, "co2e_modeled": False},
+    )
+    declared = validate_user_declared_savings(record, co2e_grams_per_year=4000.0, cost_per_year=None)
+    assert declared is not None and declared.co2e_grams_per_year == 4000.0
+    assert declared.projected_co2e_grams_per_year == pytest.approx(5000.0)
+
+
+def test_an_unrealized_apply_falls_back_to_the_billable_projection():
+    record = _applied(actual_cpu=1000).model_copy(update={"potential_savings_cost": 100.0})
+    declared = validate_user_declared_savings(record, co2e_grams_per_year=None, cost_per_year=500.0)
+    assert declared is not None and declared.projected_cost_per_year == pytest.approx(100.0)

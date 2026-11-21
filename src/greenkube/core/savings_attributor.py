@@ -311,11 +311,14 @@ def validate_user_declared_savings(
         return None
     flags: List[str] = []
     allocated = projected_allocated_rates(record)
-    projected_co2e, projected_cost = (
-        (allocated[1], allocated[0])
-        if allocated is not None
-        else (record.potential_savings_co2e_grams, record.potential_savings_cost)
-    )
+
+    def bound(allocated_value: Optional[float], billable: Optional[float]) -> Optional[float]:
+        # Per quantity: the allocated projection when it has a value, else the billable one (an
+        # allocated projection that models no CO2e, or an apply that realized none of the cut).
+        return allocated_value if allocated_value else billable
+
+    projected_cost = bound(allocated[0] if allocated else None, record.potential_savings_cost)
+    projected_co2e = bound(allocated[1] if allocated else None, record.potential_savings_co2e_grams)
     checks = (
         ("carbon_saved_co2e_grams", co2e_grams_per_year, projected_co2e),
         ("cost_saved", cost_per_year, projected_cost),
