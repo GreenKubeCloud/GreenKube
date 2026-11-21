@@ -425,3 +425,79 @@ async def test_no_ledger_v2_pass_when_the_v1_write_failed():
     projector = _Projector()
     await SavingsAttributor(ledger, "c", ledger=projector).accrue([_record()], now=NOW)
     assert projector.calls == 0
+
+
+class _ClockedLedger(FakeLedger):
+    """A ledger whose database clock is set by the test (LED-06)."""
+
+    def __init__(self, database_time: Optional[datetime]) -> None:
+        super().__init__()
+        self.database_time = database_time
+
+    async def get_database_time(self) -> Optional[datetime]:
+        return self.database_time
+
+
+class TestClockSkew:
+    """LED-06: a wrong process clock never books future slots nor freezes accrual."""
+
+    @pytest.mark.asyncio
+    async def test_bad_clock_runs_write_nothing_and_count_clock_skew(self):
+        ledger = _ClockedLedger(NOW)
+        ledger.watermarks[("c", "recommendation_savings")] = NOW.replace(minute=0)
+        bad = SavingsAttributor(ledger, "c", clock=lambda: NOW + timedelta(days=400))
+        before = _errors("clock_skew")
+
+        results = [await bad.accrue([_record()]) for _ in range(3)]
+
+        assert all(result.written == 0 and result.clock_skew for result in results)
+        assert _errors("clock_skew") == before + 3
+        assert not ledger.rows
+        assert ledger.watermarks[("c", "recommendation_savings")] == NOW.replace(minute=0)
+
+    @pytest.mark.asyncio
+    async def test_clock_within_tolerance_accrues(self):
+        ledger = _ClockedLedger(NOW + timedelta(minutes=2))
+        result = await SavingsAttributor(ledger, "c", clock=lambda: NOW).accrue([_record()])
+        assert not result.clock_skew and result.written == 3
+
+    @pytest.mark.asyncio
+    async def test_change_applied_while_the_watermark_is_ahead_accrues_from_applied_at(self):
+        """A watermark left in the future by an earlier bad clock never freezes accrual."""
+        from greenkube.core.savings_attributor import ACCRUAL_WATERMARK_AHEAD
+
+        ledger = FakeLedger()
+        ahead = NOW.replace(minute=0) + timedelta(days=21)
+        ledger.watermarks[("c", "recommendation_savings")] = ahead
+        record = _record(applied_at=NOW + timedelta(hours=1))
+        attributor = SavingsAttributor(ledger, "c")
+
+        await attributor.accrue([record], now=NOW + timedelta(hours=4))
+        assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 2)
+        await attributor.accrue([record], now=NOW + timedelta(hours=6))
+        assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 4)
+        # No slot beyond the trusted now, and the watermark ahead is exposed.
+        assert max(r.period_end for r in ledger.rows.values() if r.period_end) <= NOW + timedelta(hours=6)
+        assert ACCRUAL_WATERMARK_AHEAD.labels(cluster_name="c")._value.get() > 0
+        assert ledger.watermarks[("c", "recommendation_savings")] == ahead
+
+
+class TestPerRecommendationCursor:
+    """LED-12 (c): a record that fails for some runs keeps the slots of those runs."""
+
+    @pytest.mark.asyncio
+    async def test_record_invalid_for_three_runs_then_fixed_has_no_missing_slot(self):
+        ledger = FakeLedger()
+        attributor = SavingsAttributor(ledger, "c")
+        good = _record(1, applied_at=NOW - timedelta(hours=1))
+        await attributor.accrue([good], now=NOW)
+        broken = _record(1, applied_at=NOW - timedelta(hours=1), co2e=float("nan"))
+        for hour in (1, 2, 3):
+            result = await attributor.accrue([broken], now=NOW + timedelta(hours=hour))
+            assert result.errors == 1
+        await attributor.accrue([good], now=NOW + timedelta(hours=4))
+
+        slots = sorted(r.slot_start for r in ledger.rows.values() if r.slot_start is not None)
+        expected = [NOW.replace(minute=0) + timedelta(hours=h) for h in range(-1, 4)]
+        assert slots == expected
+        assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 4)

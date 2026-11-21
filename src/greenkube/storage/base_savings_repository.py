@@ -84,6 +84,15 @@ class SavingsLedgerRepository(ABC):
     async def get_accrual_watermark(self, cluster_name: str, stream: str = ATTRIBUTION_STREAM) -> Optional[datetime]:
         """Return the end of the last accrued slot for a stream, or ``None``."""
 
+    async def get_database_time(self) -> Optional[datetime]:
+        """Return the database server's clock, or ``None`` when it is not an independent clock (LED-06).
+
+        The attributor refuses to accrue when the process clock is too far
+        from it. SQLite runs in the process and reads the host clock, so it
+        returns ``None``.
+        """
+        return None
+
     @abstractmethod
     async def get_accrual_floors(self, recommendation_ids: Iterable[int]) -> Dict[int, datetime]:
         """Return the latest ``period_end`` already in the ledger per recommendation.

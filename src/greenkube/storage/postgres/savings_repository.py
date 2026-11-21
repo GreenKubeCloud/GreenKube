@@ -157,6 +157,12 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
             )
         return ensure_utc(value) if value is not None else None
 
+    async def get_database_time(self) -> Optional[datetime]:
+        """Return the PostgreSQL server clock (LED-06): an independent witness of the process clock."""
+        async with self._db.connection_scope() as conn:
+            value = await conn.fetchval("SELECT clock_timestamp()")
+        return ensure_utc(value) if value is not None else None
+
     async def get_accrual_floors(self, recommendation_ids: Iterable[int]) -> Dict[int, datetime]:
         ids = sorted({int(i) for i in recommendation_ids})
         if not ids:

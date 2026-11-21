@@ -13,9 +13,21 @@ records the end of the last accrued slot; each run accrues every complete slot
 after it (backfilling downtime) and advances it with a compare-and-swap in the
 same transaction as the inserts. Rows are keyed by recommendation, method and
 slot, so restarts, retries and concurrent controllers cannot double count.
-A recommendation that has never accrued is also caught up for the slots since
-its ``applied_at`` that are already behind the watermark (bounded by the
-initial backfill), so a change detected late keeps its full history.
+
+Each recommendation also has its own cursor, the end of its last accrued row
+(LED-12): it accrues every complete slot from that cursor (or from its
+``applied_at`` when it never accrued) up to the current slot, bounded by the
+initial backfill. A change detected late keeps its full history, and a record
+that was invalid for some runs gets the slots of those runs once it is valid
+again.
+
+Clock (LED-06): the process clock is compared with the database clock before
+anything is written; beyond :data:`CLOCK_SKEW_TOLERANCE` the run is refused
+(``greenkube_attribution_errors_total{reason="clock_skew"}``). No slot ever
+ends after the current slot, and a watermark left in the future by an earlier
+wrong clock is exposed as ``greenkube_accrual_watermark_ahead_seconds``; it
+never freezes the recommendations, which accrue from their own cursors.
+SQLite reads the host clock, so the comparison is only made on PostgreSQL.
 
 Which rate accrues, and under which method, depends on the recommendation's
 outcome (roadmap C0.4):
@@ -45,7 +57,7 @@ from datetime import datetime, timedelta, timezone
 from math import ceil, isfinite
 from typing import Any, Callable, Iterable, List, Optional
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Gauge
 
 from ..models.metrics import RecommendationRecord
 from ..models.savings import (
@@ -73,6 +85,8 @@ INITIAL_BACKFILL = timedelta(days=7)
 MAX_SLOTS_PER_RUN = 7 * 24
 # A user-declared saving may not exceed this multiple of the projection.
 USER_DECLARED_MAX_RATIO = 10.0
+# Largest accepted gap between the process clock and the database clock (LED-06).
+CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 
 _ACCRUING_STATUSES = frozenset({"applied", "verifying"})
 _MEASURED_STATUSES = frozenset({"verified"})
@@ -84,6 +98,19 @@ ATTRIBUTION_ERRORS = Counter(
     ["reason"],
     registry=OBSERVABILITY_REGISTRY,
 )
+
+
+ACCRUAL_WATERMARK_AHEAD = Gauge(
+    "greenkube_accrual_watermark_ahead_seconds",
+    "Seconds by which the savings accrual watermark is ahead of the current slot (a wrong clock wrote it); "
+    "0 when it is not ahead.",
+    ["cluster_name"],
+    registry=OBSERVABILITY_REGISTRY,
+)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class InvalidSavingsRecord(ValueError):
@@ -129,6 +156,8 @@ class AccrualResult:
     watermark: Optional[datetime] = None
     conflict: bool = False
     fenced: bool = False
+    #: The process clock disagreed with the database clock: nothing was written (LED-06).
+    clock_skew: bool = False
 
 
 def _finite(label: str, value: Optional[float], record_id: Optional[int]) -> float:
@@ -367,6 +396,7 @@ class SavingsAttributor:
         initial_backfill: timedelta = INITIAL_BACKFILL,
         max_slots_per_run: int = MAX_SLOTS_PER_RUN,
         ledger: Any = None,
+        clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self._repo = savings_repo
         #: Optional :class:`~greenkube.verify.ledger.projector.LedgerProjector` (dual write, C6).
@@ -377,6 +407,8 @@ class SavingsAttributor:
         self._initial_backfill = initial_backfill
         self._max_slots = max(1, int(max_slots_per_run))
         self._slot = timedelta(seconds=ACCRUAL_SLOT_SECONDS)
+        #: Process clock, compared with the database clock before every run (LED-06).
+        self._clock = clock or _utc_now
 
     def _slots(self, start: datetime, now: datetime) -> List[tuple[datetime, datetime]]:
         horizon = floor_to_slot(now)
@@ -455,27 +487,23 @@ class SavingsAttributor:
                     )
         return rows
 
-    def _catch_up_slots(
-        self,
-        record: RecommendationRecord,
-        first_slot_start: datetime,
-        lower_bound: datetime,
-    ) -> List[tuple[datetime, datetime]]:
-        """Return the slots before this run that a never-accrued record missed.
-
-        The watermark is global, so a record that became applied after its
-        ``applied_at`` (late detection, rollout-completion time, downtime) would
-        otherwise lose every slot between ``applied_at`` and the watermark.
-        The ``(recommendation_id, method, slot_start)`` key keeps this safe.
-        """
-        if record.applied_at is None:
-            return []
-        cursor = floor_to_slot(max(ensure_utc(record.applied_at), lower_bound))
+    def _record_slots(self, start: datetime, horizon: datetime) -> List[tuple[datetime, datetime]]:
+        """Complete slots from ``start`` up to ``horizon`` (bounded per run)."""
+        cursor = floor_to_slot(start)
         slots: List[tuple[datetime, datetime]] = []
-        while cursor < first_slot_start:
+        while cursor < horizon and len(slots) < self._max_slots:
             slots.append((cursor, cursor + self._slot))
             cursor += self._slot
         return slots
+
+    async def _clock_skew(self) -> Optional[timedelta]:
+        """The gap between the process clock and the database clock when it exceeds the tolerance."""
+        process_now = ensure_utc(self._clock())
+        database_now = await self._repo.get_database_time()
+        if database_now is None:
+            return None
+        gap = process_now - ensure_utc(database_now)
+        return gap if abs(gap) > CLOCK_SKEW_TOLERANCE else None
 
     async def accrue(
         self,
@@ -483,39 +511,66 @@ class SavingsAttributor:
         *,
         now: Optional[datetime] = None,
     ) -> AccrualResult:
-        """Accrue every complete slot since the watermark (bounded per run).
+        """Accrue every complete slot since each recommendation's cursor (bounded per run).
 
-        Never raises for a single bad record; persistence failures are logged,
+        ``now`` overrides the process clock (tests and replays); without it the
+        process clock must agree with the database clock (LED-06). Never
+        raises for a single bad record; persistence failures are logged,
         counted and reported in the result.
         """
-        current = ensure_utc(now) if now is not None else datetime.now(timezone.utc)
+        if now is None:
+            skew = await self._clock_skew()
+            if skew is not None:
+                ATTRIBUTION_ERRORS.labels(reason="clock_skew").inc()
+                logger.error(
+                    "Savings attribution refused: the process clock is %+.0f s away from the database clock "
+                    "(tolerance %.0f s). Fix the node's time synchronisation.",
+                    skew.total_seconds(),
+                    CLOCK_SKEW_TOLERANCE.total_seconds(),
+                )
+                return AccrualResult(clock_skew=True)
+        current = ensure_utc(now) if now is not None else ensure_utc(self._clock())
+        horizon = floor_to_slot(current)
         watermark = await self._repo.get_accrual_watermark(self._cluster, self._stream)
-        start = watermark if watermark is not None else floor_to_slot(current) - self._initial_backfill
+        ahead = (watermark - horizon).total_seconds() if watermark is not None and watermark > horizon else 0.0
+        ACCRUAL_WATERMARK_AHEAD.labels(cluster_name=self._cluster).set(ahead)
+        if ahead:
+            logger.warning(
+                "Savings accrual watermark %s is %.0f s ahead of the current slot: it was written with a wrong "
+                "clock. Recommendations keep accruing from their own cursors.",
+                watermark,
+                ahead,
+            )
+        start = watermark if watermark is not None else horizon - self._initial_backfill
         slots = self._slots(start, current)
-        if not slots:
-            return AccrualResult(watermark=watermark)
-        new_watermark = slots[-1][1]
+        new_watermark = slots[-1][1] if slots else watermark
 
         candidates = [record for record in applied_records if record.id is not None]
         floors = await self._repo.get_accrual_floors([record.id for record in candidates if record.id is not None])
 
-        # Records that never accrued are caught up for slots already behind the
-        # watermark, within the same horizon as a first run.
-        catch_up_from = slots[0][0] - self._initial_backfill if watermark is not None else None
+        # Each record accrues from its own cursor, no further back than the backfill horizon of a first run.
+        lower_bound = min(start, horizon) - self._initial_backfill if watermark is not None else start
 
         rows: List[SavingsLedgerRecord] = []
         errors = 0
         for record in candidates:
             try:
                 floor = floors.get(record.id or 0)
-                record_slots = slots
-                if floor is None and catch_up_from is not None:
-                    record_slots = self._catch_up_slots(record, slots[0][0], catch_up_from) + slots
-                rows.extend(self._accruals_for(record, record_slots, floor))
+                if floor is not None:
+                    cursor = max(floor, lower_bound)
+                elif record.applied_at is not None:
+                    cursor = max(ensure_utc(record.applied_at), lower_bound)
+                else:
+                    cursor = lower_bound
+                rows.extend(self._accruals_for(record, self._record_slots(cursor, horizon), floor))
             except Exception as exc:
                 errors += 1
                 ATTRIBUTION_ERRORS.labels(reason="invalid_record").inc()
                 logger.warning("Savings attribution skipped recommendation %s: %s", record.id, exc)
+
+        if not slots and not rows:
+            return AccrualResult(errors=errors, watermark=watermark)
+        assert new_watermark is not None
 
         if self._fence is not None and not self._fence():
             logger.info("Savings attribution stopped before writing: this process no longer holds the lease.")
