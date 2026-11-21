@@ -1,0 +1,3 @@
+### Fixed
+- Test runs no longer hang at interpreter exit. Optimization scan tests registered the realization context store (IMP-12) bound to their own database manager and left it registered; a later `refresh_realization_context` test persisted through that closed manager, which reopened an aiosqlite connection nobody closed, and its non-daemon worker thread blocked exit. An autouse fixture now clears the registered store around every test.
+- The test session now reports every non-daemon thread still alive at the end (name, target, and the test that started it) and exits with a failure instead of hanging, so a future leak shows up in CI.
