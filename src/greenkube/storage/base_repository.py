@@ -289,7 +289,13 @@ class WindowStepProfile:
 
 
 def merge_collected_seconds(raw_stamps: Any, hourly: Any, step_seconds: int) -> dict[datetime, float]:
-    """Collected seconds per hour from distinct raw timestamps and ``(hour, max duration)`` rows (MEA-13)."""
+    """Collected seconds per hour from distinct raw timestamps and ``(hour, max duration)`` rows (MEA-13).
+
+    An hour compressed while its raw rows are kept (the default overlap of both
+    tables) is in both: the raw rows win, as in ``read_combined_metrics_smart``,
+    and the hourly table only fills the hours without raw rows, so no hour is
+    counted twice.
+    """
     seconds: dict[datetime, float] = {}
     for stamp in raw_stamps:
         moment = ensure_utc(stamp)
@@ -297,7 +303,8 @@ def merge_collected_seconds(raw_stamps: Any, hourly: Any, step_seconds: int) -> 
         seconds[hour] = seconds.get(hour, 0.0) + float(step_seconds)
     for hour_value, duration in hourly:
         hour = ensure_utc(hour_value).replace(minute=0, second=0, microsecond=0)
-        seconds[hour] = seconds.get(hour, 0.0) + float(duration or 0.0)
+        if hour not in seconds:
+            seconds[hour] = float(duration or 0.0)
     return {hour: min(value, 3600.0) for hour, value in sorted(seconds.items())}
 
 
@@ -386,9 +393,9 @@ class CombinedMetricsRepository(RawHourlySplitMixin, ABC):
         """Seconds of each UTC hour of ``[start, end)`` in which the cluster was collected (MEA-13).
 
         Cluster-wide, whatever namespace a caller measures: each distinct raw
-        row timestamp covers one step, and an hour read from the hourly table
-        covers its longest pod-hour (``MAX(duration_seconds)``). Capped at the
-        hour. Backends without stored rows return an empty mapping.
+        row timestamp covers one step, and an hour with no raw row (compressed,
+        raw rows pruned) covers its longest pod-hour of the hourly table
+        (``MAX(duration_seconds)``). Capped at the hour. Backends without stored rows return an empty mapping.
         """
         return {}
 

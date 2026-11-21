@@ -17,6 +17,7 @@ import pytest
 
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
+from greenkube.core.metrics_compressor import MetricsCompressor
 from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
@@ -79,6 +80,10 @@ async def repo(request, tmp_path, monkeypatch):
     else:
         monkeypatch.setenv("DB_TYPE", "sqlite")
         monkeypatch.setenv("DB_PATH", str(tmp_path / "presence.sqlite"))
+    # Compressed hours keep their raw rows (the default 1-7 day overlap of both tables).
+    monkeypatch.setenv("METRICS_COMPRESSION_AGE_HOURS", "24")
+    monkeypatch.setenv("METRICS_RAW_RETENTION_DAYS", "-1")
+    monkeypatch.setenv("METRICS_AGGREGATED_RETENTION_DAYS", "-1")
     config.reload()
     manager = DatabaseManager(Config())
     await manager.connect()
@@ -99,6 +104,21 @@ async def repo(request, tmp_path, monkeypatch):
                 await conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
             finally:
                 await conn.close()
+
+
+async def test_a_compressed_hour_whose_raw_rows_remain_is_counted_once(repo):
+    """Review: an hour in both the raw and the hourly table must not be counted twice."""
+    half = H0 + timedelta(hours=3)
+    await repo.write_combined_metrics([_row("half", "api", half + timedelta(seconds=STEP * i)) for i in range(6)])
+    before = await repo.collected_seconds_by_hour(half, half + timedelta(hours=1), STEP)
+    assert before == {half: pytest.approx(1800.0)}
+    await MetricsCompressor(repo.db_manager, Config(), collection_watermark_provider=None, rollup_enabled=False).run(
+        now=H0 + timedelta(days=3)
+    )
+    assert await repo.read_hourly_metrics(half, half + timedelta(hours=1))
+    assert await repo.read_combined_metrics(half, half + timedelta(hours=1))
+    after = await repo.collected_seconds_by_hour(half, half + timedelta(hours=1), STEP)
+    assert after == {half: pytest.approx(1800.0)}
 
 
 async def test_collected_seconds_are_read_cluster_wide(repo):
