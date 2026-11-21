@@ -8,7 +8,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import Any, List
 
 from .. import __version__
 from ..collectors import dcgm_collector
@@ -35,14 +35,23 @@ from ..core.metric_assembler import (
 )
 from ..core.node_zone_mapper import NodeZoneMapper
 from ..core.prometheus_resource_mapper import PodResourceMaps
+from ..energy.embodied import resolve_node_embodied
 from ..energy.estimator import BasicEstimator
 from ..energy.node_power import NodePowerProfile, resolve_node_power_profile
-from ..impact.power import GpuDevice, GpuPowerModel, NodeGpuPower, node_gpu_power
+from ..energy.shared_host import SharedHost, shared_host_groups
+from ..impact.power import (
+    GpuDevice,
+    GpuPowerModel,
+    NodeGpuPower,
+    UndetectedGpuPower,
+    node_gpu_power,
+    undetected_gpu_power,
+)
 from ..impact.realization import refresh_realization_context
-from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, embodied_g_per_hour, mark_cost_pending
+from ..impact.rows import MetricRowAllocator, NodeIdleMetric, NodeSpec, mark_cost_pending
 from ..models.metrics import CombinedMetric, EnergyMetric, PodMetric
 from ..models.node import NodeInfo, NodeZoneContext
-from ..models.provenance import CostSource, MetadataSource, NodeSource, UsageSource
+from ..models.provenance import CostSource, GpuSource, MetadataSource, NodeSource, UsageSource
 from ..storage.base_pod_snapshot_repository import PodSnapshotRepository, snapshot_at, snapshot_uncertain
 from ..storage.base_repository import CarbonIntensityRepository, CombinedMetricsRepository, NodeRepository
 from ..utils.time import ensure_utc, parse_iso_date, parse_query_step_seconds
@@ -181,6 +190,9 @@ class HistoricalRangeProcessor:
         #: Consecutive failed Kubernetes list attempts per (list, window start, window end) (review 5).
         self._list_failures: dict[tuple[str, datetime], int] = {}
         self._gpu_model = GpuPowerModel()
+        #: Whether a DCGM query of this process returned GPU series: a later DCGM error then fails
+        #: the window instead of silently dropping GPU power (NRG-13).
+        self._dcgm_series_seen = False
         #: Idle rows (``__idle__`` per node and step) of the last ``run_range`` call.
         self.last_idle_metrics: List[NodeIdleMetric] = []
         #: Per step of the last ``run_range`` call: (OpenCost window total spread evenly over the steps,
@@ -558,7 +570,12 @@ class HistoricalRangeProcessor:
         return await self._query_range(chunk, self._promql.memory_working_set_by_level())
 
     async def _collect_gpu(self, chunk: CollectionWindow) -> dict[int, list[dcgm_collector.GpuSample]]:
-        """DCGM GPU power and utilization per step; empty when DCGM is absent or unreachable (B5)."""
+        """DCGM GPU power and utilization per step; empty when DCGM is absent (B5).
+
+        A query error is a warning on a cluster where DCGM never returned series. Once
+        this process has seen GPU series, an error raises ``RangeCollectionError`` so the
+        window is retried instead of being stored without GPU power (NRG-13).
+        """
         step = self._promql.step
         try:
             power, utilization = await asyncio.gather(
@@ -566,6 +583,11 @@ class HistoricalRangeProcessor:
                 self._query_range(chunk, dcgm_collector.utilization_query(step)),
             )
         except Exception as error:
+            if self._dcgm_series_seen:
+                raise RangeCollectionError(
+                    f"DCGM GPU metrics unavailable for {chunk.start.isoformat()} -> {chunk.end.isoformat()} "
+                    f"after GPU series were collected: {error}"
+                ) from error
             logger.warning(
                 "DCGM GPU metrics unavailable for %s -> %s: %s; GPU power is not counted for this window.",
                 chunk.start.isoformat(),
@@ -573,9 +595,37 @@ class HistoricalRangeProcessor:
                 error,
             )
             return {}
+        if power or utilization:
+            self._dcgm_series_seen = True
         return dcgm_collector.samples_by_step(
             power, utilization, lambda series: self._iter_window_samples(series, chunk)
         )
+
+    async def _collect_node_cpu(self, chunk: CollectionWindow) -> dict[tuple[int, str], float]:
+        """Whole-node CPU cores per (sample start, node) from the root cgroup (NRG-12).
+
+        Empty when the series is absent or the query fails: utilisation then falls back
+        to the pods' sum, as before.
+        """
+        try:
+            series_list = await self._query_range(chunk, self._promql.node_cpu_usage())
+        except Exception as error:
+            logger.warning(
+                "Node root cgroup CPU unavailable for %s -> %s: %s; node utilisation uses the pods' sum.",
+                chunk.start.isoformat(),
+                chunk.end.isoformat(),
+                error,
+            )
+            return {}
+        result: dict[tuple[int, str], float] = {}
+        for series in series_list or []:
+            node = (series.get("metric") or {}).get("node")
+            if not node:
+                continue
+            for sample_start, value in self._iter_window_samples(series, chunk):
+                if math.isfinite(value) and value >= 0:
+                    result[(sample_start, node)] = max(result.get((sample_start, node), 0.0), value)
+        return result
 
     def _gpu_power_by_group(
         self,
@@ -646,12 +696,22 @@ class HistoricalRangeProcessor:
         *,
         instance_type: str | None,
         gpu_unattributed_watts: float,
+        config: Any = None,
+        shared_host: SharedHost | None = None,
+        undetected_gpu: UndetectedGpuPower | None = None,
+        gpu_source: str | None = None,
+        node_cpu_used_cores: float | None = None,
     ) -> NodeSpec:
         """What the Impact Model needs to know about one node at one step."""
+        config = config if config is not None else get_config()
         profile = power.profile or {}
-        embodied_profile = None
-        if info is not None and info.cloud_provider and info.instance_type:
-            embodied_profile = boavizta_cache.get((info.cloud_provider, info.instance_type))
+        # Configured, Boavizta, per-vCPU fallback or flat default, with its provenance (NRG-01).
+        embodied = resolve_node_embodied(
+            info,
+            boavizta_cache,
+            config,
+            cpu_capacity_cores=(info.cpu_capacity_cores if info else None) or power.known_cores,
+        )
         return NodeSpec(
             name=node_name,
             instance_type=instance_type,
@@ -663,9 +723,16 @@ class HistoricalRangeProcessor:
             max_watts=float(profile.get("maxWatts", 0.0) or 0.0),
             vcores=float(profile.get("vcores", 0.0) or 0.0) or None,
             power_source=power.source,
-            embodied_g_per_hour=embodied_g_per_hour(embodied_profile),
+            embodied_g_per_hour=embodied.g_per_hour,
             gpu_unattributed_watts=gpu_unattributed_watts,
             is_fallback=power.is_fallback,
+            embodied_source=embodied.source,
+            embodied_reason=embodied.reason(node_name),
+            host_share=shared_host.share if shared_host is not None else 1.0,
+            host_reason=shared_host.reason(node_name) if shared_host is not None else None,
+            gpu_reason=undetected_gpu.reason if undetected_gpu is not None else None,
+            gpu_source=gpu_source,
+            node_cpu_used_cores=node_cpu_used_cores,
         )
 
     async def _pod_history(
@@ -1231,6 +1298,18 @@ class HistoricalRangeProcessor:
 
         # Boavizta embodied profiles for every node version the window can use:
         # the current nodes and every snapshot of the timeline (RECON-05).
+        # Nodes that are one physical host (NRG-15), from the live node list of this run.
+        shared_hosts = shared_host_groups(nodes_info) if getattr(self._config, "SHARED_HOST_DETECTION", True) else {}
+        collection_telemetry.set_shared_host_groups(len({group.key for group in shared_hosts.values()}))
+        # GPU nodes of the live node list, for steps DCGM has no sample of (NRG-13).
+        undetected_gpus = {
+            name: undetected_gpu_power(info.gpu_count, info.gpu_model)
+            for name, info in nodes_info.items()
+            if info.gpu_count
+        }
+        collection_telemetry.set_gpu_nodes_unmeasured(
+            sum(1 for estimate in undetected_gpus.values() if estimate.watts is None)
+        )
         embodied_nodes: dict[str, NodeInfo] = dict(nodes_info)
         for node_name, timeline in node_timeline.items():
             for index, (_ts, snapshot_info) in enumerate(timeline):
@@ -1446,6 +1525,7 @@ class HistoricalRangeProcessor:
                 pod_info_node_latest,
                 set(nodes_info) | {node for _start, node in groups if node},
             )
+            node_cpu_by_group = await self._collect_node_cpu(chunk)
 
             del samples, pod_node_map_by_ts
 
@@ -1648,13 +1728,37 @@ class HistoricalRangeProcessor:
                         )
                     )
 
+                # NRG-13: GPUs of a node DCGM does not report; requested GPUs go to the requesting pods.
+                undetected_gpu = None if gpu_power else undetected_gpus.get(node_name)
+                gpu_unattributed_watts = gpu_power.unattributed_watts if gpu_power else 0.0
+                if undetected_gpu is not None:
+                    gpu_requests: dict[tuple[str, str], int] = defaultdict(int)
+                    for container in group_pod_metrics:
+                        if container.gpu_request and container.kind != "init":
+                            gpu_requests[(container.namespace, container.pod_name)] += container.gpu_request
+                    gpu_by_pod, gpu_unattributed_watts = undetected_gpu.split(
+                        gpu_requests, float(getattr(self._config, "GPU_ASSUMED_UTILIZATION_PCT", 50.0))
+                    )
+                    for row in node_rows:
+                        row_gpu_watts = gpu_by_pod.get((row.namespace, row.pod_name))
+                        if row_gpu_watts is not None:
+                            row.gpu_power_watts = row_gpu_watts
                 spec = self._node_spec(
                     node_name,
                     _ni,
                     power,
                     boavizta_cache,
                     instance_type=(_ni.instance_type if _ni else None) or current_node_map.get(node_name),
-                    gpu_unattributed_watts=gpu_power.unattributed_watts if gpu_power else 0.0,
+                    gpu_unattributed_watts=gpu_unattributed_watts,
+                    config=self._config,
+                    shared_host=shared_hosts.get(node_name),
+                    undetected_gpu=undetected_gpu,
+                    gpu_source=(
+                        GpuSource.DCGM.value
+                        if gpu_power
+                        else (undetected_gpu.source if undetected_gpu is not None else None)
+                    ),
+                    node_cpu_used_cores=node_cpu_by_group.get((sample_start, node_name)),
                 )
                 node_profile = allocator.node_profile(
                     spec, node_rows, pue=pue, intensity=carbon_result.grid_intensity, hours=chosen_step_sec / 3600.0
@@ -1750,7 +1854,7 @@ class HistoricalRangeProcessor:
                             ]
                         combined.extend(container_rows)
 
-            del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group, counter_cpu_pods
+            del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group, counter_cpu_pods, node_cpu_by_group
             del net_rx_by_sample, net_tx_by_sample, disk_read_by_sample, disk_write_by_sample
             del restart_by_sample, ephemeral_usage_by_sample
             del container_memory_samples, normalized_container_samples

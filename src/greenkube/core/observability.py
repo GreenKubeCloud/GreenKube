@@ -386,6 +386,7 @@ _PROVENANCE_VALUES = frozenset(
         "consolidated",
         "stale",
         "zone_default",
+        "country_default",
         "global_default",
         "unknown",
         "mixed",

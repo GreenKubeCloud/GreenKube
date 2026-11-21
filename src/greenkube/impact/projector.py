@@ -13,8 +13,12 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.energy.embodied import known_profiles, resolve_node_embodied
+from greenkube.energy.node_power import default_profile_from_config, resolve_node_power_profile
+from greenkube.energy.shared_host import SharedHost, scale_to_host_share, shared_host_groups
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
 from greenkube.impact.power import memory_watts_per_gib
 from greenkube.impact.pricing import (
@@ -70,8 +74,6 @@ COVERAGE_FROM_LOOKBACK = "lookback"
 FirstObservedLookup = Callable[["WorkloadRef"], Optional[datetime]]
 
 #: Fallbacks used only when the configuration object lacks a setting.
-_FALLBACK_LIFESPAN_YEARS = 4
-_FALLBACK_EMBODIED_KG = 100.0
 _FALLBACK_INTENSITY = 500.0
 _FALLBACK_PUE = 1.3
 
@@ -98,39 +100,40 @@ class _PowerProfile:
     min_watts: float
     max_watts: float
     source: PowerSource
+    #: vCPUs the profile knows of the node; None for DEFAULT_INSTANCE_PROFILE (NRG-01).
+    known_cores: Optional[float] = None
 
 
-def _power_profile(config: Any, instance_type: Optional[str], capacity_cores: Optional[float]) -> _PowerProfile:
-    """Mirrors ``BasicEstimator`` profile selection: instance profile, capacity-derived, default."""
+def _resolved_power(
+    config: Any,
+    name: str,
+    instance_type: Optional[str],
+    capacity_cores: Optional[float],
+    provider: Optional[str],
+) -> _PowerProfile:
+    """The node power profile of the collected rows (NRG-05): one resolver for both.
+
+    ``resolve_node_power_profile``: instance profile, then capacity × the provider's CCF
+    per-vCPU coefficients (their cross-provider average for an unknown provider), then
+    ``DEFAULT_INSTANCE_PROFILE``.
+    """
     from greenkube.data.instance_profiles import INSTANCE_PROFILES
 
-    profile = INSTANCE_PROFILES.get(instance_type) if instance_type else None
-    if profile:
-        vcores = float(profile.get("vcores") or 0) or (capacity_cores or 1.0)
-        return _PowerProfile(
-            vcores=vcores,
-            min_watts=float(profile.get("minWatts", 0.0)),
-            max_watts=float(profile.get("maxWatts", 0.0)),
-            source=PowerSource.INSTANCE_PROFILE,
-        )
-
-    default_vcores = float(_setting(config, "DEFAULT_INSTANCE_VCORES", 1) or 1)
-    default_min = float(_setting(config, "DEFAULT_INSTANCE_MIN_WATTS", 1.0))
-    default_max = float(_setting(config, "DEFAULT_INSTANCE_MAX_WATTS", 10.0))
-    if capacity_cores:
-        per_core_min = default_min / default_vcores if default_vcores > 0 else default_min
-        per_core_max = default_max / default_vcores if default_vcores > 0 else default_max
-        return _PowerProfile(
-            vcores=capacity_cores,
-            min_watts=per_core_min * capacity_cores,
-            max_watts=per_core_max * capacity_cores,
-            source=PowerSource.NODE_CAPACITY_DERIVED,
-        )
+    power = resolve_node_power_profile(
+        node_name=name,
+        instance_type=instance_type,
+        cpu_capacity_cores=capacity_cores,
+        provider=provider,
+        instance_profiles=INSTANCE_PROFILES,
+        default_profile=default_profile_from_config(config),
+    )
+    profile = power.profile
     return _PowerProfile(
-        vcores=default_vcores,
-        min_watts=default_min,
-        max_watts=default_max,
-        source=PowerSource.DEFAULT_PROFILE,
+        vcores=float(profile.get("vcores") or 0) or (capacity_cores or 1.0),
+        min_watts=float(profile.get("minWatts", 0.0) or 0.0),
+        max_watts=float(profile.get("maxWatts", 0.0) or 0.0),
+        source=PowerSource(power.source),
+        known_cores=power.known_cores,
     )
 
 
@@ -358,6 +361,13 @@ class ImpactProjector:
         default_intensity = float(_setting(config, "DEFAULT_INTENSITY", _FALLBACK_INTENSITY))
         env = _row_environment(rows)
         nodes: Dict[str, NodeImpactProfile] = {}
+        # Nodes that are one physical host (NRG-15), split like the collected rows.
+        named = {getattr(info, "name", None): info for info in node_infos}
+        shared_hosts = (
+            shared_host_groups({name: info for name, info in named.items() if isinstance(name, str) and name})
+            if _setting(config, "SHARED_HOST_DETECTION", True)
+            else {}
+        )
         for info in node_infos:
             name = getattr(info, "name", None)
             if not isinstance(name, str) or not name:
@@ -372,6 +382,7 @@ class ImpactProjector:
                 embodied_kg=_positive(getattr(info, "embodied_emissions_kg", None)),
                 env=env.get(name),
                 default_intensity=default_intensity,
+                shared_host=shared_hosts.get(name),
             )
 
         # Nodes seen in metric rows but absent from the node snapshot keep their
@@ -437,9 +448,10 @@ class ImpactProjector:
         env: Optional[Tuple[float, float]],
         default_intensity: float,
         is_fallback: bool = False,
+        shared_host: Optional[SharedHost] = None,
     ) -> NodeImpactProfile:
         config = self.config
-        power = _power_profile(config, instance_type, capacity_cores)
+        power = _resolved_power(config, name, instance_type, capacity_cores, provider)
         cores = capacity_cores or power.vcores
         memory_gib = memory_bytes / BYTES_PER_GIB if memory_bytes else 0.0
         prices = self.resolver.resolve(
@@ -454,20 +466,38 @@ class ImpactProjector:
             entry = self.resolver.catalog.lookup(provider, region, instance_type)
             memory_gib = entry.memory_gib if entry is not None and entry.memory_gib else 0.0
 
-        lifespan_years = float(_setting(config, "DEFAULT_HARDWARE_LIFESPAN_YEARS", _FALLBACK_LIFESPAN_YEARS))
-        lifespan_hours = max(lifespan_years, 0.0) * HOURS_PER_YEAR
-        gwp_kg = embodied_kg or float(_setting(config, "DEFAULT_EMBODIED_EMISSIONS_KG", _FALLBACK_EMBODIED_KG))
-        embodied_g_per_hour = gwp_kg * 1000.0 / lifespan_hours if lifespan_hours > 0 else 0.0
+        # Same embodied resolution as the collected rows (NRG-01): operator value, Boavizta profile
+        # known to this process, per-vCPU fallback, flat default.
+        embodied = resolve_node_embodied(
+            SimpleNamespace(
+                embodied_emissions_kg=embodied_kg,
+                cloud_provider=provider,
+                instance_type=instance_type,
+                cpu_capacity_cores=capacity_cores,
+                memory_capacity_bytes=memory_bytes,
+            ),
+            known_profiles(),
+            config,
+            cpu_capacity_cores=capacity_cores or power.known_cores,
+        )
+        embodied_g_per_hour = embodied.g_per_hour
 
         pue = env[0] if env else _provider_pue(config, provider)
         intensity = env[1] if env and env[1] > 0 else default_intensity
+        scaled = scale_to_host_share(
+            idle_watts=power.min_watts,
+            max_watts=power.max_watts,
+            memory_watts_per_gib=memory_watts_per_gib(config),
+            embodied_g_per_hour=embodied_g_per_hour,
+            share=shared_host.share if shared_host is not None else 1.0,
+        )
         return NodeImpactProfile(
             name=name,
             cpu_capacity_cores=cores,
             mem_capacity_gib=memory_gib,
-            idle_watts=power.min_watts,
-            max_watts=power.max_watts,
-            embodied_g_per_hour=embodied_g_per_hour,
+            idle_watts=scaled.idle_watts,
+            max_watts=scaled.max_watts,
+            embodied_g_per_hour=scaled.embodied_g_per_hour,
             prices=prices,
             pue=pue,
             grid_intensity_g_per_kwh=intensity,
@@ -476,7 +506,10 @@ class ImpactProjector:
             region=region,
             provider=provider,
             is_fallback=is_fallback,
-            memory_watts_per_gib=memory_watts_per_gib(config),
+            memory_watts_per_gib=scaled.memory_watts_per_gib,
+            embodied_source=embodied.source,
+            embodied_reason=embodied.reason(name),
+            host_reason=shared_host.reason(name) if shared_host is not None else None,
         )
 
     # ------------------------------------------------------------------ #

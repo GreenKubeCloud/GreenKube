@@ -108,6 +108,11 @@ data:
   BOAVIZTA_API_URL: {{ .Values.config.boavizta.url | quote }}
   {{- end }}
   DEFAULT_EMBODIED_EMISSIONS_KG: {{ .Values.config.boavizta.defaultEmbodiedEmissionsKg | quote }}
+  DEFAULT_EMBODIED_KG_PER_VCPU: {{ .Values.config.boavizta.embodiedKgPerVcpu | quote }}
+  DEFAULT_EMBODIED_KG_PER_GIB: {{ .Values.config.boavizta.embodiedKgPerGib | quote }}
+  EMBODIED_KG_BY_INSTANCE_TYPE: {{ .Values.config.boavizta.embodiedKgByInstanceType | default dict | toJson | quote }}
+  SHARED_HOST_DETECTION: {{ .Values.config.power.sharedHostDetection | quote }}
+  GPU_ASSUMED_UTILIZATION_PCT: {{ .Values.config.power.gpuAssumedUtilizationPct | quote }}
 
   # --- Prometheus Collector Config ---
   # PROMETHEUS_URL comes from a mounted Secret (see the Boavizta note above).

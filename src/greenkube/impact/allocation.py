@@ -94,9 +94,22 @@ def memory_basis_gib_hours(node: NodeImpactProfile, samples: Sequence[ResourceSa
     return max(node.allocatable_mem * hours, reserved)
 
 
+def node_cpu_used_core_hours(node: NodeImpactProfile, samples: Sequence[ResourceSample], hours: float) -> float:
+    """Core-hours the node's CPU was busy: its own measure (root cgroup) or, without one, the pods' sum.
+
+    The node measure includes kubelet, container runtime and kernel CPU (NRG-12); it never
+    lowers the pods' sum.
+    """
+    pods = sum(max(sample.cpu_usage_cores or 0.0, 0.0) * sample.hours for sample in samples)
+    measured = node.node_cpu_used_cores
+    if measured is None or not measured > 0:
+        return pods
+    return max(float(measured) * hours, pods)
+
+
 def node_totals(node: NodeImpactProfile, samples: Sequence[ResourceSample], hours: float) -> NodeTotals:
     """Computes what one node costs and emits over ``hours``."""
-    cpu_used_core_hours = sum(max(sample.cpu_usage_cores or 0.0, 0.0) * sample.hours for sample in samples)
+    cpu_used_core_hours = node_cpu_used_core_hours(node, samples, hours)
     capacity_core_hours = node.cpu_capacity_cores * hours
     utilization = min(cpu_used_core_hours / capacity_core_hours, 1.0) if capacity_core_hours > 0 else 0.0
     idle_kwh = node.idle_watts * hours / 1000.0
@@ -139,7 +152,19 @@ def allocate_node(
 
     cpu_shares, cpu_idle_share = reservation_shares(cpu_reserved, node.allocatable_cpu * hours)
     mem_shares, mem_idle_share = reservation_shares(mem_reserved, node.allocatable_mem * hours)
-    dynamic_shares = usage_shares(cpu_used)
+    # Pods get their usage share of the NODE usage; CPU spent outside pods (kubelet, runtime,
+    # kernel) is the system share, charged to the idle row (NRG-12).
+    node_used = node_cpu_used_core_hours(node, samples, hours)
+    pods_used = sum(max(value, 0.0) for value in cpu_used)
+    if node_used > pods_used > 0:
+        dynamic_shares = [max(value, 0.0) / node_used for value in cpu_used]
+        system_share = 1.0 - pods_used / node_used
+    elif node_used > 0 and pods_used <= 0:
+        dynamic_shares = [0.0 for _ in cpu_used]
+        system_share = 1.0
+    else:
+        dynamic_shares = usage_shares(cpu_used)
+        system_share = 0.0
     totals = node_totals(node, samples, hours)
     intensity = node.pue * node.grid_intensity_g_per_kwh
     provenance = {
@@ -180,12 +205,13 @@ def allocate_node(
             )
         )
 
-    # Dynamic energy only exists when workloads report usage (utilization is 0
-    # otherwise), so the idle workload receives unreserved idle and memory
-    # power, unattributed GPU power, cost and embodied emissions only.
+    # The idle workload receives unreserved idle and memory power, unattributed GPU
+    # power, cost and embodied emissions, and the system share of the dynamic energy
+    # (CPU used outside pods, measured at node level; 0 without a node measure).
     idle_kwh = cpu_idle_share * totals.idle_energy_kwh
     memory_idle_kwh = mem_idle_share * totals.memory_energy_kwh
     gpu_idle_kwh = max(node.gpu_unattributed_watts, 0.0) * hours / 1000.0
+    system_kwh = system_share * totals.dynamic_energy_kwh
     impacts.append(
         WorkloadImpact(
             ref=WorkloadRef(cluster_uid=cluster_uid, namespace="", kind=IDLE_KIND, name=IDLE_WORKLOAD_NAME),
@@ -197,8 +223,10 @@ def allocate_node(
             mem_gib_hours_requested=0.0,
             mem_gib_hours_used=0.0,
             cost_allocated=CostBreakdown(cpu=cpu_idle_share * totals.cost.cpu, ram=mem_idle_share * totals.cost.ram),
-            energy_kwh=EnergyBreakdown(idle_share=idle_kwh, dynamic_mem=memory_idle_kwh, gpu=gpu_idle_kwh),
-            co2e_operational_g=(idle_kwh + memory_idle_kwh + gpu_idle_kwh) * intensity,
+            energy_kwh=EnergyBreakdown(
+                dynamic_cpu=system_kwh, idle_share=idle_kwh, dynamic_mem=memory_idle_kwh, gpu=gpu_idle_kwh
+            ),
+            co2e_operational_g=(idle_kwh + system_kwh + memory_idle_kwh + gpu_idle_kwh) * intensity,
             co2e_embodied_g=cpu_idle_share * totals.co2e_embodied_g,
             scope="idle",
             provenance=provenance,

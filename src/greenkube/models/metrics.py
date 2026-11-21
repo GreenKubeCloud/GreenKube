@@ -102,6 +102,10 @@ class PodMetric(BaseModel):
     ephemeral_storage_request: int = Field(0, description="Ephemeral storage request in bytes.")
     cpu_limit: Optional[int] = Field(None, description="CPU limit in millicores; None when unlimited.")
     memory_limit: Optional[int] = Field(None, description="Memory limit in bytes; None when unlimited.")
+    gpu_request: int = Field(
+        0,
+        description="GPUs requested (nvidia.com/gpu, amd.com/gpu, gpu.intel.com/*; the limit when no request), NRG-13.",
+    )
     kind: str = Field(
         "container",
         description=(
@@ -1070,6 +1074,20 @@ class CombinedMetric(BaseModel):
         description=(
             "Where the pod requests, owner and container list of the sample came from: k8s_snapshot "
             "(pod history or the live pod list) or missing (WP-01.1)."
+        ),
+    )
+    embodied_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the node embodied emissions came from: boavizta, configured, fallback_per_vcpu or "
+            "fallback_default (NRG-01). NULL on rows written before 0180 (flat fallback)."
+        ),
+    )
+    gpu_source: Optional[str] = Field(
+        None,
+        description=(
+            "Where the GPU power of the row's node came from: dcgm, gpu_tdp_estimate or unmeasured (NRG-13). "
+            "NULL when no GPU was detected on the node, and on rows written before 0182."
         ),
     )
 

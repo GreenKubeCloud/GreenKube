@@ -13,8 +13,9 @@ scrapes the exporter without ``honorLabels``, those labels are renamed
 exporter itself; the exported labels therefore win, and a GPU that would be
 attributed to the exporter pod is treated as unattributed.
 
-DCGM is optional: no series means no GPU power, and a query error never fails
-a collection window (GPU power is then missing for that window, with a warning).
+DCGM is optional: no series means no measured GPU power. A query error is a
+warning until the collector has seen GPU series; after that it fails the
+collection window so it is retried (NRG-13).
 """
 
 from __future__ import annotations

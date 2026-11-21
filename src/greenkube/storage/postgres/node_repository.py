@@ -30,6 +30,8 @@ _SCD_COMPARE_COLS = (
     "memory_capacity_bytes",
     "is_active",
     "embodied_emissions_kg",
+    "host_id",
+    "provider_id",
 )
 
 
@@ -58,7 +60,7 @@ class PostgresNodeRepository(NodeRepository):
                             SELECT id, instance_type, cpu_capacity_cores, architecture,
                                    cloud_provider, region, zone, node_pool,
                                    is_active,
-                                   memory_capacity_bytes, embodied_emissions_kg
+                                   memory_capacity_bytes, embodied_emissions_kg, host_id, provider_id
                             FROM node_snapshots_scd
                             WHERE node_name = $1 AND is_current = TRUE
                             FOR UPDATE
@@ -108,8 +110,8 @@ class PostgresNodeRepository(NodeRepository):
                                 node_name, instance_type, cpu_capacity_cores,
                                 architecture, cloud_provider, region, zone, node_pool,
                                 memory_capacity_bytes, is_active, embodied_emissions_kg,
-                                valid_from, valid_to, is_current, last_seen
-                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, TRUE, $12)
+                                valid_from, valid_to, is_current, last_seen, host_id, provider_id
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, TRUE, $12, $13, $14)
                             """,
                             node.name,
                             node.instance_type,
@@ -123,6 +125,8 @@ class PostgresNodeRepository(NodeRepository):
                             node.is_active,
                             node.embodied_emissions_kg,
                             now,
+                            node.host_id,
+                            node.provider_id,
                         )
                         new_records += 1
 
@@ -171,7 +175,7 @@ class PostgresNodeRepository(NodeRepository):
                 query = """
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                              memory_capacity_bytes, is_active, embodied_emissions_kg,
+                              memory_capacity_bytes, is_active, embodied_emissions_kg, host_id, provider_id,
                            valid_from, COALESCE(valid_to, last_seen) AS confirmed_until
                     FROM node_snapshots_scd
                     WHERE valid_from <= $2
@@ -231,7 +235,7 @@ class PostgresNodeRepository(NodeRepository):
                 query = """
                     SELECT node_name, instance_type, cpu_capacity_cores,
                            architecture, cloud_provider, region, zone, node_pool,
-                           memory_capacity_bytes, is_active, embodied_emissions_kg,
+                           memory_capacity_bytes, is_active, embodied_emissions_kg, host_id, provider_id,
                            valid_from, COALESCE(valid_to, last_seen) AS confirmed_until
                     FROM node_snapshots_scd
                     WHERE {where_clause}

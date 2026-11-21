@@ -7,6 +7,7 @@ from kubernetes_asyncio.client.rest import ApiException
 
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api
+from greenkube.energy.embodied import parse_embodied_annotation
 
 from .base_collector import BaseCollector
 from .k8s_errors import KubernetesListError, list_all_pages
@@ -23,6 +24,39 @@ def _k8s_timeout() -> int | None:
     """Return the configured Kubernetes request timeout, or None to disable."""
     t = global_config.K8S_REQUEST_TIMEOUT
     return t if t > 0 else None
+
+
+def _boot_id(node) -> str | None:
+    """``status.nodeInfo.bootID``: nodes sharing it run on one host (NRG-15)."""
+    node_info = getattr(getattr(node, "status", None), "node_info", None)
+    boot_id = getattr(node_info, "boot_id", None)
+    return boot_id if isinstance(boot_id, str) and boot_id else None
+
+
+def _provider_id(node) -> str | None:
+    """``spec.providerID`` (``kind://...`` groups container nodes of one host, NRG-15)."""
+    provider_id = getattr(getattr(node, "spec", None), "provider_id", None)
+    return provider_id if isinstance(provider_id, str) and provider_id else None
+
+
+#: Extended resources of GPU device plugins (NRG-13).
+_GPU_RESOURCES = ("nvidia.com/gpu", "amd.com/gpu")
+_GPU_RESOURCE_PREFIX = "gpu.intel.com/"
+
+
+def _gpu_count(node) -> int | None:
+    """GPUs declared in the node capacity, or ``None`` when it declares none."""
+    capacity = getattr(getattr(node, "status", None), "capacity", None)
+    if not isinstance(capacity, dict):
+        return None
+    total = 0
+    for resource, quantity in capacity.items():
+        if resource in _GPU_RESOURCES or str(resource).startswith(_GPU_RESOURCE_PREFIX):
+            try:
+                total += int(float(str(quantity)))
+            except ValueError:
+                continue
+    return total or None
 
 
 class NodeCollector(BaseCollector):
@@ -94,6 +128,12 @@ class NodeCollector(BaseCollector):
                     node_pool=node_pool,
                     cpu_capacity_cores=cpu_capacity,
                     memory_capacity_bytes=memory_capacity,
+                    # Operator embodied emissions (NRG-01); the only value node snapshots carry (NRG-07).
+                    embodied_emissions_kg=parse_embodied_annotation(getattr(node.metadata, "annotations", None)),
+                    host_id=_boot_id(node),
+                    provider_id=_provider_id(node),
+                    gpu_count=_gpu_count(node),
+                    gpu_model=labels.get("nvidia.com/gpu.product") if isinstance(labels, dict) else None,
                     timestamp=datetime.now(timezone.utc),
                 )
 

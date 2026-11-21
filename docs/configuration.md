@@ -154,7 +154,19 @@ SQLite (`DB_TYPE=sqlite`, `DB_PATH`) remains for `greenkube demo` and local deve
 | Key | Default | Description |
 |-----|---------|-------------|
 | `config.boavizta.url` | `""` | Boavizta API endpoint for embodied emissions. Empty uses the public API `https://api.boavizta.org`, or the URL saved on the Settings page. A URL set here always takes precedence. |
-| `config.boavizta.defaultEmbodiedEmissionsKg` | `100` | Fallback embodied emissions in kg CO₂e when the instance type is not recognised |
+| `config.boavizta.defaultEmbodiedEmissionsKg` | `100` | Flat fallback embodied emissions in kg CO₂e, used only when neither Boavizta nor the node capacity is known (`embodied_source=fallback_default`) |
+| `config.boavizta.embodiedKgPerVcpu` | `12` | `DEFAULT_EMBODIED_KG_PER_VCPU`: embodied emissions in kg CO₂e per vCPU for nodes Boavizta does not know and without a `greenkube.io/embodied-kg` annotation (`embodied_source=fallback_per_vcpu`) |
+| `config.boavizta.embodiedKgPerGib` | `0` | `DEFAULT_EMBODIED_KG_PER_GIB`: kg CO₂e per GiB of node memory added to the per-vCPU fallback |
+| `config.boavizta.embodiedKgByInstanceType` | `{}` | `EMBODIED_KG_BY_INSTANCE_TYPE`: whole-node embodied emissions in kg CO₂e by instance type (for example `{r740: 1300}`), used before Boavizta (`embodied_source=configured`) |
+
+A node annotation `greenkube.io/embodied-kg: "1500"` sets the whole-node embodied emissions of on-prem hardware (`embodied_source=configured`) and takes precedence over Boavizta. On nodes that share one physical host (NRG-15) the value is the whole host's: each of the N nodes gets 1/N, so give every node of the host the host figure. A failed Boavizta lookup is cached and retried at most every 24 hours.
+
+### Node power (`config.power`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `config.power.sharedHostDetection` | `true` | `SHARED_HOST_DETECTION`. Nodes with the same `status.nodeInfo.bootID` (or `kind://` and `k3d://` provider IDs) are one physical host: each of N nodes gets 1/N of the host idle power, memory power and embodied emissions, its rows carry a "Shared host" estimation reason, and `greenkube_shared_host_groups` counts the groups. `false` charges every node the whole host. |
+| `config.power.gpuAssumedUtilizationPct` | `50` | `GPU_ASSUMED_UTILIZATION_PCT` (0 to 100). On a node whose capacity declares GPUs but the DCGM exporter has no sample, each GPU a pod requests (`nvidia.com/gpu`, `amd.com/gpu`, `gpu.intel.com/*`) is charged to that pod at `idle + util × (TDP − idle)` of its TDP profile; GPUs no pod requests stay at the idle floor on the node's `__idle__` row. |
 
 ### Prometheus & OpenCost integration (`config.prometheus`, `config.opencost`)
 

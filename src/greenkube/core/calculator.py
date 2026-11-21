@@ -8,7 +8,7 @@ from typing import Optional
 
 from greenkube.utils.date_utils import ensure_utc, to_iso_z
 
-from ..data.electricity_maps_regions_grid_intensity_default import DEFAULT_GRID_INTENSITY_BY_ZONE
+from ..data.electricity_maps_regions_grid_intensity_default import LEVEL_ZONE, resolve_default_intensity
 from ..models.provenance import IntensitySource
 from ..storage.base_repository import CarbonIntensityRepository, IntensityPoint, is_default_fallback_point
 from .config import Config, get_config
@@ -50,8 +50,8 @@ class CarbonCalculator:
 
     1. a stored value no older than ``INTENSITY_MAX_AGE`` →
        ``realtime`` (provisional) or ``consolidated`` (final);
-    2. otherwise the zone default from the bundled Electricity Maps table →
-       ``zone_default``;
+    2. otherwise the bundled annual value of the zone (``zone_default``) or of its
+       country (``country_default``, for a sub-zone such as ``US-CAL-CISO``);
     3. otherwise a stale stored value, if any → ``stale``;
     4. otherwise ``DEFAULT_INTENSITY`` → ``global_default``.
 
@@ -165,16 +165,20 @@ class CarbonCalculator:
         """Replace missing or stale values by the zone or global default (computed, never stored)."""
         if entry.value is not None and entry.source != IntensitySource.STALE.value:
             return entry
-        zone_default = DEFAULT_GRID_INTENSITY_BY_ZONE.get(zone)
-        if zone_default is not None:
+        # Annual bundled value of the zone, else of its country (NRG-04).
+        bundled = resolve_default_intensity(zone)
+        if bundled is not None:
             logger.info(
-                "Carbon intensity %s for zone '%s' at %s; using zone default %s gCO2e/kWh",
+                "Carbon intensity %s for zone '%s' at %s; using the %s annual default of '%s': %s gCO2e/kWh",
                 "stale" if entry.value is not None else "missing",
                 zone,
                 normalized_dt.isoformat(),
-                zone_default,
+                bundled.year,
+                bundled.zone,
+                bundled.value,
             )
-            return _CachedIntensity(value=float(zone_default), source=IntensitySource.ZONE_DEFAULT.value)
+            source = IntensitySource.ZONE_DEFAULT if bundled.level == LEVEL_ZONE else IntensitySource.COUNTRY_DEFAULT
+            return _CachedIntensity(value=float(bundled.value), source=source.value)
         if entry.value is not None:
             logger.warning(
                 "Only a stale carbon intensity exists for zone '%s' at %s and no zone default is known; using it",

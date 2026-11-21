@@ -266,6 +266,21 @@
         "electricityProvider": {"type": "string", "enum": ["electricity_maps", "wattnet"]},
         "normalizationGranularity": {"type": "string", "enum": ["hour", "day", "none"]},
         "intensityMaxAge": {"type": "string"},
+        "power": {
+          "type": "object",
+          "properties": {
+            "sharedHostDetection": {"type": "boolean"},
+            "gpuAssumedUtilizationPct": {"type": "number", "minimum": 0, "maximum": 100}
+          }
+        },
+        "boavizta": {
+          "type": "object",
+          "properties": {
+            "embodiedKgPerVcpu": {"type": "number", "minimum": 0},
+            "embodiedKgPerGib": {"type": "number", "minimum": 0},
+            "embodiedKgByInstanceType": {"type": "object", "additionalProperties": {"type": "number", "exclusiveMinimum": 0}}
+          }
+        },
         "metricsCompressionAgeHours": {"type": "integer", "minimum": 1},
         "k8sRequestTimeout": {"type": "number", "minimum": 0},
         "db": {

@@ -73,23 +73,43 @@ The **allocatable** capacity `A` is the denominator of reservation shares. Until
 
 ### Power profile
 
-The model selects the power profile like the energy estimator does:
+Collection, `greenkube recompute` and projections select the power profile with one function, `greenkube.energy.node_power.resolve_node_power_profile` (NRG-05), so a projection uses the watts of the rows its measurement later compares it with:
 
 1. **`instance_profile`**: the instance type is in `data/instance_power_profiles.csv`, which holds Cloud Carbon Footprint per-vCPU coefficients times vCPUs.
-2. **`node_capacity_derived`**: the instance type is unknown but the node CPU capacity is known. The model uses `DEFAULT_INSTANCE_MIN_WATTS` and `DEFAULT_INSTANCE_MAX_WATTS` per `DEFAULT_INSTANCE_VCORES`, times the capacity.
-3. **`default_profile`**: nothing is known about the node. The model uses the default instance profile, and the projection is flagged with `unknown_node_profile`.
+2. **`node_capacity_derived`**: the instance type is unknown but the node CPU capacity is known (or a `cpu-N` type). The model uses the per-vCPU coefficients of the node's provider from `data/provider_power_estimates.csv` (for example 0.74 / 3.5 W per vCPU on AWS), or their cross-provider average (0.726 / 3.564 W) when the provider is unknown, times the capacity. See `docs/power_estimation_methodology.md`.
+3. **`default_profile`**: nothing is known about the node. The model uses `DEFAULT_INSTANCE_MIN_WATTS` / `DEFAULT_INSTANCE_MAX_WATTS` for `DEFAULT_INSTANCE_VCORES`, and the projection is flagged with `unknown_node_profile`.
+
+Impact Model 4.0.0 aligned the projector on this resolver; before, it used `DEFAULT_INSTANCE_MIN_WATTS / DEFAULT_INSTANCE_VCORES` (1 W idle, 10 W max per core) for every node without a bundled profile.
+
+### CPU used outside pods (NRG-12)
+
+The node utilisation is measured at node level when the kubelet exposes its root cgroup (`container_cpu_usage_seconds_total{id="/"}`, kubelet, container runtime, kernel and host processes included): `utilisation = max(root cgroup cores, Σ pod cores) / capacity`. Pods still receive `pod cores / capacity` of the dynamic range, and the rest, `(node − Σ pods) / capacity`, is the system share charged to the node's `__idle__` row, so pod and idle rows add up to the node power at its real utilisation. Without the root cgroup series the utilisation is the sum of the pods, as before. Node-exporter fallback and a stored `node_utilization_source` are not implemented yet.
+
+### Nodes sharing one host (NRG-15)
+
+kind, k3d and multi-node minikube nodes are containers of one machine and each report the host capacity. Nodes with the same `bootID` (or a `kind://`, `k3d://` provider ID) form a group of N: each node gets `idle_watts / N`, `memory_watts_per_gib / N` and `embodied / N`, while the dynamic range `max − idle` is not scaled because each node's utilisation is already a fraction of the host capacity. Pod and idle rows of such nodes carry a "Shared host" estimation reason. The grouping uses the live node list of the collection run. Projections apply the same split (`greenkube.energy.shared_host.scale_to_host_share`) to the node snapshots, which store `host_id` and `provider_id` since migration 0183. An operator embodied value (`greenkube.io/embodied-kg`, `EMBODIED_KG_BY_INSTANCE_TYPE`) on such nodes is the whole host's value: each of the N nodes gets 1/N, so annotate every node of the host with the host figure.
+
+`greenkube recompute` re-derives a node-step from what its idle row recorded (migration 0184): `host_share` and the root-cgroup CPU `node_cpu_used_cores` (NRG-12), plus its `gpu_source` and the stored GPU and shared-host reasons (NRG-13). Node-steps of the current model whose idle row predates 0184 are left as stored (`groups_skipped_unrecorded` in the report). Older rows take the shared host from the node snapshots and the pods' CPU sum. A re-allocation that drops an estimation reason recomputes `is_estimated` from the remaining reasons. Opt out with `config.power.sharedHostDetection: false`.
 
 ### Memory and GPU power (B5)
 
 - **`MemoryPowerModel`**: `P_mem = w_mem × memory GiB`, with the Cloud Carbon Footprint coefficient 0.392 W/GiB by default. On an m5.large (8 GiB) fully reserved, memory adds about 3.1 W.
 - **`GpuPowerModel`**: the board power DCGM measures (`DCGM_FI_DEV_POWER_USAGE`, averaged over the step). When only the GPU model and utilization are known, `P = idle + util × (TDP − idle)` with the TDP of `data/gpu_profiles.json` and idle at 15% of TDP. Each sample carries the GPU power DCGM attributes to its pod (`gpu_power_watts`); unattributed GPUs are node-level (`P_gpu_idle`).
+- **GPU nodes without DCGM (NRG-13)**: the node collector reads the GPUs of the node capacity (`nvidia.com/gpu`, `amd.com/gpu`, `gpu.intel.com/*`) and the `nvidia.com/gpu.product` label. At a step without DCGM samples for such a node, each GPU a pod requests (container requests, or limits, of `nvidia.com/gpu`, `amd.com/gpu`, `gpu.intel.com/*`) is charged to that pod (`gpu_power_watts`) at `idle + util × (TDP − idle)` with the assumed utilisation `GPU_ASSUMED_UTILIZATION_PCT` (50 % by default); requests beyond the node's GPU count are capped. The GPUs no pod requests are counted at the idle floor of their TDP profile (a lower bound) as unattributed node power (`P_gpu_idle`, the `__idle__` row). Its rows carry the reason "GPU power estimated from TDP". When the model has no profile, the GPU power is not counted, rows carry "GPU power not measured" and `greenkube_gpu_nodes_unmeasured` counts the node. The detection uses the live node list of the collection run; GPU requests of past windows come from the pod snapshots (stored since this change) and are zero for older snapshots and pods known only from kube-state-metrics. Once the collector has seen DCGM series, a DCGM query error fails the window (it is retried) instead of storing it without GPU power. Pod, container and idle rows record `gpu_source` (migration 0182): `dcgm` when DCGM has samples for the node at that step, `gpu_tdp_estimate` for the TDP estimate, `unmeasured` for an unknown model, NULL when no GPU is detected on the node (and on rows written before).
 
 ### Embodied emissions
 
 `M_h = GWP × 1000 / (lifespan_years × 8760)` gCO₂e per node-hour.
 
-- `GWP` is the Boavizta manufacturing value stored on the node (`embodied_emissions_kg`), or `DEFAULT_EMBODIED_EMISSIONS_KG` (100 kg).
+- `GWP` is resolved per node by `greenkube.energy.embodied.resolve_node_embodied`, the same function for collection, `greenkube recompute` and projections, and recorded on every pod, container and idle row as `embodied_source`:
+  1. `configured`: the node annotation `greenkube.io/embodied-kg` (whole-node kg CO₂e, for on-prem hardware), then `EMBODIED_KG_BY_INSTANCE_TYPE` (Helm `config.boavizta.embodiedKgByInstanceType`);
+  2. `boavizta`: the lifetime embedded GWP of the node's cloud instance type from the Boavizta API v1 (`impacts.gwp.embedded.value`, requested without `duration`), cached in `instance_carbon_profiles`;
+  3. `fallback_per_vcpu`: `DEFAULT_EMBODIED_KG_PER_VCPU` (12 kg, the Boavizta m5 family ratio) × cores + `DEFAULT_EMBODIED_KG_PER_GIB` (0) × GiB;
+  4. `fallback_default`: `DEFAULT_EMBODIED_EMISSIONS_KG` (100 kg) when the capacity is unknown.
+
+  Rows of the two fallbacks get `is_estimated` and an estimation reason starting with "Embodied emissions estimated". A failed Boavizta lookup is stored as a negative cache entry (`source = 'fallback'`, `error`) and retried at most every 24 hours. Node snapshots carry only the configured value (NRG-07).
 - The lifespan is `DEFAULT_HARDWARE_LIFESPAN_YEARS` (4 years).
+- Impact Model 4.0.0 introduced this resolution; rows written before kept the flat 100 kg per node (`embodied_source` NULL). `greenkube recompute --since <raw retention>` re-allocates the raw rows; hourly aggregates keep the old values.
 
 ## Allocation policy: `ReservationAwareAllocation`
 

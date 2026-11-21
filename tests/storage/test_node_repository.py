@@ -53,7 +53,9 @@ async def db_connection():
                 valid_from TEXT NOT NULL,
                 valid_to TEXT,
                 last_seen TEXT,
-                is_current BOOLEAN NOT NULL DEFAULT 1
+                is_current BOOLEAN NOT NULL DEFAULT 1,
+                host_id TEXT,
+                provider_id TEXT
             );
         """)
         await conn.commit()

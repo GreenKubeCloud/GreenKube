@@ -24,9 +24,12 @@ from greenkube.models.provenance import CostSource, PowerSource
 #: added and existing components keep their values (1.1.0: memory and GPU power,
 #: 2.0.0: projections annualize over the target's observed coverage, 3.0.0: workload
 #: deletions take the pool's realization factor for their reserved parts, IMP-05, and
-#: ``capacity_released`` gains ``storage_gib`` and ``load_balancers``; allocations are unchanged,
-#: 4.0.0: a baseline mixing split and unsplit cost hours prices each CPU/RAM component over the
-#: hours that carry it and apportions the rest, F-03; allocations are unchanged).
+#: ``capacity_released`` gains ``storage_gib`` and ``load_balancers``; allocations are unchanged; 4.0.0:
+#: embodied emissions from the Boavizta v1 value, an operator annotation or a per-vCPU fallback
+#: instead of a flat 100 kg per node, NRG-01; projections take the collection power profile, NRG-05;
+#: shared hosts split, GPUs without DCGM and CPU outside pods counted, NRG-15, NRG-13, NRG-12; a
+#: baseline mixing split and unsplit cost hours prices each CPU/RAM component over the hours that
+#: carry it and apportions the rest, F-03).
 IMPACT_MODEL_VERSION = "4.0.0"
 
 #: Name of the synthetic workload that receives unreserved node capacity.
@@ -294,6 +297,19 @@ class NodeImpactProfile:
     memory_watts_per_gib: float = 0.0
     #: Power of GPUs that DCGM attributes to no pod (idle GPUs), in W.
     gpu_unattributed_watts: float = 0.0
+    #: Where ``embodied_g_per_hour`` came from (``EmbodiedSource``), and the reason when it is a fallback.
+    embodied_source: Optional[str] = None
+    embodied_reason: Optional[str] = None
+    #: Estimation reason when the node shares its host with other nodes (NRG-15).
+    host_reason: Optional[str] = None
+    #: This node's share of its physical host (1.0 alone), already applied to idle, memory and embodied.
+    host_share: float = 1.0
+    #: Estimation reason of a GPU node without DCGM samples (NRG-13).
+    gpu_reason: Optional[str] = None
+    #: Where the node's GPU power came from (``GpuSource``), None without GPUs (NRG-13).
+    gpu_source: Optional[str] = None
+    #: Whole-node CPU in use (cores, window average) from the root cgroup; None: the sum of the pods (NRG-12).
+    node_cpu_used_cores: Optional[float] = None
 
     @property
     def allocatable_cpu(self) -> float:

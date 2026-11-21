@@ -255,3 +255,41 @@ ROWS_REJECTED = Counter(
 def record_rows_rejected(source: str, reason: str, count: int = 1) -> None:
     if count > 0:
         ROWS_REJECTED.labels(source=source, reason=reason).inc(count)
+
+
+SHARED_HOST_GROUPS = Gauge(
+    "greenkube_shared_host_groups",
+    "Groups of Kubernetes nodes found to run on one physical host in the latest collection (NRG-15).",
+    registry=REGISTRY,
+)
+
+
+def set_shared_host_groups(count: int) -> None:
+    SHARED_HOST_GROUPS.set(count)
+
+
+GPU_NODES_UNMEASURED = Gauge(
+    "greenkube_gpu_nodes_unmeasured",
+    "GPU nodes without DCGM samples whose GPU model has no TDP profile: their GPU power is not counted (NRG-13).",
+    registry=REGISTRY,
+)
+
+
+def set_gpu_nodes_unmeasured(count: int) -> None:
+    GPU_NODES_UNMEASURED.set(count)
+
+
+#: Outcome of the last hourly intensity fetch of a zone (NRG-03): fetched, empty or failed.
+INTENSITY_ZONES = Gauge(
+    "greenkube_intensity_zones",
+    "Zones of the hourly carbon intensity job; 1 on the status of the latest fetch of the zone.",
+    ["zone", "status"],
+    registry=REGISTRY,
+)
+INTENSITY_ZONE_STATUSES = ("fetched", "empty", "failed")
+
+
+def set_intensity_zone_status(zone: str, status: str) -> None:
+    """Marks ``status`` as the outcome of the latest intensity fetch of ``zone``."""
+    for candidate in INTENSITY_ZONE_STATUSES:
+        INTENSITY_ZONES.labels(zone=zone, status=candidate).set(1 if candidate == status else 0)

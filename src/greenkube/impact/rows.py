@@ -28,8 +28,13 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from greenkube.energy.shared_host import SHARED_HOST_REASON_PREFIX, scale_to_host_share
 from greenkube.impact.model import DEFAULT_IMPACT_MODEL, ImpactModel
-from greenkube.impact.power import memory_watts_per_gib
+from greenkube.impact.power import (
+    GPU_TDP_ESTIMATE_REASON_PREFIX,
+    GPU_UNMEASURED_REASON_PREFIX,
+    memory_watts_per_gib,
+)
 from greenkube.impact.pricing import CustomRates, PricingCatalog, UnitPriceResolver, observed_rates_from_rows
 from greenkube.impact.projector import sample_from_metric
 from greenkube.impact.types import (
@@ -43,7 +48,7 @@ from greenkube.impact.types import (
     WorkloadRef,
 )
 from greenkube.models.metrics import CombinedMetric
-from greenkube.models.provenance import ALLOCATED_COST_SOURCES, CostSource
+from greenkube.models.provenance import ALLOCATED_COST_SOURCES, EMBODIED_FALLBACK_REASON_PREFIX, CostSource
 
 #: Joules per kWh.
 JOULES_PER_KWH = 3.6e6
@@ -112,6 +117,14 @@ class NodeIdleMetric:
     intensity_source: Optional[str] = None
     model_version: str = IMPACT_MODEL_VERSION
     scope: str = IDLE_SCOPE
+    embodied_source: Optional[str] = None
+    #: Where the node's GPU power came from (``GpuSource``), NULL without GPUs (NRG-13).
+    gpu_source: Optional[str] = None
+    #: Inputs ``greenkube recompute`` needs to re-derive the row (0184): the node's share of a
+    #: shared host (1.0 alone, NRG-15) and its root-cgroup CPU (None: the pods' sum, NRG-12).
+    #: ``host_share`` NULL marks a row written before they were recorded.
+    host_share: Optional[float] = None
+    node_cpu_used_cores: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +146,18 @@ class NodeSpec:
     embodied_g_per_hour: float = 0.0
     gpu_unattributed_watts: float = 0.0
     is_fallback: bool = False
+    #: Where ``embodied_g_per_hour`` came from (``EmbodiedSource``) and its row estimation reason (NRG-01).
+    embodied_source: Optional[str] = None
+    embodied_reason: Optional[str] = None
+    #: Share of a host shared with other nodes (1.0 alone) and its row estimation reason (NRG-15).
+    host_share: float = 1.0
+    host_reason: Optional[str] = None
+    #: Estimation reason of a GPU node without DCGM samples (NRG-13).
+    gpu_reason: Optional[str] = None
+    #: Where the node's GPU power came from (``GpuSource``); None without GPUs or when unknown (NRG-13).
+    gpu_source: Optional[str] = None
+    #: Whole-node CPU in use (cores, window average) incl. kubelet, runtime and kernel; None: pods only (NRG-12).
+    node_cpu_used_cores: Optional[float] = None
 
 
 @dataclass
@@ -149,6 +174,10 @@ def _is_observed_cost(row: CombinedMetric) -> bool:
         return True
     # Legacy rows without provenance: a positive cost came from OpenCost.
     return not source and (row.total_cost or 0.0) > 0
+
+
+#: Prefixes of node-level estimation reasons the allocator rewrites on every allocation.
+_NODE_REASON_PREFIXES = (SHARED_HOST_REASON_PREFIX, GPU_TDP_ESTIMATE_REASON_PREFIX, GPU_UNMEASURED_REASON_PREFIX)
 
 
 def embodied_g_per_hour(profile: Optional[Mapping[str, Any]]) -> float:
@@ -220,13 +249,21 @@ class MetricRowAllocator:
             power_source = PowerSource(spec.power_source)
         except ValueError:
             power_source = PowerSource.DEFAULT_PROFILE
+        # A shared host (NRG-15): this node gets its share of the host idle, memory and embodied.
+        scaled = scale_to_host_share(
+            idle_watts=spec.idle_watts,
+            max_watts=spec.max_watts,
+            memory_watts_per_gib=self.memory_watts_per_gib,
+            embodied_g_per_hour=spec.embodied_g_per_hour,
+            share=spec.host_share,
+        )
         return NodeImpactProfile(
             name=spec.name,
             cpu_capacity_cores=float(cores),
             mem_capacity_gib=memory_gib,
-            idle_watts=max(spec.idle_watts, 0.0),
-            max_watts=max(spec.max_watts, 0.0),
-            embodied_g_per_hour=max(spec.embodied_g_per_hour, 0.0),
+            idle_watts=scaled.idle_watts,
+            max_watts=scaled.max_watts,
+            embodied_g_per_hour=scaled.embodied_g_per_hour,
             prices=prices,
             pue=pue,
             grid_intensity_g_per_kwh=intensity,
@@ -235,8 +272,15 @@ class MetricRowAllocator:
             region=spec.region,
             provider=spec.provider,
             is_fallback=spec.is_fallback,
-            memory_watts_per_gib=self.memory_watts_per_gib,
+            memory_watts_per_gib=scaled.memory_watts_per_gib,
             gpu_unattributed_watts=max(spec.gpu_unattributed_watts, 0.0),
+            embodied_source=spec.embodied_source,
+            embodied_reason=spec.embodied_reason,
+            host_reason=spec.host_reason,
+            host_share=spec.host_share if 0.0 < spec.host_share <= 1.0 else 1.0,
+            gpu_reason=spec.gpu_reason,
+            gpu_source=spec.gpu_source,
+            node_cpu_used_cores=spec.node_cpu_used_cores,
         )
 
     def modeled_prices(self, node: NodeImpactProfile) -> UnitPrices:
@@ -320,6 +364,29 @@ class MetricRowAllocator:
             "embodied_co2e_grams": impact.co2e_embodied_g,
             "model_version": impact.model_version,
         }
+        if node.embodied_source is not None:
+            # NRG-01: the embodied provenance is recomputed with the row; a fallback is flagged.
+            reasons = [r for r in row.estimation_reasons if not r.startswith(EMBODIED_FALLBACK_REASON_PREFIX)]
+            if node.embodied_reason:
+                reasons.append(node.embodied_reason)
+            update["embodied_source"] = node.embodied_source
+            update["estimation_reasons"] = reasons
+            if node.embodied_reason:
+                update["is_estimated"] = True
+        if node.gpu_source is not None:
+            update["gpu_source"] = node.gpu_source
+        # NRG-15 and NRG-13: a node sharing its host, or with GPUs DCGM does not report, says so.
+        node_reasons = [reason for reason in (node.host_reason, node.gpu_reason) if reason]
+        reasons = [
+            r
+            for r in update.get("estimation_reasons", row.estimation_reasons)
+            if not r.startswith(_NODE_REASON_PREFIXES)
+        ]
+        if node_reasons:
+            reasons.extend(node_reasons)
+            update["is_estimated"] = True
+        if reasons != list(row.estimation_reasons) or "estimation_reasons" in update:
+            update["estimation_reasons"] = reasons
         if not _is_observed_cost(row):
             # Allocation cost is share × capacity × unit price, so re-pricing a
             # share at the modeled prices is a per-resource rescale.
@@ -338,13 +405,21 @@ class MetricRowAllocator:
                 f"{MODELED_COST_REASON_PREFIX} '{row.pod_name}'; cost allocated by reservation at "
                 f"{modeled.source.value} unit prices ({modeled.detail or 'unspecified'})"
             )
-            reasons = [r for r in row.estimation_reasons if not r.startswith("No cost data for pod")]
+            reasons = [
+                r
+                for r in update.get("estimation_reasons", row.estimation_reasons)
+                if not r.startswith("No cost data for pod")
+            ]
             reasons = [r for r in reasons if not r.startswith(MODELED_COST_REASON_PREFIX)]
             update["estimation_reasons"] = [*reasons, reason]
             update["is_estimated"] = True
             if (row.cost_source or "").strip().lower() == CostSource.OPENCOST_PENDING.value:
                 # A recompute re-prices the model but the window still waits for OpenCost.
                 update["cost_source"] = CostSource.OPENCOST_PENDING.value
+        if "estimation_reasons" in update:
+            # A re-allocation that drops a reason (a host no longer shared, a GPU now measured)
+            # clears the flag too: a row is estimated when it says why.
+            update["is_estimated"] = bool(update["estimation_reasons"])
         return row.model_copy(update=update)
 
     def _idle_row(
@@ -393,6 +468,10 @@ class MetricRowAllocator:
             power_source=node.power_source.value,
             intensity_source=fields.get("intensity_source", first.intensity_source),
             model_version=impact.model_version,
+            embodied_source=node.embodied_source,
+            gpu_source=node.gpu_source,
+            host_share=node.host_share,
+            node_cpu_used_cores=node.node_cpu_used_cores,
         )
 
 

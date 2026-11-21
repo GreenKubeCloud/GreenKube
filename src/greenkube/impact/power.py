@@ -24,7 +24,9 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from greenkube.models.provenance import GpuSource
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,80 @@ class NodeGpuPower:
     @property
     def total_watts(self) -> float:
         return sum(self.by_pod.values()) + self.unattributed_watts
+
+
+#: ``estimation_reasons`` prefixes of rows of a GPU node without DCGM samples (NRG-13).
+GPU_TDP_ESTIMATE_REASON_PREFIX = "GPU power estimated from TDP"
+GPU_UNMEASURED_REASON_PREFIX = "GPU power not measured"
+
+
+@dataclass(frozen=True)
+class UndetectedGpuPower:
+    """Estimated power of the GPUs of a node that DCGM does not report (NRG-13)."""
+
+    #: Whole-node GPU power in W at the idle floor, or ``None`` when the GPU model is unknown.
+    watts: Optional[float]
+    reason: str
+    gpu_count: int = 0
+    profile: Optional[GpuProfile] = None
+
+    @property
+    def source(self) -> str:
+        """``gpu_tdp_estimate`` with a TDP profile, ``unmeasured`` without (``GpuSource``)."""
+        return GpuSource.GPU_TDP_ESTIMATE.value if self.profile is not None else GpuSource.UNMEASURED.value
+
+    def split(
+        self, requests_by_pod: Mapping[Tuple[str, str], int], assumed_utilization_pct: float
+    ) -> Tuple[Dict[Tuple[str, str], float], float]:
+        """Per-pod watts of the GPUs pods request, and the watts of the GPUs no pod requests.
+
+        A requested GPU is charged ``idle + util x (TDP - idle)`` at the assumed utilisation;
+        requests beyond the node's GPU count are capped in pod order. The GPUs no pod requests
+        stay at the idle floor. An unknown model gives nothing.
+        """
+        if self.profile is None:
+            return {}, 0.0
+        busy_watts = self.profile.watts(assumed_utilization_pct)
+        remaining = self.gpu_count
+        by_pod: Dict[Tuple[str, str], float] = {}
+        for pod_key, requested in sorted(requests_by_pod.items()):
+            count = min(max(int(requested), 0), remaining)
+            if count <= 0:
+                continue
+            by_pod[pod_key] = count * busy_watts
+            remaining -= count
+        return by_pod, remaining * self.profile.watts(None)
+
+
+def undetected_gpu_power(
+    gpu_count: int, gpu_model: Optional[str], model: Optional[GpuPowerModel] = None
+) -> UndetectedGpuPower:
+    """GPU power of a node whose capacity declares ``gpu_count`` GPUs but DCGM has no sample.
+
+    Without utilization the GPUs are counted at the idle floor of their TDP profile
+    (``GpuProfile.watts(None)``), a lower bound. ``UndetectedGpuPower.split`` charges the
+    GPUs pods request to those pods at an assumed utilisation.
+    """
+    model = model or GpuPowerModel()
+    profile = model.profile_for(gpu_model)
+    if profile is None:
+        return UndetectedGpuPower(
+            watts=None,
+            reason=(
+                f"{GPU_UNMEASURED_REASON_PREFIX}: {gpu_count} GPU(s) of unknown model '{gpu_model or 'unknown'}' "
+                "and no DCGM exporter series"
+            ),
+        )
+    watts = gpu_count * profile.watts(None)
+    return UndetectedGpuPower(
+        watts=watts,
+        gpu_count=gpu_count,
+        profile=profile,
+        reason=(
+            f"{GPU_TDP_ESTIMATE_REASON_PREFIX}: DCGM exporter not available; {gpu_count} x {profile.name} "
+            f"counted at the idle floor ({profile.watts(None):g} W each)"
+        ),
+    )
 
 
 def node_gpu_power(devices: Sequence[GpuDevice], model: Optional[GpuPowerModel] = None) -> NodeGpuPower:

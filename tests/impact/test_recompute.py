@@ -236,6 +236,51 @@ async def test_recompute_never_reads_modeled_costs_back_as_observed_prices(store
     )
 
 
+class _StoredProfiles:
+    """``instance_carbon_profiles`` with one Boavizta value (NRG-01, NRG-07)."""
+
+    async def get_profile(self, provider: str, instance_type: str):
+        if (provider, instance_type) == ("aws", "m5.large"):
+            return {"gwp_manufacture": 24.0, "lifespan_hours": 35040, "source": "boavizta_api"}
+        return None
+
+
+async def test_recompute_takes_embodied_from_the_stored_boavizta_profile_not_the_snapshot(stores):
+    """A snapshot without embodied value (node analysis) never zeroes embodied CO2e (NRG-07)."""
+    repository, node_repository = stores
+    await _seed(repository, node_repository)
+    await node_repository.save_nodes(
+        [
+            NodeInfo(
+                name="n1",
+                instance_type="m5.large",
+                cloud_provider="aws",
+                cpu_capacity_cores=2,
+                memory_capacity_bytes=8 * GIB,
+                timestamp=T0 - timedelta(hours=1),
+            )
+        ]
+    )
+    window = (T0, T0 + timedelta(seconds=STEP))
+    recomputer = MetricRecomputer(Config(), repository, node_repository, embodied_repository=_StoredProfiles())
+    await recomputer.run(T0, T0 + timedelta(hours=1), only_outdated=False)
+
+    pods = await repository.read_combined_metrics(*window)
+    (idle,) = await repository.read_idle_metrics(*window)
+    embodied = 24 * 1000 / (4 * 8760) * STEP / 3600
+    assert sum(row.embodied_co2e_grams or 0 for row in pods) + idle.embodied_co2e_grams == pytest.approx(embodied)
+    assert idle.embodied_source == "boavizta"
+
+    # Without a stored profile the per-vCPU fallback applies, flagged, never 0.
+    await MetricRecomputer(Config(), repository, node_repository).run(T0, T0 + timedelta(hours=1), only_outdated=False)
+    pods = await repository.read_combined_metrics(*window)
+    (idle,) = await repository.read_idle_metrics(*window)
+    fallback = 2 * Config().DEFAULT_EMBODIED_KG_PER_VCPU * 1000 / (4 * 8760) * STEP / 3600
+    assert sum(row.embodied_co2e_grams or 0 for row in pods) + idle.embodied_co2e_grams == pytest.approx(fallback)
+    assert idle.embodied_source == "fallback_per_vcpu"
+    assert all(any(r.startswith("Embodied emissions estimated") for r in row.estimation_reasons) for row in pods)
+
+
 def test_split_to_containers_never_duplicates_pod_gpu_power():
     pod = _pod("a", 1000, 500, 2 * GIB, gpu_power_watts=60.0, gpu_usage_millicores=800)
     two = split_to_containers(pod, [_container(pod, "app", 400, GIB), _container(pod, "sidecar", 100, GIB)])

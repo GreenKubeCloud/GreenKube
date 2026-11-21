@@ -7,7 +7,8 @@ Since Cloud Carbon Footprint (CCF) does not provide default estimation constants
 GreenKube estimates node power from three components (Impact Model `1.1.0` and later, see [Impact Model methodology](methodology/impact-model.md)). For a collection step of `H` hours:
 
 ```text
-node_utilization = min(total_node_cpu_cores / node_vcores, 1)
+node_cpu_cores   = max(root cgroup CPU of the node, Σ pod CPU)               # NRG-12
+node_utilization = min(node_cpu_cores / node_vcores, 1)
 cpu_power_watts    = min_watts + node_utilization × (max_watts - min_watts)     # LinearCpuPowerModel
 memory_power_watts = node_memory_gib × POWER_MEMORY_W_PER_GIB                    # MemoryPowerModel, 0.392 W/GiB
 gpu_power_watts    = Σ GPUs: DCGM_FI_DEV_POWER_USAGE, else TDP model             # GpuPowerModel
@@ -33,7 +34,7 @@ When the NVIDIA DCGM exporter is scraped by Prometheus, GreenKube reads, per ste
 - `avg_over_time(DCGM_FI_DEV_POWER_USAGE[step])`: the measured board power of each GPU;
 - `avg_over_time(DCGM_FI_DEV_GPU_UTIL[step])`: the utilization, stored on the pod row as `gpu_usage_millicores` (1000 = one fully used GPU).
 
-A GPU with Kubernetes attribution (`namespace`/`pod` labels, or `exported_namespace`/`exported_pod` when the exporter is scraped without `honorLabels`) is charged to that pod (`gpu_power_watts` on the row). Unattributed GPUs are charged to the node's `__idle__` row. When DCGM reports utilization but no power for a GPU, its power is `idle + util × (TDP − idle)` from the bundled `data/gpu_profiles.json` (board power of common data-center GPUs; idle is 15% of TDP). Without the DCGM exporter, GPU power is not counted. A DCGM query error never fails a collection window: GPU power is missing for that window and a warning is logged.
+A GPU with Kubernetes attribution (`namespace`/`pod` labels, or `exported_namespace`/`exported_pod` when the exporter is scraped without `honorLabels`) is charged to that pod (`gpu_power_watts` on the row). Unattributed GPUs are charged to the node's `__idle__` row. When DCGM reports utilization but no power for a GPU, its power is `idle + util × (TDP − idle)` from the bundled `data/gpu_profiles.json` (board power of common data-center GPUs; idle is 15% of TDP). Without the DCGM exporter, GPUs declared in the node capacity are counted at the idle floor of their TDP profile on the node's `__idle__` row (see the Impact Model, NRG-13). A DCGM query error on a cluster where DCGM never returned series is a warning. Once the collector has seen GPU series, a DCGM query error fails the collection window, which is retried, instead of storing it without GPU power.
 
 Known instance profiles use the provider's per-vCPU constants multiplied by the instance vCPU count. The currently loaded provider constants are:
 
@@ -63,9 +64,12 @@ Each metric row records where its grid intensity came from (`intensity_source`):
 |---|---|
 | `consolidated` | Final provider value no older than `INTENSITY_MAX_AGE` (default `6h`) |
 | `realtime` | Provisional provider value no older than `INTENSITY_MAX_AGE`; the hourly recompute replaces it once the provider consolidates it |
-| `zone_default` | No fresh value: the bundled per-zone default is used |
-| `stale` | Only a value older than `INTENSITY_MAX_AGE` exists and the zone has no default |
-| `global_default` | Neither a value nor a zone default: `DEFAULT_INTENSITY` is used |
+| `zone_default` | No fresh value: the bundled annual value of the zone is used |
+| `country_default` | No fresh value and the zone (a sub-zone such as `US-CAL-CISO` or `SE-SE3`) has no bundled value: its country's annual value is used |
+| `stale` | Only a value older than `INTENSITY_MAX_AGE` exists and neither the zone nor its country has a default |
+| `global_default` | Neither a value nor a zone or country default: `DEFAULT_INTENSITY` is used |
+
+The bundled defaults (`src/greenkube/data/electricity_maps_default.csv`) are the annual mean intensity of each country for one calendar year (2024), with life-cycle emission factors, from [Ember's yearly electricity data](https://ember-energy.org/data/yearly-electricity-data/) (CC BY 4.0). `scripts/generate_zone_intensity_defaults.py` regenerates the table; the year is in every row. An annual mean ignores the hour-to-hour variation of the grid: set an Electricity Maps or Wattnet token for hourly values. Rows already stored with a default keep the value they were computed with.
 
 Defaults are computed when metrics are calculated and are never written into
 the intensity history, so a missing token or a provider outage cannot pass for
@@ -140,7 +144,7 @@ GreenKube classifies carbon emissions according to the [GHG Protocol Corporate A
 | GHG Scope | GreenKube field | Description |
 |---|---|---|
 | **Scope 2** (location-based estimate) | `co2e_grams` | Indirect emissions from purchased electricity — computed as `grid_intensity × energy_kWh × PUE`. Grid intensity is sourced from Electricity Maps (default) or optional Wattnet, with the configurable `DEFAULT_INTENSITY` fallback. |
-| **Scope 3, Category 1** (purchased goods & services) | `embodied_co2e_grams` | Upstream hardware manufacturing emissions allocated to the pod by CPU reservation share (`max(request, usage)`; the unreserved share goes to the node's `__idle__` row) — sourced from the [Boavizta API](https://api.boavizta.org) and amortised over the hardware lifespan. Falls back to `DEFAULT_EMBODIED_EMISSIONS_KG` (default: **100 kg CO₂e**) when Boavizta does not recognise the provider or instance type. The Boavizta `/v1/cloud/instance` endpoint returns per-instance allocated GWP (typically 50–170 kg for common cloud VMs such as `aws/m5.large`); the fallback is calibrated to the same scale to avoid over-estimating Scope 3. |
+| **Scope 3, Category 1** (purchased goods & services) | `embodied_co2e_grams` | Upstream hardware manufacturing emissions allocated to the pod by CPU reservation share (`max(request, usage)`; the unreserved share goes to the node's `__idle__` row) — sourced from the [Boavizta API](https://api.boavizta.org) and amortised over the hardware lifespan. A `greenkube.io/embodied-kg` node annotation takes precedence (`embodied_source=configured`). When Boavizta does not recognise the provider or instance type, the node gets `DEFAULT_EMBODIED_KG_PER_VCPU` (default **12 kg CO₂e per vCPU**, the Boavizta m5 family ratio) × cores (`fallback_per_vcpu`), or `DEFAULT_EMBODIED_EMISSIONS_KG` (100 kg) when its capacity is unknown (`fallback_default`); both are flagged estimated. The Boavizta `/v1/cloud/instance` endpoint returns the lifetime embedded GWP of the instance share (`impacts.gwp.embedded.value`, 24 kg for `aws/m5.large`). |
 | **Scope 2 + Scope 3** | `total_co2e_grams` | Full pod carbon footprint — computed field on `CombinedMetric`, also exposed as `total_co2e_all_scopes` in API summary and timeseries responses. |
 
 **Scope 1** (direct combustion) is not applicable for cloud/virtualised Kubernetes workloads and is therefore not tracked.

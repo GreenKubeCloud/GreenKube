@@ -126,6 +126,11 @@ class PromQLCatalog:
             "by (namespace,pod,container,node)"
         )
 
+    def node_cpu_usage(self) -> str:
+        """Whole-node CPU cores of the kubelet root cgroup (``id="/"``): pods, kubelet, runtime, kernel (NRG-12)."""
+        selector = _selector('id="/"', *self.extra_matchers)
+        return f"max(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) by (node)"
+
     def pod_cgroup_cpu_usage(self) -> str:
         """Fallback when no container series exist: the pod cgroup series only, counted once."""
         selector = _selector(POD_CGROUP_FILTER, *self.extra_matchers)

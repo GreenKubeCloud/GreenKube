@@ -1106,3 +1106,55 @@ tests:
       - equal:
           path: data.OPENCOST_CLUSTER_ID
           value: cluster-a
+
+  - it: sets the per-vCPU and per-GiB embodied fallback with defaults 12 and 0 (NRG-01)
+    asserts:
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_VCPU
+          value: "12"
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_GIB
+          value: "0"
+
+  - it: renders the embodied kg by instance type map as JSON, empty by default (NRG-01)
+    set:
+      config.boavizta.embodiedKgByInstanceType:
+        r740: 1300
+    asserts:
+      - equal:
+          path: data.EMBODIED_KG_BY_INSTANCE_TYPE
+          value: '{"r740":1300}'
+
+  - it: enables shared host detection by default and lets config.power disable it (NRG-15)
+    set:
+      config.power.sharedHostDetection: false
+    asserts:
+      - equal:
+          path: data.SHARED_HOST_DETECTION
+          value: "false"
+
+  - it: sets the GPU utilisation assumed for requested GPUs without DCGM (NRG-13)
+    asserts:
+      - equal:
+          path: data.GPU_ASSUMED_UTILIZATION_PCT
+          value: "50"
+
+  - it: lets config.power override the assumed GPU utilisation (NRG-13)
+    set:
+      config.power.gpuAssumedUtilizationPct: 80
+    asserts:
+      - equal:
+          path: data.GPU_ASSUMED_UTILIZATION_PCT
+          value: "80"
+
+  - it: sets the embodied fallback coefficients from config.boavizta (NRG-01)
+    set:
+      config.boavizta.embodiedKgPerVcpu: 9.5
+      config.boavizta.embodiedKgPerGib: 1.2
+    asserts:
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_VCPU
+          value: "9.5"
+      - equal:
+          path: data.DEFAULT_EMBODIED_KG_PER_GIB
+          value: "1.2"

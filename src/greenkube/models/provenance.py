@@ -55,11 +55,42 @@ class PowerSource(StrEnum):
     MIXED = MIXED
 
 
+class EmbodiedSource(StrEnum):
+    """Where the whole-node embodied emissions of a row came from (NRG-01)."""
+
+    BOAVIZTA = "boavizta"
+    """Boavizta API value for the node's cloud provider and instance type."""
+    CONFIGURED = "configured"
+    """Operator value: node annotation ``greenkube.io/embodied-kg``."""
+    FALLBACK_PER_VCPU = "fallback_per_vcpu"
+    """Estimate from the node capacity: ``DEFAULT_EMBODIED_KG_PER_VCPU`` × cores (+ per GiB)."""
+    FALLBACK_DEFAULT = "fallback_default"
+    """Flat ``DEFAULT_EMBODIED_EMISSIONS_KG``: neither a lookup nor the node capacity is known."""
+    MIXED = MIXED
+
+
+class GpuSource(StrEnum):
+    """Where the GPU power of a row's node came from (NRG-13). NULL: no GPU detected on the node."""
+
+    DCGM = "dcgm"
+    """DCGM exporter samples (measured power, or TDP at the measured utilization)."""
+    GPU_TDP_ESTIMATE = "gpu_tdp_estimate"
+    """No DCGM sample: GPUs of the node capacity estimated from their TDP profile."""
+    UNMEASURED = "unmeasured"
+    """No DCGM sample and no TDP profile for the GPU model: GPU power is not counted."""
+
+
+#: ``estimation_reasons`` prefix of rows whose embodied emissions are a fallback (NRG-01).
+EMBODIED_FALLBACK_REASON_PREFIX = "Embodied emissions estimated"
+
+
 class IntensitySource(StrEnum):
     REALTIME = "realtime"
     CONSOLIDATED = "consolidated"
     STALE = "stale"
     ZONE_DEFAULT = "zone_default"
+    COUNTRY_DEFAULT = "country_default"
+    """Bundled annual value of the zone's country: the zone has none of its own (NRG-04)."""
     GLOBAL_DEFAULT = "global_default"
     UNKNOWN = "unknown"
     """Legacy rows written before provenance was recorded."""

@@ -24,7 +24,7 @@ class SQLiteEmbodiedRepository(BaseEmbodiedRepository):
 
     async def get_profile(self, provider: str, instance_type: str) -> Optional[dict]:
         query = """
-            SELECT gwp_manufacture, lifespan_hours, source, last_updated
+            SELECT gwp_manufacture, lifespan_hours, source, last_updated, error
             FROM instance_carbon_profiles
             WHERE provider = ? AND instance_type = ?
         """
@@ -38,6 +38,7 @@ class SQLiteEmbodiedRepository(BaseEmbodiedRepository):
                             "lifespan_hours": row["lifespan_hours"],
                             "source": row["source"],
                             "last_updated": row["last_updated"],
+                            "error": row["error"],
                         }
                     return None
         except Exception as e:
@@ -45,24 +46,31 @@ class SQLiteEmbodiedRepository(BaseEmbodiedRepository):
             raise QueryError(f"Database error in get_profile: {e}") from e
 
     async def save_profile(
-        self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str = "boavizta_api"
+        self,
+        provider: str,
+        instance_type: str,
+        gwp: float,
+        lifespan: int,
+        source: str = "boavizta_api",
+        error: Optional[str] = None,
     ):
         now_iso = to_iso_z(datetime.now(timezone.utc))
         query = """
             INSERT INTO instance_carbon_profiles (
-                provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated
+                provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated, error
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(provider, instance_type)
             DO UPDATE SET
                 gwp_manufacture = excluded.gwp_manufacture,
                 lifespan_hours = excluded.lifespan_hours,
                 source = excluded.source,
-                last_updated = excluded.last_updated
+                last_updated = excluded.last_updated,
+                error = excluded.error
         """
         try:
             async with self.db_manager.connection_scope() as conn:
-                await conn.execute(query, (provider, instance_type, gwp, lifespan, source, now_iso))
+                await conn.execute(query, (provider, instance_type, gwp, lifespan, source, now_iso, error))
                 await conn.commit()
         except Exception as e:
             logger.error("Error saving embodied profile for %s/%s: %s", provider, instance_type, e)
@@ -82,7 +90,7 @@ class PostgresEmbodiedRepository(BaseEmbodiedRepository):
 
     async def get_profile(self, provider: str, instance_type: str) -> Optional[dict]:
         query = """
-            SELECT gwp_manufacture, lifespan_hours, source, last_updated
+            SELECT gwp_manufacture, lifespan_hours, source, last_updated, error
             FROM instance_carbon_profiles
             WHERE provider = $1 AND instance_type = $2
         """
@@ -95,6 +103,7 @@ class PostgresEmbodiedRepository(BaseEmbodiedRepository):
                         "lifespan_hours": row["lifespan_hours"],
                         "source": row["source"],
                         "last_updated": row["last_updated"],
+                        "error": row["error"],
                     }
                 return None
         except Exception as e:
@@ -102,24 +111,31 @@ class PostgresEmbodiedRepository(BaseEmbodiedRepository):
             raise QueryError(f"Database error in get_profile: {e}") from e
 
     async def save_profile(
-        self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str = "boavizta_api"
+        self,
+        provider: str,
+        instance_type: str,
+        gwp: float,
+        lifespan: int,
+        source: str = "boavizta_api",
+        error: Optional[str] = None,
     ):
         now = datetime.now(timezone.utc)
         query = """
             INSERT INTO instance_carbon_profiles (
-                provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated
+                provider, instance_type, gwp_manufacture, lifespan_hours, source, last_updated, error
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (provider, instance_type)
             DO UPDATE SET
                 gwp_manufacture = EXCLUDED.gwp_manufacture,
                 lifespan_hours = EXCLUDED.lifespan_hours,
                 source = EXCLUDED.source,
-                last_updated = EXCLUDED.last_updated
+                last_updated = EXCLUDED.last_updated,
+                error = EXCLUDED.error
         """
         try:
             async with self.db_manager.connection_scope() as conn:
-                await conn.execute(query, provider, instance_type, gwp, lifespan, source, now)
+                await conn.execute(query, provider, instance_type, gwp, lifespan, source, now, error)
         except Exception as e:
             logger.error("Error saving embodied profile for %s/%s: %s", provider, instance_type, e)
             raise QueryError(f"Database error in save_profile: {e}") from e
@@ -147,6 +163,12 @@ class EmbodiedRepository(BaseEmbodiedRepository):
         return await self._impl.get_profile(provider, instance_type)
 
     async def save_profile(
-        self, provider: str, instance_type: str, gwp: float, lifespan: int, source: str = "boavizta_api"
+        self,
+        provider: str,
+        instance_type: str,
+        gwp: float,
+        lifespan: int,
+        source: str = "boavizta_api",
+        error: Optional[str] = None,
     ):
-        await self._impl.save_profile(provider, instance_type, gwp, lifespan, source)
+        await self._impl.save_profile(provider, instance_type, gwp, lifespan, source, error)

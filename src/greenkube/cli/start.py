@@ -19,6 +19,7 @@ import typer
 from typing_extensions import Annotated
 
 from ..collectors.node_collector import NodeCollector
+from ..core import collection_telemetry
 from ..core.cluster_identity import identity_problem
 from ..core.config import get_config
 from ..core.factory import (
@@ -29,7 +30,7 @@ from ..core.factory import (
     get_repository,
 )
 from ..core.loops import report_loop_failure
-from ..utils.mapping_translator import get_emaps_zone_from_cloud_zone
+from ..core.node_zone_mapper import NodeZoneMapper
 from .utils import write_combined_metrics_to_database
 
 try:
@@ -59,37 +60,18 @@ async def collect_carbon_intensity_for_all_zones() -> None:
     try:
         nodes_info = await node_collector.collect()
         if not nodes_info:
-            logger.warning("No node zones discovered.")
-            return
+            logger.warning("No node discovered; fetching DEFAULT_ZONE only.")
 
-        # Collect unique (zone, region, provider) tuples for mapping.
-        unique_zone_region_providers = {
-            (node_info.zone, node_info.region, node_info.cloud_provider)
-            for node_info in nodes_info.values()
-            if node_info.zone or node_info.region
-        }
-        emaps_zones: Set[str] = set()
-        for cz, region, provider in unique_zone_region_providers:
-            emz = None
-            # Try zone first
-            if cz:
-                emz = get_emaps_zone_from_cloud_zone(cz, provider=provider)
-            # Fallback to region (mirrors NodeZoneMapper logic)
-            if not emz and region:
-                emz = get_emaps_zone_from_cloud_zone(region, provider=provider)
-            if emz and emz != "unknown":
-                emaps_zones.add(emz)
-            else:
-                logger.warning(
-                    "Could not map cloud zone '%s' or region '%s' (provider: %s) to an Electricity Maps zone.",
-                    cz,
-                    region,
-                    provider,
-                )
-
+        # The zones the rows are computed for, with the rows' own resolver, plus DEFAULT_ZONE
+        # (unresolved nodes and nodes that left the cluster use it) (NRG-03).
+        cfg = get_config()
+        emaps_zones: Set[str] = await NodeZoneMapper(node_collector, cfg).intensity_zones(nodes_info or {})
         if not emaps_zones:
-            logger.warning("No mappable Electricity Maps zones found based on node discovery.")
-            return
+            logger.warning(
+                "No Electricity Maps zone to fetch: no node zone maps to one and DEFAULT_ZONE is '%s'. "
+                "Rows use the global default intensity; set DEFAULT_ZONE to your zone code.",
+                cfg.DEFAULT_ZONE,
+            )
 
         # Parallelize zone history collection
         async def process_zone(zone):
@@ -101,20 +83,23 @@ async def collect_carbon_intensity_for_all_zones() -> None:
                 if history_data:
                     saved_count = await repository.save_history(history_data, zone=zone)
                     logger.info("Successfully saved %s new records for zone: %s", saved_count, zone)
+                    collection_telemetry.set_intensity_zone_status(zone, "fetched")
                 else:
                     logger.info("No new data to save for zone: %s", zone)
+                    collection_telemetry.set_intensity_zone_status(zone, "empty")
             except Exception as e:
                 logger.error("Failed to process data for zone %s: %s", zone, e)
+                collection_telemetry.set_intensity_zone_status(zone, "failed")
                 report_loop_failure(e)
 
-        await asyncio.gather(*(process_zone(zone) for zone in emaps_zones))
-
-        await _recompute_combined_metrics(repository)
+        await asyncio.gather(*(process_zone(zone) for zone in sorted(emaps_zones)))
 
     except Exception as e:
         logger.error("Failed to collect node zones: %s", e)
         report_loop_failure(e)
     finally:
+        # Never skip the recompute: the last 24 h of rows take the refreshed or consolidated history.
+        await _recompute_combined_metrics(repository)
         await node_collector.close()
         await em_collector.close()
 

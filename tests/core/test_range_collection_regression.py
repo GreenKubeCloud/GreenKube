@@ -94,7 +94,8 @@ async def test_range_usage_counts_each_container_once(harness, include_pod_cgrou
     # Conservation: pod rows + __idle__ = node power (CPU profile + memory).
     assert pods[0].joules + idle.joules == pytest.approx(NODE_CPU_JOULES + MEMORY_WATTS * STEP, rel=1e-6)
     assert [(c.container_name, c.cpu_usage_millicores) for c in containers] == [("app", 200)]
-    cpu_queries = [q for q, *_ in prom.queries if "container_cpu_usage_seconds_total" in q]
+    # The node root cgroup query (id="/", NRG-12) is node-level by design and not a pod usage query.
+    cpu_queries = [q for q, *_ in prom.queries if "container_cpu_usage_seconds_total" in q and 'id="/"' not in q]
     # Containers and pod cgroups are read together (COL-09); the per-pod choice keeps the value at 200m.
     assert cpu_queries and all(
         'container!="POD"' in q and ('pod!=""' in q or 'container!=""' in q) for q in cpu_queries

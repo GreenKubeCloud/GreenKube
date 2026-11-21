@@ -53,6 +53,22 @@ class NodePowerProfile:
     def is_fallback(self) -> bool:
         return self.source == POWER_SOURCE_DEFAULT_PROFILE
 
+    @property
+    def known_cores(self) -> Optional[float]:
+        """vCPUs of the node when the profile knows them; ``None`` for ``DEFAULT_INSTANCE_PROFILE``.
+
+        The default profile's ``vcores`` describe the fallback wattage, not the node: using
+        them for embodied emissions would charge 1 vCPU of the per-vCPU fallback instead of
+        the flat default (NRG-01).
+        """
+        if self.is_fallback:
+            return None
+        try:
+            cores = float(self.profile.get("vcores") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return cores if cores > 0 else None
+
 
 @lru_cache(maxsize=1)
 def _provider_coefficients() -> dict[str, dict[str, float]]:
@@ -73,6 +89,22 @@ def per_core_watts(provider: Optional[str]) -> tuple[float, float, str]:
         return min_avg, max_avg, "cross-provider average"
     # CCF documented AWS defaults; only reached if the bundled CSV is missing.
     return 0.74, 3.5, "CCF default"
+
+
+def default_profile_from_config(config: Any) -> dict[str, Any]:
+    """``DEFAULT_INSTANCE_PROFILE`` of the configuration: used only when nothing is known of a node."""
+
+    def _number(name: str, default: float) -> float:
+        try:
+            return float(getattr(config, name, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "vcores": int(_number("DEFAULT_INSTANCE_VCORES", 1) or 1),
+        "minWatts": _number("DEFAULT_INSTANCE_MIN_WATTS", 1.0),
+        "maxWatts": _number("DEFAULT_INSTANCE_MAX_WATTS", 10.0),
+    }
 
 
 def capacity_derived_profile(cores: float, provider: Optional[str]) -> dict[str, Any]:

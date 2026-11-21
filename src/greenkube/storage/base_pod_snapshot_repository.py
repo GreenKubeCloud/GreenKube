@@ -37,6 +37,8 @@ CONTAINER_FIELDS: tuple[str, ...] = (
     "cpu_limit",
     "memory_limit",
 )
+#: Stored only when non-zero, so the spec hash of pods without GPUs is unchanged (NRG-13).
+OPTIONAL_CONTAINER_FIELDS: tuple[str, ...] = ("gpu_request",)
 
 
 @dataclass(frozen=True)
@@ -59,7 +61,11 @@ class PodSnapshot:
         return [
             PodMetric.model_validate(
                 {
-                    **{key: container.get(key) for key in CONTAINER_FIELDS if container.get(key) is not None},
+                    **{
+                        key: container.get(key)
+                        for key in (*CONTAINER_FIELDS, *OPTIONAL_CONTAINER_FIELDS)
+                        if container.get(key) is not None
+                    },
                     "pod_name": self.pod_name,
                     "namespace": self.namespace,
                     "owner_kind": self.owner_kind,
@@ -82,7 +88,13 @@ def snapshots_from_pod_metrics(pods: Iterable[PodMetric], seen_at: datetime) -> 
         pod_uid = next((c.pod_uid for c in containers if c.pod_uid), None)
         payload = tuple(
             sorted(
-                ({key: getattr(c, key) for key in CONTAINER_FIELDS} for c in containers),
+                (
+                    {
+                        **{key: getattr(c, key) for key in CONTAINER_FIELDS},
+                        **{key: getattr(c, key) for key in OPTIONAL_CONTAINER_FIELDS if getattr(c, key)},
+                    }
+                    for c in containers
+                ),
                 key=lambda item: (str(item["kind"]), str(item["container_name"])),
             )
         )

@@ -34,6 +34,7 @@ CONTAINER_SAMPLE_INCOMPLETE = _CONTAINER_SAMPLE_INCOMPLETE
 #: Intensity provenance values that mean the figure is not a fresh provider value.
 _DEFAULTED_INTENSITY = {
     IntensitySource.ZONE_DEFAULT.value: "zone default",
+    IntensitySource.COUNTRY_DEFAULT.value: "country default (annual value of the zone's country)",
     IntensitySource.GLOBAL_DEFAULT.value: "global default (DEFAULT_INTENSITY)",
     IntensitySource.STALE.value: "stale stored value (older than INTENSITY_MAX_AGE)",
 }

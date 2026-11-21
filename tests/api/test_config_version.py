@@ -64,3 +64,11 @@ class TestConfigEndpoint:
         data = client.get("/api/v1/config").json()
 
         assert data["currency"] == "EUR"
+
+    def test_config_exposes_the_vintage_of_the_bundled_intensity_defaults(self, client):
+        """Rows computed with defaults use annual means of this year (NRG-04)."""
+        from greenkube.data.electricity_maps_regions_grid_intensity_default import DEFAULT_INTENSITY_YEAR
+
+        data = client.get("/api/v1/config").json()
+
+        assert data["intensity_defaults_year"] == DEFAULT_INTENSITY_YEAR == 2024

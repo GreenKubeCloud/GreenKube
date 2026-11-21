@@ -506,6 +506,13 @@ class ConfigResponse(BaseModel):
     currency: str = Field(
         "USD", description="Pricing currency (ISO 4217) of every cost and savings amount (impact.pricing.currency)."
     )
+    intensity_defaults_year: Optional[int] = Field(
+        None,
+        description=(
+            "Calendar year of the bundled annual grid intensities used when no live value exists "
+            "(intensity_source zone_default or country_default, NRG-04)."
+        ),
+    )
 
 
 class PaginatedMetricsResponse(BaseModel):
