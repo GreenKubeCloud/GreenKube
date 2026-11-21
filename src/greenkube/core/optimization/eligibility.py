@@ -1057,7 +1057,8 @@ def has_native_evidence(record: Any) -> bool:
 
 
 #: Sources whose signals arrive through the push API (report uploads); ``push:<client>`` too.
-#: ``polaris`` (removed in B.3) stays for the votes of records stored before the removal.
+#: ``polaris`` (removed in B.3) stays for the votes of records stored before the removal: an intentional
+#: exception to the B.0 "no reference left" grep (listed in docs/upgrading.md).
 _PUSHED_SOURCE_IDS = frozenset({"krr", "polaris"})
 
 

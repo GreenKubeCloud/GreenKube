@@ -279,8 +279,15 @@ def test_the_removed_polaris_report_route_stores_nothing(tmp_path, monkeypatch):
     inbox = MemoryInbox()
     with auth_harness(tmp_path, monkeypatch) as h:
         h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
-        headers = _key(h, "read", "write", name="polaris-job")
-        response = h.client.post("/api/v1/sources/polaris/reports", json={"results": []}, headers=headers)
+        responses = [
+            h.client.post("/api/v1/sources/polaris/reports", json={"results": []}, headers=_key(h, *scopes, name=name))
+            # A leftover CronJob key (signals:report, or the deprecated signals:write) and a write key.
+            for name, scopes in (
+                ("polaris-job", ("signals:report",)),
+                ("old-job", ("signals:write",)),
+                ("rw", ("read", "write")),
+            )
+        ]
 
-    assert response.status_code in (404, 405)
+    assert [response.status_code for response in responses] == [404, 404, 404]
     assert inbox.signals == {}

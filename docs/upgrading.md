@@ -121,7 +121,7 @@ down, and a source alone never creates a recommendation. What was removed, and w
 | Removed | On upgrade |
 |---|---|
 | The Kubecost, GKE recommender, Azure Advisor and Polaris connectors | Their `SOURCES_CONFIG` / `sources.settings.<id>` entries (`kubecost`, `gke`, `azure_advisor`, `polaris`) are accepted and ignored, with one warning at start and a line under DEPRECATED VALUES. Push their advice to `POST /api/v1/signals` instead ([Push API](sources/push.md)). |
-| `POST /api/v1/sources/polaris/reports` | Answers `404`. |
+| `POST /api/v1/sources/polaris/reports` | Answers `404` for every key, a leftover CronJob's `signals:report` or `signals:write` key included; nothing is stored. Delete the job. |
 | The chart's KRR and Polaris CronJobs (`sources.krr.job.*`, `sources.polaris.job.*`) | Ignored with a line under DEPRECATED VALUES; the CronJobs, their ServiceAccounts and ClusterRoles are deleted by the upgrade. Run KRR yourself and push its report: [Robusta KRR](sources/krr.md) has a ready-made CronJob. |
 | `RECOMMENDATION_CONSENSUS_POLICY` (`safest`, `median`, `weighted`, `priority`; Helm `config.recommendations.consensusPolicy`) | Accepted and ignored, with one warning at start (and a line under DEPRECATED VALUES). |
 | `RECOMMENDATION_SOURCE_PRIORITY` (Helm `sources.priority`, `config.recommendations.sourcePriority`) | Accepted and ignored, with one warning at start (and a line under DEPRECATED VALUES). |
@@ -134,6 +134,13 @@ backup note here. A recommendation stored before keeps the consensus `policy` it
 rebuilds it with the native value, which may change its proposed value (a new revision).
 
 These values are refused in a later release: remove them from your values file.
+
+Intentional references to the removed names stay in the code (the B.0 grep exceptions):
+`greenkube.core.optimization.eligibility._PUSHED_SOURCE_IDS` keeps `polaris`, so votes of records stored before the
+removal still count as pushed (one independent vote); the removed-settings and removed-source lists
+(`REMOVED_SETTINGS` in `greenkube.core.config`, `REMOVED_SOURCE_IDS` in `greenkube.signals.registry`, the chart's
+deprecation notes and migration `0310`) name them to ignore and warn about them; and `kubecost` as a cost provenance
+(`cost_source`) and a protected namespace is OpenCost-compatible cost data, not the removed connector.
 
 Note that `automation.enabled: false` now means *discovery, previews and measurement run, no pull request is
 opened*. To keep the Git tokens out of every pod, also remove `automation.providers` and do not create
