@@ -182,6 +182,41 @@ async def test_pod_rows_store_the_memory_peak_and_hourly_rows_keep_it(database):
 
 
 @pytest.mark.asyncio
+async def test_hourly_rows_keep_the_newest_calculation_version_not_the_largest_string(database):
+    """Review 7: '+range.10' sorts below '+range.9' as a string; the hour keeps its newest row's version."""
+    from datetime import timezone as tz
+
+    from greenkube.core.metrics_compressor import MetricsCompressor
+
+    backend, manager = database
+    metrics = (
+        SQLiteCombinedMetricsRepository(manager) if backend == "sqlite" else PostgresCombinedMetricsRepository(manager)
+    )
+    hour = (datetime.now(tz.utc) - timedelta(days=2)).replace(minute=0, second=0, microsecond=0)
+    rows = [
+        CombinedMetric(
+            pod_name="a",
+            namespace="ns",
+            timestamp=hour + k * STEP,
+            duration_seconds=300,
+            calculation_version=version,
+        )
+        for k, version in enumerate(("0.3.1+range.9", "0.3.1+range.9", "0.3.1+range.10"))
+    ]
+    await metrics.write_combined_metrics(rows)
+
+    await MetricsCompressor(manager, collection_watermark_provider=None).run()
+
+    async with manager.connection_scope() as conn:
+        if backend == "sqlite":
+            async with conn.execute("SELECT calculation_version FROM combined_metrics_hourly") as cursor:
+                versions = [row[0] for row in await cursor.fetchall()]
+        else:
+            versions = [row[0] for row in await conn.fetch("SELECT calculation_version FROM combined_metrics_hourly")]
+    assert versions == ["0.3.1+range.10"]
+
+
+@pytest.mark.asyncio
 async def test_latest_container_usage_sources_reads_the_newest_step(database):
     """COL-05: /health says where container usage comes from (cri-dockerd: Metrics API point samples)."""
     backend, manager = database
