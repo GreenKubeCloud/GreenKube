@@ -223,7 +223,7 @@ class VpaSource(RecommendationSource):
 
     def __init__(self, config: "Config", collector: Optional[VPACollectorLike] = None):
         self.config = config
-        self._collector = collector if collector is not None else VPACollector()
+        self._collector = collector if collector is not None else VPACollector(config)
         self._available: Optional[bool] = None
         #: VPA container recommendations read by the last ``collect()`` (signals per VPA object).
         self.last_vpas: List[VPARecommendation] = []

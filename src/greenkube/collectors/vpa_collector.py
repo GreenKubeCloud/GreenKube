@@ -71,15 +71,14 @@ def _parse_time(value: Any) -> Optional[datetime]:
         return None
 
 
-def _created_recently(value: Any) -> bool:
-    """Whether a VPA was created less than ``VPA_MIN_SAMPLE_HOURS`` ago (its history is shorter)."""
+def _created_recently(value: Any, min_hours: float) -> bool:
+    """Whether a VPA was created less than ``min_hours`` (``VPA_MIN_SAMPLE_HOURS``) ago: its history is shorter."""
     created = _parse_time(value)
     if created is None:
         return False
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
-    hours = float(getattr(global_config, "VPA_MIN_SAMPLE_HOURS", 24.0) or 0.0)
-    return datetime.now(timezone.utc) - created < timedelta(hours=hours)
+    return datetime.now(timezone.utc) - created < timedelta(hours=min_hours)
 
 
 def _conditions(status: dict) -> Dict[str, str]:
@@ -123,7 +122,9 @@ def _parse_container_recommendation(
 class VPACollector:
     """Collects recommendation-mode VPA container targets."""
 
-    def __init__(self) -> None:
+    def __init__(self, config: Any = None) -> None:
+        #: Settings of this collector (``VPA_MIN_SAMPLE_HOURS``); the global config when not given.
+        self.config = config if config is not None else global_config
         #: VPAs skipped by the last ``collect()``, by update mode (``Auto``, ``Recreate``...).
         self.skipped_by_mode: Dict[str, int] = {}
         #: Whether the last ``collect()`` could list the VPA checkpoints (None before any collect).
@@ -188,6 +189,7 @@ class VPACollector:
 
         items = (result or {}).get("items", []) or []
         checkpoints = await self._checkpoints(api) if items else {}
+        min_hours = float(getattr(self.config, "VPA_MIN_SAMPLE_HOURS", 24.0) or 0.0)
         checkpointed_vpas = {(namespace, vpa_name) for namespace, vpa_name, _container in checkpoints}
         for item in items:
             try:
@@ -233,7 +235,7 @@ class VPACollector:
                             parsed.last_sample_start = _parse_time(checkpoint.get("lastSampleStart"))
                         elif self.checkpoints_readable and (
                             (parsed.namespace, parsed.vpa_name) in checkpointed_vpas
-                            or _created_recently(metadata.get("creationTimestamp"))
+                            or _created_recently(metadata.get("creationTimestamp"), min_hours)
                         ):
                             # The recommender checkpoints this VPA's other containers, or the VPA
                             # is newer than the maturity window: no sample history to trust yet.

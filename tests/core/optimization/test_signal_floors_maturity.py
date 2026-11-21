@@ -532,6 +532,17 @@ class TestCheckpointCollection:
 
         assert vpa.total_samples is None
 
+    async def test_the_new_vpa_window_comes_from_the_collector_config(self, monkeypatch):
+        from greenkube.collectors import vpa_collector
+
+        self._api(monkeypatch, [], created=datetime.now(timezone.utc) - timedelta(hours=2))
+        cfg = Config().model_copy(update={"VPA_MIN_SAMPLE_HOURS": 1.0})
+
+        [vpa] = await vpa_collector.VPACollector(config=cfg).collect()
+
+        # Two hours old with a one-hour window: not new, so no checkpoint means unknown, not 0 samples.
+        assert vpa.total_samples is None
+
     async def test_unreadable_checkpoints_leave_maturity_unknown(self, monkeypatch):
         collector = self._api(monkeypatch, PermissionError("forbidden"))
 
@@ -558,7 +569,7 @@ class TestPluginsAreNeverNative:
                     signals=[
                         SourceSignal(
                             source_id="acme.sizer",
-                            **signal_family,
+                            engine_family=signal_family.get("engine_family"),
                             target=TargetRef.for_kind(
                                 ctx.cluster_uid, "Deployment", "api", namespace="shop", container="web"
                             ),
