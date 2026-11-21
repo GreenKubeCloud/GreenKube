@@ -123,6 +123,11 @@
 		}
 	}
 
+	/** Users and browsers signed in with an API key (F-09) have an account page and can sign out. */
+	function signsOut(principal) {
+		return principal?.kind === 'user' || principal?.kind === 'apikey';
+	}
+
 	function handleSignedIn(event) {
 		enter(event.detail);
 	}
@@ -342,12 +347,12 @@
 								{#if $currentUser.role}<span class="text-dark-500">· {$currentUser.role}</span>{/if}
 							</p>
 						{/if}
-						{#if $currentUser.kind === 'user'}
+						{#if signsOut($currentUser)}
 							<a
 								href="/settings/account"
 								class="block rounded-lg px-2 py-1 text-xs text-dark-500 hover:bg-dark-800 hover:text-dark-200"
 							>
-								{$sidebarCollapsed ? 'Acct' : 'Account & sessions'}
+								{$sidebarCollapsed ? 'Acct' : $currentUser.kind === 'apikey' ? 'Account' : 'Account & sessions'}
 							</a>
 						{/if}
 						{#if hasScope($currentUser, 'admin')}
@@ -358,7 +363,7 @@
 								{$sidebarCollapsed ? 'Keys' : 'API keys'}
 							</a>
 						{/if}
-						{#if $currentUser.kind === 'user'}
+						{#if signsOut($currentUser)}
 							<button
 								type="button"
 								on:click={signOut}

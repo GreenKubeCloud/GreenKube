@@ -36,10 +36,13 @@
 	let error = '';
 	let submitting = false;
 	let providers = null;
+	let providersLoading = true;
+	let providersError = '';
 	let ssoError = '';
 
 	$: apiKeyEnabled = Boolean(providers && (providers.api_key === true || providers.mode === 'api_key'));
-	$: passwordEnabled = !apiKeyEnabled && (providers ? providers.password !== false : true);
+	// Without the sign-in options, no form is shown: guessing one would answer 409 in api_key or SSO-only modes.
+	$: passwordEnabled = Boolean(providers) && !apiKeyEnabled && providers.password !== false;
 	$: sso = providers?.sso || null;
 
 	function readSsoError() {
@@ -64,8 +67,16 @@
 
 	onMount(async () => {
 		ssoError = readSsoError();
-		providers = await getAuthProviders();
+		await loadProviders();
 	});
+
+	async function loadProviders() {
+		providersLoading = true;
+		providersError = '';
+		providers = await getAuthProviders();
+		if (!providers) providersError = 'GreenKube could not load the sign-in options. Check that it is reachable and try again.';
+		providersLoading = false;
+	}
 
 	function messageFor(err) {
 		if (err instanceof ApiError) {
@@ -129,6 +140,23 @@
 		<p class="rounded-lg border border-red-800/60 bg-red-900/20 px-3 py-2 text-sm text-red-300" role="alert">
 			{ssoError}
 		</p>
+	{/if}
+
+	{#if providersLoading}
+		<p class="text-sm text-dark-500" role="status">Loading sign-in options…</p>
+	{:else if providersError}
+		<div class="space-y-3" data-testid="providers-error">
+			<p class="rounded-lg border border-red-800/60 bg-red-900/20 px-3 py-2 text-sm text-red-300" role="alert">
+				{providersError}
+			</p>
+			<button
+				type="button"
+				on:click={loadProviders}
+				class="w-full rounded-lg border border-dark-600 bg-dark-800 px-4 py-2 text-sm font-medium text-dark-100 hover:bg-dark-700"
+			>
+				Try again
+			</button>
+		</div>
 	{/if}
 
 	{#if sso?.kind === 'oidc'}

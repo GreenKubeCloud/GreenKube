@@ -95,11 +95,12 @@ describe('sign-in form with single sign-on', () => {
 		expect(window.history.replaceState).toHaveBeenCalledWith(null, '', '/');
 	});
 
-	it('keeps the plain password form when providers cannot be read', async () => {
+	it('shows an error instead of guessing a form when providers cannot be read', async () => {
 		installFetch({ 'GET /api/v1/auth/providers': () => fail(500) });
 		render(LoginForm);
 
-		expect(await screen.findByRole('form', { name: 'Sign in to GreenKube' })).toBeInTheDocument();
+		expect(await screen.findByTestId('providers-error')).toBeInTheDocument();
+		expect(screen.queryByRole('form', { name: 'Sign in to GreenKube' })).not.toBeInTheDocument();
 		expect(screen.queryByTestId('sso-login')).not.toBeInTheDocument();
 	});
 });

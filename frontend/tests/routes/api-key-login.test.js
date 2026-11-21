@@ -87,6 +87,22 @@ describe('sign-in form in api_key mode', () => {
 	});
 });
 
+describe('sign-in form without sign-in options', () => {
+	it('shows an error and a retry instead of a password form that would be refused', async () => {
+		let providers = fail(503);
+		installFetch({ 'GET /api/v1/auth/providers': () => providers });
+		render(LoginForm);
+
+		expect(await screen.findByRole('alert')).toHaveTextContent('could not load the sign-in options');
+		expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
+		expect(screen.queryByLabelText('API key')).not.toBeInTheDocument();
+
+		providers = ok(API_KEY_PROVIDERS);
+		await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+		expect(await screen.findByLabelText('API key')).toBeInTheDocument();
+	});
+});
+
 describe('sign-in form in session mode', () => {
 	it('keeps the password form and the initial-password hint', async () => {
 		installFetch({
