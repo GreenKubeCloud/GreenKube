@@ -125,6 +125,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - The dashboard summary cache (`/metrics/dashboard-summary`) keeps the idle share, the cluster totals and `idle_data_since` of its cluster-wide windows (migration 0250).
 - The Footprint page shows the allocated totals, the node idle share and the cluster total side by side for CO₂e, cost and energy, with "not available" and the reason when the idle share is unknown.
 - Each decided change measurement records `untrusted_cost_hours` and `baseline_untrusted_cost_hours`, the workload hours of each window without trusted cost (migration 0251, MEA-05). The API returns them with the measurements and the change detail page shows them. Measurements decided earlier keep `null` and a valid evidence digest.
+- `GET /nodes` returns `gpu_source` for each node (from its latest idle row of the last hour), and the Footprint nodes page shows a "GPU power estimated" or "GPU power not measured" badge, with a notice counting such nodes, when no DCGM exporter sample reached GreenKube (NRG-13).
 
 ### Changed
 
@@ -309,6 +310,8 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - Failed `Authorization: Bearer` authentications and rejected API-key browser cookies are now throttled per client IP (four times `AUTH_LOGIN_RATE_LIMIT`, no exponential lockout), answering `429 TOO_MANY_ATTEMPTS` with `Retry-After`; before, only the global `API_RATE_LIMIT` bounded online guessing of an operator-chosen bootstrap key. Prometheus scrapes on `/prometheus/metrics` use a separate bucket, successful authentications never consume the budget, and clients sharing one address share it. Refusals are counted as `greenkube_auth_failures_total{reason="key_rate_limited"}`.
 - The controller and worker metrics listeners throttle failed scrape credentials per TCP peer the same way.
 - In `api_key` mode, a stale browser cookie is no longer counted as a failure on an open development instance or on the public sign-in routes; it is cleared instead, so a browser can always sign in again.
+- `greenkube recompute` splits shared hosts (kind, k3d, multi-node minikube) for rows collected before migration 0183: when the node snapshot in force has no host or provider id, the ids of the node's current snapshot form the group, and the "Shared host" reason says the grouping came from the current snapshot. Rows an earlier recompute stamped with a host share of 1 for such nodes are repaired by the next recompute that reaches them (`--all` for rows of the current model); a group member whose own snapshot has ids keeps its recorded share.
+- The hourly rollups (`combined_metrics_hourly`, `container_metrics_hourly`, `node_idle_metrics_hourly`, `workload_usage_hourly`) of the 0.3.x upgrade hour, which mixes 5-minute rows with and without a CPU/RAM cost split, store NULL `cost_cpu` and `cost_ram` instead of a partial sum (the trusted components only when the unsplit rows are trusted), so projections and observed node prices treat it as an unsplit hour (F-03). Hours already compressed keep their stored values until they are re-aggregated.
 
 ### Security
 - Wildcard CORS is never combined with credentials; CORS is same-origin by default.
