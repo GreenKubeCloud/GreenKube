@@ -148,3 +148,22 @@ def test_the_source_run_says_which_targets_were_left_out() -> None:
 
     assert codes == {"target_gone": 2, "target_not_running": 1}
     assert liveness_diagnostics(0, 0) == []
+
+
+def test_owner_chain_transition_retires_the_stale_targets_and_keeps_cronjobs() -> None:
+    """COL-16 review: stored rows of a Rollout's pods say Deployment/web and of a CronJob run Job/<run>;
+    after the owner chain change those targets are retired as gone, while the CronJob, whose pods run
+    only on schedule, is never retired for lack of a running pod."""
+    stale_deployment = ("shop", "Deployment", "web")
+    rollout = ("shop", "Rollout", "web")
+    old_run = ("shop", "Job", "report-28912345")
+    cronjob = ("shop", "CronJob", "report")
+    snapshot = UsageSnapshot(source="test")
+    for target, hours_ago in ((stale_deployment, 5), (rollout, 0), (old_run, 5), (cronjob, 5)):
+        snapshot.summaries[target] = {"": _summary(target, "", hours_ago)}
+
+    report = filter_live_targets(snapshot, end=END, live_containers={(rollout, "app")}, scaled_to_zero=set())
+
+    assert report.gone == {stale_deployment, old_run}
+    assert cronjob in report.not_running
+    assert set(snapshot.summaries) == {rollout}

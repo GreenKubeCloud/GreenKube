@@ -43,6 +43,7 @@ from greenkube.models.workload_usage import (
     WorkloadUsageHour,
     WorkloadUsageSummary,
 )
+from greenkube.utils.time import ensure_utc
 
 if TYPE_CHECKING:
     from greenkube.storage.base_workload_usage_repository import WorkloadUsageRepository
@@ -636,14 +637,21 @@ def rollup_rows(
             groups[(bucket, key)] = accumulator
         return accumulator
 
-    # A pod's workload owner, from any of its rows: pod rows written before
-    # owners were stored on them would otherwise make every StatefulSet replica
-    # its own target, and its containers with it.
+    # A pod's workload owner, from its latest row that has one: pod rows written
+    # before owners were stored on them would otherwise make every StatefulSet
+    # replica its own target, and its containers with it; the latest owner wins
+    # when the owner rule changed (COL-16: Deployment/<x> before, Rollout/<x> after).
     owners: Dict[Tuple[str, str], Tuple[str, str]] = {}
+    owner_seen: Dict[Tuple[str, str], float] = {}
     for row in [*pod_rows, *container_rows]:
         owner_kind, owner_name = getattr(row, "owner_kind", None), getattr(row, "owner_name", None)
         if owner_kind and owner_name:
-            owners.setdefault((row.namespace, row.pod_name), (owner_kind, owner_name))
+            key = (row.namespace, row.pod_name)
+            stamp = getattr(row, "timestamp", None)
+            seen = ensure_utc(stamp).timestamp() if isinstance(stamp, datetime) else float("-inf")
+            if key not in owners or seen > owner_seen[key]:
+                owners[key] = (owner_kind, owner_name)
+                owner_seen[key] = seen
 
     def _target(row: Any) -> Tuple[str, str, str]:
         owner = owners.get((row.namespace, row.pod_name))

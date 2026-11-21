@@ -6,15 +6,20 @@ its recommendations (refreshing their TTL) until its last hour left the
 lookback. Before the analyzers run, :func:`filter_live_targets` removes from
 the usage snapshot:
 
-* every ``Job`` target: one run's requests are not a workload's. CronJob runs
-  are attributed to their Job (the collectors do not resolve a Job to its
-  CronJob), so a CronJob gets no rightsizing at all for now. A running Job,
+* every ``Job`` target: one run's requests are not a workload's. Runs of a
+  CronJob are attributed to the CronJob (COL-16); targets ``Job/<run>`` of
+  rows stored before that are retired like any finished Job. A running Job,
   or a Job whose pods could not be listed, is ``not_running`` (records kept);
   only a Job confirmed finished (pods listed, none running) is ``gone``;
 * containers no longer in the pod spec of a running target;
 * targets without a running pod whose last sample is older than
   :data:`TARGET_MAX_STALENESS` before the scan, and bare pods without a
   running pod.
+
+A ``Deployment/<x>`` target of stored rows whose pods belong to an Argo Rollout
+(the owner was cut from the ReplicaSet name before COL-16) has no running pod
+and no Deployment scaled to zero, so it is retired as ``gone``; a CronJob
+between two runs is ``not_running``.
 
 A removed target is reported ``gone`` (its records are retired with the
 reason ``target_gone``) only when the cluster confirms it: the pod list was
@@ -43,8 +48,9 @@ TARGET_MAX_STALENESS = timedelta(hours=2)
 EPHEMERAL_KINDS = frozenset({"Job"})
 #: Controllers that may be scaled to zero while they still exist.
 SCALABLE_KINDS = ("Deployment", "StatefulSet")
-#: Controllers that may run no pod while they exist (no node matches their selector): never retired.
-PODLESS_KINDS = frozenset({"DaemonSet"})
+#: Controllers that may run no pod while they exist (no node matches their selector, a CronJob between
+#: two runs, COL-16): never retired for lack of a running pod.
+PODLESS_KINDS = frozenset({"DaemonSet", "CronJob"})
 
 ContainerKey = Tuple[TargetKey, str]
 
