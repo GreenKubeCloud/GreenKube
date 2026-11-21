@@ -17,9 +17,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from greenkube.api.dependencies import get_combined_metrics_repository, validate_namespace
-from greenkube.api.routers.metrics import idle_history_gap, with_idle_share
 from greenkube.api.schemas import ReportSummaryResponse
 from greenkube.core.aggregator import aggregate_metrics
+from greenkube.core.idle_share import idle_history_gap, with_idle_share
 from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.base_repository import CombinedMetricsRepository
 from greenkube.utils.date_utils import ensure_utc, time_range_from_last

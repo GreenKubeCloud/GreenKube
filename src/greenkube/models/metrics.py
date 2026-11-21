@@ -1012,6 +1012,19 @@ class MetricsSummaryRow(BaseModel):
         None,
         description="Timestamp of the last refresh.",
     )
+    # Node idle share of a cluster-wide window and the cluster totals (WP-05.3, NRG-02, migration 0250):
+    # null on namespace rows, without idle rows, or when the window holds pod rows before idle_data_since.
+    idle_co2e_grams: Optional[float] = Field(None, description="Scope 2 CO₂e of the node idle share.")
+    idle_embodied_co2e_grams: Optional[float] = Field(None, description="Scope 3 CO₂e of the node idle share.")
+    idle_cost: Optional[float] = Field(None, description="Modeled cost of the node idle share.")
+    idle_energy_joules: Optional[float] = Field(None, description="Energy of the node idle share in Joules.")
+    cluster_total_co2e_grams: Optional[float] = Field(None, description="Scope 2 CO₂e: allocated + idle share.")
+    cluster_total_embodied_co2e_grams: Optional[float] = Field(
+        None, description="Scope 3 CO₂e: allocated + idle share."
+    )
+    cluster_total_cost: Optional[float] = Field(None, description="Cost: allocated + idle share.")
+    cluster_total_energy_joules: Optional[float] = Field(None, description="Energy in Joules: allocated + idle.")
+    idle_data_since: Optional[datetime] = Field(None, description="First instant covered by stored idle rows.")
 
 
 class TimeseriesCachePoint(BaseModel):

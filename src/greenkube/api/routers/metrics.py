@@ -21,6 +21,7 @@ from greenkube.api.schemas import (
     TopPodItem,
 )
 from greenkube.core.config import get_config
+from greenkube.core.idle_share import window_idle_share, with_idle_share
 from greenkube.storage.base_repository import CombinedMetricsRepository
 from greenkube.utils.date_utils import time_range_from_last
 
@@ -135,9 +136,7 @@ async def metrics_summary(
     # The node idle share belongs to no namespace: cluster-wide scope only (NRG-02).
     idle_fields: dict = {}
     if not namespace:
-        since, short = await idle_history_gap(repo, start, end)
-        idle = None if short else await repo.aggregate_idle_summary(start, end)
-        idle_fields = {"idle_data_since": since, **with_idle_share(summary, idle)}
+        idle_fields = await window_idle_share(repo, start, end, summary)
     return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3, **idle_fields)
 
 
@@ -168,44 +167,6 @@ async def _drop_partial_idle_buckets(repo: CombinedMetricsRepository, idle_by_bu
         before = await repo.aggregate_summary(start_time=start, end_time=since, namespace=None)
         if before.get("row_count"):
             del idle_by_bucket[label]
-
-
-async def idle_history_gap(
-    repo: CombinedMetricsRepository, start: datetime, end: datetime
-) -> tuple[Optional[datetime], bool]:
-    """First instant of the stored idle rows, and whether pod rows of ``[start, end)`` precede it.
-
-    Idle rows exist only since the upgrade that added them (about the raw
-    retention before the first compression): a window with pod rows before
-    that instant would get an idle share, and a cluster total, that cover only
-    part of it. Such a window reports them as unknown (review of NRG-02).
-    """
-    since = await repo.idle_data_since()
-    if since is None or since <= start:
-        return since, False
-    before = await repo.aggregate_summary(start_time=start, end_time=min(since, end), namespace=None)
-    return since, bool(before.get("row_count"))
-
-
-#: Allocated measure → idle and cluster-total field suffix (NRG-02).
-IDLE_MEASURES = {
-    "total_co2e_grams": "co2e_grams",
-    "total_embodied_co2e_grams": "embodied_co2e_grams",
-    "total_cost": "cost",
-    "total_energy_joules": "energy_joules",
-}
-
-
-def with_idle_share(allocated: dict, idle: Optional[dict]) -> dict:
-    """Idle share and cluster totals (allocated + idle) of a summary or a bucket; empty when unknown."""
-    if idle is None:
-        return {}
-    fields: dict = {}
-    for total, suffix in IDLE_MEASURES.items():
-        value = float(idle.get(f"idle_{suffix}") or 0.0)
-        fields[f"idle_{suffix}"] = value
-        fields[f"cluster_total_{suffix}"] = float(allocated.get(total) or 0.0) + value
-    return fields
 
 
 _GRANULARITY_FORMATS = {
