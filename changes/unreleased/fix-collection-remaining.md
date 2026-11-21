@@ -7,7 +7,7 @@
 - CPU of a container adds its consecutive instances inside the rate window (restart, crash loop, pod recreated under the same name, told apart by cAdvisor's `name` label); duplicates of one instance still count once (COL-11).
 - `memory_usage_bytes` is the working-set average over the step (`avg_over_time`), not the instant value at the step boundary (COL-12).
 - The node cloud provider comes from `CLOUD_PROVIDER` when set, else from `spec.providerID`, else from provider label prefixes; region names are no longer used, and Linode, Oracle, IBM and Alibaba nodes stay `unknown` (COL-15).
-- Pod owners follow the controller chain: a ReplicaSet resolves to its Deployment or Argo Rollout (or stays a ReplicaSet), and a Job created by a CronJob resolves to the CronJob. The ClusterRole can now list `batch/jobs`. When ReplicaSets cannot be listed, the name rule is kept and a warning is logged (COL-16).
+- Pod owners follow the controller chain: a ReplicaSet resolves to its Deployment or Argo Rollout (or stays a ReplicaSet), and a Job created by a CronJob resolves to the CronJob. The ClusterRole can now list `batch/jobs`. Owners of pods known only from kube-state-metrics follow the same chain through `kube_replicaset_owner` and `kube_job_owner`. When ReplicaSets cannot be listed, the name rule is kept and a warning is logged (COL-16).
 - Recommendation evidence, the memory `restart_history` risk and the stability score count the restarts inside the window (increases of the lifetime counter between rows), not the lifetime restart counter (COL-20).
 - A closed `DatabaseManager` raises `DatabaseClosedError` on use instead of silently reopening a connection; `connect()` and `setup_*()` still open it explicitly (roadmap A.9).
 
