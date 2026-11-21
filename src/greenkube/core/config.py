@@ -653,9 +653,6 @@ class Config(BaseSettings):
     LEDGER_CHAIN_KEY: Optional[str] = None
     # Verify-only previous chain keys of a deliberate rotation, comma-separated (never used to write).
     LEDGER_CHAIN_PREVIOUS_KEYS: Optional[str] = None
-    # UTC time LEDGER_CHAIN_KEY was created (an anchor outside the database): unkeyed entries and unsigned
-    # status rows later than this plus a 2 h grace period fail verification (LED-05).
-    LEDGER_CHAIN_KEY_SINCE: Optional[str] = None
     # Interval between lifecycle jobs (apply detection, verification, expiry).
     RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
     # Interval between scheduled, leader-gated recommendation scans in the

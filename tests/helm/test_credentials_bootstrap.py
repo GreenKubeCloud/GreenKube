@@ -177,29 +177,6 @@ def test_an_upgrade_adds_the_ledger_chain_key_once_and_never_rotates_it():
     assert len(api.writes()) == 1
 
 
-def test_the_key_creation_time_is_written_with_a_new_key_and_preserved_on_upgrade():
-    """LED-05: LEDGER_CHAIN_KEY_SINCE is written once with a generated key and never overwritten."""
-    api = FakeApi()
-    settings = _settings(generate_api_key=False, generate_ledger_chain_key=True)
-
-    bootstrap.ensure_credentials(api, settings)
-    first = _plain(api.stored)
-    bootstrap.ensure_credentials(api, settings)
-
-    assert first["LEDGER_CHAIN_KEY_SINCE"].endswith("Z") and "T" in first["LEDGER_CHAIN_KEY_SINCE"]
-    assert _plain(api.stored)["LEDGER_CHAIN_KEY_SINCE"] == first["LEDGER_CHAIN_KEY_SINCE"]
-    assert _plain(api.stored)["LEDGER_CHAIN_KEY"] == first["LEDGER_CHAIN_KEY"]
-
-
-def test_an_existing_key_without_a_creation_time_gets_none_guessed():
-    legacy = _legacy_secret(
-        GREENKUBE_API_KEY="k", POSTGRES_PASSWORD="pw", DB_CONNECTION_STRING=LEGACY_DSN, LEDGER_CHAIN_KEY="old"
-    )
-    api = FakeApi(secret=legacy, pvcs={"data-greenkube-postgres-0"})
-    bootstrap.ensure_credentials(api, _settings(generate_api_key=False, generate_ledger_chain_key=True))
-    assert "LEDGER_CHAIN_KEY_SINCE" not in _plain(api.stored)
-
-
 def test_created_secret_is_not_tracked_by_helm_or_argo_cd():
     api = FakeApi()
 

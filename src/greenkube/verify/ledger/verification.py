@@ -47,14 +47,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from prometheus_client import Counter, Gauge
 
 from greenkube.core.observability import REGISTRY as OBSERVABILITY_REGISTRY
-from greenkube.storage.ledger_repository import CHAIN_KEY_GRACE, ChainStatus, LedgerRepository
-from greenkube.utils.time import ensure_utc
-from greenkube.verify.ledger.model import entry_id_for
+from greenkube.storage.ledger_repository import ChainStatus, LedgerRepository
+from greenkube.verify.ledger.model import chain_key_id, entry_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +137,8 @@ class ChainVerification:
     head_key_id: Optional[str] = None
     #: Seq of the first keyed entry walked (full passes), or None.
     first_keyed_seq: Optional[int] = None
+    #: ``(key id, from seq)`` where each key took over, as walked (full passes).
+    key_boundaries: Tuple[Tuple[str, int], ...] = ()
 
 
 async def verify_chain(
@@ -147,28 +148,31 @@ async def verify_chain(
     after_seq: int = 0,
     after_hash: Optional[str] = None,
     page_size: int = PAGE_SIZE,
-    first_keyed_seq: Optional[int] = None,
+    boundaries: Optional[ChainStatus] = None,
 ) -> ChainVerification:
-    """Walk the chain of ``cluster_uid`` after position ``after_seq`` (whose hash is ``after_hash``)."""
+    """Walk the chain of ``cluster_uid`` after position ``after_seq`` (whose hash is ``after_hash``).
+
+    ``boundaries`` is a status row signed with the current key: its
+    ``first_keyed_seq`` and ``key_boundaries`` then fix which key each entry
+    must use (LED-05). Unkeyed entries are valid only below
+    ``first_keyed_seq``, whatever their timestamps, and a previous key only
+    below its successor's boundary.
+    """
     expected_seq = after_seq + 1
     prev_hash = after_hash
     verified = after_seq
     keys = repo.chain_keys
-    #: Key rank: 0 for the current key, then previous keys from newest to oldest. A chain only moves to newer keys.
-    rank = {key_id: index for index, key_id in enumerate(repo.chain_key_order)}
     #: Whether an entry walked was chained with the key: later entries must be too.
     keyed_seen = False
-    newest_rank: Optional[int] = None
     head_key_id: Optional[str] = None
     if after_seq and after_hash is not None:
         anchor = await repo.chain_page(cluster_uid, after_seq - 1, 1)
         keyed_seen = bool(anchor) and anchor[0].chain_key_id is not None
         if keyed_seen:
             head_key_id = anchor[0].chain_key_id
-            newest_rank = rank.get(head_key_id or "")
-    since = repo.key_since
-    cutoff = since + CHAIN_KEY_GRACE if since is not None else None
+    first_keyed = boundaries.first_keyed_seq if boundaries is not None and boundaries.key_boundaries else None
     first_keyed_walked: Optional[int] = None
+    walked_boundaries: List[Tuple[str, int]] = []
     #: entry id -> (value, quantity, unit) of the entries walked, for the reversal checks.
     seen: Dict[str, Tuple[float, str, str]] = {}
     #: ids reversed (non-drift) by the entries walked.
@@ -189,28 +193,19 @@ async def verify_chain(
                 failure = ("chain_key_missing", f"seq {entry.seq} is chained with a key and LEDGER_CHAIN_KEY is unset")
             elif entry.chain_key_id is not None and entry.chain_key_id not in keys:
                 failure = ("chain_key_mismatch", f"seq {entry.seq} is chained with another key")
+            elif first_keyed is not None and entry.seq < first_keyed and entry.chain_key_id is not None:
+                failure = ("chain_key_order", f"seq {entry.seq} is keyed below the first keyed seq {first_keyed}")
+            elif first_keyed is not None and entry.seq >= first_keyed and entry.chain_key_id is None:
+                failure = ("unkeyed_after_key", f"seq {entry.seq} is unkeyed at or above the first keyed seq")
             elif (
-                entry.chain_key_id is not None
-                and newest_rank is not None
-                and rank.get(entry.chain_key_id, len(rank)) > newest_rank
+                first_keyed is not None
+                and boundaries is not None
+                and entry.chain_key_id is not None
+                and entry.chain_key_id != boundaries.key_for(entry.seq)
             ):
-                failure = ("chain_key_order", f"seq {entry.seq} uses an older key after a newer one")
+                failure = ("chain_key_order", f"seq {entry.seq} is not keyed with the key of its boundary")
             elif entry.hash != entry.computed_hash(keys.get(entry.chain_key_id or "")):
                 failure = ("hash_mismatch", f"seq {entry.seq} ({entry.entry_id}) was modified")
-            elif (
-                cutoff is not None
-                and entry.chain_key_id is None
-                and (first_keyed_seq is None or entry.seq >= first_keyed_seq)
-                and _entry_time(entry) > cutoff
-            ):
-                failure = ("unkeyed_after_key", f"seq {entry.seq} is unkeyed and later than LEDGER_CHAIN_KEY_SINCE")
-            elif (
-                cutoff is not None
-                and entry.chain_key_id is not None
-                and rank.get(entry.chain_key_id) != 0
-                and _entry_time(entry) > cutoff
-            ):
-                failure = ("chain_key_order", f"seq {entry.seq} uses a previous key after LEDGER_CHAIN_KEY_SINCE")
             elif entry.entry_id != entry_id_for(cluster_uid, entry.entry_key):
                 failure = ("identity_mismatch", f"seq {entry.seq} has an entry id that does not match its key")
             elif entry.cluster_uid != cluster_uid:
@@ -233,10 +228,10 @@ async def verify_chain(
             head_key_id = entry.chain_key_id
             if entry.chain_key_id is not None and first_keyed_walked is None:
                 first_keyed_walked = entry.seq
-            if entry.chain_key_id is not None:
-                entry_rank = rank.get(entry.chain_key_id)
-                if entry_rank is not None:
-                    newest_rank = entry_rank if newest_rank is None else min(newest_rank, entry_rank)
+            if entry.chain_key_id is not None and (
+                not walked_boundaries or walked_boundaries[-1][0] != entry.chain_key_id
+            ):
+                walked_boundaries.append((entry.chain_key_id, entry.seq))
             seen[entry.entry_id] = (entry.value, entry.quantity, entry.unit)
             verified = entry.seq
             expected_seq += 1
@@ -251,12 +246,8 @@ async def verify_chain(
         head_keyed=keyed_seen,
         head_key_id=head_key_id,
         first_keyed_seq=first_keyed_walked,
+        key_boundaries=tuple(walked_boundaries),
     )
-
-
-def _entry_time(entry) -> datetime:
-    """The latest instant an entry claims: its period end or its creation, whichever is later."""
-    return max(ensure_utc(entry.period_end), ensure_utc(entry.created_at))
 
 
 async def _reversal_mismatch(
@@ -293,43 +284,39 @@ async def _reversal_mismatch(
 
 
 def _status_failure(
-    repo: LedgerRepository, result: ChainVerification, previous: Optional[ChainStatus], moment: datetime
+    repo: LedgerRepository, result: ChainVerification, previous: Optional[ChainStatus]
 ) -> Optional[ChainVerification]:
-    """With a chain key, the stored anchor must be signed and present (LED-05).
+    """With a chain key, a chain that holds keyed entries needs a status row signed with the current key (LED-05).
 
-    A signed row whose HMAC does not match was edited (``status_forged``). A
-    missing row fails once the chain exists (``status_missing``): a keyed
-    chain gets a signed row with its first append, and the reset is
-    ``greenkube db ledger-accept-head``. An unsigned row (stored before
-    migration 0294 or without a key) is accepted only while the chain holds no
-    keyed entry; it is signed by this verification.
+    The row records the boundaries the entries were checked against. A row
+    signed with another key (an old one after a rotation that was not
+    recorded, or a forgery) fails with ``status_forged``; a missing or unsigned
+    row fails with ``status_missing`` or ``status_unsigned``. While the chain
+    holds no keyed entry (an upgrade, before the first keyed append) any row
+    is accepted and the next append signs it.
     """
-    if not repo.chain_key or not result.entries:
+    if not repo.chain_key or not result.entries or not result.head_keyed:
         return None
     cluster_uid = result.cluster_uid
 
     def failure(reason: str, detail: str) -> ChainVerification:
         return replace(result, ok=False, failure_seq=None, reason=reason, detail=detail)
 
-    since = repo.key_since
-    in_grace = repo.within_key_grace(moment)
     if previous is None:
-        if in_grace:
-            # An idle cluster before its first keyed append: the anchor is written (signed) by this run.
-            return None
-        return failure("status_missing", f"the ledger chain status of cluster {cluster_uid} is missing")
+        return failure("status_missing", f"the ledger chain status of keyed cluster {cluster_uid} is missing")
     state = repo.status_signature_state(previous)
     if state == "forged":
         return failure("status_forged", f"the ledger chain status of cluster {cluster_uid} fails its signature")
-    if state == "previous" and not in_grace:
-        # Only the current key's signature counts: the writer re-signs the row with it after a rotation (with its
-        # first append), and a row signed with an older, possibly leaked key is a forgery outside the grace period.
-        return failure("status_forged", f"the ledger chain status of cluster {cluster_uid} uses an old key")
+    if state == "previous":
+        return failure(
+            "status_forged",
+            f"the ledger chain status of cluster {cluster_uid} is signed with a previous key: "
+            "run `greenkube db ledger-rotate-key` to record a rotation",
+        )
     if state == "unsigned":
-        if since is not None and not in_grace:
-            return failure("status_unsigned", f"the ledger chain status of cluster {cluster_uid} is not signed")
-        if since is None and (previous.head_keyed or result.head_keyed):
-            return failure("status_unsigned", f"the ledger chain status of keyed cluster {cluster_uid} is not signed")
+        return failure("status_unsigned", f"the ledger chain status of keyed cluster {cluster_uid} is not signed")
+    if not previous.key_boundaries:
+        return failure("status_unsigned", f"the ledger chain status of keyed cluster {cluster_uid} has no key boundary")
     return None
 
 
@@ -385,12 +372,8 @@ async def verify_ledger(
     total = 0
     for cluster_uid in await repo.clusters():
         previous = await repo.get_chain_status(cluster_uid)
-        # The boundary between unkeyed and keyed entries counts only from a row signed with the current key.
-        boundary = (
-            previous.first_keyed_seq
-            if previous is not None and repo.status_signature_state(previous) == "current"
-            else None
-        )
+        # Boundaries count only from a row signed with the current key.
+        trusted = previous if previous is not None and repo.status_signature_state(previous) == "current" else None
         checkpoint = marks.get(cluster_uid)
         incremental = not full and checkpoint is not None and moment - checkpoint[2] < FULL_VERIFICATION_INTERVAL
         if incremental:
@@ -401,12 +384,12 @@ async def verify_ledger(
         if incremental:
             assert checkpoint is not None
             result = await verify_chain(
-                repo, cluster_uid, after_seq=checkpoint[0], after_hash=checkpoint[1], first_keyed_seq=boundary
+                repo, cluster_uid, after_seq=checkpoint[0], after_hash=checkpoint[1], boundaries=trusted
             )
         else:
-            result = await verify_chain(repo, cluster_uid, first_keyed_seq=boundary)
+            result = await verify_chain(repo, cluster_uid, boundaries=trusted)
         if result.ok:
-            result = _status_failure(repo, result, previous, moment) or result
+            result = _status_failure(repo, result, previous) or result
         if result.ok:
             result = await _tail_lost(repo, result, previous) or result
         if result.ok and not incremental:
@@ -449,9 +432,8 @@ async def verify_ledger(
                 head_hash=anchor_hash,
                 failure=None if result.ok else f"{result.reason}: {result.detail}",
                 head_keyed=result.head_keyed if result.ok else bool(previous and previous.head_keyed),
-                first_keyed_seq=boundary
-                if boundary is not None
-                else (result.first_keyed_seq if result.ok and not incremental else None),
+                first_keyed_seq=trusted.first_keyed_seq if trusted is not None else None,
+                key_boundaries=trusted.key_boundaries if trusted is not None else (),
             ),
             # Only a trusted anchor is signed: never a forged, unsigned or missing one carried by a failure.
             sign=result.ok or (previous is not None and repo.status_signature_state(previous) == "current"),
@@ -476,10 +458,13 @@ async def accept_head(
     if not reason.strip():
         raise ValueError("a reason is required to accept a new ledger head")
     moment = now or datetime.now(timezone.utc)
-    result = await verify_chain(repo, cluster_uid)
+    previous = await repo.get_chain_status(cluster_uid)
+    # The recorded boundaries are kept when the row is signed with the current key; otherwise they are taken from
+    # the walk (the entries' own keys).
+    kept = previous if previous is not None and repo.status_signature_state(previous) == "current" else None
+    result = await verify_chain(repo, cluster_uid, boundaries=kept)
     if not result.ok:
         return result
-    previous = await repo.get_chain_status(cluster_uid)
     await repo.record_chain_status(
         ChainStatus(
             cluster_uid=cluster_uid,
@@ -490,7 +475,8 @@ async def accept_head(
             head_hash=result.head_hash,
             failure=None,
             head_keyed=result.head_keyed,
-            first_keyed_seq=result.first_keyed_seq,
+            first_keyed_seq=kept.first_keyed_seq if kept and kept.key_boundaries else result.first_keyed_seq,
+            key_boundaries=kept.key_boundaries if kept and kept.key_boundaries else result.key_boundaries,
         )
     )
     await repo.record_head_acceptance(
@@ -515,23 +501,84 @@ async def accept_head(
     return result
 
 
+async def rotate_key(
+    repo: LedgerRepository, cluster_uid: str, reason: str, *, now: Optional[datetime] = None
+) -> ChainVerification:
+    """Record a deliberate rotation of the chain key (``greenkube db ledger-rotate-key``, LED-05).
+
+    Runs with the new key as ``LEDGER_CHAIN_KEY`` and the old one in
+    ``LEDGER_CHAIN_PREVIOUS_KEYS``. The chain is verified with the old key;
+    then the boundary ``(new key id, next seq)`` is appended to the status
+    row, which is signed with the new key, and the action is audited in
+    ``ledger_head_acceptances``. From then on the old key verifies only the
+    entries below that boundary, so a leaked old key cannot forge anything
+    after it, and the writer continues the chain with the new key.
+
+    Raises:
+        ValueError: without a reason, without a key, on an unkeyed chain, or
+            when the chain already uses the current key.
+    """
+    if not reason.strip():
+        raise ValueError("a reason is required to rotate the ledger chain key")
+    key = repo.chain_key
+    if not key:
+        raise ValueError("LEDGER_CHAIN_KEY (the new key) is not set")
+    moment = now or datetime.now(timezone.utc)
+    current_id = chain_key_id(key)
+    previous = await repo.get_chain_status(cluster_uid)
+    kept = previous if previous is not None and repo.status_signature_valid(previous) is True else None
+    if kept is not None and kept.key_boundaries and kept.key_for(10**18) == current_id:
+        raise ValueError(f"the ledger of cluster {cluster_uid} already rotated to key {current_id}")
+    result = await verify_chain(repo, cluster_uid, boundaries=kept if kept and kept.key_boundaries else None)
+    if not result.ok:
+        return result
+    if not result.head_keyed:
+        raise ValueError(f"the ledger of cluster {cluster_uid} holds no keyed entry: no rotation is needed")
+    if result.head_key_id == current_id:
+        raise ValueError(f"the ledger of cluster {cluster_uid} already uses key {current_id}")
+    boundaries = kept.key_boundaries if kept and kept.key_boundaries else result.key_boundaries
+    first_keyed = kept.first_keyed_seq if kept and kept.key_boundaries else result.first_keyed_seq
+    rotated = tuple(boundaries) + ((current_id, (result.head_seq or 0) + 1),)
+    await repo.record_chain_status(
+        ChainStatus(
+            cluster_uid=cluster_uid,
+            verified_at=moment,
+            ok=True,
+            entries=result.entries,
+            head_seq=result.head_seq,
+            head_hash=result.head_hash,
+            failure=None,
+            head_keyed=True,
+            first_keyed_seq=first_keyed,
+            key_boundaries=rotated,
+        )
+    )
+    await repo.record_head_acceptance(
+        cluster_uid,
+        accepted_at=moment,
+        reason=f"rotate-key to {current_id} from seq {(result.head_seq or 0) + 1}: {reason.strip()}",
+        previous=previous,
+        head_seq=result.head_seq,
+        head_hash=result.head_hash,
+    )
+    _CHECKPOINTS.pop(cluster_uid, None)
+    logger.warning(
+        "Savings ledger chain key of cluster %s rotated to %s from seq %s. Reason: %s",
+        cluster_uid,
+        current_id,
+        (result.head_seq or 0) + 1,
+        reason,
+    )
+    return result
+
+
 _UNKEYED_WARNED = False
 
 
 def warn_if_unkeyed(repo: LedgerRepository) -> bool:
     """Warn once per process when no ``LEDGER_CHAIN_KEY`` is configured; returns True when it warned."""
     global _UNKEYED_WARNED
-    if _UNKEYED_WARNED:
-        return False
-    if repo.chain_key:
-        if repo.key_since is None:
-            _UNKEYED_WARNED = True
-            logger.warning(
-                "LEDGER_CHAIN_KEY is set without LEDGER_CHAIN_KEY_SINCE: a chain rewritten entirely without the key "
-                "cannot be told from entries written before it. Set secrets.ledgerChainKeySince to the key's UTC "
-                "creation time (LED-05)."
-            )
-            return True
+    if _UNKEYED_WARNED or repo.chain_key:
         return False
     _UNKEYED_WARNED = True
     logger.warning(
@@ -570,6 +617,7 @@ async def run_ledger_chain() -> None:
 
 __all__ = [
     "accept_head",
+    "rotate_key",
     "CHAIN_OK",
     "CHAIN_VERIFICATION_FAILURES",
     "ChainVerification",

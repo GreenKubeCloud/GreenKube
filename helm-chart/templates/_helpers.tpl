@@ -149,7 +149,7 @@ Settings-page overrides are stored, and otherwise fall back to the app default.
 {{- $data := dict -}}
 {{- if not .Values.secrets.existingSecret -}}
   {{- $secrets := .Values.secrets -}}
-  {{- range $pair := list (list "ELECTRICITY_MAPS_TOKEN" $secrets.electricityMapsToken) (list "BOAVIZTA_TOKEN" $secrets.boaviztaToken) (list "WATTNET_EMAIL" $secrets.wattnetEmail) (list "WATTNET_PASSWORD" $secrets.wattnetPassword) (list "GREENKUBE_API_KEY" $secrets.apiKey) (list "GREENKUBE_METRICS_TOKEN" $secrets.metricsToken) (list "LEDGER_CHAIN_KEY" $secrets.ledgerChainKey) (list "LEDGER_CHAIN_PREVIOUS_KEYS" $secrets.ledgerChainPreviousKeys) (list "LEDGER_CHAIN_KEY_SINCE" $secrets.ledgerChainKeySince) (list "PROMETHEUS_URL" $.Values.config.prometheus.url) (list "OPENCOST_API_URL" $.Values.config.opencost.url) (list "BOAVIZTA_API_URL" $.Values.config.boavizta.url) -}}
+  {{- range $pair := list (list "ELECTRICITY_MAPS_TOKEN" $secrets.electricityMapsToken) (list "BOAVIZTA_TOKEN" $secrets.boaviztaToken) (list "WATTNET_EMAIL" $secrets.wattnetEmail) (list "WATTNET_PASSWORD" $secrets.wattnetPassword) (list "GREENKUBE_API_KEY" $secrets.apiKey) (list "GREENKUBE_METRICS_TOKEN" $secrets.metricsToken) (list "LEDGER_CHAIN_KEY" $secrets.ledgerChainKey) (list "LEDGER_CHAIN_PREVIOUS_KEYS" $secrets.ledgerChainPreviousKeys) (list "PROMETHEUS_URL" $.Values.config.prometheus.url) (list "OPENCOST_API_URL" $.Values.config.opencost.url) (list "BOAVIZTA_API_URL" $.Values.config.boavizta.url) -}}
     {{- if index $pair 1 -}}
       {{- $_ := set $data (index $pair 0) (index $pair 1 | toString) -}}
     {{- end -}}
@@ -246,7 +246,6 @@ Project only the application Secret keys required by one component.
       "WATTNET_PASSWORD"
       "LEDGER_CHAIN_KEY"
       "LEDGER_CHAIN_PREVIOUS_KEYS"
-      "LEDGER_CHAIN_KEY_SINCE"
   -}}
     {{- $keys = append $keys $key -}}
   {{- end -}}

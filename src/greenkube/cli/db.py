@@ -387,6 +387,41 @@ def ledger_accept_head_command(
     typer.echo(f"Accepted head seq {result.head_seq} of cluster {cluster_uid}.")
 
 
+@app.command("ledger-rotate-key")
+def ledger_rotate_key_command(
+    cluster_uid: Annotated[str, typer.Option("--cluster-uid", help="Cluster uid of the ledger chain.")],
+    reason: Annotated[str, typer.Option("--reason", help="Why the key is rotated (logged and audited).")],
+) -> None:
+    """Record a rotation of the savings ledger chain key (LED-05).
+
+    Run it with the new key as LEDGER_CHAIN_KEY and the old key in
+    LEDGER_CHAIN_PREVIOUS_KEYS. The chain is verified with the old key, the
+    new key's boundary is signed into the status row, and the controller then
+    continues the chain with the new key. No entry is written.
+    """
+    from ..storage.ledger_repository import get_ledger_repository
+    from ..verify.ledger.verification import rotate_key
+
+    async def _run():
+        from ..core.db import get_db_manager
+
+        manager = get_db_manager()
+        await manager.connect()
+        try:
+            return await rotate_key(get_ledger_repository(manager), cluster_uid, reason)
+        finally:
+            await manager.close()
+
+    try:
+        result = asyncio.run(_run())
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    if not result.ok:
+        typer.echo(f"Refused: the chain fails verification at seq {result.failure_seq}: {result.reason}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Rotated the chain key of cluster {cluster_uid} from seq {(result.head_seq or 0) + 1}.")
+
+
 @app.command("copy")
 def copy_command(
     source: Annotated[str, typer.Option("--from", help="Source database, e.g. sqlite:///data/greenkube_data.db")],

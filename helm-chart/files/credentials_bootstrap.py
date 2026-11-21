@@ -23,10 +23,7 @@ Generated keys:
                                             chain (LED-05), when
                                             secrets.ledgerChainKey is empty. It is
                                             never rotated: entries chained with it
-                                            only verify with it. LEDGER_CHAIN_KEY_SINCE
-                                            (UTC creation time, the anchor outside the
-                                            database) is written with it, once, and
-                                            never overwritten.
+                                            only verify with it.
 
 With GREENKUBE_INITIAL_ADMIN_SECRET set, the script also creates that Secret
 once with a random first-admin password (keys ``username`` and ``password``,
@@ -62,13 +59,11 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Protocol
 
 API_KEY = "GREENKUBE_API_KEY"
 METRICS_TOKEN = "GREENKUBE_METRICS_TOKEN"
 LEDGER_CHAIN_KEY = "LEDGER_CHAIN_KEY"
-LEDGER_CHAIN_KEY_SINCE = "LEDGER_CHAIN_KEY_SINCE"
 POSTGRES_PASSWORD = "POSTGRES_PASSWORD"
 DB_CONNECTION_STRING = "DB_CONNECTION_STRING"
 
@@ -182,15 +177,10 @@ def connection_string(settings: Settings, password: str) -> str:
     )
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def missing_credentials(
     current: Mapping[str, str],
     settings: Settings,
     *,
-    now: Callable[[], datetime] | None = None,
     pvc_exists: Callable[[], bool],
     token: Callable[[int], str] = generate_token,
 ) -> dict[str, str]:
@@ -207,9 +197,6 @@ def missing_credentials(
         additions[METRICS_TOKEN] = token(METRICS_TOKEN_LENGTH)
     if settings.generate_ledger_chain_key and not current.get(LEDGER_CHAIN_KEY):
         additions[LEDGER_CHAIN_KEY] = token(LEDGER_CHAIN_KEY_LENGTH)
-        # Only with a key created now: an existing key's creation time is unknown and never guessed.
-        if not current.get(LEDGER_CHAIN_KEY_SINCE):
-            additions[LEDGER_CHAIN_KEY_SINCE] = (now or _utc_now)().strftime("%Y-%m-%dT%H:%M:%SZ")
     if settings.generate_postgres_password:
         password = current.get(POSTGRES_PASSWORD, "")
         if not password:

@@ -247,6 +247,9 @@ async def test_a_deliberate_rotation_keeps_the_previous_key_for_verification(led
     new = b"the-rotated-chain-key"
     await LedgerRepository(ledger.manager, chain_key=KEY).append(CLUSTER_UID, CLUSTER, [_draft("k0")])
     rotated = LedgerRepository(ledger.manager, chain_key=new, previous_keys=[KEY])
+    from greenkube.verify.ledger.verification import rotate_key
+
+    assert (await rotate_key(rotated, CLUSTER_UID, "planned rotation")).ok
     await rotated.append(CLUSTER_UID, CLUSTER, [_draft("k1")])
     entries = await rotated.list_entries(CLUSTER_UID, limit=10, ascending=True)
     assert [entry.chain_key_id for entry in entries] == [chain_key_id(KEY), chain_key_id(new)]
@@ -258,8 +261,12 @@ async def test_a_deliberate_rotation_keeps_the_previous_key_for_verification(led
 
 @pytest.mark.asyncio
 @pytest.mark.database
-async def test_a_full_unkeyed_rewrite_with_the_status_row_deleted_fails(ledger: LedgerDb):  # noqa: F811
-    """With a key configured, the status row is signed and a missing one fails once the chain exists."""
+async def test_a_full_unkeyed_rewrite_with_the_status_row_deleted_is_the_documented_residual(ledger: LedgerDb):  # noqa: F811
+    """A full rewrite without the key plus a missing status row looks like a pre-key install (documented residual).
+
+    The key checks cannot tell it apart; here the edited values are still caught by the totals, and the chart
+    alert GreenKubeLedgerChainKeyDropped covers the drop of the keyed head.
+    """
     repo = LedgerRepository(ledger.manager, chain_key=KEY)
     await repo.append(CLUSTER_UID, CLUSTER, [_draft(f"k{i}", 0.005) for i in range(6)])
     assert (await verify_ledger(repo, checkpoints={}))[CLUSTER_UID].ok
@@ -268,7 +275,7 @@ async def test_a_full_unkeyed_rewrite_with_the_status_row_deleted_fails(ledger: 
     await _rewrite(ledger, entries, downgrade_from=1)
     await ledger.execute("DELETE FROM ledger_chain_status")
     result = (await verify_ledger(repo, checkpoints={}, full=True))[CLUSTER_UID]
-    assert not result.ok and result.reason == "status_missing"
+    assert not result.ok and result.reason == "totals_mismatch"
 
 
 @pytest.mark.asyncio

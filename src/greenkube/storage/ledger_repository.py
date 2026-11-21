@@ -26,7 +26,7 @@ import hmac
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -135,6 +135,22 @@ class ChainStatus:
     signature: Optional[str] = None
     #: Seq of the first keyed entry, recorded at the first keyed append and covered by the signature (0296).
     first_keyed_seq: Optional[int] = None
+    #: ``(key id, from seq)`` for every key that took over the chain, oldest first (0297): the first key at
+    #: ``first_keyed_seq``, then one per ``greenkube db ledger-rotate-key``. Covered by the signature.
+    key_boundaries: Tuple[Tuple[str, int], ...] = ()
+
+    @property
+    def key_id(self) -> Optional[str]:
+        """Id of the key that signed the row (the current key when the row is valid)."""
+        return (self.signature or "").partition(":")[0] or None
+
+    def key_for(self, seq: int) -> Optional[str]:
+        """Id of the key whose boundary covers ``seq``, or None below ``first_keyed_seq``."""
+        found = None
+        for key_id, from_seq in self.key_boundaries:
+            if from_seq <= seq:
+                found = key_id
+        return found
 
 
 @dataclass(frozen=True)
@@ -228,30 +244,23 @@ def configured_previous_chain_keys() -> List[bytes]:
     return [item.strip().encode("utf-8") for item in raw.split(",") if item.strip()]
 
 
-#: Grace period after ``LEDGER_CHAIN_KEY_SINCE`` for unkeyed entries and unsigned status rows (LED-05).
-CHAIN_KEY_GRACE = timedelta(hours=2)
-
-
-def configured_chain_key_since() -> Optional[datetime]:
-    """``LEDGER_CHAIN_KEY_SINCE`` as a UTC datetime, or None when unset or unparsable (logged)."""
-    from greenkube.core.config import get_config
-
-    raw = getattr(get_config(), "LEDGER_CHAIN_KEY_SINCE", None)
-    if not raw:
-        return None
-    try:
-        return ensure_utc(datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00")))
-    except ValueError:
-        logger.error("LEDGER_CHAIN_KEY_SINCE=%r is not an ISO 8601 UTC time: it is ignored.", raw)
-        return None
-
-
 def configured_chain_key() -> Optional[bytes]:
     """The ledger chain key from ``LEDGER_CHAIN_KEY`` (LED-05), or ``None`` when none is configured."""
     from greenkube.core.config import get_config
 
     raw = getattr(get_config(), "LEDGER_CHAIN_KEY", None)
     return raw.encode("utf-8") if raw else None
+
+
+def _boundaries(raw: Any) -> Tuple[Tuple[str, int], ...]:
+    """Parse the stored ``key_boundaries`` JSON (``[[key_id, from_seq], ...]``)."""
+    if not raw:
+        return ()
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else raw
+        return tuple((str(key_id), int(from_seq)) for key_id, from_seq in items)
+    except (TypeError, ValueError):
+        return ()
 
 
 def _sqlite_epoch(expression: str) -> str:
@@ -273,41 +282,10 @@ class LedgerRepository:
         db_manager,
         chain_key: Optional[bytes] = None,
         previous_keys: Optional[Sequence[bytes]] = None,
-        key_since: Optional[datetime] = None,
     ):
         self.db_manager = db_manager
         self._chain_key = chain_key
         self._previous_keys = list(previous_keys) if previous_keys is not None else None
-        self._key_since = ensure_utc(key_since) if key_since is not None else None
-
-    @property
-    def key_since(self) -> Optional[datetime]:
-        """When the current chain key was created (``LEDGER_CHAIN_KEY_SINCE``), or None; only with a key."""
-        if not self.chain_key:
-            return None
-        if self._key_since is not None:
-            return self._key_since
-        if self._chain_key is not None:
-            return None
-        return configured_chain_key_since()
-
-    def within_key_grace(self, moment: datetime) -> bool:
-        """Whether ``moment`` is no later than ``LEDGER_CHAIN_KEY_SINCE`` plus the grace period."""
-        since = self.key_since
-        return since is not None and ensure_utc(moment) <= since + CHAIN_KEY_GRACE
-
-    @property
-    def chain_key_order(self) -> List[str]:
-        """Key ids from the newest (current) to the oldest previous key: a chain only moves to newer keys."""
-        previous = self._previous_keys if self._previous_keys is not None else configured_previous_chain_keys()
-        order: List[str] = []
-        current = self.chain_key
-        if current:
-            order.append(chain_key_id(current))
-        for key in previous:
-            if key and chain_key_id(key) not in order:
-                order.append(chain_key_id(key))
-        return order
 
     @property
     def chain_keys(self) -> Dict[str, bytes]:
@@ -458,118 +436,110 @@ class LedgerRepository:
         )
         return (int(rows[0]["seq"]), rows[0]["hash"]) if rows else (0, None)
 
-    async def _ensure_status(
-        self, conn, cluster_uid: str, moment: datetime, first_keyed_seq: Optional[int] = None
-    ) -> None:
-        """Create a signed, empty anchor when a keyed chain has no status row yet (LED-05).
-
-        A keyed chain then always has a status row, so a deleted one is
-        detected by the next verification (``status_missing``).
-        """
+    async def _status_in(self, conn, cluster_uid: str) -> Optional[ChainStatus]:
         rows = await self._fetch(
             conn,
-            "SELECT verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature, first_keyed_seq "
-            "FROM ledger_chain_status WHERE cluster_uid = ?",
+            "SELECT verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature, first_keyed_seq, "
+            "key_boundaries FROM ledger_chain_status WHERE cluster_uid = ?",
             [cluster_uid],
         )
-        if rows:
-            row = rows[0]
-            stored = ChainStatus(
-                cluster_uid=cluster_uid,
-                verified_at=parse_time(row["verified_at"]) or moment,
-                ok=bool(row["ok"]),
-                entries=int(row["entries"]),
-                head_seq=int(row["head_seq"]) if row["head_seq"] is not None else None,
-                head_hash=row["head_hash"],
-                failure=row["failure"],
-                head_keyed=bool(row["head_keyed"]),
-                signature=row["signature"],
-                first_keyed_seq=int(row["first_keyed_seq"]) if row["first_keyed_seq"] is not None else None,
-            )
-            state = self.status_signature_state(stored)
-            boundary = stored.first_keyed_seq if stored.first_keyed_seq is not None else first_keyed_seq
-            since = self.key_since
-            in_grace = self.within_key_grace(moment)
-            # An unsigned row stored before the key (upgrade), or a row signed with a previous key (rotation), is
-            # signed with the current key only inside the grace period of LEDGER_CHAIN_KEY_SINCE; without that
-            # anchor, as before (unsigned and not keyed, or a previous key).
-            resign = (state == "unsigned" and not stored.head_keyed and (since is None or in_grace)) or (
-                state == "previous" and (since is None or in_grace)
-            )
-            # The first keyed append records the boundary in a row signed with the current key.
-            record_boundary = state == "current" and stored.first_keyed_seq is None and first_keyed_seq is not None
-            if resign or record_boundary:
-                verified_at = stored.verified_at
-                await self._upsert_status(
-                    conn,
-                    ChainStatus(
-                        cluster_uid=cluster_uid,
-                        verified_at=verified_at,
-                        ok=bool(row["ok"]),
-                        entries=int(row["entries"]),
-                        head_seq=int(row["head_seq"]) if row["head_seq"] is not None else None,
-                        head_hash=row["head_hash"],
-                        failure=row["failure"],
-                        head_keyed=stored.head_keyed,
-                        first_keyed_seq=boundary,
-                    ),
-                )
-            return
+        if not rows:
+            return None
+        row = rows[0]
+        return ChainStatus(
+            cluster_uid=cluster_uid,
+            verified_at=parse_time(row["verified_at"]) or datetime.now(timezone.utc),
+            ok=bool(row["ok"]),
+            entries=int(row["entries"]),
+            head_seq=int(row["head_seq"]) if row["head_seq"] is not None else None,
+            head_hash=row["head_hash"],
+            failure=row["failure"],
+            head_keyed=bool(row["head_keyed"]),
+            signature=row["signature"],
+            first_keyed_seq=int(row["first_keyed_seq"]) if row["first_keyed_seq"] is not None else None,
+            key_boundaries=_boundaries(row["key_boundaries"]),
+        )
+
+    async def _record_first_keyed(self, conn, cluster_uid: str, moment: datetime, first_seq: int) -> None:
+        """The first keyed append on an unkeyed chain records the boundary and signs the status row (LED-05).
+
+        This is the upgrade path: unkeyed entries below ``first_keyed_seq``
+        stay valid whatever their timestamps, and every later entry must be
+        keyed with the key of its boundary.
+        """
+        stored = await self._status_in(conn, cluster_uid)
+        key = self.chain_key
+        assert key is not None
+        base = stored or ChainStatus(
+            cluster_uid=cluster_uid,
+            verified_at=moment,
+            ok=True,
+            entries=0,
+            head_seq=None,
+            head_hash=None,
+            failure=None,
+        )
         await self._upsert_status(
             conn,
-            ChainStatus(
-                cluster_uid=cluster_uid,
-                verified_at=moment,
-                ok=True,
-                entries=0,
-                head_seq=None,
-                head_hash=None,
-                failure=None,
-                head_keyed=True,
-                first_keyed_seq=first_keyed_seq,
+            replace(
+                base,
+                signature=None,
+                first_keyed_seq=first_seq,
+                key_boundaries=((chain_key_id(key), first_seq),),
             ),
         )
 
+    def _chain_key_refusal(self, cluster_uid: str, detail: str) -> LedgerChainKeyError:
+        from greenkube.verify.ledger.projector import LEDGER_WRITE_ERRORS
+
+        LEDGER_WRITE_ERRORS.labels(reason="chain_key").inc()
+        message = f"The savings ledger of cluster {cluster_uid}: {detail}: nothing is appended."
+        logger.error(message)
+        return LedgerChainKeyError(message)
+
     async def _check_writer_key(self, conn, cluster_uid: str, chain_key: Optional[bytes]) -> bool:
-        """Fail closed when the head is keyed and this process lacks that key or a rotation from it (LED-05).
+        """Fail closed unless the head's key is the current key, or a previous key the status row rotated from.
 
         Appending unkeyed or differently keyed entries after keyed ones would
-        break the chain for good, so nothing is written: the error is counted
-        (``greenkube_ledger_write_errors_total{reason="chain_key"}``) and logged.
+        break the chain, so nothing is written: the error is counted
+        (``greenkube_ledger_write_errors_total{reason="chain_key"}``) and logged
+        with what to do. Returns whether the head is keyed.
         """
         rows = await self._fetch(
             conn,
-            "SELECT chain_key_id, period_end, created_at FROM savings_ledger_entries WHERE cluster_uid = ? "
-            "ORDER BY seq DESC LIMIT 1",
+            "SELECT seq, chain_key_id FROM savings_ledger_entries WHERE cluster_uid = ? ORDER BY seq DESC LIMIT 1",
             [cluster_uid],
         )
         head_key_id = rows[0]["chain_key_id"] if rows else None
         if head_key_id is None:
             return False
         current_id = chain_key_id(chain_key) if chain_key else None
+        if current_id is None:
+            raise self._chain_key_refusal(
+                cluster_uid, f"the head is chained with key {head_key_id} and LEDGER_CHAIN_KEY is not set"
+            )
         if current_id == head_key_id:
             return True
-        if current_id is not None and head_key_id in self.chain_keys:
-            # Continuing after a previous key is a rotation. With LEDGER_CHAIN_KEY_SINCE, only when the head was
-            # written before SINCE plus the grace period (whenever the next append comes): a head keyed with the old
-            # key after that is a forgery, and the verifier enforces the key order anyway.
-            head_time = max(
-                ensure_utc(parse_time(rows[0]["period_end"]) or datetime.min.replace(tzinfo=timezone.utc)),
-                ensure_utc(parse_time(rows[0]["created_at"]) or datetime.min.replace(tzinfo=timezone.utc)),
-            )
-            if self.key_since is None or self.within_key_grace(head_time):
+        if head_key_id in self.chain_keys:
+            status = await self._status_in(conn, cluster_uid)
+            head_seq = int(rows[0]["seq"])
+            if (
+                status is not None
+                and self.status_signature_state(status) == "current"
+                and status.key_for(head_seq + 1) == current_id
+            ):
                 return True
-        from greenkube.verify.ledger.projector import LEDGER_WRITE_ERRORS
-
-        LEDGER_WRITE_ERRORS.labels(reason="chain_key").inc()
-        message = (
-            f"The savings ledger head of cluster {cluster_uid} is chained with key {head_key_id}, and "
-            + ("LEDGER_CHAIN_KEY is not set" if current_id is None else f"LEDGER_CHAIN_KEY is key {current_id}")
-            + ": nothing is appended. Restore the Secret's LEDGER_CHAIN_KEY, or for a deliberate rotation list "
-            "the old key in LEDGER_CHAIN_PREVIOUS_KEYS."
+            raise self._chain_key_refusal(
+                cluster_uid,
+                f"the head is chained with the previous key {head_key_id} and LEDGER_CHAIN_KEY is key {current_id}; "
+                "run `greenkube db ledger-rotate-key` (new key as LEDGER_CHAIN_KEY, old key in "
+                "LEDGER_CHAIN_PREVIOUS_KEYS) to record the rotation",
+            )
+        raise self._chain_key_refusal(
+            cluster_uid,
+            f"the head is chained with key {head_key_id}, which is neither LEDGER_CHAIN_KEY ({current_id}) nor in "
+            "LEDGER_CHAIN_PREVIOUS_KEYS; restore the Secret's key",
         )
-        logger.error(message)
-        raise LedgerChainKeyError(message)
 
     async def append(
         self,
@@ -615,9 +585,8 @@ class LedgerRepository:
                 prev_hash = entry.hash
                 inserted.append(entry)
             await self._add_totals(conn, cluster_uid, inserted)
-            if inserted and chain_key:
-                boundary = None if head_keyed_before else inserted[0].seq
-                await self._ensure_status(conn, cluster_uid, moment, boundary)
+            if inserted and chain_key and not head_keyed_before:
+                await self._record_first_keyed(conn, cluster_uid, moment, inserted[0].seq)
             for source_table, position in (watermarks or {}).items():
                 await self._execute(
                     conn,
@@ -1423,10 +1392,13 @@ class LedgerRepository:
         head_hash: Optional[str],
         keyed: bool,
         first_keyed_seq: Optional[int] = None,
+        boundaries: Sequence[Tuple[str, int]] = (),
     ) -> bytes:
         message = f"ledger-status|{cluster_uid}|{head_seq}|{head_hash}|{int(bool(keyed))}"
         if first_keyed_seq is not None:
             message += f"|first-keyed:{first_keyed_seq}"
+        if boundaries:
+            message += "|boundaries:" + json.dumps([list(item) for item in boundaries], separators=(",", ":"))
         return message.encode("utf-8")
 
     def sign_status(
@@ -1436,12 +1408,13 @@ class LedgerRepository:
         head_hash: Optional[str],
         keyed: bool,
         first_keyed_seq: Optional[int] = None,
+        boundaries: Sequence[Tuple[str, int]] = (),
     ):
         """``<key id>:<HMAC>`` of an anchor with the current chain key, or None without a key (LED-05)."""
         key = self.chain_key
         if not key:
             return None
-        message = self._status_message(cluster_uid, head_seq, head_hash, keyed, first_keyed_seq)
+        message = self._status_message(cluster_uid, head_seq, head_hash, keyed, first_keyed_seq, boundaries)
         return f"{chain_key_id(key)}:{hmac.new(key, message, hashlib.sha256).hexdigest()}"
 
     def status_signature_state(self, status: ChainStatus) -> str:
@@ -1466,7 +1439,12 @@ class LedgerRepository:
         expected = hmac.new(
             key,
             self._status_message(
-                status.cluster_uid, status.head_seq, status.head_hash, status.head_keyed, status.first_keyed_seq
+                status.cluster_uid,
+                status.head_seq,
+                status.head_hash,
+                status.head_keyed,
+                status.first_keyed_seq,
+                status.key_boundaries,
             ),
             hashlib.sha256,
         ).hexdigest()
@@ -1477,7 +1455,12 @@ class LedgerRepository:
         keyed: Any = bool(status.head_keyed) if self.postgres else int(bool(status.head_keyed))
         signature = (
             self.sign_status(
-                status.cluster_uid, status.head_seq, status.head_hash, status.head_keyed, status.first_keyed_seq
+                status.cluster_uid,
+                status.head_seq,
+                status.head_hash,
+                status.head_keyed,
+                status.first_keyed_seq,
+                status.key_boundaries,
             )
             if sign
             else None
@@ -1485,11 +1468,13 @@ class LedgerRepository:
         await self._execute(
             conn,
             "INSERT INTO ledger_chain_status (cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, "
-            "head_keyed, signature, first_keyed_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cluster_uid) "
+            "head_keyed, signature, first_keyed_seq, key_id, key_boundaries) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cluster_uid) "
             "DO UPDATE SET verified_at = excluded.verified_at, ok = excluded.ok, entries = excluded.entries, "
             "head_seq = excluded.head_seq, head_hash = excluded.head_hash, failure = excluded.failure, "
             "head_keyed = excluded.head_keyed, signature = excluded.signature, "
-            "first_keyed_seq = excluded.first_keyed_seq",
+            "first_keyed_seq = excluded.first_keyed_seq, key_id = excluded.key_id, "
+            "key_boundaries = excluded.key_boundaries",
             [
                 status.cluster_uid,
                 self._ts(status.verified_at),
@@ -1501,6 +1486,10 @@ class LedgerRepository:
                 keyed,
                 signature,
                 status.first_keyed_seq,
+                (signature or "").partition(":")[0] or None,
+                json.dumps([list(item) for item in status.key_boundaries], separators=(",", ":"))
+                if status.key_boundaries
+                else None,
             ],
         )
 
@@ -1552,7 +1541,7 @@ class LedgerRepository:
     async def get_chain_status(self, cluster_uid: str) -> Optional[ChainStatus]:
         rows = await self._select(
             "SELECT cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature, "
-            "first_keyed_seq FROM ledger_chain_status WHERE cluster_uid = ?",
+            "first_keyed_seq, key_boundaries FROM ledger_chain_status WHERE cluster_uid = ?",
             [cluster_uid],
         )
         if not rows:
@@ -1571,6 +1560,7 @@ class LedgerRepository:
             head_keyed=bool(row["head_keyed"]),
             signature=row["signature"],
             first_keyed_seq=int(row["first_keyed_seq"]) if row["first_keyed_seq"] is not None else None,
+            key_boundaries=_boundaries(row["key_boundaries"]),
         )
 
 
