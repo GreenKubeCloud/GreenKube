@@ -7,6 +7,7 @@
       "goldilocks"
     ],
     "contested": true,
+    "floor": null,
     "ignored_votes": [],
     "independent_votes": 3,
     "last_known": {},
