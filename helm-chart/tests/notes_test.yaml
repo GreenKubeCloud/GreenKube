@@ -157,6 +157,28 @@ tests:
       - matchRegexRaw:
           pattern: pauseDelivery is true
 
+  - it: names the removed Karpenter flag and the settings of removed sources (B.1)
+    set:
+      config.recommendations.karpenterEnabled: false
+      sources.settings:
+        greenkube.carbon_aware:
+          enabled: false
+        greenkube.nodepool:
+          enabled: auto
+        vpa:
+          enabled: auto
+    asserts:
+      - matchRegexRaw:
+          pattern: DEPRECATED VALUES
+      - matchRegexRaw:
+          pattern: "config.recommendations.karpenterEnabled is ignored: the Karpenter NodePool recommendation source was removed"
+      - matchRegexRaw:
+          pattern: "sources.settings.greenkube.carbon_aware is ignored: that source was removed"
+      - matchRegexRaw:
+          pattern: "sources.settings.greenkube.nodepool is ignored: that source was removed"
+      - notMatchRegexRaw:
+          pattern: "sources.settings.vpa is ignored"
+
   - it: keeps the dashboard URLs when the deprecated config.api.enabled is false
     set:
       config.api.enabled: false

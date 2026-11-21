@@ -353,11 +353,11 @@ tests:
 
   - it: maps config.recommendations.sourcePriority of 0.3.x
     set:
-      config.recommendations.sourcePriority: karpenter,greenkube
+      config.recommendations.sourcePriority: greenkube,vpa
     asserts:
       - equal:
           path: data.RECOMMENDATION_SOURCE_PRIORITY
-          value: karpenter,greenkube
+          value: greenkube,vpa
 
   # --------------------------------------------------------------------------
   # Recommendation engine config
@@ -477,19 +477,18 @@ tests:
   # --------------------------------------------------------------------------
   # Verification & automation (Phases 3–4)
   # --------------------------------------------------------------------------
-  - it: should enable VPA and Karpenter connectors by default
+  - it: should enable the VPA connector by default and no longer render the removed Karpenter flag
     asserts:
       - equal:
           path: data.RECOMMENDATION_VPA_ENABLED
           value: "true"
-      - equal:
+      - notExists:
           path: data.RECOMMENDATION_KARPENTER_ENABLED
-          value: "true"
       - equal:
           path: data.KUBERNETES_METRICS_API_ENABLED
           value: "true"
 
-  - it: should disable the VPA and Karpenter connectors when set to false
+  - it: should disable the VPA connector and ignore the removed karpenterEnabled
     set:
       config.recommendations.vpaEnabled: false
       config.recommendations.karpenterEnabled: false
@@ -497,9 +496,8 @@ tests:
       - equal:
           path: data.RECOMMENDATION_VPA_ENABLED
           value: "false"
-      - equal:
+      - notExists:
           path: data.RECOMMENDATION_KARPENTER_ENABLED
-          value: "false"
 
   - it: should load source plugins with no per-source settings by default
     asserts:
@@ -514,7 +512,7 @@ tests:
     set:
       sources.pluginsEnabled: false
       sources.settings:
-        greenkube.carbon_aware:
+        greenkube.orphaned_lb:
           enabled: false
         vpa:
           enabled: auto
@@ -524,7 +522,7 @@ tests:
           value: "false"
       - equal:
           path: data.SOURCES_CONFIG
-          value: '{"greenkube.carbon_aware":{"enabled":false},"vpa":{"enabled":"auto"}}'
+          value: '{"greenkube.orphaned_lb":{"enabled":false},"vpa":{"enabled":"auto"}}'
 
   - it: should render the tool floors, minimum change and VPA maturity defaults
     asserts:

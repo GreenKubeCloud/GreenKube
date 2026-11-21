@@ -595,6 +595,8 @@ config:
     minDecreaseCoverageDays: 7
     # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.
     limitsPolicy: keep
+    # Inputs of the sustainability score only (the advisory analyzers that also
+    # read them were removed in 0.4).
     zombieCostThreshold: 0.01
     zombieEnergyThreshold: 1000
     autoscalingCvThreshold: 0.7
@@ -725,10 +727,10 @@ sources:
   # `greenkube.sources` Python entry points. GET /api/v1/sources lists them.
   pluginsEnabled: true
   # Per-source settings keyed by source id; `enabled` is true, false or auto
-  # (auto: the source probes its prerequisites, such as the VPA or Karpenter
-  # CRDs). Replaces config.recommendations.vpaEnabled / karpenterEnabled. Example:
+  # (auto: the source probes its prerequisites, such as the VPA CRD).
+  # Replaces config.recommendations.vpaEnabled. Example:
   #   settings:
-  #     greenkube.carbon_aware: { enabled: false }
+  #     greenkube.orphaned_lb: { enabled: false }
   #     vpa: { enabled: auto }
   # Do not put credentials here: this map is rendered into the ConfigMap.
   # Connector settings (docs/sources/): krr and push { max_age_hours },
@@ -736,7 +738,7 @@ sources:
   settings: {}
   # Source precedence used to arbitrate conflicts (highest priority first).
   # Replaces config.recommendations.sourcePriority.
-  priority: vpa,karpenter,greenkube
+  priority: vpa,greenkube
   # Robusta KRR (docs/sources/krr.md). Reports pushed to
   # POST /api/v1/sources/krr/reports (from CI or this job) become signals.
   krr:

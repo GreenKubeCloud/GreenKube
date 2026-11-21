@@ -187,20 +187,24 @@ production block included) keeps the single-replica sizes. */ -}}
 
 {{- /* Sources grouped under sources.* (N3, E5). */ -}}
 {{- $sources := $values.sources | default dict -}}
-{{- $sourcePriority := $sources.priority | default "vpa,karpenter,greenkube" -}}
+{{- $sourcePriority := $sources.priority | default "vpa,greenkube" -}}
 {{- if hasKey $recommendations "sourcePriority" -}}
   {{- $sourcePriority = $recommendations.sourcePriority -}}
   {{- $deprecations = append $deprecations "config.recommendations.sourcePriority is mapped to sources.priority." -}}
 {{- end -}}
 {{- $vpaEnabled := "true" -}}
-{{- $karpenterEnabled := "true" -}}
 {{- if hasKey $recommendations "vpaEnabled" -}}
   {{- $vpaEnabled = $recommendations.vpaEnabled | toString -}}
   {{- $deprecations = append $deprecations "config.recommendations.vpaEnabled is deprecated: use sources.settings.vpa.enabled." -}}
 {{- end -}}
+{{- /* Removed in 0.4 (roadmap B.1): accepted, mapped to nothing, and named here. */ -}}
 {{- if hasKey $recommendations "karpenterEnabled" -}}
-  {{- $karpenterEnabled = $recommendations.karpenterEnabled | toString -}}
-  {{- $deprecations = append $deprecations "config.recommendations.karpenterEnabled is deprecated: use sources.settings.karpenter.enabled." -}}
+  {{- $deprecations = append $deprecations "config.recommendations.karpenterEnabled is ignored: the Karpenter NodePool recommendation source was removed." -}}
+{{- end -}}
+{{- range $id := list "greenkube.zombie" "greenkube.autoscaling" "greenkube.off_peak" "greenkube.idle_namespace" "greenkube.carbon_aware" "greenkube.nodes" "greenkube.nodepool" "karpenter" -}}
+  {{- if hasKey ($sources.settings | default dict) $id -}}
+    {{- $deprecations = append $deprecations (printf "sources.settings.%s is ignored: that source was removed." $id) -}}
+  {{- end -}}
 {{- end -}}
 
 {{- $_ := set $api "port" (int ($apiConfig.port | default 8000)) -}}
@@ -220,7 +224,6 @@ production block included) keeps the single-replica sizes. */ -}}
     "verificationMinSamples" $verificationMinSamples
     "sourcePriority" $sourcePriority
     "vpaEnabled" $vpaEnabled
-    "karpenterEnabled" $karpenterEnabled
     "deprecations" $deprecations
   | toYaml -}}
 {{- end -}}
