@@ -73,7 +73,7 @@ COVERAGE_FROM_LOOKBACK = "lookback"
 #: Looks up when a target was first observed (None when unknown).
 FirstObservedLookup = Callable[["WorkloadRef"], Optional[datetime]]
 #: Returns the collection steps of each hour bucket of the cluster (None or empty when unknown, IMP-04).
-CollectedStepsLookup = Callable[[], Optional[Mapping[datetime, int]]]
+CollectedStepsLookup = Callable[[], Optional[Mapping[datetime, float]]]
 
 #: Fallbacks used only when the configuration object lacks a setting.
 _FALLBACK_INTENSITY = 500.0
@@ -307,7 +307,7 @@ def _context_collected_steps(context: Any) -> Optional[CollectedStepsLookup]:
     if reader is None:
         return None
 
-    def lookup() -> Optional[Mapping[datetime, int]]:
+    def lookup() -> Optional[Mapping[datetime, float]]:
         try:
             snapshot = reader()
         except Exception:  # pragma: no cover - defensive: coverage falls back to the span
@@ -319,38 +319,55 @@ def _context_collected_steps(context: Any) -> Optional[CollectedStepsLookup]:
     return lookup
 
 
-def collected_steps_from_rows(rows: Sequence[Any]) -> Dict[datetime, int]:
-    """Distinct sample timestamps of raw metric rows per UTC hour (IMP-04); empty for rollup rows."""
-    stamps: Dict[datetime, set] = {}
+def collected_steps_from_rows(rows: Sequence[Any], step_seconds: float) -> Dict[datetime, float]:
+    """Collected steps of each UTC hour from metric rows of the whole scope (IMP-04).
+
+    Each distinct row timestamp covers the longest row at that time (one step
+    for a raw row, its ``duration_seconds`` for an hourly row read for older
+    hours), capped at the hour. Empty for rollup baseline rows, whose
+    timestamps are not sample times (the usage snapshot gives their collection).
+    """
+    if step_seconds <= 0:
+        return {}
+    covered: Dict[datetime, Dict[datetime, float]] = {}
     for row in rows:
         if _is_aggregated(row):
             return {}
         stamp = _utc(getattr(row, "timestamp", None))
         if stamp is None:
             continue
-        stamps.setdefault(stamp.replace(minute=0, second=0, microsecond=0), set()).add(stamp)
-    return {hour: len(values) for hour, values in sorted(stamps.items())}
+        duration = getattr(row, "duration_seconds", None)
+        seconds = float(duration) if isinstance(duration, (int, float)) and duration > 0 else step_seconds
+        hour = covered.setdefault(stamp.replace(minute=0, second=0, microsecond=0), {})
+        hour[stamp] = max(hour.get(stamp, 0.0), seconds)
+    return {hour: min(sum(values.values()), 3600.0) / step_seconds for hour, values in sorted(covered.items())}
 
 
 def collected_hours(
-    steps_by_hour: Mapping[datetime, int], step_seconds: float, start: datetime, end: datetime
+    steps_by_hour: Mapping[datetime, float], step_seconds: float, start: datetime, end: datetime
 ) -> float:
     """Hours of ``[start, end)`` in which the collector observed the cluster (IMP-04).
 
-    Each hour bucket contributes its collected time (steps x step), capped by
-    its overlap with ``[start, end)``: a gap with no row of any target adds
-    nothing, a CronJob's idle hours count because other targets were collected.
+    The span minus the uncollected time of each hour: an hour with no row of
+    any target is a gap of its whole overlap with the span, a partly collected
+    hour misses its overlap minus its collected time (steps x step), less one
+    step of tolerance (samples are not aligned on the hour). A CronJob's idle
+    hours are collected when other targets have rows in them.
     """
-    total = 0.0
-    for hour, steps in steps_by_hour.items():
-        bucket = _utc(hour)
-        if bucket is None:
-            continue
-        overlap = (min(bucket + timedelta(hours=1), end) - max(bucket, start)).total_seconds()
-        if overlap <= 0:
-            continue
-        total += min(max(float(steps), 0.0) * step_seconds, overlap)
-    return total / 3600.0
+    if end <= start:
+        return 0.0
+    steps = {
+        bucket: value for bucket, value in ((_utc(hour), value) for hour, value in steps_by_hour.items()) if bucket
+    }
+    missing = 0.0
+    hour = start.replace(minute=0, second=0, microsecond=0)
+    while hour < end:
+        overlap = (min(hour + timedelta(hours=1), end) - max(hour, start)).total_seconds()
+        collected = max(float(steps.get(hour, 0.0)), 0.0) * step_seconds
+        tolerance = step_seconds if collected > 0 else 0.0
+        missing += max(overlap - collected - tolerance, 0.0)
+        hour += timedelta(hours=1)
+    return max((end - start).total_seconds() - missing, 0.0) / 3600.0
 
 
 def observed_window_hours(samples: Sequence[ResourceSample]) -> float:
@@ -404,8 +421,8 @@ class ImpactProjector:
         self._first_observed = first_observed
         rows = list(rows)
         self._collected_steps = collected_steps
-        self._rows_collected: Optional[Dict[datetime, int]] = (
-            None if collected_steps is not None else (collected_steps_from_rows(rows))
+        self._rows_collected: Optional[Dict[datetime, float]] = (
+            None if collected_steps is not None else collected_steps_from_rows(rows, self.default_hours * 3600.0)
         )
         self.resolver = UnitPriceResolver(
             catalog=catalog if catalog is not None else PricingCatalog(),
@@ -680,7 +697,7 @@ class ImpactProjector:
             collected_hours=collected,
         )
 
-    def _collection_steps(self) -> Optional[Mapping[datetime, int]]:
+    def _collection_steps(self) -> Optional[Mapping[datetime, float]]:
         """Collection steps per hour of the cluster: from the usage snapshot, else from raw rows."""
         if self._collected_steps is not None:
             try:

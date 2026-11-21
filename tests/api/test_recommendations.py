@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from greenkube.core.config import get_config
 from greenkube.core.optimization.engine import OptimizationEngine
 from greenkube.models.metrics import RecommendationRecord, RecommendationType
 from greenkube.models.savings import SavingsAccrualTotal
@@ -78,13 +77,18 @@ class TestRecommendationsEndpoint:
         data = await _scan(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
 
         zombie_rec = next(r for r in data if r["type"] == "ZOMBIE_POD")
-        annualization_factor = 365 / get_config().RECOMMENDATION_LOOKBACK_DAYS
+        # IMP-04: annualized over the hours the collector observed the cluster. The only row of the
+        # cluster is this 5-minute sample, so the minimum coverage applies.
+        from greenkube.impact.model import MIN_COVERAGE_HOURS
+
+        annualization_factor = 8760 / MIN_COVERAGE_HOURS
         assert zombie_rec["potential_savings_cost"] == pytest.approx(0.05 * annualization_factor)
         # CO2e comes from the Impact Model (allocated idle, dynamic and embodied
         # share released by deleting the pod), returned with its provenance.
         impact = zombie_rec["impact"]
         assert impact["kind"] == "workload_deletion"
         assert impact["assumptions"]["annualization_factor"] == pytest.approx(annualization_factor)
+        assert impact["assumptions"]["collected_hours"] == pytest.approx(300 / 3600)
         assert zombie_rec["potential_savings_co2e_grams"] == pytest.approx(impact["co2e_expected_annual_g"])
         assert zombie_rec["potential_savings_co2e_grams"] > 0
 
