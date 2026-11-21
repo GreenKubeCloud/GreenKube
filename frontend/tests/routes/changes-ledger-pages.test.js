@@ -156,6 +156,23 @@ describe('/changes/[plan_id]', () => {
 		expect(screen.getByTestId('measured-capacity-replicas')).toHaveTextContent('2 → 3 replicas');
 	});
 
+	it('shows the untrusted cost hours of each window (MEA-05)', async () => {
+		api.getChangeMeasurements.mockResolvedValue({
+			items: [{ ...measurement, outcome: 'inconclusive', untrusted_cost_hours: 40.25, baseline_untrusted_cost_hours: 0 }]
+		});
+		render(ChangePage, { props: { data: { planId: 'plan-1' } } });
+		const block = await screen.findByTestId('untrusted-cost-hours');
+		expect(within(block).getByTestId('untrusted-cost-hours-post')).toHaveTextContent('40.3 h');
+		expect(within(block).getByTestId('untrusted-cost-hours-baseline')).toHaveTextContent('0 h');
+		expect(block).toHaveTextContent(/without trusted cost/i);
+	});
+
+	it('says "not recorded" for a measurement decided before untrusted cost hours existed', async () => {
+		render(ChangePage, { props: { data: { planId: 'plan-1' } } });
+		const block = await screen.findByTestId('untrusted-cost-hours');
+		expect(within(block).getByTestId('untrusted-cost-hours-post')).toHaveTextContent('not recorded');
+	});
+
 	it('explains a plan that is not applied yet', async () => {
 		api.listChanges.mockResolvedValue({ items: [], next_cursor: null });
 		render(ChangePage, { props: { data: { planId: 'plan-1' } } });
