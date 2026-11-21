@@ -194,16 +194,24 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
         ]
 
     async def read_hour_inputs(self, hour: datetime) -> Tuple[List[UsageInputRow], List[UsageInputRow], str]:
+        from greenkube.storage.raw_hourly_split import raw_hour_is_complete
+
         hour = ensure_utc(hour)
         sources = set()
-        pods = await self._raw_rows("combined_metrics", q.RAW_POD_COLUMNS, hour)
+        # Raw rows of an hour already pruned are only the late ones: never let them
+        # replace the complete hourly aggregate (ROL-02).
+        pods = []
+        if await raw_hour_is_complete(self.db_manager, "combined_metrics", hour):
+            pods = await self._raw_rows("combined_metrics", q.RAW_POD_COLUMNS, hour)
         if pods:
             sources.add("raw")
         else:
             pods = await self._hourly_rows("combined_metrics_hourly", q.HOURLY_POD_COLUMNS, hour)
             if pods:
                 sources.add("hourly")
-        containers = await self._raw_rows("container_metrics", q.RAW_CONTAINER_COLUMNS, hour)
+        containers = []
+        if await raw_hour_is_complete(self.db_manager, "container_metrics", hour):
+            containers = await self._raw_rows("container_metrics", q.RAW_CONTAINER_COLUMNS, hour)
         if containers:
             sources.add("raw")
         else:

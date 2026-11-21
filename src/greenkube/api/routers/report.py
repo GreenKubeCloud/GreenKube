@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from greenkube.api.dependencies import get_combined_metrics_repository, validate_namespace
+from greenkube.api.routers.metrics import idle_history_gap, with_idle_share
 from greenkube.api.schemas import ReportSummaryResponse
 from greenkube.core.aggregator import aggregate_metrics
 from greenkube.storage.base_repository import CombinedMetricsRepository
@@ -143,6 +144,52 @@ async def _aggregate_summary_for_ranges(
     return result
 
 
+async def _idle_share_for_ranges(
+    repo: CombinedMetricsRepository,
+    namespace: Optional[str],
+    ranges: list[tuple[datetime, datetime]],
+) -> dict:
+    """Idle share and cluster totals of the report, summed over ``ranges`` (NRG-02).
+
+    The node idle share belongs to no namespace: empty for a namespace report,
+    and empty when no range holds an idle row (unknown, never zero) or when a
+    range holds pod rows older than the first idle row (partial idle history).
+    """
+    if namespace:
+        return {}
+    idle: Optional[dict] = None
+    since: Optional[datetime] = None
+    for range_start, range_end in ranges:
+        since, short = await idle_history_gap(repo, range_start, range_end)
+        if short:
+            return {"since": since}
+        part = await repo.aggregate_idle_summary(range_start, range_end)
+        if part is None:
+            continue
+        idle = idle or {}
+        for key, value in part.items():
+            idle[key] = idle.get(key, 0.0) + float(value or 0.0)
+    return {"idle": idle, "since": since}
+
+
+def _report_summary(total_rows: int, agg: dict, idle: dict) -> ReportSummaryResponse:
+    """Report preview: allocated totals of ``agg``, plus the idle share and cluster totals when known."""
+    total_co2e = agg["total_co2e_grams"]
+    total_embodied = agg["total_embodied_co2e_grams"]
+    return ReportSummaryResponse(
+        total_rows=total_rows,
+        total_co2e_grams=total_co2e,
+        total_embodied_co2e_grams=total_embodied,
+        total_co2e_all_scopes=total_co2e + total_embodied,
+        total_cost=agg["total_cost"],
+        total_energy_joules=agg["total_energy_joules"],
+        unique_pods=agg["pod_count"],
+        unique_namespaces=agg["namespace_count"],
+        **({"idle_data_since": idle.get("since")} if idle else {}),
+        **with_idle_share(agg, idle.get("idle")),
+    )
+
+
 @router.get("/report/summary", response_model=ReportSummaryResponse)
 async def report_summary(
     namespace: Optional[str] = Depends(validate_namespace),
@@ -172,19 +219,9 @@ async def report_summary(
 
     if not aggregate:
         # Fast path: SQL-level aggregation avoids loading millions of rows into memory.
-        agg = await _aggregate_summary_for_ranges(repo, namespace, _get_time_ranges(last, start, end, years))
-        total_co2e = agg["total_co2e_grams"]
-        total_embodied = agg["total_embodied_co2e_grams"]
-        return ReportSummaryResponse(
-            total_rows=agg["row_count"],
-            total_co2e_grams=total_co2e,
-            total_embodied_co2e_grams=total_embodied,
-            total_co2e_all_scopes=total_co2e + total_embodied,
-            total_cost=agg["total_cost"],
-            total_energy_joules=agg["total_energy_joules"],
-            unique_pods=agg["pod_count"],
-            unique_namespaces=agg["namespace_count"],
-        )
+        ranges = _get_time_ranges(last, start, end, years)
+        agg = await _aggregate_summary_for_ranges(repo, namespace, ranges)
+        return _report_summary(agg["row_count"], agg, await _idle_share_for_ranges(repo, namespace, ranges))
 
     # aggregate=True: use SQL-level grouped COUNT — no CombinedMetric rows are
     # loaded into memory regardless of the range width.
@@ -194,8 +231,6 @@ async def report_summary(
     # combinations that the export would produce.
     resolved_ranges = _get_time_ranges(last, start, end, years)
     agg = await _aggregate_summary_for_ranges(repo, namespace, resolved_ranges)
-    total_co2e = agg["total_co2e_grams"]
-    total_embodied = agg["total_embodied_co2e_grams"]
 
     total_rows = 0
     for r_start, r_end in resolved_ranges:
@@ -207,16 +242,7 @@ async def report_summary(
             group_by=group_by,
         )
 
-    return ReportSummaryResponse(
-        total_rows=total_rows,
-        total_co2e_grams=total_co2e,
-        total_embodied_co2e_grams=total_embodied,
-        total_co2e_all_scopes=total_co2e + total_embodied,
-        total_cost=agg["total_cost"],
-        total_energy_joules=agg["total_energy_joules"],
-        unique_pods=agg["pod_count"],
-        unique_namespaces=agg["namespace_count"],
-    )
+    return _report_summary(total_rows, agg, await _idle_share_for_ranges(repo, namespace, resolved_ranges))
 
 
 @router.get("/report/years", response_model=list[int])

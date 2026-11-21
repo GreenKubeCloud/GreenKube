@@ -1097,6 +1097,15 @@ class CombinedMetric(BaseModel):
     memory_limit: Optional[int] = Field(None, description="Container memory limit in bytes (None = unlimited).")
     # Actual usage metrics (from Prometheus)
     sample_count: int = Field(1, description="Number of raw samples represented by this metric point.")
+    # Hourly rollup rows only (ROL-03, MEA-05, migration 0172); None on raw rows and older rollups.
+    first_sample_at: Optional[datetime] = Field(None, description="Hourly row: first raw sample of the hour.")
+    last_sample_at: Optional[datetime] = Field(None, description="Hourly row: last raw sample of the hour.")
+    trusted_cost: Optional[float] = Field(None, description="Hourly row: cost of the raw samples with trusted cost.")
+    trusted_cost_cpu: Optional[float] = Field(None, description="Hourly row: CPU cost of the trusted samples.")
+    trusted_cost_ram: Optional[float] = Field(None, description="Hourly row: RAM cost of the trusted samples.")
+    trusted_cost_seconds: Optional[float] = Field(
+        None, description="Hourly row: pod-seconds covered by the samples with trusted cost."
+    )
     cpu_usage_millicores: Optional[int] = Field(None, description="Actual CPU usage in millicores.")
     cpu_usage_max_millicores: Optional[int] = Field(
         None,

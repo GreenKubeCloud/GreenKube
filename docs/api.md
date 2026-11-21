@@ -46,7 +46,7 @@ All paths below are relative to `/api/v1`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Readiness and application version. Returns `503` with `status: migrating` until the controller has applied every database migration (cached once current), `database_unavailable` when the schema cannot be checked, and `degraded` while a supervised in-process loop is down or stale. |
+| `GET` | `/health` | Readiness and application version. Returns `503` with `status: migrating` until the controller has applied every database migration (cached once current), `database_unavailable` when the schema cannot be checked, and `degraded` while a supervised in-process loop is down or stale. `compression` gives the hourly compression `watermarks` per metric table, the largest `lag_seconds` behind `now - METRICS_COMPRESSION_AGE_HOURS` and `status` (`degraded` above two hours; it never changes readiness). |
 | `GET` | `/setup/status` | Guided setup checklist: `complete`, `checks[]` (`id`, `category`, `title`, `status` ok/action_needed/blocked/not_applicable/pending, `reason`, `fix` {`text`, `snippet`, `ui_action`}, `docs_url`) and `capabilities` (`discovery`, `delivery`, `sync_tracking`, `measurement` with `state` and `reason`). |
 | `GET` | `/version` | Application version. |
 | `GET` | `/config` | Current non-sensitive runtime configuration, including `currency` (the pricing currency of every amount, `impact.pricing.currency`). |
@@ -61,8 +61,8 @@ The unauthenticated `/api/v1/health/heartbeat` liveness route is excluded from t
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/metrics` | Paginated combined per-pod metrics. `last`, `namespace`, `offset`, `limit`, and `cursor` are supported. |
-| `GET` | `/metrics/summary` | Aggregated cluster or namespace totals (`last`, optional `namespace`). |
-| `GET` | `/metrics/timeseries` | Aggregated time series (`last`, optional `namespace`, `granularity=hour\|day\|week\|month`; default `hour`). |
+| `GET` | `/metrics/summary` | Aggregated cluster or namespace totals (`last`, optional `namespace`). The `total_*` fields are **allocated to workloads** (pod rows). Without `namespace` the response adds the node idle share (`idle_co2e_grams`, `idle_embodied_co2e_grams`, `idle_cost`, `idle_energy_joules`: unreserved capacity, `__idle__` rows) and the cluster totals `cluster_total_*` = allocated + idle; they are `null` with a namespace filter, when the range holds no idle row, or when the range holds pod rows older than the first stored idle row (`idle_data_since`: idle rows exist only since the upgrade that added them, so the idle share would cover part of the range). |
+| `GET` | `/metrics/timeseries` | Aggregated time series (`last`, optional `namespace`, `granularity=hour\|day\|week\|month`; default `hour`). Each point carries the same `idle_*` and `cluster_total_*` fields as the summary (cluster-wide only); they are `null` in the bucket that straddles `idle_data_since` when it holds earlier pod rows. |
 | `GET` | `/metrics/by-namespace` | Metrics grouped by namespace (`last`; optional `namespace` narrows the result). |
 | `GET` | `/metrics/top-pods` | Highest-emitting pods (`last`, optional `namespace`, `limit`, 1–50; default 10). |
 | `GET` | `/metrics/dashboard-summary` | Precomputed KPI values for dashboard windows (optional `namespace`). |
@@ -196,7 +196,7 @@ When `GREENKUBE_API_KEY` is configured, only this `POST` route with a single pro
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/report/summary` | Preview report row count and aggregate totals. |
+| `GET` | `/report/summary` | Preview report row count and aggregate totals. The `total_*` fields are allocated to workloads; without `namespace` the response adds the node idle share (`idle_*`) and the cluster totals (`cluster_total_*` = allocated + idle), summed over the selected ranges, as in `/metrics/summary`. `/report/export` holds pod rows only (no idle rows yet). |
 | `GET` | `/report/years` | List calendar years with reportable data. |
 | `GET` | `/report/export` | Stream a CSV or JSON report (`format=csv\|json`, default `csv`). |
 

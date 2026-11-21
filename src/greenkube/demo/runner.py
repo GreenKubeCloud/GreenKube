@@ -185,7 +185,8 @@ async def _populate_database(days: int) -> dict[str, int]:
     from greenkube.core.db import get_db_manager
     from greenkube.core.metrics_compressor import MetricsCompressor
 
-    compressor = MetricsCompressor(get_db_manager())
+    # Demo data is generated at once, never collected: no collection watermark bounds it.
+    compressor = MetricsCompressor(get_db_manager(), collection_watermark_provider=None)
     compression_stats = await compressor.run()
     counts["hourly_compressed"] = compression_stats.get("rows_compressed", 0)
 

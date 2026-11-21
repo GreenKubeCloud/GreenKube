@@ -246,6 +246,14 @@ OPENCOST_AUTH_FAILED = Gauge(
     "1 when OpenCost rejected the last allocation request with HTTP 401 or 403 (credentials), COST-06.",
     registry=REGISTRY,
 )
+METRICS_COMPRESSION_LAG = Gauge(
+    "greenkube_metrics_compression_lag_seconds",
+    "Seconds between the hour the compressor may reach (now - the effective compression age, the longer of "
+    "METRICS_COMPRESSION_AGE_HOURS and COLLECTION_MAX_BACKFILL) and the "
+    "compression watermark of each metric table (ROL-01).",
+    ["table"],
+    registry=REGISTRY,
+)
 OPENCOST_AMBIGUOUS_CLUSTER = Gauge(
     "greenkube_opencost_ambiguous_cluster",
     "1 when the last OpenCost answer covered several clusters and OPENCOST_CLUSTER_ID is not set: no OpenCost "

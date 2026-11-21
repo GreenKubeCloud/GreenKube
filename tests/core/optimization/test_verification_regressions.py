@@ -109,7 +109,7 @@ async def _scenario(
             cpu_usage=cpu_usage,
         )
     )
-    await MetricsCompressor(database, cfg).run()
+    await MetricsCompressor(database, cfg, collection_watermark_provider=None).run()
 
     annual_cost = 0.12 * replicas * HOURS_PER_YEAR
     annual_co2 = 12 * replicas * HOURS_PER_YEAR

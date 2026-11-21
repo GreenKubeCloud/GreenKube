@@ -158,7 +158,7 @@ async def test_hourly_readers_keep_sample_count_and_provenance(db):
     ]
     await repo.write_combined_metrics(rows)
 
-    await MetricsCompressor(db, Config()).run(now=T0 + timedelta(days=2))
+    await MetricsCompressor(db, Config(), collection_watermark_provider=None).run(now=T0 + timedelta(days=2))
 
     # Hourly readers are half-open: [start, end) (A2).
     pod_hourly = await repo.read_hourly_metrics(T0, T0 + timedelta(hours=1))
@@ -420,7 +420,7 @@ async def test_hourly_cost_source_keeps_opencost_and_derived_rows_trusted(db, so
     rows += [_pod_row(ts, cost_source=source) for ts, source in zip(stamps, sources, strict=True)]
     await repo.write_combined_metrics(rows)
 
-    await MetricsCompressor(db, Config()).run(now=T0 + timedelta(days=2))
+    await MetricsCompressor(db, Config(), collection_watermark_provider=None).run(now=T0 + timedelta(days=2))
 
     (pod,) = await repo.read_hourly_metrics(T0, T0 + timedelta(hours=1))
     (container,) = await repo.read_hourly_container_metrics(T0, T0 + timedelta(hours=1))

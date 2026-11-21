@@ -496,6 +496,16 @@ each from its complete raw set and in the same transaction that advances the tab
 `metrics_compression_watermarks`. Compression resumes at the watermark (never re-reading compressed hours) and
 raw pruning deletes whole hours below the watermark only, so sums of cost, energy, CO₂e and sample counts are
 preserved exactly. The savings ledger has its own compression.
+
+Every reader that combines raw and hourly rows (summaries, time series, breakdowns, counts, pages,
+`read_*_metrics_smart`) splits at that **compression watermark**, never at wall-clock
+`now - METRICS_COMPRESSION_AGE_HOURS` (ROL-01, `storage/raw_hourly_split.py`): full hours inside the window
+and below the watermark come from the hourly table, everything else (rows at or after the watermark and the
+partial first and last hours of a window that is not hour-aligned) from raw rows. Hours the compressor has
+not reached yet therefore stay readable from raw rows. A partial edge hour older than raw retention has no raw
+rows left and is not read. The compressor exports `greenkube_metrics_compression_lag_seconds{table}`, `/health`
+reports `compression.status = degraded` when a watermark trails `now - METRICS_COMPRESSION_AGE_HOURS` by
+more than two hours, and a failed step marks the `metrics-compression` loop tick failed.
 - **GHG Scope 2:** `co2e_grams` — indirect emissions from purchased electricity (grid intensity × energy × PUE)
 - **GHG Scope 3 Cat. 1:** `embodied_co2e_grams` — upstream hardware manufacturing emissions (Boavizta, allocated by CPU share)
 - **Total (Scope 2 + 3):** `total_co2e_grams` — computed field, full pod carbon footprint

@@ -375,6 +375,22 @@ class CollectionStatusResponse(BaseModel):
     )
 
 
+class CompressionStatusResponse(BaseModel):
+    """Hourly compression watermark and lag (ROL-01)."""
+
+    status: str = Field(
+        ..., description="`ok`, or `degraded` when a compression watermark trails its reachable hour by over 2 h."
+    )
+    lag_seconds: Optional[float] = Field(
+        None,
+        description="Largest lag of the metric tables behind now - the effective compression age (the longer of "
+        "METRICS_COMPRESSION_AGE_HOURS and COLLECTION_MAX_BACKFILL).",
+    )
+    watermarks: dict[str, Optional[datetime]] = Field(
+        default_factory=dict, description="Compression watermark per raw metric table (exclusive end)."
+    )
+
+
 class HealthResponse(BaseModel):
     """Response schema for the health check endpoint."""
 
@@ -385,6 +401,9 @@ class HealthResponse(BaseModel):
     )
     demo: bool = Field(
         False, description="True when the API runs `greenkube demo` (synthetic data, pull requests disabled)."
+    )
+    compression: Optional[CompressionStatusResponse] = Field(
+        None, description="Hourly compression watermark and lag; absent when the database cannot be read."
     )
 
 
@@ -408,6 +427,29 @@ class MetricsSummaryResponse(BaseModel):
     total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
     pod_count: int = Field(0, description="Number of unique pods.")
     namespace_count: int = Field(0, description="Number of unique namespaces.")
+    idle_co2e_grams: Optional[float] = Field(
+        None,
+        description="Scope 2 CO₂e of the node idle share (unreserved capacity, `__idle__` rows); null with a "
+        "namespace filter or when the range holds no idle row.",
+    )
+    idle_embodied_co2e_grams: Optional[float] = Field(None, description="Scope 3 CO₂e of the node idle share.")
+    idle_cost: Optional[float] = Field(None, description="Modeled cost of the node idle share.")
+    idle_energy_joules: Optional[float] = Field(None, description="Energy of the node idle share in Joules.")
+    cluster_total_co2e_grams: Optional[float] = Field(
+        None, description="Scope 2 CO₂e of the cluster: allocated to workloads + idle share."
+    )
+    cluster_total_embodied_co2e_grams: Optional[float] = Field(
+        None, description="Scope 3 CO₂e of the cluster: allocated + idle share."
+    )
+    cluster_total_cost: Optional[float] = Field(None, description="Cost of the cluster: allocated + idle share.")
+    cluster_total_energy_joules: Optional[float] = Field(
+        None, description="Energy of the cluster in Joules: allocated + idle share."
+    )
+    idle_data_since: Optional[datetime] = Field(
+        None,
+        description="First instant covered by stored idle rows. When the window holds pod rows before it, the "
+        "idle and cluster-total fields are null (the idle history covers only part of the window).",
+    )
 
 
 class TimeseriesPoint(BaseModel):
@@ -425,6 +467,24 @@ class TimeseriesPoint(BaseModel):
     joules: float = Field(0.0, description="Total energy in Joules for this bucket.")
     pod_count: int = Field(0, description="Number of unique pods in this bucket.")
     namespace_count: int = Field(0, description="Number of unique namespaces in this bucket.")
+    idle_co2e_grams: Optional[float] = Field(
+        None,
+        description="Scope 2 CO₂e of the node idle share (unreserved capacity, `__idle__` rows); null with a "
+        "namespace filter or when the range holds no idle row.",
+    )
+    idle_embodied_co2e_grams: Optional[float] = Field(None, description="Scope 3 CO₂e of the node idle share.")
+    idle_cost: Optional[float] = Field(None, description="Modeled cost of the node idle share.")
+    idle_energy_joules: Optional[float] = Field(None, description="Energy of the node idle share in Joules.")
+    cluster_total_co2e_grams: Optional[float] = Field(
+        None, description="Scope 2 CO₂e of the cluster: allocated to workloads + idle share."
+    )
+    cluster_total_embodied_co2e_grams: Optional[float] = Field(
+        None, description="Scope 3 CO₂e of the cluster: allocated + idle share."
+    )
+    cluster_total_cost: Optional[float] = Field(None, description="Cost of the cluster: allocated + idle share.")
+    cluster_total_energy_joules: Optional[float] = Field(
+        None, description="Energy of the cluster in Joules: allocated + idle share."
+    )
 
 
 class ConfigResponse(BaseModel):
@@ -499,6 +559,29 @@ class ReportSummaryResponse(BaseModel):
     total_energy_joules: float = Field(0.0, description="Total energy in Joules.")
     unique_pods: int = Field(0, description="Number of unique pods.")
     unique_namespaces: int = Field(0, description="Number of unique namespaces.")
+    idle_co2e_grams: Optional[float] = Field(
+        None,
+        description="Scope 2 CO₂e of the node idle share (unreserved capacity, `__idle__` rows); null with a "
+        "namespace filter or when the range holds no idle row.",
+    )
+    idle_embodied_co2e_grams: Optional[float] = Field(None, description="Scope 3 CO₂e of the node idle share.")
+    idle_cost: Optional[float] = Field(None, description="Modeled cost of the node idle share.")
+    idle_energy_joules: Optional[float] = Field(None, description="Energy of the node idle share in Joules.")
+    cluster_total_co2e_grams: Optional[float] = Field(
+        None, description="Scope 2 CO₂e of the cluster: allocated to workloads + idle share."
+    )
+    cluster_total_embodied_co2e_grams: Optional[float] = Field(
+        None, description="Scope 3 CO₂e of the cluster: allocated + idle share."
+    )
+    cluster_total_cost: Optional[float] = Field(None, description="Cost of the cluster: allocated + idle share.")
+    cluster_total_energy_joules: Optional[float] = Field(
+        None, description="Energy of the cluster in Joules: allocated + idle share."
+    )
+    idle_data_since: Optional[datetime] = Field(
+        None,
+        description="First instant covered by stored idle rows. When the window holds pod rows before it, the "
+        "idle and cluster-total fields are null (the idle history covers only part of the window).",
+    )
 
 
 class DashboardSummaryResponse(BaseModel):

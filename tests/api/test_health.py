@@ -34,6 +34,26 @@ class TestHealthEndpoint:
         monkeypatch.setattr(get_config(), "GREENKUBE_DEMO_MODE", True)
         assert client.get("/api/v1/health").json()["demo"] is True
 
+    def test_health_reports_a_lagging_compressor_as_degraded(self, client, monkeypatch):
+        """ROL-01: a compression watermark over two hours behind shows as degraded, readiness unchanged."""
+        from datetime import datetime, timezone
+
+        from greenkube.core.metrics_compressor import MetricsCompressor
+
+        async def lagging(self, now=None):
+            watermark = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            return {
+                "status": "degraded",
+                "lag_seconds": 3 * 3600.0,
+                "tables": {"combined_metrics": {"watermark": watermark, "lag_seconds": 3 * 3600.0}},
+            }
+
+        monkeypatch.setattr(MetricsCompressor, "compression_status", lagging)
+        body = client.get("/api/v1/health").json()
+        assert body["status"] == "ok"
+        assert body["compression"]["status"] == "degraded"
+        assert body["compression"]["lag_seconds"] == 3 * 3600.0
+
 
 class TestSchemaReadiness:
     """F11: only the controller migrates; API replicas are not ready until the schema is current."""

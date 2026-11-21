@@ -48,7 +48,13 @@ async def health(request: Request):
             status_code=503,
             content=HealthResponse(status="degraded", version=__version__, demo=_demo()).model_dump(),
         )
-    return HealthResponse(status="ok", version=__version__, collection=await _collection_status(), demo=_demo())
+    return HealthResponse(
+        status="ok",
+        version=__version__,
+        collection=await _collection_status(),
+        demo=_demo(),
+        compression=await _compression_status(),
+    )
 
 
 def _demo() -> bool:
@@ -77,6 +83,31 @@ async def _collection_status():
     except Exception as error:  # the table may not exist yet, or the database is down
         logger.debug("Collection status unavailable for /health (%s).", type(error).__name__)
         return None
+
+
+async def _compression_status():
+    """Compression watermark and lag (ROL-01); ``None`` when unreadable.
+
+    Bounded to one second; a lag over two hours reports ``degraded`` here and in
+    ``greenkube_metrics_compression_lag_seconds`` but never changes readiness.
+    """
+    import asyncio
+
+    from greenkube.api.schemas import CompressionStatusResponse
+    from greenkube.core.db import get_db_manager
+    from greenkube.core.metrics_compressor import MetricsCompressor
+
+    try:
+        compressor = MetricsCompressor(get_db_manager(), collection_watermark_provider=None)
+        status = await asyncio.wait_for(compressor.compression_status(), timeout=1.0)
+    except Exception as error:  # the table may not exist yet, or the database is down
+        logger.debug("Compression status unavailable for /health (%s).", type(error).__name__)
+        return None
+    return CompressionStatusResponse(
+        status=status["status"],
+        lag_seconds=status["lag_seconds"],
+        watermarks={table: info["watermark"] for table, info in status["tables"].items()},
+    )
 
 
 @router.get("/version", response_model=VersionResponse)
