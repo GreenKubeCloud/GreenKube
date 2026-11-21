@@ -160,7 +160,8 @@ def sample_prices(sample: ResourceSample, node: NodeImpactProfile, currency: str
        An aggregate whose split covers only some of its hours (hours
        re-aggregated from 0.3.x rows carry a total only, F-03) prices each
        component over the hours that carry it, and apportions the total of
-       the other hours the same way.
+       the other hours the same way. Hours whose observed total is zero
+       count as zero cost.
     3. No observed cost: the node's unit prices (catalog or custom rates).
 
     Under 1 and 2 the CPU and RAM cost of a sample never exceeds its observed
@@ -199,7 +200,6 @@ def sample_prices(sample: ResourceSample, node: NodeImpactProfile, currency: str
         rest = hours - split_hours
         given = sample.observed_cost_unsplit_hours
         unsplit_hours = rest if given is None else min(max(given, 0.0), rest)
-        free_hours = rest - unsplit_hours
         unsplit_total = min(max(sample.observed_cost_unsplit_total or 0.0, 0.0), observed.other)
         cpu_cost, ram_cost, apportioned = _observed_cpu_ram_cost(
             observed.cpu if cpu_known else None,
@@ -215,15 +215,18 @@ def sample_prices(sample: ResourceSample, node: NodeImpactProfile, currency: str
             sample.cpu_reserved_cores * unsplit_hours * node_cpu,
             sample.mem_reserved_gib * unsplit_hours * node_ram,
         )
-        # Hours without any observed cost are priced like samples without one:
-        # at the node's unit prices.
-        cpu_cost += unsplit_cpu + sample.cpu_reserved_cores * free_hours * node_cpu
-        ram_cost += unsplit_ram + sample.mem_reserved_gib * free_hours * node_ram
-        detail = OBSERVED_COMPONENTS_PARTLY_APPORTIONED
+        # Hours whose observed total is zero cost nothing (OpenCost says so):
+        # they add reserved quantity but no cost, which keeps every projection
+        # bounded by the observed cost (BUG-15).
+        cpu_cost += unsplit_cpu
+        ram_cost += unsplit_ram
+        if unsplit_total > 0:
+            detail = OBSERVED_COMPONENTS_PARTLY_APPORTIONED
+        else:
+            detail = OBSERVED_TOTAL_APPORTIONED if apportioned else OBSERVED_COMPONENTS
+            unsplit_hours = 0.0
         if unsplit_total > 0 or apportioned:
             confidence = min(confidence, APPORTIONED_CONFIDENCE)
-        else:
-            unsplit_hours = 0.0
     else:
         cpu_cost, ram_cost, apportioned = _observed_cpu_ram_cost(
             observed.cpu if cpu_known else None,
