@@ -146,3 +146,22 @@ def test_health_shows_the_watermark_lag_and_the_last_gap(wired):
     assert collection["lag_seconds"] > 0
     assert collection["last_gap"]["status"] == STATUS_FAILED
     assert collection["last_gap"]["reason"] == REASON_NO_SCRAPE_DATA
+    # The fake repository has no container rows.
+    assert collection["container_usage_source"] is None
+
+
+def test_health_reports_metrics_api_container_usage(wired, records, monkeypatch):
+    """COL-05 acceptance: a pod-level-only cAdvisor cluster reports container_usage_source=metrics_server."""
+    windows = _Windows(records)
+
+    async def _sources():
+        return {"metrics_server"}
+
+    windows.latest_container_usage_sources = _sources  # type: ignore[attr-defined]
+
+    async def _windows():
+        return windows
+
+    monkeypatch.setattr(collection_router, "get_collection_window_repository", _windows)
+    collection = wired.get("/api/v1/health").json()["collection"]
+    assert collection["container_usage_source"] == "metrics_server"

@@ -153,6 +153,31 @@ async def test_stored_metric_timestamps_are_distinct(database):
 
 
 @pytest.mark.asyncio
+async def test_latest_container_usage_sources_reads_the_newest_step(database):
+    """COL-05: /health says where container usage comes from (cri-dockerd: Metrics API point samples)."""
+    backend, manager = database
+    repo = create_collection_window_repository(manager, backend)
+    metrics = (
+        SQLiteCombinedMetricsRepository(manager) if backend == "sqlite" else PostgresCombinedMetricsRepository(manager)
+    )
+    assert await repo.latest_container_usage_sources() == set()
+    rows = [
+        CombinedMetric(
+            pod_name="a",
+            namespace="ns",
+            container_name="app",
+            timestamp=BASE + k * STEP,
+            duration_seconds=300,
+            usage_source=source,
+        )
+        for k, source in ((0, "prometheus"), (1, "metrics_server"))
+    ]
+    await metrics.write_container_metrics(rows)
+
+    assert await repo.latest_container_usage_sources() == {"metrics_server"}
+
+
+@pytest.mark.asyncio
 async def test_cost_pending_status_round_trips_and_is_listed(database):
     """COST-01: a step whose cost waits for OpenCost is stored, listed, then cleared by its re-pricing."""
     from dataclasses import replace

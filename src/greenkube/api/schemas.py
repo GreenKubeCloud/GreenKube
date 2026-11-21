@@ -375,6 +375,12 @@ class CollectionStatusResponse(BaseModel):
         description="Set while collection refuses this database because it belongs to another cluster; "
         "set config.collection.allowClusterUidChange once to adopt it.",
     )
+    container_usage_source: Optional[str] = Field(
+        None,
+        description="Where the container usage of the newest stored step comes from (COL-05): `prometheus`, "
+        "`metrics_server` (Metrics API point samples, because cAdvisor exports pod-level series only, for "
+        "example on cri-dockerd), `mixed`, or null when no container row is stored.",
+    )
 
 
 class CompressionStatusResponse(BaseModel):
