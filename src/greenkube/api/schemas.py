@@ -525,10 +525,22 @@ class PaginatedMetricsResponse(BaseModel):
     next_cursor: Optional[str] = Field(None, description="Opaque cursor for the next page.")
 
 
+class NodeResponse(NodeInfo):
+    """A node snapshot with where its GPU power came from in the latest collection (NRG-13)."""
+
+    gpu_source: Optional[str] = Field(
+        None,
+        description=(
+            "GPU power source of the node's latest idle row: dcgm, gpu_tdp_estimate or unmeasured. "
+            "None when no GPU was detected or no recent row exists."
+        ),
+    )
+
+
 class PaginatedNodesResponse(BaseModel):
     """Opt-in cursor-paginated node response."""
 
-    items: List[NodeInfo] = Field(default_factory=list, description="Nodes in this page.")
+    items: List[NodeResponse] = Field(default_factory=list, description="Nodes in this page.")
     next_cursor: Optional[str] = Field(None, description="Opaque cursor for the next page.")
 
 

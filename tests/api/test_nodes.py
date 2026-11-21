@@ -1,7 +1,10 @@
 # tests/api/test_nodes.py
 """Tests for the nodes endpoint."""
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
+
+from greenkube.impact.rows import NodeIdleMetric
 
 
 class TestNodesEndpoint:
@@ -64,3 +67,53 @@ class TestNodesEndpoint:
         ]
         for field in expected_fields:
             assert field in node, f"Missing field: {field}"
+
+
+def _idle(node: str, minutes_ago: int, gpu_source):
+    return NodeIdleMetric(
+        node=node,
+        timestamp=datetime.now(timezone.utc) - timedelta(minutes=minutes_ago),
+        duration_seconds=300,
+        joules=0.0,
+        co2e_grams=0.0,
+        embodied_co2e_grams=0.0,
+        total_cost=0.0,
+        cost_cpu=0.0,
+        cost_ram=0.0,
+        cost_source="none",
+        cpu_unreserved_cores=0.0,
+        memory_unreserved_bytes=0,
+        gpu_source=gpu_source,
+    )
+
+
+class TestNodesGpuSource:
+    """GET /api/v1/nodes exposes where each node's GPU power came from (NRG-13 badge)."""
+
+    def test_nodes_carry_the_gpu_source_of_their_latest_idle_row(
+        self, client, mock_node_repo, mock_combined_metrics_repo, sample_node_infos
+    ):
+        idle = [_idle("node-1", 10, "dcgm"), _idle("node-1", 5, "gpu_tdp_estimate"), _idle("node-2", 5, None)]
+        mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=sample_node_infos)
+        mock_combined_metrics_repo.read_idle_metrics = AsyncMock(return_value=idle)
+        data = client.get("/api/v1/nodes").json()
+        by_name = {node["name"]: node for node in data}
+        assert by_name["node-1"]["gpu_source"] == "gpu_tdp_estimate"
+        assert by_name["node-2"]["gpu_source"] is None
+
+    def test_paginated_nodes_carry_the_gpu_source(
+        self, client, mock_node_repo, mock_combined_metrics_repo, sample_node_infos
+    ):
+        mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=sample_node_infos)
+        mock_combined_metrics_repo.read_idle_metrics = AsyncMock(return_value=[_idle("node-2", 1, "unmeasured")])
+        data = client.get("/api/v1/nodes", params={"limit": 10}).json()
+        assert {node["name"]: node["gpu_source"] for node in data["items"]} == {"node-1": None, "node-2": "unmeasured"}
+
+    def test_unreadable_idle_rows_leave_the_gpu_source_unknown(
+        self, client, mock_node_repo, mock_combined_metrics_repo, sample_node_infos
+    ):
+        mock_node_repo.get_latest_snapshots_before = AsyncMock(return_value=sample_node_infos)
+        mock_combined_metrics_repo.read_idle_metrics = AsyncMock(side_effect=RuntimeError("db down"))
+        response = client.get("/api/v1/nodes")
+        assert response.status_code == 200
+        assert all(node["gpu_source"] is None for node in response.json())

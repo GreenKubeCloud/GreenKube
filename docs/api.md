@@ -69,7 +69,7 @@ The unauthenticated `/api/v1/health/heartbeat` liveness route is excluded from t
 | `GET` | `/metrics/dashboard-timeseries/{window_slug}` | Precomputed dashboard time series for `1h`, `6h`, `24h`, `7d`, `30d`, `1y`, or `ytd` (optional `namespace`). |
 | `POST` | `/metrics/dashboard-summary/refresh` | Schedule a dashboard-cache refresh for the optional `namespace`; returns `202 Accepted`. |
 | `GET` | `/namespaces` | List active namespaces. |
-| `GET` | `/nodes` | Cluster node inventory. |
+| `GET` | `/nodes` | Cluster node inventory. Each node carries `gpu_source` from its latest idle row of the last hour: `dcgm`, `gpu_tdp_estimate`, `unmeasured`, or `null` (no GPU detected, or no recent row). |
 
 Raw `/metrics` listing accepts at most 30 days by default (`config.metricsListMaxRangeDays`); wider exports should use the report endpoints.
 

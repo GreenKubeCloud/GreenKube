@@ -4,10 +4,13 @@
 	import { formatCPU, formatBytes, formatNumber } from '$lib/utils/format.js';
 	import DataState from '$lib/components/DataState.svelte';
 	import Card from '$lib/components/Card.svelte';
+	import { gpuPowerBadge } from '$lib/nodeGpu.js';
 
 	let nodes = [];
 	let loading = true;
 	let error = null;
+
+	$: gpuWarnings = nodes.filter((node) => gpuPowerBadge(node)).length;
 
 	onMount(async () => {
 		try {
@@ -49,6 +52,13 @@
 	</div>
 
 	<DataState {loading} {error} empty={!nodes.length} emptyMessage="No nodes discovered">
+		{#if gpuWarnings > 0}
+			<div role="status" class="card-compact border border-yellow-600/40 text-sm text-yellow-300">
+				⚠ {gpuWarnings} node{gpuWarnings !== 1 ? 's' : ''} without DCGM exporter samples: their GPU power is
+				estimated from the TDP or not counted. Deploy the DCGM exporter to measure it.
+			</div>
+		{/if}
+
 		<!-- Summary -->
 		<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
 			<div class="card-compact text-center">
@@ -87,6 +97,10 @@
 							</h3>
 							{#if node.instance_type}
 								<p class="text-xs text-dark-500 mt-0.5">{node.instance_type}</p>
+							{/if}
+							{#if gpuPowerBadge(node)}
+								{@const badge = gpuPowerBadge(node)}
+								<span class="{badge.tone === 'red' ? 'badge-red' : 'badge-yellow'} text-[10px] mt-1 inline-block" title={badge.title}>{badge.label}</span>
 							{/if}
 						</div>
 						<span class="text-lg">🖥️</span>
