@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, List, Literal, Optional, Sequence
 
+from greenkube.core.optimization.restarts import restarts_in_window
 from greenkube.core.optimization.statistics import latest_request_value, percentile, usage_stats
 from greenkube.models.evidence import (
     LimitChange,
@@ -306,7 +307,8 @@ def build_evidence(rec: Recommendation, context: "OptimizationContext") -> Optio
         memory_request_bytes=rec.recommended_memory_request_bytes,
     )
 
-    restart_count = max((m.restart_count or 0 for m in series), default=0)
+    # Restarts inside the window, not the lifetime counter (COL-20).
+    restart_count = restarts_in_window(series) or 0
     total_cost = sum(m.total_cost for m in series)
     total_co2e = sum(m.co2e_grams for m in series)
     cost_per_hour = max(total_cost / window * 3600, 0.0) if window else None

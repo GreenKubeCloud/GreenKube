@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 
 from greenkube.core.config import Config, get_config
+from greenkube.core.optimization.restarts import restarts_by_pod
 from greenkube.models.metrics import CombinedMetric
 
 logger = logging.getLogger(__name__)
@@ -440,8 +441,12 @@ class SustainabilityScorer:
 
     @staticmethod
     def _score_stability(metrics: List[CombinedMetric]) -> float:
-        """Penalizes pods with high restart counts."""
-        restart_values = [m.restart_count for m in metrics if m.restart_count is not None]
+        """Penalizes pods that restart inside the period, by their average restarts (COL-20).
+
+        ``restart_count`` is the pod's lifetime counter: restarts older than the
+        period (a node reboot months ago) are not counted.
+        """
+        restart_values = list(restarts_by_pod(metrics).values())
 
         if not restart_values:
             return _NEUTRAL

@@ -124,6 +124,7 @@ class RecommendationEvidence(BaseModel):
     changes: List[ProposedChange] = Field(default_factory=list)
     cpu_usage: Optional[UtilizationStats] = None
     memory_usage: Optional[UtilizationStats] = None
+    #: Restarts inside the observation window: increases of the lifetime counter between rows (COL-20).
     restart_count: Optional[int] = None
     #: OOM kills of the target container over the observation window (None: not observed).
     oom_events: Optional[int] = None
