@@ -11,7 +11,7 @@ from pydantic import AliasChoices, Field, PrivateAttr, field_validator, model_va
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 # Import datacenter PUE profiles
-from greenkube.data.datacenter_pue_profiles import DATACENTER_PUE_PROFILES
+from greenkube.data.datacenter_pue_profiles import DATACENTER_PUE_PROFILES, ON_PREMISES_PROVIDERS
 
 _GITOPS_DURATION_PATTERN = re.compile(r"^(\d+)(ms|s|m|h)$")
 
@@ -1080,6 +1080,13 @@ class Config(BaseSettings):
         pue = DATACENTER_PUE_PROFILES.get(profile_key)
         if pue is not None:
             self.DEFAULT_PUE = pue
+        elif self.CLOUD_PROVIDER in ON_PREMISES_PROVIDERS:
+            logging.getLogger(__name__).info(
+                "CLOUD_PROVIDER '%s' is an on-premises datacenter: using the configured DEFAULT_PUE=%s "
+                "(set config.defaults.pue to the measured PUE of the site).",
+                self.CLOUD_PROVIDER,
+                self.DEFAULT_PUE,
+            )
         else:
             logging.getLogger(__name__).warning(
                 "Unknown CLOUD_PROVIDER '%s' - falling back to DEFAULT_PUE=%s",
