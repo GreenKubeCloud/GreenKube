@@ -105,6 +105,10 @@ class WorkloadUsageHour:
     #: Seconds from ``hour_bucket`` to the row's latest sample: among the node rows of
     #: one hour, the newest one holds the current request (None for rows before 0076).
     latest_sample_offset_seconds: Optional[float] = None
+    #: Pods seen at the row's latest sample (within half a step): the replicas of that
+    #: moment, which a rollout inside the hour does not double (migration 0210). None
+    #: for rows rolled before it (``pod_count`` is read instead).
+    latest_pod_count: Optional[int] = None
     #: Restarts in the hour, summed over the pods of the row: each pod's count
     #: compared with its own previous count (a reset or a new pod adds its count).
     #: None when no row carries a restart count, and for rows before migration 0130.
@@ -153,6 +157,14 @@ class WorkloadUsageSummary:
     step_count: int = 0
     duration_seconds: float = 0.0
     replicas_max: int = 0
+    #: Distinct pods observed in the last observed hour (all nodes): the target's current
+    #: replica count as the rollup knows it (F-08). 0 when unknown.
+    replicas_latest: int = 0
+    #: Highest hourly p95 over the lookback (node rows merged by maximum): a node row holds the
+    #: samples of the replicas on that node, so this bounds the hottest replica's p95, which the
+    #: per-target baseline rows of the rollup cannot show (F-08 review). None when unknown.
+    cpu_p95_hour_max: Optional[float] = None
+    memory_p95_hour_max: Optional[float] = None
     cpu: Optional[UsageStats] = None
     memory: Optional[UsageStats] = None
     cpu_request: int = 0

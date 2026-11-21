@@ -100,12 +100,12 @@
       {
         "code": "policy_evidence_missing",
         "fix": "Rescan the recommendation and refresh GitOps discovery so the policy can check it.",
-        "message": "The recommendation has no risk level."
+        "message": "Risk evidence is missing for one or more recommendations."
       },
       {
         "code": "policy_evidence_missing",
         "fix": "Rescan the recommendation and refresh GitOps discovery so the policy can check it.",
-        "message": "The recommendation has no confidence score."
+        "message": "Confidence evidence is missing for one or more recommendations."
       }
     ],
     "can_open_pr": false,

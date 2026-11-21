@@ -53,6 +53,10 @@ class OptimizationContext:
     gone_targets: Set[Tuple[str, str, str]] = field(default_factory=set)
     #: Targets not running (scaled to zero, or liveness unknown): nothing is emitted, records are kept.
     not_running_targets: Set[Tuple[str, str, str]] = field(default_factory=set)
+    #: Targets of static (mirror) pods left out of every analyzer (F-04): their manifests live on the node.
+    static_pod_targets: Set[Tuple[str, str, str]] = field(default_factory=set)
+    #: Static pods behind ``static_pod_targets`` (reported as a source-run diagnostic).
+    static_pod_count: int = 0
     _target_series_cache: Optional[Dict[Tuple[str, str, str], List[CombinedMetric]]] = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -114,7 +118,17 @@ class OptimizationContext:
             container_rows.extend(self.container_metrics)
             warmup = int(getattr(self.config, "RIGHTSIZING_WARMUP_MINUTES", 0) or 0) * 60
             self.usage = summarize_rows(pod_rows, container_rows, step_seconds=step, warmup_seconds=warmup)
+        self._exclude_static_pods(self.usage)
         return self.usage
+
+    def _exclude_static_pods(self, snapshot: UsageSnapshot) -> None:
+        """Leaves static (mirror) pods out of the snapshot and records them (F-04, idempotent)."""
+        from greenkube.core.optimization.liveness import exclude_static_pods
+
+        excluded = exclude_static_pods(snapshot)
+        if excluded.targets:
+            self.static_pod_targets |= excluded.targets
+            self.static_pod_count += excluded.pod_count
 
     def workload_summaries(self) -> Iterator[Tuple[TargetKey, WorkloadUsageSummary]]:
         """Pod-level usage summary of every target."""

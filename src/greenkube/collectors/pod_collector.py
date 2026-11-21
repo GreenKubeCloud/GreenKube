@@ -11,6 +11,7 @@ from greenkube.collectors.base_collector import BaseCollector
 from greenkube.collectors.k8s_errors import KubernetesListError, list_all_pages
 from greenkube.core.config import config as global_config
 from greenkube.core.k8s_client import get_core_v1_api
+from greenkube.core.optimization.targeting import MIRROR_POD_ANNOTATION, STATIC_POD_OWNER_KIND
 from greenkube.models.metrics import PodMetric
 
 from ..utils.k8s_utils import parse_cpu_request, parse_memory_request, parse_storage_request
@@ -134,6 +135,14 @@ class PodCollector(BaseCollector):
                         if len(parts) == 2:
                             owner_kind = "Deployment"
                             owner_name = parts[0]
+
+                annotations = getattr(pod.metadata, "annotations", None) or {}
+                if owner_kind is None and isinstance(annotations, dict) and MIRROR_POD_ANNOTATION in annotations:
+                    # A static pod's mirror (older kubelets set no Node owner): attribute it to its
+                    # node, so it is recognized as a static pod and never advised on (F-04).
+                    node_name = getattr(pod.spec, "node_name", None)
+                    if node_name:
+                        owner_kind, owner_name = STATIC_POD_OWNER_KIND, node_name
 
                 uid = getattr(pod.metadata, "uid", None)
                 pod_uid = uid if isinstance(uid, str) and uid else None

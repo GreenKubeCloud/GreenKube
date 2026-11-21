@@ -9,6 +9,16 @@ from greenkube.models.metrics import CombinedMetric
 
 DEPLOYMENT_POD_NAME_RE = re.compile(r"^(?P<deployment>.+)-[a-z0-9]{8,10}-[a-z0-9]{5}$")
 
+#: Owner kind of a static pod's mirror pod (kubeadm, kind, minikube, k3s control planes, F-04).
+STATIC_POD_OWNER_KIND = "Node"
+#: Annotation the kubelet sets on the mirror pod of a static pod.
+MIRROR_POD_ANNOTATION = "kubernetes.io/config.mirror"
+
+
+def is_static_pod_kind(target_kind: Optional[str]) -> bool:
+    """True for the target of static (mirror) pods: their manifests live on the node, not in Git."""
+    return target_kind == STATIC_POD_OWNER_KIND
+
 
 def infer_deployment_target(pod_name: str) -> Tuple[str, str] | None:
     """Infer a Deployment target from the standard Deployment pod name format."""

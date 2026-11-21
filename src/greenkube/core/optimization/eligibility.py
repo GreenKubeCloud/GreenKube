@@ -31,7 +31,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
-from greenkube.automation.policy import AutomationPolicyConfig, AutomationPolicyEvaluator, AutomationPolicyResult
+from greenkube.automation.policy import (
+    RECOMMENDATION_GATES,
+    AutomationPolicyConfig,
+    AutomationPolicyEvaluator,
+    AutomationPolicyResult,
+)
 from greenkube.core.deletion_safety import DELETION_TYPES
 from greenkube.core.optimization.risks import (
     OOM_HISTORY_UNKNOWN,
@@ -81,7 +86,7 @@ ACTION_UNAVAILABLE_BY_KIND: Dict[str, Tuple[str, str]] = {
 }
 
 #: Policy gates evaluated locally (for every recommendation, with or without a binding).
-_LOCAL_GATES = frozenset({"maximum_risk", "minimum_confidence", "change_freeze_window", "sample_count_coverage"})
+_LOCAL_GATES = RECOMMENDATION_GATES
 #: Policy gates reported as warnings: an unapproved preview of the workload is reused or
 #: replaced when a new one is prepared (D6), so it must not hide the preview action.
 _WARNING_GATES = frozenset({"active_plan"})
@@ -303,6 +308,9 @@ class EligibilityContext:
     delivery_mode: str = field(default_factory=lambda: _configured_delivery_mode())
     #: Resource bindings (H0d) by (kind, namespace, name); None when they were not read.
     resource_bindings: Optional[Mapping[Tuple[str, str, str], Any]] = None
+    #: Recommendations by id, to evaluate the policy over every recommendation of a typed action
+    #: as plan creation does (F-07); None when only each record itself is known.
+    records_by_id: Optional[Mapping[int, Any]] = None
 
 
 def workload_key(record: Any) -> Optional[Tuple[str, str, str]]:
@@ -571,42 +579,69 @@ def _binding_blocker(binding: Optional[WorkloadBinding]) -> Optional[Dict[str, s
     return _entry(code, message)
 
 
-def _local_policy_blockers(record: Any, policy: AutomationPolicyConfig, now: datetime) -> List[Dict[str, str]]:
+def action_records(record: Any, recommendation_ids: Optional[Sequence[int]], ctx: "EligibilityContext") -> tuple:
+    """``(records, missing ids)``: every recommendation of the record's typed action, as plan creation reads them.
+
+    Plan creation evaluates the policy over all the recommendations its action
+    groups (a CPU and a memory change of one container share it), so eligibility
+    does too (F-07). Without ``ctx.records_by_id`` only the record itself is known.
+    """
+    if not recommendation_ids or ctx.records_by_id is None:
+        return [record], []
+    rec_id = getattr(record, "id", None)
+    records: List[Any] = []
+    missing: List[int] = []
+    for item in recommendation_ids:
+        found = record if item == rec_id else ctx.records_by_id.get(item)
+        if found is None:
+            missing.append(item)
+        else:
+            records.append(found)
+    return records, missing
+
+
+def _gate_blockers(records: Sequence[Any], ctx: "EligibilityContext", *, include_samples: bool) -> tuple:
+    """Blockers of the per-recommendation policy gates and the warm-up end, as plan creation decides them.
+
+    The decision is :func:`greenkube.automation.policy.evaluate_recommendation_gates`, the code
+    plan creation runs (F-07); a sample gate rejected for too little evidence is worded as
+    ``warming_up`` with the time it should pass (F7).
+    """
+    from greenkube.automation.policy import PolicyCheckState, evaluate_recommendation_gates, known_history_start
+
+    outcomes = evaluate_recommendation_gates(
+        records,
+        ctx.policy,
+        now=ctx.now,
+        history_start=known_history_start(),
+        step_seconds=ctx.step_seconds,
+        include_samples=include_samples,
+    )
     blockers: List[Dict[str, str]] = []
-    order = {"low": 0, "medium": 1, "high": 2}
-    risk = _text(getattr(record, "risk_level", None))
-    limit = policy.max_risk_level.value
-    if risk not in order:
-        blockers.append(_entry("policy_evidence_missing", "The recommendation has no risk level."))
-    elif order[risk] > order[limit]:
-        blockers.append(
-            _entry(
-                "policy_risk_exceeded",
-                f"Risk {risk} exceeds the automation policy maximum ({limit}).",
-            )
-        )
-    confidence = getattr(record, "confidence", None)
-    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
-        blockers.append(_entry("policy_evidence_missing", "The recommendation has no confidence score."))
-    elif confidence < policy.min_confidence:
-        blockers.append(
-            _entry(
-                "policy_confidence_too_low",
-                f"Confidence {confidence:.2f} is below the automation policy minimum ({policy.min_confidence:.2f}).",
-            )
-        )
-    for window in policy.change_freeze_windows:
-        if window.start <= now < window.end:
-            reason = f" ({window.reason})" if window.reason else ""
-            blockers.append(
-                _entry(
-                    "change_freeze_active",
-                    f"A change-freeze window is active until {window.end.isoformat()}{reason}.",
-                    "Wait until the freeze window ends.",
+    eligible_at: Optional[datetime] = None
+    # The evidence gate first: it says when the recommendation becomes eligible.
+    outcomes.sort(key=lambda outcome: outcome.gate != "sample_count_coverage")
+    for outcome in outcomes:
+        if outcome.state is not PolicyCheckState.REJECTED:
+            continue
+        code = outcome.code.value if outcome.code is not None else "policy_evidence_missing"
+        invalid = isinstance(outcome.observed, Mapping) and "missing_or_invalid_recommendation_ids" in outcome.observed
+        if outcome.gate == "sample_count_coverage":
+            pending = [
+                warm
+                for warm in (warm_up(item, ctx.policy, ctx.step_seconds, ctx.now) for item in records)
+                if warm[0] is not None and (warm[0]["code"] != "warming_up") is invalid
+            ]
+            if pending:
+                # The latest record to warm up decides; an unknown end (None) is the latest.
+                blocker, eligible_at = max(
+                    pending, key=lambda warm: warm[1] or datetime.max.replace(tzinfo=timezone.utc)
                 )
-            )
-            break
-    return blockers
+                blockers.append(blocker)
+                continue
+        message = outcome.detail if code != "policy_evidence_missing" and outcome.detail else outcome.message
+        blockers.append(_entry(code, message))
+    return blockers, eligible_at
 
 
 def _evaluator_entries(result: AutomationPolicyResult) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
@@ -708,13 +743,20 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
         if ctx.policy_error:
             blockers.append(_entry("policy_invalid", f"Invalid automation policy: {ctx.policy_error}"))
         else:
-            # A deletion's evidence is the minimum unused period, already required by its analyzer.
-            warm_blocker, eligible_at = (
-                (None, None) if deletion else warm_up(record, ctx.policy, ctx.step_seconds, ctx.now)
-            )
-            if warm_blocker:
-                blockers.append(warm_blocker)
-            blockers.extend(_local_policy_blockers(record, ctx.policy, ctx.now))
+            # The gates plan creation evaluates, over the same records (F-07). A deletion's
+            # evidence is the minimum unused period, already required by its analyzer.
+            group, missing = action_records(record, recommendation_ids, ctx)
+            if missing:
+                blockers.append(
+                    _entry(
+                        "policy_evidence_missing",
+                        "Recommendation(s) "
+                        + ", ".join(str(item) for item in missing)
+                        + " of the same change could not be read, so the policy cannot be checked.",
+                    )
+                )
+            gate_blockers, eligible_at = _gate_blockers(group, ctx, include_samples=not deletion)
+            blockers.extend(gate_blockers)
             result = ctx.policy_results.get(rec_id) if rec_id is not None else None
             if rec_id is not None and rec_id in ctx.policy_results and result is None:
                 blockers.append(_entry("policy_evaluation_unavailable"))
@@ -853,7 +895,9 @@ async def evaluate_policies(
             # Only records that could otherwise become a PR cost a plan-history read.
             continue
         try:
-            results[rec_id] = await evaluator.evaluate([record], binding.source)
+            group, missing = action_records(record, validate_action(record)[0], ctx)
+            # A missing record blocks in assess_eligibility; plan creation would evaluate none.
+            results[rec_id] = await evaluator.evaluate([] if missing else group, binding.source)
         except Exception as exc:
             logger.warning("Policy evaluation failed for recommendation %s: %s", rec_id, exc)
             results[rec_id] = None

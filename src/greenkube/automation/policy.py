@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any, Literal, Protocol, cast
@@ -462,83 +463,7 @@ class AutomationPolicyEvaluator:
                 if rejection not in rejections:
                     rejections.append(rejection)
 
-        risk_values = [_record_risk(record) for record in records]
-        missing_risk_ids = [record.id for record, risk in zip(records, risk_values, strict=True) if risk is None]
-        if not records or missing_risk_ids:
-            add_check(
-                "maximum_risk",
-                PolicyCheckState.REJECTED,
-                "Risk evidence is missing for one or more recommendations.",
-                observed={"missing_recommendation_ids": missing_risk_ids},
-                limit=self.config.max_risk_level.value,
-                code=AutomationErrorCode.POLICY_EVIDENCE_MISSING,
-                detail=("Refresh the affected recommendations so each has a risk level before planning or approval."),
-            )
-        else:
-            highest_risk = max((risk for risk in risk_values if risk is not None), key=_RISK_RANK.__getitem__)
-            if _RISK_RANK[highest_risk] > _RISK_RANK[self.config.max_risk_level]:
-                add_check(
-                    "maximum_risk",
-                    PolicyCheckState.REJECTED,
-                    "Recommendation risk exceeds the configured maximum.",
-                    observed=highest_risk.value,
-                    limit=self.config.max_risk_level.value,
-                    code=AutomationErrorCode.POLICY_RISK_EXCEEDED,
-                    detail=(
-                        f"Risk {highest_risk.value!r} exceeds the configured maximum "
-                        f"{self.config.max_risk_level.value!r}; lower the risk or adjust policy."
-                    ),
-                )
-            else:
-                add_check(
-                    "maximum_risk",
-                    PolicyCheckState.PASSED,
-                    "Recommendation risk is within the configured maximum.",
-                    observed=highest_risk.value,
-                    limit=self.config.max_risk_level.value,
-                )
-
-        confidence_values = [_record_confidence(record) for record in records]
-        missing_confidence_ids = [
-            record.id for record, confidence in zip(records, confidence_values, strict=True) if confidence is None
-        ]
-        if not records or missing_confidence_ids:
-            add_check(
-                "minimum_confidence",
-                PolicyCheckState.REJECTED,
-                "Confidence evidence is missing for one or more recommendations.",
-                observed={"missing_recommendation_ids": missing_confidence_ids},
-                limit=self.config.min_confidence,
-                code=AutomationErrorCode.POLICY_EVIDENCE_MISSING,
-                detail=(
-                    "Refresh the affected recommendations so each has a confidence score before planning or approval."
-                ),
-            )
-        else:
-            lowest_confidence = min(value for value in confidence_values if value is not None)
-            if lowest_confidence < self.config.min_confidence:
-                add_check(
-                    "minimum_confidence",
-                    PolicyCheckState.REJECTED,
-                    "Recommendation confidence is below the configured minimum.",
-                    observed=lowest_confidence,
-                    limit=self.config.min_confidence,
-                    code=AutomationErrorCode.POLICY_CONFIDENCE_TOO_LOW,
-                    detail=(
-                        f"Confidence {lowest_confidence:.3f} is below the configured minimum "
-                        f"{self.config.min_confidence:.3f}; collect stronger evidence before retrying."
-                    ),
-                )
-            else:
-                add_check(
-                    "minimum_confidence",
-                    PolicyCheckState.PASSED,
-                    "Recommendation confidence meets the configured minimum.",
-                    observed=lowest_confidence,
-                    limit=self.config.min_confidence,
-                )
-
-        self._evaluate_freeze_windows(now, add_check)
+        evaluate_risk_confidence_freeze(records, self.config, now, add_check)
         self._evaluate_freeze_labels(source, add_check)
 
         def add_missing_evidence(gate: str, message: str, detail: str) -> None:
@@ -671,37 +596,7 @@ class AutomationPolicyEvaluator:
         )
 
     def _evaluate_freeze_windows(self, now: datetime, add_check) -> None:
-        active = [window for window in self.config.change_freeze_windows if window.start <= now < window.end]
-        if active:
-            window = active[0]
-            add_check(
-                "change_freeze_window",
-                PolicyCheckState.REJECTED,
-                "A configured change-freeze window is active.",
-                observed={
-                    "start": window.start.isoformat(),
-                    "end": window.end.isoformat(),
-                    "reason": window.reason,
-                },
-                code=AutomationErrorCode.CHANGE_FREEZE_ACTIVE,
-                detail=(
-                    f"A configured change-freeze window is active until {window.end.isoformat()}; retry after it ends."
-                ),
-            )
-        elif self.config.change_freeze_windows:
-            add_check(
-                "change_freeze_window",
-                PolicyCheckState.PASSED,
-                "No configured change-freeze window is active.",
-                observed=now.isoformat(),
-                limit=[window.model_dump(mode="json") for window in self.config.change_freeze_windows],
-            )
-        else:
-            add_check(
-                "change_freeze_window",
-                PolicyCheckState.NOT_CONFIGURED,
-                "No change-freeze windows are configured.",
-            )
+        evaluate_freeze_windows(self.config, now, add_check)
 
     def _evaluate_freeze_labels(
         self,
@@ -903,75 +798,9 @@ class AutomationPolicyEvaluator:
         else:
             self._evaluate_legacy_interaction_gate(evidence, add_check, add_missing_evidence)
 
-        sample_evidence: list[dict[str, Any]] = []
-        invalid_sample_ids: list[int | None] = []
-        for record in records:
-            evidence = record.evidence
-            if evidence is None:
-                invalid_sample_ids.append(record.id)
-                continue
-            sample_count = evidence.sample_count
-            coverage = evidence.coverage_ratio
-            if (
-                type(sample_count) is not int
-                or sample_count < 0
-                or isinstance(coverage, bool)
-                or not isinstance(coverage, (int, float))
-                or not math.isfinite(coverage)
-                or not 0 <= coverage <= 1
-            ):
-                invalid_sample_ids.append(record.id)
-                continue
-            sample_evidence.append(
-                {
-                    "recommendation_id": record.id,
-                    "sample_count": sample_count,
-                    "coverage_ratio": coverage,
-                    # minCoverage is evaluated against the data available since install (F7).
-                    "coverage_since_install": round(coverage_since_history(evidence, history_start, step_seconds), 4),
-                }
-            )
-
-        if not records or invalid_sample_ids:
-            add_check(
-                "sample_count_coverage",
-                PolicyCheckState.REJECTED,
-                "Recommendation sample and coverage evidence is missing or invalid.",
-                observed={"missing_or_invalid_recommendation_ids": invalid_sample_ids},
-                limit={
-                    "min_samples": self.config.min_samples,
-                    "min_coverage": self.config.min_coverage,
-                },
-                code=AutomationErrorCode.POLICY_EVIDENCE_MISSING,
-                detail="Refresh the affected recommendations to collect valid sample and coverage evidence.",
-            )
-        else:
-            below_threshold = [
-                item
-                for item in sample_evidence
-                if item["sample_count"] < self.config.min_samples
-                or item["coverage_since_install"] < self.config.min_coverage
-            ]
-            add_check(
-                "sample_count_coverage",
-                PolicyCheckState.REJECTED if below_threshold else PolicyCheckState.PASSED,
-                (
-                    "Recommendation sample count or coverage is below the configured minimum."
-                    if below_threshold
-                    else "Recommendation sample count and coverage meet the configured minimums."
-                ),
-                observed=sample_evidence,
-                limit={
-                    "min_samples": self.config.min_samples,
-                    "min_coverage": self.config.min_coverage,
-                },
-                code=AutomationErrorCode.POLICY_EVIDENCE_MISSING if below_threshold else None,
-                detail=(
-                    "Collect more samples or improve metric coverage before creating or approving this plan."
-                    if below_threshold
-                    else None
-                ),
-            )
+        evaluate_sample_coverage(
+            records, self.config, add_check, history_start=history_start, step_seconds=step_seconds
+        )
 
     def _evaluate_hpa_gate(
         self,
@@ -1257,7 +1086,7 @@ class AutomationPolicyEvaluator:
 
 
 def _record_risk(record: RecommendationRecord) -> RiskLevel | None:
-    value: Any = record.risk_level
+    value: Any = getattr(record, "risk_level", None)
     if value is None:
         return None
     if isinstance(value, RiskLevel):
@@ -1271,9 +1100,10 @@ def _record_risk(record: RecommendationRecord) -> RiskLevel | None:
 
 
 def _record_confidence(record: RecommendationRecord) -> float | None:
-    value: Any = record.confidence
-    if value is None and record.evidence is not None:
-        value = record.evidence.confidence
+    value: Any = getattr(record, "confidence", None)
+    evidence = getattr(record, "evidence", None)
+    if value is None and evidence is not None:
+        value = getattr(evidence, "confidence", None)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     confidence = float(value)
@@ -1447,3 +1277,280 @@ def _resource_bound(records: Sequence[RecommendationRecord]) -> bool:
 
     specs = [action_kind_of(record.action) if record.action is not None else None for record in records]
     return bool(specs) and all(spec is not None and spec.binding_scope == "resource" for spec in specs)
+
+
+# --------------------------------------------------------------------------- per-recommendation gates (F-07)
+#
+# The gates that depend only on the recommendations and the policy (risk,
+# confidence, change-freeze windows, sample count and coverage) are module
+# functions: plan creation (``AutomationPolicyEvaluator``) and the displayed
+# delivery eligibility (``core.optimization.eligibility``) call the same code on
+# the same records (every recommendation of the typed action), so a
+# recommendation shown as eligible is never refused by plan creation for them.
+
+#: Gates :func:`evaluate_recommendation_gates` decides.
+RECOMMENDATION_GATES = frozenset(
+    {"maximum_risk", "minimum_confidence", "change_freeze_window", "sample_count_coverage"}
+)
+
+
+class AddCheck(Protocol):
+    """Callback that records one gate outcome (the evaluator's ``add_check``)."""
+
+    def __call__(
+        self,
+        gate: str,
+        state: PolicyCheckState,
+        message: str,
+        *,
+        observed: Any = None,
+        limit: Any = None,
+        code: AutomationErrorCode | None = None,
+        detail: str | None = None,
+    ) -> None: ...
+
+
+def evaluate_risk_confidence_freeze(
+    records: Sequence[RecommendationRecord], config: AutomationPolicyConfig, now: datetime, add_check: AddCheck
+) -> None:
+    """The ``maximum_risk``, ``minimum_confidence`` and ``change_freeze_window`` gates over ``records``."""
+    risk_values = [_record_risk(record) for record in records]
+    missing_risk_ids = [record.id for record, risk in zip(records, risk_values, strict=True) if risk is None]
+    if not records or missing_risk_ids:
+        add_check(
+            "maximum_risk",
+            PolicyCheckState.REJECTED,
+            "Risk evidence is missing for one or more recommendations.",
+            observed={"missing_recommendation_ids": missing_risk_ids},
+            limit=config.max_risk_level.value,
+            code=AutomationErrorCode.POLICY_EVIDENCE_MISSING,
+            detail=("Refresh the affected recommendations so each has a risk level before planning or approval."),
+        )
+    else:
+        highest_risk = max((risk for risk in risk_values if risk is not None), key=_RISK_RANK.__getitem__)
+        if _RISK_RANK[highest_risk] > _RISK_RANK[config.max_risk_level]:
+            add_check(
+                "maximum_risk",
+                PolicyCheckState.REJECTED,
+                "Recommendation risk exceeds the configured maximum.",
+                observed=highest_risk.value,
+                limit=config.max_risk_level.value,
+                code=AutomationErrorCode.POLICY_RISK_EXCEEDED,
+                detail=(
+                    f"Risk {highest_risk.value!r} exceeds the configured maximum "
+                    f"{config.max_risk_level.value!r}; lower the risk or adjust policy."
+                ),
+            )
+        else:
+            add_check(
+                "maximum_risk",
+                PolicyCheckState.PASSED,
+                "Recommendation risk is within the configured maximum.",
+                observed=highest_risk.value,
+                limit=config.max_risk_level.value,
+            )
+
+    confidence_values = [_record_confidence(record) for record in records]
+    missing_confidence_ids = [
+        record.id for record, confidence in zip(records, confidence_values, strict=True) if confidence is None
+    ]
+    if not records or missing_confidence_ids:
+        add_check(
+            "minimum_confidence",
+            PolicyCheckState.REJECTED,
+            "Confidence evidence is missing for one or more recommendations.",
+            observed={"missing_recommendation_ids": missing_confidence_ids},
+            limit=config.min_confidence,
+            code=AutomationErrorCode.POLICY_EVIDENCE_MISSING,
+            detail=("Refresh the affected recommendations so each has a confidence score before planning or approval."),
+        )
+    else:
+        lowest_confidence = min(value for value in confidence_values if value is not None)
+        if lowest_confidence < config.min_confidence:
+            add_check(
+                "minimum_confidence",
+                PolicyCheckState.REJECTED,
+                "Recommendation confidence is below the configured minimum.",
+                observed=lowest_confidence,
+                limit=config.min_confidence,
+                code=AutomationErrorCode.POLICY_CONFIDENCE_TOO_LOW,
+                detail=(
+                    f"Confidence {lowest_confidence:.3f} is below the configured minimum "
+                    f"{config.min_confidence:.3f}; collect stronger evidence before retrying."
+                ),
+            )
+        else:
+            add_check(
+                "minimum_confidence",
+                PolicyCheckState.PASSED,
+                "Recommendation confidence meets the configured minimum.",
+                observed=lowest_confidence,
+                limit=config.min_confidence,
+            )
+    evaluate_freeze_windows(config, now, add_check)
+
+
+def evaluate_freeze_windows(config: AutomationPolicyConfig, now: datetime, add_check: AddCheck) -> None:
+    """The ``change_freeze_window`` gate."""
+    active = [window for window in config.change_freeze_windows if window.start <= now < window.end]
+    if active:
+        window = active[0]
+        add_check(
+            "change_freeze_window",
+            PolicyCheckState.REJECTED,
+            "A configured change-freeze window is active.",
+            observed={
+                "start": window.start.isoformat(),
+                "end": window.end.isoformat(),
+                "reason": window.reason,
+            },
+            code=AutomationErrorCode.CHANGE_FREEZE_ACTIVE,
+            detail=(
+                f"A configured change-freeze window is active until {window.end.isoformat()}; retry after it ends."
+            ),
+        )
+    elif config.change_freeze_windows:
+        add_check(
+            "change_freeze_window",
+            PolicyCheckState.PASSED,
+            "No configured change-freeze window is active.",
+            observed=now.isoformat(),
+            limit=[window.model_dump(mode="json") for window in config.change_freeze_windows],
+        )
+    else:
+        add_check(
+            "change_freeze_window",
+            PolicyCheckState.NOT_CONFIGURED,
+            "No change-freeze windows are configured.",
+        )
+
+
+def evaluate_sample_coverage(
+    records: Sequence[RecommendationRecord],
+    config: AutomationPolicyConfig,
+    add_check: AddCheck,
+    *,
+    history_start: datetime | None,
+    step_seconds: int,
+) -> None:
+    """The ``sample_count_coverage`` gate: valid evidence on every record, above ``minSamples``/``minCoverage``.
+
+    ``minCoverage`` is evaluated against the data available since install (F7).
+    """
+    sample_evidence: list[dict[str, Any]] = []
+    invalid_sample_ids: list[int | None] = []
+    for record in records:
+        evidence = getattr(record, "evidence", None)
+        if evidence is None:
+            invalid_sample_ids.append(record.id)
+            continue
+        sample_count = getattr(evidence, "sample_count", None)
+        coverage = getattr(evidence, "coverage_ratio", None)
+        if (
+            type(sample_count) is not int
+            or sample_count < 0
+            or isinstance(coverage, bool)
+            or not isinstance(coverage, (int, float))
+            or not math.isfinite(coverage)
+            or not 0 <= coverage <= 1
+        ):
+            invalid_sample_ids.append(record.id)
+            continue
+        sample_evidence.append(
+            {
+                "recommendation_id": record.id,
+                "sample_count": sample_count,
+                "coverage_ratio": coverage,
+                # minCoverage is evaluated against the data available since install (F7).
+                "coverage_since_install": round(coverage_since_history(evidence, history_start, step_seconds), 4),
+            }
+        )
+
+    if not records or invalid_sample_ids:
+        add_check(
+            "sample_count_coverage",
+            PolicyCheckState.REJECTED,
+            "Recommendation sample and coverage evidence is missing or invalid.",
+            observed={"missing_or_invalid_recommendation_ids": invalid_sample_ids},
+            limit={
+                "min_samples": config.min_samples,
+                "min_coverage": config.min_coverage,
+            },
+            code=AutomationErrorCode.POLICY_EVIDENCE_MISSING,
+            detail="Refresh the affected recommendations to collect valid sample and coverage evidence.",
+        )
+    else:
+        below_threshold = [
+            item
+            for item in sample_evidence
+            if item["sample_count"] < config.min_samples or item["coverage_since_install"] < config.min_coverage
+        ]
+        add_check(
+            "sample_count_coverage",
+            PolicyCheckState.REJECTED if below_threshold else PolicyCheckState.PASSED,
+            (
+                "Recommendation sample count or coverage is below the configured minimum."
+                if below_threshold
+                else "Recommendation sample count and coverage meet the configured minimums."
+            ),
+            observed=sample_evidence,
+            limit={
+                "min_samples": config.min_samples,
+                "min_coverage": config.min_coverage,
+            },
+            code=AutomationErrorCode.POLICY_EVIDENCE_MISSING if below_threshold else None,
+            detail=(
+                "Collect more samples or improve metric coverage before creating or approving this plan."
+                if below_threshold
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class GateOutcome:
+    """One gate decision of :func:`evaluate_recommendation_gates`."""
+
+    gate: str
+    state: PolicyCheckState
+    message: str
+    observed: Any = None
+    limit: Any = None
+    code: AutomationErrorCode | None = None
+    detail: str | None = None
+
+
+def evaluate_recommendation_gates(
+    records: Sequence[RecommendationRecord],
+    config: AutomationPolicyConfig,
+    *,
+    now: datetime,
+    history_start: datetime | None,
+    step_seconds: int,
+    include_samples: bool = True,
+) -> list[GateOutcome]:
+    """Risk, confidence, freeze-window and sample-coverage gates, exactly as plan creation evaluates them.
+
+    ``records`` are every recommendation of the typed action (plan creation
+    evaluates them together). ``include_samples`` is False for actions bound
+    to a resource rather than a workload (deletions), whose evidence is the
+    one their analyzer required.
+    """
+    outcomes: list[GateOutcome] = []
+
+    def collect(
+        gate: str,
+        state: PolicyCheckState,
+        message: str,
+        *,
+        observed: Any = None,
+        limit: Any = None,
+        code: AutomationErrorCode | None = None,
+        detail: str | None = None,
+    ) -> None:
+        outcomes.append(GateOutcome(gate, state, message, observed, limit, code, detail))
+
+    evaluate_risk_confidence_freeze(records, config, ensure_utc(now), collect)
+    if include_samples:
+        evaluate_sample_coverage(records, config, collect, history_start=history_start, step_seconds=step_seconds)
+    return outcomes

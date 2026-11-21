@@ -124,6 +124,47 @@ def filter_live_targets(
     return report
 
 
+@dataclass
+class StaticPodExclusion:
+    """Static (mirror) pods :func:`exclude_static_pods` left out of a snapshot (F-04, REC-09)."""
+
+    targets: Set[TargetKey] = field(default_factory=set)
+    #: Distinct static pods behind those targets (one per control-plane component and node).
+    pod_count: int = 0
+
+
+def exclude_static_pods(snapshot: UsageSnapshot) -> StaticPodExclusion:
+    """Removes the targets of static pods (owner kind ``Node``) from ``snapshot``.
+
+    The mirror pod of a static pod (etcd, kube-apiserver, scheduler and
+    controller-manager on kubeadm, kind, minikube or k3s) is owned by its Node,
+    so the rollup merges a node's static pods into one target ``Node/<node>``.
+    Its manifests live in the node's manifest directory, never in Git, and the
+    merged statistics mix unrelated components: no analyzer may advise on it.
+    The pod count of a target is its pod-level ``replicas_max`` (the static
+    pods observed together in one hour), or its container count when larger.
+    """
+    from greenkube.core.optimization.targeting import is_static_pod_kind
+
+    report = StaticPodExclusion()
+    for target in [target for target in snapshot.summaries if is_static_pod_kind(target[1])]:
+        containers = snapshot.summaries.pop(target)
+        pod_level = containers.get(POD_LEVEL)
+        replicas = int(getattr(pod_level, "replicas_max", 0) or 0) if pod_level is not None else 0
+        named = len([name for name in containers if name != POD_LEVEL])
+        report.pod_count += max(replicas, named, 1)
+        report.targets.add(target)
+        snapshot.hour_profiles.pop(target, None)
+        snapshot.hour_profile_samples.pop(target, None)
+    if report.targets:
+        logger.info(
+            "Static pods: %d pod(s) on %d node(s) left out of the analyzers (manifests on the node, not in Git).",
+            report.pod_count,
+            len(report.targets),
+        )
+    return report
+
+
 def needs_controller_check(
     snapshot: UsageSnapshot,
     *,

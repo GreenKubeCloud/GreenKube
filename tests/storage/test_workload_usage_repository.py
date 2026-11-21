@@ -205,6 +205,9 @@ async def test_sql_snapshot_matches_the_reference_summary(db):
             assert actual.sample_count == expected.sample_count
             assert actual.step_count == expected.step_count
             assert actual.replicas_max == expected.replicas_max
+            assert actual.replicas_latest == expected.replicas_latest
+            assert actual.cpu_p95_hour_max == pytest.approx(expected.cpu_p95_hour_max)
+            assert actual.memory_p95_hour_max == pytest.approx(expected.memory_p95_hour_max)
             assert actual.cpu_request == expected.cpu_request
             assert actual.cpu_limit == expected.cpu_limit
             assert actual.total_cost == pytest.approx(expected.total_cost, rel=1e-5)
@@ -793,3 +796,174 @@ async def test_config_since_is_the_start_of_the_last_hour_with_other_requests_on
         web = summaries[("shop", "Deployment", "api")]["web"]
         assert web.memory_config_since == start + timedelta(hours=1)
         assert web.resources_config_since == start + timedelta(hours=3)
+
+
+async def test_risk_profile_counts_the_replicas_of_a_rolled_up_statefulset(db):
+    """F-08: a 3-replica StatefulSet scanned from the rollup is no singleton (and a 1-replica one is)."""
+    from greenkube.core.optimization.context import OptimizationContext
+    from greenkube.core.optimization.enrich import build_risk_profile
+    from greenkube.core.optimization.risks import assess
+    from greenkube.models.metrics import Recommendation, RecommendationType
+
+    start = _base_hour()
+    rows: list[CombinedMetric] = []
+    for hour in range(3):
+        for step in range(12):
+            ts = start + timedelta(hours=hour, minutes=5 * step)
+            for index in range(3):
+                for container in (None, "volume"):
+                    rows.append(
+                        _row(
+                            ts,
+                            pod_name=f"seaweedfs-volume-{index}",
+                            namespace="storage",
+                            owner_kind="StatefulSet",
+                            owner_name="seaweedfs-volume",
+                            node=f"node-{index}",
+                            container_name=container,
+                        )
+                    )
+            for container in (None, "db"):
+                rows.append(
+                    _row(
+                        ts,
+                        pod_name="solo-0",
+                        namespace="storage",
+                        owner_kind="StatefulSet",
+                        owner_name="solo",
+                        container_name=container,
+                    )
+                )
+    repository, _ = await _rolled(db, rows, start, hours=3)
+    window = (start, start + timedelta(hours=3))
+    snapshot = await repository.read_usage_snapshot(*window)
+    pods, containers = await repository.read_baseline_rows(*window, snapshot=snapshot)
+    context = OptimizationContext(
+        config=Config(), metrics=list(pods), container_metrics=list(containers), usage=snapshot
+    )
+
+    def _rec(name: str, container: str) -> Recommendation:
+        return Recommendation(
+            pod_name=name,
+            container_name=container,
+            namespace="storage",
+            type=RecommendationType.RIGHTSIZING_CPU,
+            scope="workload",
+            owner_kind="StatefulSet",
+            owner_name=name,
+            description="reduce cpu",
+            current_cpu_request_millicores=500,
+            recommended_cpu_request_millicores=200,
+        )
+
+    replicated = _rec("seaweedfs-volume", "volume")
+    profile = build_risk_profile(replicated, context)
+    assert profile.replicas == 3
+    assert "singleton_workload" not in assess(replicated, None, Config(), profile).risk_factors
+    single = _rec("solo", "db")
+    profile = build_risk_profile(single, context)
+    assert profile.replicas == 1
+    assert "singleton_workload" in assess(single, None, Config(), profile).risk_factors
+
+
+@pytest.mark.parametrize("new_node", ["node-a", "node-b"], ids=["same_node", "rescheduled"])
+async def test_a_singleton_replaced_during_its_last_hour_stays_a_singleton(db, new_node):
+    """Review of F-08: a rollout in the last hour (two pod names in it) must not hide singleton_workload."""
+    from greenkube.core.optimization.context import OptimizationContext
+    from greenkube.core.optimization.enrich import build_risk_profile
+    from greenkube.core.optimization.risks import assess
+    from greenkube.models.metrics import Recommendation, RecommendationType
+
+    start = _base_hour()
+    rows: list[CombinedMetric] = []
+    for hour in range(3):
+        for step in range(12):
+            ts = start + timedelta(hours=hour, minutes=5 * step)
+            # The pod is replaced halfway through the last hour (GreenKube's own merged PR does this).
+            replaced = hour == 2 and step >= 6
+            pod, node = ("api-5f6d7c8b9-new01", new_node) if replaced else ("api-7d9f8b6c5d-old01", "node-a")
+            for container in (None, "api"):
+                rows.append(_row(ts, pod_name=pod, node=node, container_name=container))
+    repository, _ = await _rolled(db, rows, start, hours=3)
+    window = (start, start + timedelta(hours=3))
+    snapshot = await repository.read_usage_snapshot(*window)
+    pods, containers = await repository.read_baseline_rows(*window, snapshot=snapshot)
+    context = OptimizationContext(
+        config=Config(), metrics=list(pods), container_metrics=list(containers), usage=snapshot
+    )
+    rec = Recommendation(
+        pod_name="api",
+        container_name="api",
+        namespace="shop",
+        type=RecommendationType.RIGHTSIZING_CPU,
+        scope="workload",
+        owner_kind="Deployment",
+        owner_name="api",
+        description="reduce cpu",
+        current_cpu_request_millicores=500,
+        recommended_cpu_request_millicores=200,
+    )
+
+    profile = build_risk_profile(rec, context)
+
+    assert snapshot.summaries[("shop", "Deployment", "api")][""].replicas_latest == 1
+    assert profile.replicas == 1
+    assert "singleton_workload" in assess(rec, None, Config(), profile).risk_factors
+
+
+async def test_a_spiky_replica_flags_a_proposal_on_the_rollup_path_as_on_the_rows_path(db):
+    """Review of F-08: the per-replica p95 guard must not read pseudo-pod averages on the rollup path."""
+    from greenkube.core.optimization.context import OptimizationContext
+    from greenkube.core.optimization.enrich import build_risk_profile
+    from greenkube.core.optimization.risks import assess
+    from greenkube.models.metrics import Recommendation, RecommendationType
+
+    start = _base_hour()
+    rows: list[CombinedMetric] = []
+    for hour in range(3):
+        for step in range(12):
+            ts = start + timedelta(hours=hour, minutes=5 * step)
+            for replica, node in (("api-7d9f8b6c5d-aaaaa", "node-a"), ("api-7d9f8b6c5d-bbbbb", "node-b")):
+                spike = replica.endswith("bbbbb") and step % 3 == 0  # a third of its samples at 1000m
+                usage = 1000 if spike else 100
+                rows.append(_row(ts, pod_name=replica, node=node, cpu_usage_millicores=usage, cpu_request=2000))
+                rows.append(
+                    _row(
+                        ts,
+                        pod_name=replica,
+                        node=None,
+                        container_name="web",
+                        cpu_usage_millicores=usage,
+                        cpu_request=2000,
+                    )
+                )
+    vpa = Recommendation(
+        pod_name="api",
+        container_name="web",
+        namespace="shop",
+        type=RecommendationType.RIGHTSIZING_CPU,
+        scope="workload",
+        owner_kind="Deployment",
+        owner_name="api",
+        source="vpa",
+        description="VPA target 600m",
+        current_cpu_request_millicores=2000,
+        recommended_cpu_request_millicores=600,
+    )
+    rows_context = OptimizationContext(config=Config(), container_metrics=[row for row in rows if row.container_name])
+    assert (
+        "replica_p95_exceeds_proposal"
+        in assess(vpa, None, Config(), build_risk_profile(vpa, rows_context)).risk_factors
+    )
+
+    repository, _ = await _rolled(db, rows, start, hours=3)
+    window = (start, start + timedelta(hours=3))
+    snapshot = await repository.read_usage_snapshot(*window)
+    pods, containers = await repository.read_baseline_rows(*window, snapshot=snapshot)
+    rollup_context = OptimizationContext(
+        config=Config(), metrics=list(pods), container_metrics=list(containers), usage=snapshot
+    )
+    profile = build_risk_profile(vpa, rollup_context)
+
+    assert profile.replica_cpu_p95_max is not None and profile.replica_cpu_p95_max >= 1000
+    assert "replica_p95_exceeds_proposal" in assess(vpa, None, Config(), profile).risk_factors

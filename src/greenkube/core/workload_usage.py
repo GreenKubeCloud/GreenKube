@@ -210,6 +210,9 @@ class _SyntheticPodRow:
 @dataclass
 class _HourAccumulator:
     pods: set = field(default_factory=set)
+    #: Latest sample time of each pod of the hour (replicas at the latest step, F-08).
+    pod_latest: Dict[Any, float] = field(default_factory=dict)
+    step_seconds: float = 0.0
     steps: Dict[Any, int] = field(default_factory=dict)
     sample_count: int = 0
     duration_seconds: float = 0.0
@@ -253,7 +256,12 @@ class _HourAccumulator:
     def add(self, row: Any, step_seconds: float, warm: bool = False, restart_delta: Optional[int] = None) -> None:
         weight = _weight(row)
         timestamp = getattr(row, "timestamp", None)
-        self.pods.add(getattr(row, "pod_name", None))
+        pod_name = getattr(row, "pod_name", None)
+        self.pods.add(pod_name)
+        self.step_seconds = step_seconds
+        if isinstance(timestamp, datetime):
+            stamp = timestamp.timestamp()
+            self.pod_latest[pod_name] = max(self.pod_latest.get(pod_name, stamp), stamp)
         self.steps[timestamp] = max(self.steps.get(timestamp, 0), weight)
         self.sample_count += weight
         duration = _number(getattr(row, "duration_seconds", None))
@@ -318,6 +326,18 @@ class _HourAccumulator:
         self.zones.append(getattr(row, "emaps_zone", None))
         self.instance_types.append(getattr(row, "node_instance_type", None))
 
+    def _latest_pod_count(self) -> int:
+        """Pods whose latest sample is within half a step of the hour's latest sample (F-08).
+
+        Mirrors ``_current_replicas`` on the rows path: a pod a rollout replaced
+        earlier in the hour is not a replica of the latest step.
+        """
+        if not self.pod_latest:
+            return len(self.pods)
+        latest = max(self.pod_latest.values())
+        tolerance = max(self.step_seconds, 0.0) / 2
+        return sum(1 for seen in self.pod_latest.values() if latest - seen <= tolerance) or len(self.pods)
+
     def _latest(self, name: str, *, optional: bool) -> Optional[int]:
         values = [_number(getattr(row, name, None)) for row in self.latest_rows]
         present = [value for value in values if value is not None]
@@ -346,6 +366,7 @@ class _HourAccumulator:
             hour_of_day=bucket.hour if bucket is not None else None,
             sample_count=self.sample_count,
             pod_count=len(self.pods),
+            latest_pod_count=self._latest_pod_count(),
             step_count=sum(self.steps.values()),
             duration_seconds=self.duration_seconds,
             cpu_sample_count=self.cpu_weight,
@@ -654,6 +675,8 @@ class _HourTotals:
     memory_limit: Optional[int] = None
     #: Latest-sample offset of the node rows whose requests and limits are kept.
     latest_offset: Optional[float] = None
+    #: ``(latest-sample offset, pods at that sample)`` of each node row (F-08).
+    latest_pods: List[Tuple[float, int]] = field(default_factory=list)
     restart_count: Optional[int] = None
     #: Sum of the node rows' per-pod restart increases (None when no row carries one).
     restart_increase: Optional[int] = None
@@ -666,6 +689,35 @@ class _HourTotals:
     intensity_sum: float = 0.0
     intensity_n: int = 0
     emaps_zone: Optional[str] = None
+
+
+def latest_step_tolerance_seconds() -> int:
+    """Half the configured sampling step: node rows of one hour whose latest samples are this close
+    to the hour's newest are the same step (the SQL summary inlines the same value, F-08)."""
+    from greenkube.core.config import get_config
+    from greenkube.utils.time import parse_query_step_seconds
+
+    try:
+        step = parse_query_step_seconds(str(getattr(get_config(), "PROMETHEUS_QUERY_RANGE_STEP", "") or "5m"))
+    except Exception:
+        step = 300
+    return max(int(step) // 2, 0)
+
+
+def _replicas_at_latest_step(totals: "_HourTotals") -> int:
+    """Pods of the hour's latest step, all nodes merged: node rows whose latest sample is within
+    half a step of the newest one (a pod a rollout moved to another node earlier in the hour is
+    not counted)."""
+    if not totals.latest_pods:
+        return totals.pod_count
+    newest = max(offset for offset, _ in totals.latest_pods)
+    tolerance = latest_step_tolerance_seconds()
+    return sum(count for offset, count in totals.latest_pods if newest - offset <= tolerance)
+
+
+def _highest(values: Iterable[Optional[float]]) -> Optional[float]:
+    present = [value for value in values if value is not None]
+    return max(present) if present else None
 
 
 def _max_optional(left: Optional[float], right: Optional[float]) -> Optional[float]:
@@ -695,6 +747,8 @@ def _merge_hour(totals: _HourTotals, hour: WorkloadUsageHour) -> None:
     # Requests and limits come from the node row with the newest sample (a pod
     # moved to another node by a rollout), the highest on a tie or without offsets.
     offset = hour.latest_sample_offset_seconds if hour.latest_sample_offset_seconds is not None else -1.0
+    pods_at_latest = hour.latest_pod_count if hour.latest_pod_count is not None else hour.pod_count
+    totals.latest_pods.append((offset, pods_at_latest))
     if totals.latest_offset is None or offset > totals.latest_offset:
         totals.latest_offset = offset
         totals.cpu_request = hour.cpu_request or 0
@@ -814,6 +868,9 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             step_count=sum(item.step_count for item in ordered),
             duration_seconds=sum(item.duration_seconds for item in ordered),
             replicas_max=max(item.pod_count for item in ordered),
+            replicas_latest=_replicas_at_latest_step(ordered[-1]),
+            cpu_p95_hour_max=_highest((item.cpu_p.get(95) for item in ordered if item.cpu_n)),
+            memory_p95_hour_max=_highest((item.memory_p.get(95) for item in ordered if item.memory_n)),
             cpu=_stats(
                 sum(item.cpu_n for item in ordered),
                 sum(item.cpu_sum for item in ordered),

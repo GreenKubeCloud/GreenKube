@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Collection, Dict, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, Collection, Dict, List, Mapping, Optional, Sequence
 
 from ..models.metrics import (
     ApplyRecommendationRequest,
@@ -1000,6 +1000,18 @@ class RecommendationRepository(ABC):
             A list of matching RecommendationRecord objects.
         """
         pass
+
+    async def get_recommendations_by_ids(self, rec_ids: Sequence[int]) -> List[RecommendationRecord]:
+        """Returns the recommendations with these database IDs (unknown IDs are skipped).
+
+        The SQL repositories read them in one query; this default reads them one by one.
+        """
+        records: List[RecommendationRecord] = []
+        for rec_id in dict.fromkeys(rec_ids):
+            record = await self.get_recommendation_by_id(rec_id)
+            if record is not None:
+                records.append(record)
+        return records
 
     @abstractmethod
     async def get_recommendation_by_id(self, rec_id: int) -> Optional[RecommendationRecord]:
