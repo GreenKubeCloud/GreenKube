@@ -58,6 +58,22 @@ BEGIN
     );
 END;
 
+CREATE TRIGGER IF NOT EXISTS trg_node_idle_metrics_dirty_update_old
+AFTER UPDATE ON node_idle_metrics
+WHEN OLD."timestamp" < (SELECT compressed_until FROM metrics_compression_watermarks WHERE table_name = 'node_idle_metrics')
+    AND OLD."timestamp" >= COALESCE(
+        (SELECT raw_pruned_until FROM metrics_compression_watermarks WHERE table_name = 'node_idle_metrics'), ''
+    )
+    AND strftime('%Y-%m-%dT%H:00:00Z', OLD."timestamp") <> strftime('%Y-%m-%dT%H:00:00Z', NEW."timestamp")
+BEGIN
+    INSERT INTO metrics_dirty_hours (table_name, hour_bucket)
+    SELECT 'node_idle_metrics', strftime('%Y-%m-%dT%H:00:00Z', OLD."timestamp")
+    WHERE NOT EXISTS (
+        SELECT 1 FROM metrics_dirty_hours
+        WHERE table_name = 'node_idle_metrics' AND hour_bucket = strftime('%Y-%m-%dT%H:00:00Z', OLD."timestamp")
+    );
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_node_idle_metrics_dirty_delete
 AFTER DELETE ON node_idle_metrics
 WHEN OLD."timestamp" < (SELECT compressed_until FROM metrics_compression_watermarks WHERE table_name = 'node_idle_metrics')
