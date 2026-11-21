@@ -120,7 +120,9 @@ def _cost(hour: real_datetime, index: int) -> tuple[float, Optional[float], Opti
     return 1.0, None, None
 
 
-def _row(hour: real_datetime, index: int, container: str | None = None) -> CombinedMetric:
+def _row(
+    hour: real_datetime, index: int, container: str | None = None, cost_source: str = "opencost"
+) -> CombinedMetric:
     total, cpu, ram = _cost(hour, index)
     return CombinedMetric(
         pod_name="api-0",
@@ -133,7 +135,7 @@ def _row(hour: real_datetime, index: int, container: str | None = None) -> Combi
         total_cost=total,
         cost_cpu=cpu,
         cost_ram=ram,
-        cost_source="opencost",
+        cost_source=cost_source,
         co2e_grams=1.0,
         joules=1.0,
         pue=1.0,
@@ -215,3 +217,21 @@ async def test_workload_rollup_nulls_the_components_of_a_mixed_hour(metrics_db):
             assert row.total_cost == pytest.approx(expected[0])
             assert row.cost_cpu == pytest.approx(expected[1])
             assert row.cost_ram == pytest.approx(expected[2])
+
+
+async def test_trusted_components_stay_when_the_unsplit_rows_are_untrusted(metrics_db, clock):
+    """Untrusted unsplit rows do not enter the trusted sums: the trusted split stays (A.9 review)."""
+    repo = _repository(metrics_db)
+    await repo.write_combined_metrics(
+        [_row(MIXED, i, cost_source="opencost" if _split(i) else "estimated") for i in range(12)]
+    )
+    clock.now = T0 + timedelta(days=2)
+    await MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None).run()
+    rows = await _fetch(
+        metrics_db,
+        "SELECT cost_cpu, cost_ram, trusted_cost, trusted_cost_cpu, trusted_cost_ram FROM combined_metrics_hourly",
+    )
+    assert len(rows) == 1
+    cost_cpu, cost_ram, trusted, trusted_cpu, trusted_ram = rows[0]
+    assert (cost_cpu, cost_ram) == (None, None)
+    assert (float(trusted), float(trusted_cpu), float(trusted_ram)) == pytest.approx((6.0, 3.6, 1.8))
