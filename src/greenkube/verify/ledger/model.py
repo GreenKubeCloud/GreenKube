@@ -125,7 +125,8 @@ V1_METHODS = {
 
 #: Version of the ledger writer; part of every entry's ``method_version`` for v1 projections.
 #: ``ledger/2`` entries carry their ``basis`` (part of the hash payload); ``ledger/1`` entries have none.
-LEDGER_WRITER_VERSION = "ledger/2"
+#: ``ledger/3`` accruals also carry the ``annual_rate`` they were computed from (LED-11).
+LEDGER_WRITER_VERSION = "ledger/3"
 
 _NAMESPACE = uuid.UUID("6f1d3c52-5a0e-4c39-9a51-3b8ad0c4f6e1")
 
@@ -198,6 +199,9 @@ class LedgerEntryDraft:
     source_id: Optional[int] = None
     #: Accounting basis (LED-01); ``None`` only on entries stored before migration 0160.
     basis: Optional[str] = None
+    #: Annual rate the value was accrued from: ``value == annual_rate x seconds / year`` (LED-11).
+    #: ``None`` on entries stored before ledger/3 and on corrections.
+    annual_rate: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.entry_kind not in ENTRY_KINDS:
@@ -239,6 +243,11 @@ class LedgerEntry(LedgerEntryDraft):
         if data.get("basis") is None:
             # Entries stored before the basis column keep the payload (and hash) they were chained with.
             data.pop("basis", None)
+        if data.get("annual_rate") is None:
+            # Entries stored before ledger/3 keep the payload (and hash) they were chained with.
+            data.pop("annual_rate", None)
+        else:
+            data["annual_rate"] = float(data["annual_rate"])
         if data.get("chain_key_id") is None:
             # Entries chained without a key keep the payload (and hash) of the release before LED-05.
             data.pop("chain_key_id", None)

@@ -243,6 +243,22 @@ def _projection_components(record: RecommendationRecord) -> List[AccrualComponen
     return [component for component in components if not component.is_zero]
 
 
+def _impact_currency(record: RecommendationRecord) -> Optional[str]:
+    """Currency of the recommendation's projection (``impact.currency``), or None when it names none."""
+    currency = (_impact(record) or {}).get("currency")
+    return currency.strip().upper() or None if isinstance(currency, str) else None
+
+
+def _latest_measurement_id(record: RecommendationRecord) -> Optional[str]:
+    """The measurement whose measured values the record carries (``baseline.latest_measurement_id``)."""
+    baseline = record.baseline
+    if baseline is None:
+        return None
+    values = baseline.model_dump() if hasattr(baseline, "model_dump") else dict(baseline)
+    value = values.get("latest_measurement_id")
+    return str(value) if value else None
+
+
 #: Recommendation baseline key set to ``False`` by an accelerated demo measurement (MEA-10).
 REPRESENTATIVE_KEY = "measurement_representative"
 
@@ -445,6 +461,9 @@ class SavingsAttributor:
         # measured savings afterwards; the slot holding verified_at is split.
         split_at = verified_at if status in _MEASURED_STATUSES else None
         rec_type = _value(record.type)
+        # Provenance read now, at accrual time (LED-11): a later re-measurement must not relabel these rows.
+        currency = _impact_currency(record)
+        measurement_id = _latest_measurement_id(record)
         rows: List[SavingsLedgerRecord] = []
         for slot_start, slot_end in slots:
             begin = max(slot_start, accrue_from)
@@ -483,6 +502,10 @@ class SavingsAttributor:
                             actual_value=component.co2e_grams_per_year,
                             confidence=record.confidence if component.method == METHOD_PROJECTED else None,
                             basis=component.basis,
+                            annual_cost_rate=component.cost_per_year,
+                            annual_co2e_rate=component.co2e_grams_per_year,
+                            currency=currency,
+                            measurement_id=measurement_id if component.method == METHOD_MEASURED else None,
                         )
                     )
         return rows

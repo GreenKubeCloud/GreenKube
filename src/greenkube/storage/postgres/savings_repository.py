@@ -18,12 +18,14 @@ _INSERT_SQL = """
          cost_saved_dollars, period_seconds, timestamp,
          period_start, period_end, slot_start,
          measurement_method, baseline_value, actual_value,
-         confidence, superseded, basis, row_kind)
+         confidence, superseded, basis, row_kind,
+         annual_cost_rate, annual_co2e_rate, currency, measurement_id)
     SELECT * FROM unnest(
         $1::INTEGER[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::DOUBLE PRECISION[],
         $6::DOUBLE PRECISION[], $7::INTEGER[], $8::TIMESTAMPTZ[], $9::TIMESTAMPTZ[],
         $10::TIMESTAMPTZ[], $11::TIMESTAMPTZ[], $12::TEXT[], $13::DOUBLE PRECISION[],
-        $14::DOUBLE PRECISION[], $15::DOUBLE PRECISION[], $16::BOOLEAN[], $17::TEXT[], $18::TEXT[]
+        $14::DOUBLE PRECISION[], $15::DOUBLE PRECISION[], $16::BOOLEAN[], $17::TEXT[], $18::TEXT[],
+        $19::DOUBLE PRECISION[], $20::DOUBLE PRECISION[], $21::TEXT[], $22::TEXT[]
     )
     ON CONFLICT DO NOTHING
 """
@@ -50,6 +52,10 @@ def _row_params(record: SavingsLedgerRecord) -> tuple:
         bool(record.superseded),
         record.basis,
         record.row_kind,
+        record.annual_cost_rate,
+        record.annual_co2e_rate,
+        record.currency,
+        record.measurement_id,
     )
 
 

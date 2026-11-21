@@ -109,6 +109,7 @@ async def test_upgrade_keeps_entries_written_without_a_key_valid(ledger: LedgerD
     assert all(entry.chain_key_id is None for entry in old)
     # Hash rule of the release before LED-05: sha256 over a payload without chain_key_id.
     assert all("chain_key_id" not in entry.payload() for entry in old)
+    assert all("annual_rate" not in entry.payload() for entry in old)
     assert (await verify_ledger(before, checkpoints={}))[CLUSTER_UID].ok
 
     after = LedgerRepository(ledger.manager, chain_key=KEY)

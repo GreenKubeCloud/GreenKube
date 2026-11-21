@@ -94,6 +94,18 @@ class SavingsLedgerRecord(BaseModel):
             "None only for rows written without one (drift reversals and demo rows: inferred from the method)."
         ),
     )
+    annual_cost_rate: Optional[float] = Field(
+        None, description="Annual cost rate the row was accrued from (LED-11); None on rows stored before 0293."
+    )
+    annual_co2e_rate: Optional[float] = Field(
+        None, description="Annual CO2e rate (grams) the row was accrued from (LED-11); None before 0293."
+    )
+    currency: Optional[str] = Field(
+        None, description="Currency of cost_saved_dollars (the projection's currency, LED-11); None before 0293."
+    )
+    measurement_id: Optional[str] = Field(
+        None, description="Measurement whose rate a measured row uses, read at accrual time (LED-11)."
+    )
     row_kind: Optional[str] = Field(
         None,
         description=(

@@ -93,6 +93,7 @@ _COLUMNS = (
     "hash",
     "basis",
     "chain_key_id",
+    "annual_rate",
 )
 _TIME_COLUMNS = ("period_start", "period_end", "slot_start", "created_at")
 _SELECT = ", ".join(_COLUMNS)
@@ -299,7 +300,7 @@ class LedgerRepository:
         for column in ("seq", "recommendation_id", "source_id"):
             if data.get(column) is not None:
                 data[column] = int(data[column])
-        for column in ("confidence", "intensity_g_per_kwh"):
+        for column in ("confidence", "intensity_g_per_kwh", "annual_rate"):
             if data.get(column) is not None:
                 data[column] = float(data[column])
         return LedgerEntry(**data)
@@ -484,7 +485,12 @@ class LedgerRepository:
         found, however late it becomes visible.
         """
         slot = "l.slot_start" if table == V1_RAW_TABLE else "NULL AS slot_start"
-        basis = "l.basis, l.row_kind" if table == V1_RAW_TABLE else "NULL AS basis, NULL AS row_kind"
+        basis = (
+            "l.basis, l.row_kind, l.annual_cost_rate, l.annual_co2e_rate, l.currency, l.measurement_id"
+            if table == V1_RAW_TABLE
+            else "NULL AS basis, NULL AS row_kind, NULL AS annual_cost_rate, NULL AS annual_co2e_rate, "
+            "NULL AS currency, NULL AS measurement_id"
+        )
         where = self._v1_scope(table, unprojected_for)
         params: List[Any] = [cluster_name, int(after_id)]
         if unprojected_for is not None:
