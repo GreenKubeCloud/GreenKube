@@ -7,7 +7,15 @@ from kubernetes_asyncio import client
 
 # We need to import the module where ConfigException lives to patch effectively if we were mocking it,
 # but here we just want to avoid mocking the class itself.
+from greenkube.collectors import node_collector as node_collector_module
 from greenkube.collectors.node_collector import NodeCollector
+
+
+@pytest.fixture(autouse=True)
+def _detect_the_provider(monkeypatch):
+    """The test environment sets CLOUD_PROVIDER=aws, which overrides detection (COL-15)."""
+    monkeypatch.setattr(node_collector_module.global_config, "CLOUD_PROVIDER", "unknown", raising=False)
+
 
 # --- Mock Kubernetes Objects ---
 
@@ -387,7 +395,8 @@ async def test_collect_scaleway_node_providerid_fallback(mock_get_api):
         ({"node.k8s.ovh/type": "standard"}, "ovh"),
         ({"kubernetes.azure.com/agentpool": "pool-a"}, "azure"),
         ({"eks.amazonaws.com/nodegroup": "workers"}, "aws"),
-        ({"node.kubernetes.io/instance-type": "m5.large", "topology.kubernetes.io/region": "eu-west-3"}, "aws"),
+        # A region name alone never decides (COL-15): GKE us-central1 or OCI eu-frankfurt-1 look the same.
+        ({"node.kubernetes.io/instance-type": "m5.large", "topology.kubernetes.io/region": "eu-west-3"}, "unknown"),
         ({"cloud.google.com/gke-nodepool": "pool-a"}, "gcp"),
     ],
 )

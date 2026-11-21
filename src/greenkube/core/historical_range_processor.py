@@ -85,6 +85,9 @@ logger = logging.getLogger(__name__)
 #: COL-12: memory_usage_bytes is the working-set average over the step (avg_over_time), no longer the
 #: instant value at the step boundary, and container rows store the step peak (max_over_time) in
 #: memory_usage_max_bytes.  Older rows keep a NULL peak (rightsizing then uses the step value).
+#: COL-15: the node provider comes from CLOUD_PROVIDER, the providerID or provider labels, never from a
+#: region prefix (GKE us-* nodes were aws).  Rows and node snapshots stored before keep their provider and
+#: PUE; re-collect a window inside Prometheus retention to apply it.
 CALCULATION_VERSION = f"{__version__}+range.9"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
