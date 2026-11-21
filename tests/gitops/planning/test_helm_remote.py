@@ -977,7 +977,8 @@ def test_helm_values_mapping_source_index_matching_no_owner_stays_ambiguous():
 
 def test_chart_values_manifests_app_plans_end_to_end():
     registry = FakeChartRegistry()
-    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, "environments/prod/manifests/route.yaml": "kind: HTTPRoute\n"})
+    route = "apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: web\n"
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, "environments/prod/manifests/route.yaml": route})
     action = _action([_op("nginx", cpu="50m", memory="64Mi"), _op("metrics", cpu="20m")])
     binding = _bound(_discover_web(_chart_values_manifests_application(), [_live_deployment(_HELM_LABELS)]))
     assert binding.source is not None
@@ -988,5 +989,55 @@ def test_chart_values_manifests_app_plans_end_to_end():
         assert [edit.path for edit in plan.files] == [VALUES_PATH]
         assert plan.files[0].content == EXPECTED_VALUES
         assert plan.validation.passed
+    finally:
+        snapshot.close()
+
+
+_MANIFEST_DEPLOYMENT = """\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-extra
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-nginx
+"""
+
+
+@pytest.mark.parametrize(
+    "manifest_path", ["environments/prod/manifests/web.yaml", "environments/prod/manifests/web.yml"]
+)
+def test_a_manifests_source_that_also_declares_the_workload_fails_closed(manifest_path):
+    """F-02: the Helm labels are not enough when the ``path`` source renders the same kind and name."""
+    registry = FakeChartRegistry()
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, manifest_path: _MANIFEST_DEPLOYMENT})
+    binding = _bound(_discover_web(_chart_values_manifests_application(), [_live_deployment(_HELM_LABELS)]))
+    assert binding.source is not None
+
+    try:
+        with pytest.raises(HelmValuesUnsupportedError, match="manifests source"):
+            _planner(_BitnamiRunner(), _fetcher(registry)).plan(
+                _action([_op("nginx", cpu="50m")]), binding.source, snapshot, VALUES_REVISION
+            )
+    finally:
+        snapshot.close()
+
+
+def test_a_manifests_source_outside_the_snapshot_cannot_be_verified_and_fails_closed():
+    registry = FakeChartRegistry()
+    application = _chart_values_manifests_application()
+    application["spec"]["sources"][2]["repoURL"] = "https://github.com/acme/routes.git"
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES})
+    binding = _bound(_discover_web(application, [_live_deployment(_HELM_LABELS)]))
+    assert binding.source is not None
+    assert binding.status is BindingStatus.RESOLVED
+
+    try:
+        with pytest.raises(HelmValuesUnsupportedError, match="manifests source"):
+            _planner(_BitnamiRunner(), _fetcher(registry)).plan(
+                _action([_op("nginx", cpu="50m")]), binding.source, snapshot, VALUES_REVISION
+            )
     finally:
         snapshot.close()

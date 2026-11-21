@@ -884,6 +884,7 @@ def _prepare_helm_values_plan(
     if len(set(values_files)) != len(values_files):
         raise HelmValuesUnsupportedError("Helm values file order contains duplicate paths")
     _validate_argo_values_sources(source, base_revision)
+    _reject_workload_declared_by_manifest_sources(source, base_revision, root, snapshot_files)
     for values_path in values_files:
         if values_path not in snapshot_files:
             raise HelmValuesUnsupportedError(
@@ -1329,6 +1330,67 @@ def _validate_common_request(
     except KustomizePlanError as exc:
         raise error_type(f"repository snapshot is invalid: {exc}") from exc
     return operations, root, snapshot_files
+
+
+def _reject_workload_declared_by_manifest_sources(
+    source: WorkloadSource,
+    base_revision: str,
+    root: Path,
+    snapshot_files: Mapping[str, Any],
+) -> None:
+    """Fail closed when a competing Argo CD ``path`` source also declares the workload (F-02).
+
+    Discovery binds a Helm-labelled workload to the chart rather than to a plain manifests
+    directory of the same Application, and lists those directories in the evidence. The
+    choice holds only if none of them declares a resource of the workload's kind and name;
+    a directory outside this repository snapshot cannot be checked and blocks the plan.
+    """
+    selection = source.evidence.get("owner_selection")
+    if not isinstance(selection, Mapping) or selection.get("by") != "helm-ownership-labels":
+        return
+    manifest_sources = selection.get("manifest_sources")
+    if not isinstance(manifest_sources, list):
+        raise HelmValuesUnsupportedError("ambiguous-multi-source-owner: manifests source evidence is missing")
+    for entry in manifest_sources:
+        if not isinstance(entry, Mapping):
+            raise HelmValuesUnsupportedError("ambiguous-multi-source-owner: manifests source evidence is invalid")
+        repo_url = entry.get("repo_url")
+        revision = entry.get("revision")
+        if (
+            not isinstance(repo_url, str)
+            or not same_repository(repo_url, source.repo_url)
+            or entry.get("ref") != source.ref
+            or (revision is not None and not _revision_matches_snapshot(revision, base_revision))
+        ):
+            raise HelmValuesUnsupportedError(
+                "ambiguous-multi-source-owner: the Application's manifests source is not in this repository "
+                "snapshot, so GreenKube cannot verify that it does not declare the workload"
+            )
+        directory = _canonical_path(entry.get("path"), allow_root=True, error=HelmValuesUnsupportedError)
+        prefix = "" if directory == "." else f"{directory}/"
+        recurse = entry.get("recurse") is True
+        contents: dict[str, str] = {}
+        for path in sorted(snapshot_files):
+            relative = path[len(prefix) :] if path.startswith(prefix) else None
+            if relative is None or (not recurse and "/" in relative):
+                continue
+            if PurePosixPath(path).suffix.lower() in {".yaml", ".yml", ".json"}:
+                contents[path] = _read_source_file(root, snapshot_files, path, HelmValuesUnsupportedError)
+        if not contents:
+            continue
+        try:
+            rendered = render_raw(contents)
+        except (RawRenderError, RecursionError, TypeError, ValueError) as exc:
+            raise HelmValuesUnsupportedError(
+                f"ambiguous-multi-source-owner: the manifests source {directory} could not be read to verify "
+                "that it does not declare the workload"
+            ) from exc
+        for resource in rendered.resources:
+            if resource.target.kind == source.workload_kind and resource.target.name == source.workload_name:
+                raise HelmValuesUnsupportedError(
+                    f"ambiguous-multi-source-owner: {resource.source_path} in the manifests source also declares "
+                    f"{source.workload_kind}/{source.workload_name}"
+                )
 
 
 def _validate_argo_values_sources(source: WorkloadSource, base_revision: str) -> None:

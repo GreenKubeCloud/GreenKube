@@ -181,7 +181,16 @@ def discover_argo_application(
             )
             if helm_owner is not None:
                 resource_owners = [helm_owner[0]]
-                resource_selection = {"by": "helm-ownership-labels", "markers": helm_owner[1]}
+                resource_selection = {
+                    "by": "helm-ownership-labels",
+                    "markers": helm_owner[1],
+                    # The planner checks that none of these directories declares the workload.
+                    "manifest_sources": [
+                        _manifest_source_evidence(owner, revisions)
+                        for owner in owners_to_map
+                        if owner is not helm_owner[0]
+                    ],
+                }
                 resource_status, resource_reason = (
                     (BindingStatus.UNRESOLVED, "application-context-unresolved") if context_unresolved else (None, None)
                 )
@@ -334,6 +343,18 @@ def _helm_owner_by_ownership_labels(
     if not markers:
         return None
     return helm_owner, markers
+
+
+def _manifest_source_evidence(owner: _ArgoSource, revisions: list[str | None]) -> dict[str, Any]:
+    directory = owner.directory or {}
+    return {
+        "source_index": owner.index,
+        "repo_url": owner.repo_url,
+        "ref": owner.ref,
+        "revision": revisions[owner.index] if 0 <= owner.index < len(revisions) else None,
+        "path": owner.path,
+        "recurse": directory.get("recurse") is True,
+    }
 
 
 def _source_types(status: Mapping[str, Any], source_count: int) -> list[str | None]:
