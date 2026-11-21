@@ -67,10 +67,12 @@ rules:
   - list
   # GitOps discovery reads Argo CD Applications and projects. Always rendered,
   # read-only: discovery activates itself when the CRDs exist (F12).
+  # Rollouts: a Rollout scaled to zero is not retired as gone (COL-16 review).
 - apiGroups: ["argoproj.io"]
   resources:
   - applications
   - appprojects
+  - rollouts
   verbs:
   - get
   - list

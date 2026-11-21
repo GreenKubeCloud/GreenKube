@@ -150,20 +150,124 @@ def test_the_source_run_says_which_targets_were_left_out() -> None:
     assert liveness_diagnostics(0, 0) == []
 
 
-def test_owner_chain_transition_retires_the_stale_targets_and_keeps_cronjobs() -> None:
+def test_owner_chain_transition_retires_the_stale_targets() -> None:
     """COL-16 review: stored rows of a Rollout's pods say Deployment/web and of a CronJob run Job/<run>;
-    after the owner chain change those targets are retired as gone, while the CronJob, whose pods run
-    only on schedule, is never retired for lack of a running pod."""
+    after the owner chain change those targets are retired as gone."""
     stale_deployment = ("shop", "Deployment", "web")
     rollout = ("shop", "Rollout", "web")
     old_run = ("shop", "Job", "report-28912345")
-    cronjob = ("shop", "CronJob", "report")
     snapshot = UsageSnapshot(source="test")
-    for target, hours_ago in ((stale_deployment, 5), (rollout, 0), (old_run, 5), (cronjob, 5)):
+    for target, hours_ago in ((stale_deployment, 5), (rollout, 0), (old_run, 5)):
         snapshot.summaries[target] = {"": _summary(target, "", hours_ago)}
 
     report = filter_live_targets(snapshot, end=END, live_containers={(rollout, "app")}, scaled_to_zero=set())
 
     assert report.gone == {stale_deployment, old_run}
-    assert cronjob in report.not_running
     assert set(snapshot.summaries) == {rollout}
+
+
+ROLLOUT = ("shop", "Rollout", "web")
+BARE_RS = ("shop", "ReplicaSet", "my-rs")
+CRON = ("shop", "CronJob", "report")
+
+
+def _stale_snapshot(*targets) -> UsageSnapshot:
+    snapshot = UsageSnapshot(source="test")
+    for target in targets:
+        snapshot.summaries[target] = {"": _summary(target, "", 5)}
+    return snapshot
+
+
+def test_rollouts_bare_replicasets_and_cronjobs_need_the_controller_check() -> None:
+    """Re-review 1, 2: a stale Rollout, ReplicaSet or CronJob without pods triggers the controller lists."""
+    from greenkube.core.optimization.liveness import needs_controller_check
+
+    for target in (ROLLOUT, BARE_RS, CRON):
+        assert needs_controller_check(_stale_snapshot(target), end=END, live_containers=set())
+
+
+def test_present_rollouts_replicasets_and_cronjobs_are_kept_and_absent_ones_retired() -> None:
+    """Re-review 1, 2: scaled to zero or present (CronJob, even suspended) is not_running; absent is gone."""
+    snapshot = _stale_snapshot(ROLLOUT, BARE_RS, CRON)
+    report = filter_live_targets(snapshot, end=END, live_containers=set(), scaled_to_zero={ROLLOUT, BARE_RS, CRON})
+    assert report.not_running == {ROLLOUT, BARE_RS, CRON} and not report.gone
+
+    snapshot = _stale_snapshot(ROLLOUT, BARE_RS, CRON)
+    report = filter_live_targets(snapshot, end=END, live_containers=set(), scaled_to_zero=set())
+    assert report.gone == {ROLLOUT, BARE_RS, CRON}
+
+
+def test_unreadable_controllers_fail_closed() -> None:
+    snapshot = _stale_snapshot(ROLLOUT, BARE_RS, CRON)
+    report = filter_live_targets(snapshot, end=END, live_containers=set(), scaled_to_zero=None)
+    assert report.not_running == {ROLLOUT, BARE_RS, CRON} and not report.gone
+
+
+def _item(namespace, name, replicas=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        metadata=SimpleNamespace(namespace=namespace, name=name), spec=SimpleNamespace(replicas=replicas)
+    )
+
+
+def _list(items):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(items=items)
+
+
+async def _read(monkeypatch, *, rollouts=None, rollout_error=None, cron_error=None):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from greenkube.core import k8s_client
+    from greenkube.core.optimization.liveness import read_scaled_to_zero
+
+    apps = MagicMock()
+    apps.list_deployment_for_all_namespaces = AsyncMock(return_value=_list([_item("shop", "d0", 0)]))
+    apps.list_stateful_set_for_all_namespaces = AsyncMock(return_value=_list([]))
+    apps.list_replica_set_for_all_namespaces = AsyncMock(
+        return_value=_list([_item("shop", "my-rs", 0), _item("shop", "busy-rs", 2)])
+    )
+    batch = MagicMock()
+    batch.list_cron_job_for_all_namespaces = (
+        AsyncMock(side_effect=cron_error) if cron_error else AsyncMock(return_value=_list([_item("shop", "report")]))
+    )
+    custom = MagicMock()
+    custom.list_cluster_custom_object = (
+        AsyncMock(side_effect=rollout_error) if rollout_error else AsyncMock(return_value={"items": rollouts or []})
+    )
+    monkeypatch.setattr(k8s_client, "get_apps_v1_api", AsyncMock(return_value=apps))
+    monkeypatch.setattr(k8s_client, "get_batch_v1_api", AsyncMock(return_value=batch))
+    monkeypatch.setattr(k8s_client, "get_custom_objects_api", AsyncMock(return_value=custom))
+    return await read_scaled_to_zero()
+
+
+@pytest.mark.asyncio
+async def test_controller_reader_lists_rollouts_replicasets_and_cronjobs(monkeypatch) -> None:
+    rollouts = [
+        {"metadata": {"namespace": "shop", "name": "web"}, "spec": {"replicas": 0}},
+        {"metadata": {"namespace": "shop", "name": "live"}, "spec": {"replicas": 3}},
+    ]
+    present = await _read(monkeypatch, rollouts=rollouts)
+    assert present == {("shop", "Deployment", "d0"), BARE_RS, ROLLOUT, CRON}
+
+
+@pytest.mark.asyncio
+async def test_controller_reader_without_the_rollout_crd_lists_the_rest(monkeypatch) -> None:
+    from kubernetes_asyncio.client.rest import ApiException
+
+    present = await _read(monkeypatch, rollout_error=ApiException(status=404))
+    assert present == {("shop", "Deployment", "d0"), BARE_RS, CRON}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("which", ["rollout", "cron"])
+async def test_controller_reader_fails_closed_on_a_failed_list(monkeypatch, which) -> None:
+    from kubernetes_asyncio.client.rest import ApiException
+
+    error = ApiException(status=403)
+    present = await _read(
+        monkeypatch, rollout_error=error if which == "rollout" else None, cron_error=error if which == "cron" else None
+    )
+    assert present is None
