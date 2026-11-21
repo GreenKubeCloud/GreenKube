@@ -223,7 +223,7 @@ class NodeCollector(BaseCollector):
         """Detect the cloud provider of a node (COL-15).
 
         The node's ``spec.providerID`` scheme decides, then provider-specific
-        label prefixes; ``CLOUD_PROVIDER`` only fills in nodes neither identifies,
+        label prefixes; ``CLOUD_PROVIDER`` only fills in nodes without any providerID,
         so a hybrid or mixed cluster keeps each node's real provider.  Region names are never
         used: GKE ``us-central1``, Linode
         ``us-east`` or OCI ``eu-frankfurt-1`` look like AWS regions.  Providers
@@ -247,7 +247,10 @@ class NodeCollector(BaseCollector):
         for prefixes, provider in _PROVIDER_LABEL_PREFIXES:
             if has_label(*prefixes):
                 return provider
-        # Only nodes nothing identifies take the configured provider (review 5: hybrid clusters).
+        # Only nodes without any providerID take the configured provider (hybrid clusters): an
+        # unrecognised scheme (k3s://, kind://, openstack://) names a known non-cloud or other setup.
+        if provider_id:
+            return "unknown"
         configured = str(getattr(global_config, "CLOUD_PROVIDER", "") or "").strip().lower()
         return configured or "unknown"
 

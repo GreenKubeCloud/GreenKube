@@ -86,3 +86,10 @@ def test_on_prem_aliases_are_not_cloud_providers(monkeypatch, alias):
     monkeypatch.setattr(node_collector_module.global_config, "CLOUD_PROVIDER", alias, raising=False)
     assert NodeCollector()._detect_cloud_provider({}, _node()) == alias
     assert alias in NON_CLOUD_PROVIDERS
+
+
+@pytest.mark.parametrize("provider_id", ["k3s://node-1", "kind://docker/kind/kind-control-plane", "openstack:///abc"])
+def test_an_unrecognised_provider_id_is_not_filled_from_the_configuration(monkeypatch, provider_id):
+    """Re-review 3: CLOUD_PROVIDER only fills nodes without any providerID."""
+    monkeypatch.setattr(node_collector_module.global_config, "CLOUD_PROVIDER", "gcp", raising=False)
+    assert NodeCollector()._detect_cloud_provider({}, _node(provider_id)) == "unknown"
