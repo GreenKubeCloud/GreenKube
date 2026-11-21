@@ -155,6 +155,9 @@ class WorkloadUsageSummary:
     #: Steps of the target in its first observed hour (IMP-04): its samples run from
     #: ``first_hour + 1h - first_hour_steps x step`` to the end of that hour. 0 when unknown.
     first_hour_steps: int = 0
+    #: Seconds from ``first_hour`` to the target's latest sample in that hour (IMP-04 review): the
+    #: steps run up to the end of the hour only when it sits in the hour's last step. None when unknown.
+    first_hour_last_offset: Optional[float] = None
     hours_observed: int = 0
     sample_count: int = 0
     step_count: int = 0

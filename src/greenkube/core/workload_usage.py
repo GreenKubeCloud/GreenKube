@@ -895,6 +895,14 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             first_hour=buckets[0] if buckets else None,
             last_hour=buckets[-1] if buckets else None,
             first_hour_steps=next((item.step_count for item in ordered if item.hour_bucket is not None), 0),
+            first_hour_last_offset=next(
+                (
+                    item.latest_offset
+                    for item in ordered
+                    if item.hour_bucket is not None and item.latest_offset is not None and item.latest_offset >= 0
+                ),
+                None,
+            ),
             hours_observed=len(ordered),
             sample_count=sum(item.sample_count for item in ordered),
             step_count=sum(item.step_count for item in ordered),

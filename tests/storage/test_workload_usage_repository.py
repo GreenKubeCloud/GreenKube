@@ -205,6 +205,7 @@ async def test_sql_snapshot_matches_the_reference_summary(db):
             assert actual.hours_observed == expected.hours_observed == 5
             assert actual.first_hour == expected.first_hour
             assert actual.first_hour_steps == expected.first_hour_steps > 0  # IMP-04
+            assert actual.first_hour_last_offset == pytest.approx(expected.first_hour_last_offset)
             assert actual.last_hour == expected.last_hour
             assert actual.sample_count == expected.sample_count
             assert actual.step_count == expected.step_count

@@ -267,7 +267,17 @@ def first_observed_from_summaries(
         if hour is None:
             continue
         steps = getattr(summary, "first_hour_steps", 0)
-        if step_seconds and isinstance(steps, int) and not isinstance(steps, bool) and 0 < steps * step_seconds < 3600:
+        last = getattr(summary, "first_hour_last_offset", None)
+        # The first hour's steps run up to its end only when its latest sample sits in the hour's
+        # last step; a target that ran 10:00-10:10 keeps 10:00 (IMP-04 review).
+        contiguous = isinstance(last, (int, float)) and step_seconds and last >= 3600 - 1.5 * step_seconds
+        if (
+            contiguous
+            and step_seconds
+            and isinstance(steps, int)
+            and not isinstance(steps, bool)
+            and 0 < steps * step_seconds < 3600
+        ):
             hour += timedelta(seconds=3600 - steps * step_seconds)
         firsts.append(hour)
     return min(firsts) if firsts else None

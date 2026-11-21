@@ -94,59 +94,34 @@ def test_a_cronjob_keeps_its_duty_cycle_while_other_targets_were_collected():
     assert delete.capacity_released.replica_hours == pytest.approx(HOURS_PER_YEAR / 24, rel=0.01)
 
 
-def test_a_young_target_counts_from_its_first_sample_not_the_hour_floor():
-    """First sampled at hh:35, scanned at hh+1:30: rollup rows and a summary, as a bounded scan reads them."""
-    first_hour = _hour() - timedelta(hours=2)
-    end = first_hour + timedelta(hours=1, minutes=30)
-    hours = [
-        WorkloadUsageHour(
-            hour_bucket=first_hour,
-            namespace="apps",
-            target_kind="Deployment",
-            target_name="young",
-            step_count=5,
-        ),
-        WorkloadUsageHour(
-            hour_bucket=first_hour + timedelta(hours=1),
-            namespace="apps",
-            target_kind="Deployment",
-            target_name="young",
-            step_count=6,
-        ),
-        WorkloadUsageHour(
-            hour_bucket=first_hour,
-            namespace="apps",
-            target_kind="Deployment",
-            target_name="other",
-            step_count=12,
-        ),
-        WorkloadUsageHour(
-            hour_bucket=first_hour + timedelta(hours=1),
-            namespace="apps",
-            target_kind="Deployment",
-            target_name="other",
-            step_count=6,
-        ),
-    ]
+def _hour_row(hour, name, steps, last_offset=None) -> WorkloadUsageHour:
+    return WorkloadUsageHour(
+        hour_bucket=hour,
+        namespace="apps",
+        target_kind="Deployment",
+        target_name=name,
+        step_count=steps,
+        latest_sample_offset_seconds=last_offset,
+    )
+
+
+def _young_projection(hours, end, samples):
     snapshot: UsageSnapshot = summarize(hours, source="rows")
-    summary: WorkloadUsageSummary = snapshot.summaries[("apps", "Deployment", "young")][""]
-    assert summary.first_hour_steps == 5
-    assert snapshot.collected_steps_by_hour == {first_hour: 12, first_hour + timedelta(hours=1): 6}
     row = BaselineMetric.model_construct(
         pod_name="young",
         namespace="apps",
         owner_kind="Deployment",
         owner_name="young",
         node="n1",
-        timestamp=first_hour + timedelta(hours=1),
-        sample_count=11,
-        duration_seconds=11 * 300,
+        timestamp=end.replace(minute=0),
+        sample_count=samples,
+        duration_seconds=samples * 300,
         cpu_request=1000,
         memory_request=GIB,
         cpu_usage_millicores=50,
         memory_usage_bytes=GIB // 4,
-        total_cost=0.0025 * 11,
-        cost_cpu=0.0025 * 11,
+        total_cost=0.0025 * samples,
+        cost_cpu=0.0025 * samples,
         cost_ram=0.0,
         estimation_reasons=[],
     )
@@ -162,5 +137,39 @@ def test_a_young_target_counts_from_its_first_sample_not_the_hour_floor():
     delta = projector.workload_deletion(
         projector.workload_ref("apps", "Deployment", "young"), context.workload_rows(("apps", "Deployment", "young"))
     )
+    return snapshot, delta
+
+
+def test_a_young_target_counts_from_its_first_sample_not_the_hour_floor():
+    """First sampled at hh:35 (last sample hh:55), scanned at hh+1:30: rollup rows and a summary."""
+    first_hour = _hour() - timedelta(hours=2)
+    end = first_hour + timedelta(hours=1, minutes=30)
+    hours = [
+        _hour_row(first_hour, "young", 5, last_offset=3300),
+        _hour_row(first_hour + timedelta(hours=1), "young", 6, last_offset=1500),
+        _hour_row(first_hour, "other", 12, last_offset=3300),
+        _hour_row(first_hour + timedelta(hours=1), "other", 6, last_offset=1500),
+    ]
+    snapshot, delta = _young_projection(hours, end, 11)
+    summary: WorkloadUsageSummary = snapshot.summaries[("apps", "Deployment", "young")][""]
+    assert summary.first_hour_steps == 5
+    assert summary.first_hour_last_offset == 3300
+    assert snapshot.collected_steps_by_hour == {first_hour: 12, first_hour + timedelta(hours=1): 6}
     assert delta.assumptions["coverage_hours"] == pytest.approx(55 / 60, rel=0.02)
     assert delta.allocated_cost_annual == pytest.approx(0.03 * HOURS_PER_YEAR, rel=0.02)
+
+
+def test_a_gap_inside_the_first_hour_does_not_move_the_first_observation():
+    """Ran 10:00-10:10, then 11:00-12:00: the first hour's samples are at its start, not its end."""
+    first_hour = _hour() - timedelta(hours=3)
+    end = first_hour + timedelta(hours=2)
+    hours = [
+        _hour_row(first_hour, "young", 2, last_offset=300),
+        _hour_row(first_hour + timedelta(hours=1), "young", 12, last_offset=3300),
+        _hour_row(first_hour, "other", 12, last_offset=3300),
+        _hour_row(first_hour + timedelta(hours=1), "other", 12, last_offset=3300),
+    ]
+    _, delta = _young_projection(hours, end, 14)
+    # 14 samples of 0.0025 over two collected hours, not over 70 minutes (1.71x too high).
+    assert delta.assumptions["coverage_hours"] == pytest.approx(2.0, rel=0.01)
+    assert delta.allocated_cost_annual == pytest.approx(0.0025 * 14 / 2 * HOURS_PER_YEAR, rel=0.01)
