@@ -260,6 +260,7 @@ def _boundaries(raw: Any) -> Tuple[Tuple[str, int], ...]:
         items = json.loads(raw) if isinstance(raw, str) else raw
         return tuple((str(key_id), int(from_seq)) for key_id, from_seq in items)
     except (TypeError, ValueError):
+        logger.warning("Malformed ledger key_boundaries %r: treated as no boundary.", raw)
         return ()
 
 
@@ -470,6 +471,10 @@ class LedgerRepository:
         stored = await self._status_in(conn, cluster_uid)
         key = self.chain_key
         assert key is not None
+        if stored is not None and stored.key_boundaries:
+            return  # never overwritten: append refuses an unkeyed head under recorded boundaries
+        if stored is not None and stored.first_keyed_seq is not None:
+            first_seq = stored.first_keyed_seq
         base = stored or ChainStatus(
             cluster_uid=cluster_uid,
             verified_at=moment,
@@ -497,13 +502,21 @@ class LedgerRepository:
         logger.error(message)
         return LedgerChainKeyError(message)
 
-    async def _check_writer_key(self, conn, cluster_uid: str, chain_key: Optional[bytes]) -> bool:
-        """Fail closed unless the head's key is the current key, or a previous key the status row rotated from.
+    async def _check_writer_key(self, conn, cluster_uid: str, chain_key: Optional[bytes]) -> Tuple[bool, bool]:
+        """Fail closed unless this process may continue the chain with its key (LED-05).
 
-        Appending unkeyed or differently keyed entries after keyed ones would
-        break the chain, so nothing is written: the error is counted
-        (``greenkube_ledger_write_errors_total{reason="chain_key"}``) and logged
-        with what to do. Returns whether the head is keyed.
+        Allowed: the status row names this process's key as the chain's
+        current key (its last boundary and its signer) and the head uses it, or
+        the head uses a previous key and the row already records the boundary of
+        this key (a rotation done with ``ledger-rotate-key``); or the chain holds
+        no keyed entry and the row records no boundary. Everything else (an old
+        pod after a rotation, a new key before the rotation was recorded, an
+        unkeyed head under recorded boundaries) writes nothing: the error is
+        counted (``greenkube_ledger_write_errors_total{reason="chain_key"}``) and
+        logged with what to do. An old pod cannot check the new key's signature,
+        so this is only a fail-closed guard; verification is the proof.
+
+        Returns (whether the head is keyed, whether the row records boundaries).
         """
         rows = await self._fetch(
             conn,
@@ -511,35 +524,121 @@ class LedgerRepository:
             [cluster_uid],
         )
         head_key_id = rows[0]["chain_key_id"] if rows else None
-        if head_key_id is None:
-            return False
+        status = await self._status_in(conn, cluster_uid)
+        has_boundaries = bool(status is not None and status.key_boundaries)
         current_id = chain_key_id(chain_key) if chain_key else None
+        rotate_hint = (
+            "deploy the Secret with the new key as LEDGER_CHAIN_KEY and the old key in LEDGER_CHAIN_PREVIOUS_KEYS, "
+            "then run `greenkube db ledger-rotate-key`"
+        )
+        if head_key_id is None:
+            if has_boundaries:
+                raise self._chain_key_refusal(
+                    cluster_uid,
+                    "the head is unkeyed but the status row records key boundaries (a rewrite without the key?); "
+                    "investigate, then `greenkube db ledger-accept-head`",
+                )
+            return False, False
         if current_id is None:
             raise self._chain_key_refusal(
                 cluster_uid, f"the head is chained with key {head_key_id} and LEDGER_CHAIN_KEY is not set"
             )
+        recorded = status.key_boundaries[-1][0] if status is not None and status.key_boundaries else None
+        signer = status.key_id if status is not None else None
+        if (recorded is not None and recorded != current_id) or (
+            signer is not None and signer != current_id and recorded != current_id
+        ):
+            raise self._chain_key_refusal(
+                cluster_uid,
+                f"the status row names key {recorded or signer} as the chain's current key and LEDGER_CHAIN_KEY is "
+                f"key {current_id}; {rotate_hint}",
+            )
         if current_id == head_key_id:
-            return True
+            return True, has_boundaries
         if head_key_id in self.chain_keys:
-            status = await self._status_in(conn, cluster_uid)
             head_seq = int(rows[0]["seq"])
             if (
                 status is not None
                 and self.status_signature_state(status) == "current"
                 and status.key_for(head_seq + 1) == current_id
             ):
-                return True
+                return True, has_boundaries
             raise self._chain_key_refusal(
                 cluster_uid,
                 f"the head is chained with the previous key {head_key_id} and LEDGER_CHAIN_KEY is key {current_id}; "
-                "run `greenkube db ledger-rotate-key` (new key as LEDGER_CHAIN_KEY, old key in "
-                "LEDGER_CHAIN_PREVIOUS_KEYS) to record the rotation",
+                f"{rotate_hint}",
             )
         raise self._chain_key_refusal(
             cluster_uid,
             f"the head is chained with key {head_key_id}, which is neither LEDGER_CHAIN_KEY ({current_id}) nor in "
             "LEDGER_CHAIN_PREVIOUS_KEYS; restore the Secret's key",
         )
+
+    async def commit_status(
+        self,
+        status: ChainStatus,
+        *,
+        expect_head: Tuple[int, Optional[str]],
+        expect_signature: Optional[str],
+        audit_reason: str,
+        previous: Optional[ChainStatus],
+        accepted_at: datetime,
+    ) -> None:
+        """Write an operator's status row and its audit row in one transaction, under the append lock (LED-05).
+
+        The head and the stored row must still be the ones the operator's
+        verification saw (``expect_head``, ``expect_signature``); otherwise
+        :class:`LedgerConflictError` is raised and nothing is written.
+        """
+        async with self._transaction() as conn:
+            if self.postgres:
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"ledger:{status.cluster_uid}"
+                )
+            head = await self._head(conn, status.cluster_uid)
+            if head != (int(expect_head[0] or 0), expect_head[1]):
+                raise LedgerConflictError(
+                    f"the ledger head of cluster {status.cluster_uid} moved; run the command again"
+                )
+            stored = await self._status_in(conn, status.cluster_uid)
+            if (stored.signature if stored is not None else None) != expect_signature:
+                raise LedgerConflictError(
+                    f"the ledger status of cluster {status.cluster_uid} changed; run the command again"
+                )
+            await self._upsert_status(conn, status)
+            await self._execute(
+                conn,
+                "INSERT INTO ledger_head_acceptances (cluster_uid, accepted_at, reason, previous_head_seq, "
+                "previous_head_hash, head_seq, head_hash, key_boundaries) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    status.cluster_uid,
+                    self._ts(accepted_at),
+                    audit_reason,
+                    previous.head_seq if previous else None,
+                    previous.head_hash if previous else None,
+                    status.head_seq,
+                    status.head_hash,
+                    json.dumps([list(item) for item in status.key_boundaries], separators=(",", ":"))
+                    if status.key_boundaries
+                    else None,
+                ],
+            )
+
+    async def record_verification_result(
+        self, cluster_uid: str, *, verified_at: datetime, ok: bool, failure: Optional[str]
+    ) -> None:
+        """Update only the outcome of a verification, leaving the signed anchor and its boundaries untouched.
+
+        Used by a verifier that cannot vouch for the stored row (signed with a key
+        it does not hold, or forged): it must not erase a rotation it cannot see.
+        """
+        flag: Any = bool(ok) if self.postgres else int(bool(ok))
+        async with self.db_manager.transaction() as conn:
+            await self._execute(
+                conn,
+                "UPDATE ledger_chain_status SET verified_at = ?, ok = ?, failure = ? WHERE cluster_uid = ?",
+                [self._ts(verified_at), flag, failure, cluster_uid],
+            )
 
     async def append(
         self,
@@ -565,7 +664,7 @@ class LedgerRepository:
             existing = await self._existing_keys(conn, cluster_uid, list(unique))
             seq, prev_hash = await self._head(conn, cluster_uid)
             chain_key = self.chain_key
-            head_keyed_before = await self._check_writer_key(conn, cluster_uid, chain_key)
+            head_keyed_before, has_boundaries = await self._check_writer_key(conn, cluster_uid, chain_key)
             placeholders = ", ".join("?" for _ in _COLUMNS)
             insert = f"INSERT INTO savings_ledger_entries ({_SELECT}) VALUES ({placeholders})"
             for key, draft in unique.items():
@@ -585,7 +684,7 @@ class LedgerRepository:
                 prev_hash = entry.hash
                 inserted.append(entry)
             await self._add_totals(conn, cluster_uid, inserted)
-            if inserted and chain_key and not head_keyed_before:
+            if inserted and chain_key and not head_keyed_before and not has_boundaries:
                 await self._record_first_keyed(conn, cluster_uid, moment, inserted[0].seq)
             for source_table, position in (watermarks or {}).items():
                 await self._execute(
@@ -1528,7 +1627,7 @@ class LedgerRepository:
     async def head_acceptances(self, cluster_uid: str) -> List[dict]:
         """Operator head acceptances of a cluster, oldest first."""
         rows = await self._select(
-            "SELECT accepted_at, reason, previous_head_seq, previous_head_hash, head_seq, head_hash "
+            "SELECT accepted_at, reason, previous_head_seq, previous_head_hash, head_seq, head_hash, key_boundaries "
             "FROM ledger_head_acceptances WHERE cluster_uid = ? ORDER BY id",
             [cluster_uid],
         )
@@ -1536,6 +1635,7 @@ class LedgerRepository:
             for column in ("previous_head_seq", "head_seq"):
                 if row.get(column) is not None:
                     row[column] = int(row[column])
+            row["key_boundaries"] = [list(item) for item in _boundaries(row.get("key_boundaries"))]
         return rows
 
     async def get_chain_status(self, cluster_uid: str) -> Optional[ChainStatus]:

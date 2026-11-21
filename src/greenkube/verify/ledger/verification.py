@@ -422,6 +422,17 @@ async def verify_ledger(
             anchor_seq, anchor_hash = previous.head_seq, previous.head_hash
         else:
             anchor_seq, anchor_hash = None, None
+        if previous is not None and repo.status_signature_state(previous) in ("previous", "forged"):
+            # A row this process cannot vouch for (signed with a key it does not hold, or forged): only the outcome
+            # is recorded, never the anchor, so a rotation it cannot see is not erased.
+            await repo.record_verification_result(
+                cluster_uid,
+                verified_at=moment,
+                ok=result.ok,
+                failure=None if result.ok else f"{result.reason}: {result.detail}",
+            )
+            results[cluster_uid] = result
+            continue
         await repo.record_chain_status(
             ChainStatus(
                 cluster_uid=cluster_uid,
@@ -459,33 +470,47 @@ async def accept_head(
         raise ValueError("a reason is required to accept a new ledger head")
     moment = now or datetime.now(timezone.utc)
     previous = await repo.get_chain_status(cluster_uid)
-    # The recorded boundaries are kept when the row is signed with the current key; otherwise they are taken from
-    # the walk (the entries' own keys).
-    kept = previous if previous is not None and repo.status_signature_state(previous) == "current" else None
+    # The recorded boundaries are kept when the row is signed with a key this process holds; otherwise, or when
+    # the entries no longer follow them (an old writer after a rotation), they are rebuilt from the entries' own
+    # keys as consecutive runs, provided every keyed entry verifies with a configured key. The rebuilt boundaries
+    # are recorded in the audit row.
+    kept = previous if previous is not None and repo.status_signature_valid(previous) is True else None
+    if kept is not None and not kept.key_boundaries:
+        kept = None
     result = await verify_chain(repo, cluster_uid, boundaries=kept)
+    rebuilt = False
+    if not result.ok and kept is not None and result.reason in ("chain_key_order", "unkeyed_after_key"):
+        kept = None
+        result = await verify_chain(repo, cluster_uid)
+        rebuilt = True
+    elif kept is None:
+        rebuilt = bool(result.ok and result.key_boundaries)
     if not result.ok:
         return result
-    await repo.record_chain_status(
-        ChainStatus(
-            cluster_uid=cluster_uid,
-            verified_at=moment,
-            ok=True,
-            entries=result.entries,
-            head_seq=result.head_seq,
-            head_hash=result.head_hash,
-            failure=None,
-            head_keyed=result.head_keyed,
-            first_keyed_seq=kept.first_keyed_seq if kept and kept.key_boundaries else result.first_keyed_seq,
-            key_boundaries=kept.key_boundaries if kept and kept.key_boundaries else result.key_boundaries,
-        )
-    )
-    await repo.record_head_acceptance(
-        cluster_uid,
-        accepted_at=moment,
-        reason=reason.strip(),
-        previous=previous,
+    boundaries = kept.key_boundaries if kept is not None else result.key_boundaries
+    first_keyed = kept.first_keyed_seq if kept is not None else result.first_keyed_seq
+    status = ChainStatus(
+        cluster_uid=cluster_uid,
+        verified_at=moment,
+        ok=True,
+        entries=result.entries,
         head_seq=result.head_seq,
         head_hash=result.head_hash,
+        failure=None,
+        head_keyed=result.head_keyed,
+        first_keyed_seq=first_keyed,
+        key_boundaries=tuple(boundaries),
+    )
+    audit = reason.strip()
+    if rebuilt:
+        audit += f" [key boundaries rebuilt from the entries: {list(boundaries)}]"
+    await repo.commit_status(
+        status,
+        expect_head=(result.head_seq or 0, result.head_hash),
+        expect_signature=previous.signature if previous is not None else None,
+        audit_reason=audit,
+        previous=previous,
+        accepted_at=moment,
     )
     _CHECKPOINTS.pop(cluster_uid, None)
     logger.warning(
@@ -530,6 +555,9 @@ async def rotate_key(
     if kept is not None and kept.key_boundaries and kept.key_for(10**18) == current_id:
         raise ValueError(f"the ledger of cluster {cluster_uid} already rotated to key {current_id}")
     result = await verify_chain(repo, cluster_uid, boundaries=kept if kept and kept.key_boundaries else None)
+    if result.ok:
+        # The head the old row anchored must still be there (a lost tail is accepted first, with accept-head).
+        result = await _tail_lost(repo, result, previous) or result
     if not result.ok:
         return result
     if not result.head_keyed:
@@ -539,7 +567,9 @@ async def rotate_key(
     boundaries = kept.key_boundaries if kept and kept.key_boundaries else result.key_boundaries
     first_keyed = kept.first_keyed_seq if kept and kept.key_boundaries else result.first_keyed_seq
     rotated = tuple(boundaries) + ((current_id, (result.head_seq or 0) + 1),)
-    await repo.record_chain_status(
+    # One transaction under the append lock: the head and the row are those verified, and the status row and its
+    # audit row are written together.
+    await repo.commit_status(
         ChainStatus(
             cluster_uid=cluster_uid,
             verified_at=moment,
@@ -551,15 +581,12 @@ async def rotate_key(
             head_keyed=True,
             first_keyed_seq=first_keyed,
             key_boundaries=rotated,
-        )
-    )
-    await repo.record_head_acceptance(
-        cluster_uid,
-        accepted_at=moment,
-        reason=f"rotate-key to {current_id} from seq {(result.head_seq or 0) + 1}: {reason.strip()}",
+        ),
+        expect_head=(result.head_seq or 0, result.head_hash),
+        expect_signature=previous.signature if previous is not None else None,
+        audit_reason=f"rotate-key to {current_id} from seq {(result.head_seq or 0) + 1}: {reason.strip()}",
         previous=previous,
-        head_seq=result.head_seq,
-        head_hash=result.head_hash,
+        accepted_at=moment,
     )
     _CHECKPOINTS.pop(cluster_uid, None)
     logger.warning(
