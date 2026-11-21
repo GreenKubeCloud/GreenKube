@@ -4,7 +4,9 @@
 -- from the Kubernetes state at collection time (metadata_source NULL) or was
 -- missing. Its source is the last earlier row of the same pod that has
 -- metadata (the last known values), else the first later one, within one
--- continuous run of rows of that pod: a gap over three steps, or a new
+-- continuous run of rows of that pod: a gap over three steps (the previous
+-- row's duration_seconds, 300 s assumed for legacy rows without one, so with a
+-- shorter configured step the tolerance stays 15 minutes), or a new
 -- pod_snapshots version (spec change or another incarnation of the pod name),
 -- ends the run, so values never cross incarnations. A row that has an owner
 -- or a request is never a target (a BestEffort pod has requests 0).
