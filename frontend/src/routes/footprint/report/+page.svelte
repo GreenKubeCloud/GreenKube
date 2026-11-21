@@ -21,6 +21,8 @@
 	let aggregationLevel = 'raw';
 	let groupBy = 'pod';
 	let format = 'csv';
+	// Opt-in (NRG-02): idle and cluster-total rows make a column sum count the idle share twice.
+	let includeIdle = false;
 
 	// ── UI state ──────────────────────────────────────────────────────────────
 	let namespaces = [];
@@ -147,7 +149,8 @@
 		try {
 			await downloadReport({
 				...reportParams,
-				format
+				format,
+				...(includeIdle ? { include_idle: true } : {})
 			});
 			downloadSuccess = true;
 			setTimeout(() => { downloadSuccess = false; }, 4000);
@@ -339,6 +342,16 @@
 						</button>
 					{/each}
 				</div>
+				<label class="mt-3 flex items-start gap-2 text-sm text-dark-200">
+					<input type="checkbox" bind:checked={includeIdle} class="mt-1" />
+					<span>Include node idle share</span>
+				</label>
+				{#if includeIdle}
+					<p class="mt-1 text-xs text-amber-300">
+						Adds an idle row and a cluster-total row per period (cluster-wide reports only). Do not sum all rows:
+						the cluster total already includes the workload rows and the idle share.
+					</p>
+				{/if}
 			</Card>
 
 		</div>

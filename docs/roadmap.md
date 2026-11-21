@@ -164,8 +164,8 @@ Every surprise becomes an issue in this roadmap. **This is the release gate of p
 ### A.9 Follow-ups found during phase A (lane noted; do before or with phase D)
 - **Test hygiene (lane: tests, in progress):** pytest runs can hang at exit on a leaked non-daemon thread (an unclosed `aiosqlite` connection or executor). Fix the leak and keep a session-end guard (`fix/test-thread-leak`).
 - **Bearer key guessing (lane: auth):** wrong Bearer keys are not login-throttled; only the global rate limit applies. Generated keys are 256-bit, so the risk is low, but an operator-chosen bootstrap key is not. Throttle failed Bearer attempts per IP.
-- **Idle share (lane: API, with WP-10):** still missing from `/report/export`, the Prometheus gauges and the Footprint UI (WP-05.3).
-- **Untrusted cost hours (lane: measurement):** expose `untrusted_cost_hours` per change (MEA-05 rest).
+- **Idle share (lane: API, with WP-10):** done on `fix/idle-share-exposure`: `/report/export` rows, Prometheus gauges, dashboard summary cache and the Footprint UI (WP-05.3).
+- **Untrusted cost hours (lane: measurement):** done on `fix/idle-share-exposure`: `untrusted_cost_hours` and `baseline_untrusted_cost_hours` per measurement, API and change detail (MEA-05 rest).
 - **Hourly provenance (lane: storage, with C.3):** the hourly tables do not keep `embodied_source` or `gpu_source`.
 - **Shared-host history (lane: impact):** rows collected before migration 0183 on kind, k3d or multi-node minikube cannot be split per host on recompute; use the current snapshot ids of the same node when the historical snapshot has none.
 - **Energy findings left (lane: impact):** NRG-14 (operators set server power: annotation, node profiles, measured tier), NRG-16 (Wattnet 15-minute points, proxy zones), NRG-17 (doc and code drift, PUE overrides), the NRG-13 UI badge.

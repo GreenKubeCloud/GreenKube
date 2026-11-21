@@ -653,8 +653,9 @@ class ChangeRepository:
                 "INSERT INTO change_measurements (measurement_id, change_id, sequence, strategy_key, strategy_version, "
                 "impact_model_version, baseline_snapshot_id, baseline_sha256, windows, load_driver, "
                 "counterfactual_params, estimates, confounders, confidence, health, allocations, outcome, reasons, "
-                "evidence_sha256, supersedes_measurement_id, decided_at, capacity) "
-                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?j, ?j, ?j, ?j, ?j, ?, ?j, ?j, ?, ?j, ?, ?, ?, ?j) {conflict}",
+                "evidence_sha256, supersedes_measurement_id, decided_at, capacity, untrusted_cost_hours, "
+                "baseline_untrusted_cost_hours) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?j, ?j, ?j, ?j, ?j, ?, ?j, ?j, ?, ?j, ?, ?, ?, ?j, ?, ?) {conflict}",
                 [
                     measurement.measurement_id,
                     measurement.change_id,
@@ -678,6 +679,8 @@ class ChangeRepository:
                     measurement.supersedes_measurement_id,
                     self._ts(measurement.decided_at),
                     _dumps(data["capacity"]) if data["capacity"] is not None else None,
+                    measurement.untrusted_cost_hours,
+                    measurement.baseline_untrusted_cost_hours,
                 ],
             )
         stored = await self.get_measurement_for_cycle(measurement.change_id, measurement.sequence)

@@ -17,6 +17,7 @@
 	} from '$lib/api.js';
 	import { formatCO2, formatCost, formatEnergy, formatNumber, formatRelativeTime } from '$lib/utils/format.js';
 	import { buildTimeseriesOption, buildMultiSeriesOption, buildNamespaceDonutOption, buildTopPodsOption } from '$lib/charts.js';
+	import { NOT_AVAILABLE, idleShareNote, idleShareRows, windowStart } from '$lib/idleShare.js';
 	import StatCard from '$lib/components/StatCard.svelte';
 	import DataState from '$lib/components/DataState.svelte';
 	import Filters from '$lib/components/Filters.svelte';
@@ -124,6 +125,17 @@
 		}
 	}
 
+	$: idleRows = idleShareRows(summary);
+	$: idleNote = idleShareNote(summary, $selectedNamespace, windowStart($selectedTimeRange));
+
+	/** A value of the idle-share table, or "not available" when unknown. */
+	function formatIdleValue(key, value) {
+		if (value === null || value === undefined) return NOT_AVAILABLE;
+		if (key === 'cost') return formatCost(value);
+		if (key === 'energy') return formatEnergy(value);
+		return formatCO2(value);
+	}
+
 	$: co2Option = timeseries.length
 		? buildTimeseriesOption(timeseries, { valueKey: 'co2e_grams', label: 'CO₂ Emissions', unit: 'g', windowSlug: $selectedTimeRange })
 		: null;
@@ -206,6 +218,39 @@
 					</p>
 				</div>
 			</div>
+
+			<!-- WP-05.3 (NRG-02): the totals above are allocated to pods; the node idle share
+			     (unreserved capacity) and the cluster total sit next to them, unknown when null. -->
+			<section class="card-compact space-y-2" aria-labelledby="idle-share-heading" data-testid="idle-share">
+				<h2 id="idle-share-heading" class="text-sm font-semibold uppercase tracking-wider text-dark-300">
+					Allocated, idle share and cluster total
+				</h2>
+				<div class="overflow-x-auto">
+					<table class="w-full text-sm" aria-labelledby="idle-share-heading">
+						<thead>
+							<tr class="text-left text-xs text-dark-500">
+								<th scope="col"></th>
+								<th scope="col" class="py-1 pr-4">Allocated to pods</th>
+								<th scope="col" class="py-1 pr-4">Node idle share</th>
+								<th scope="col" class="py-1">Cluster total</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each idleRows as row (row.key)}
+								<tr class="border-t border-dark-700/50">
+									<th scope="row" class="py-1 pr-4 text-left font-normal text-dark-400">{row.label}</th>
+									<td class="py-1 pr-4 text-dark-100">{formatIdleValue(row.key, row.allocated)}</td>
+									<td class="py-1 pr-4 {row.idle === null ? 'text-dark-500 italic' : 'text-dark-100'}">
+										{formatIdleValue(row.key, row.idle)}{#if row.idleShare !== null}<span class="text-xs text-dark-500"> ({Math.round(row.idleShare * 100)}%)</span>{/if}
+									</td>
+									<td class="py-1 {row.total === null ? 'text-dark-500 italic' : 'text-dark-100'}">{formatIdleValue(row.key, row.total)}</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+				{#if idleNote}<p class="text-xs text-dark-500">{idleNote}</p>{/if}
+			</section>
 
 			<div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
 				<Card title="CO₂ Emissions Over Time" icon="📈">

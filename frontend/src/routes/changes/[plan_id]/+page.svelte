@@ -2,7 +2,7 @@
 	import { onDestroy } from 'svelte';
 	import { ApiError, getAutomationPlan, getChangeMeasurements, getRecommendationPullRequests } from '$lib/api.js';
 	import { formatDate } from '$lib/utils/format.js';
-	import { changeTarget, latestMeasurement, resolveChange, stateLabel, stateTone } from '$lib/changes.js';
+	import { changeTarget, formatUntrustedHours, latestMeasurement, resolveChange, stateLabel, stateTone } from '$lib/changes.js';
 	import { safeHttpUrl } from '$lib/recommendationDetail.js';
 	import StatusPill from '$lib/components/StatusPill.svelte';
 	import MeasurementTable from '$lib/components/MeasurementTable.svelte';
@@ -181,6 +181,14 @@
 					<MeasurementTable measurement={current} />
 					<!-- WP-08.1: released capacity, decided from the specs alone, never money -->
 					<ReleasedCapacity capacity={current.capacity} testid="measured-capacity" />
+					<!-- MEA-05: why a cost verdict lost hours -->
+					<div class="space-y-1 text-xs" data-testid="untrusted-cost-hours">
+						<p class="text-dark-500">Workload hours without trusted cost (configured rates, missing or estimated cost)</p>
+						<dl class="grid grid-cols-2 gap-2">
+							<div><dt class="text-dark-500">Measurement window</dt><dd class="text-dark-200" data-testid="untrusted-cost-hours-post">{formatUntrustedHours(current.untrusted_cost_hours)}</dd></div>
+							<div><dt class="text-dark-500">Baseline window</dt><dd class="text-dark-200" data-testid="untrusted-cost-hours-baseline">{formatUntrustedHours(current.baseline_untrusted_cost_hours)}</dd></div>
+						</dl>
+					</div>
 				{:else}
 					<p class="text-sm text-dark-400">No measurement decided yet.</p>
 				{/if}

@@ -110,6 +110,18 @@ export function measurementRows(measurement) {
 		.sort((a, b) => Number(b.claimed) - Number(a.claimed));
 }
 
+/**
+ * Untrusted cost hours of a measurement window (MEA-05): workload hours with
+ * metric rows but no trusted cost. "not recorded" on measurements decided
+ * before the value was stored (null or absent), never "0 h".
+ * @param {unknown} hours
+ */
+export function formatUntrustedHours(hours) {
+	if (typeof hours !== 'number' || !Number.isFinite(hours)) return 'not recorded';
+	if (hours === 0) return '0 h';
+	return `${hours < 10 ? hours.toFixed(2).replace(/\.?0+$/, '') : hours.toFixed(1)} h`;
+}
+
 /** The latest (current) measurement: the last one that nothing supersedes. */
 export function latestMeasurement(items = []) {
 	if (!Array.isArray(items) || !items.length) return null;

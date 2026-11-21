@@ -8,12 +8,20 @@ from typing import List, Optional
 
 import aiosqlite
 
+from greenkube.core.idle_share import stored_summary_idle_fields, summary_idle_values
 from greenkube.models.metrics import MetricsSummaryRow
 
 from ...core.exceptions import QueryError
 from ..base_repository import SummaryRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _idle_values(row: MetricsSummaryRow) -> list:
+    """Idle columns of ``row`` for SQLite: ``idle_data_since`` as ISO 8601 text."""
+    values = summary_idle_values(row)
+    since = values[-1]
+    return [*values[:-1], since.isoformat() if since is not None else None]
 
 
 class SQLiteSummaryRepository(SummaryRepository):
@@ -38,8 +46,10 @@ class SQLiteSummaryRepository(SummaryRepository):
                             (window_slug, namespace,
                              total_co2e_grams, total_embodied_co2e_grams,
                              total_cost, total_energy_joules,
-                             pod_count, namespace_count, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             pod_count, namespace_count, updated_at,
+                             idle_co2e_grams, idle_embodied_co2e_grams, idle_cost,
+                             idle_energy_joules, idle_data_since)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             row.window_slug,
@@ -51,6 +61,7 @@ class SQLiteSummaryRepository(SummaryRepository):
                             row.pod_count,
                             row.namespace_count,
                             updated_at,
+                            *_idle_values(row),
                         ),
                     )
                 else:
@@ -60,8 +71,10 @@ class SQLiteSummaryRepository(SummaryRepository):
                             (window_slug, namespace,
                              total_co2e_grams, total_embodied_co2e_grams,
                              total_cost, total_energy_joules,
-                             pod_count, namespace_count, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             pod_count, namespace_count, updated_at,
+                             idle_co2e_grams, idle_embodied_co2e_grams, idle_cost,
+                             idle_energy_joules, idle_data_since)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(window_slug, namespace) DO UPDATE SET
                             total_co2e_grams          = excluded.total_co2e_grams,
                             total_embodied_co2e_grams = excluded.total_embodied_co2e_grams,
@@ -69,7 +82,12 @@ class SQLiteSummaryRepository(SummaryRepository):
                             total_energy_joules       = excluded.total_energy_joules,
                             pod_count                 = excluded.pod_count,
                             namespace_count           = excluded.namespace_count,
-                            updated_at                = excluded.updated_at
+                            updated_at                = excluded.updated_at,
+                            idle_co2e_grams           = excluded.idle_co2e_grams,
+                            idle_embodied_co2e_grams  = excluded.idle_embodied_co2e_grams,
+                            idle_cost                 = excluded.idle_cost,
+                            idle_energy_joules        = excluded.idle_energy_joules,
+                            idle_data_since           = excluded.idle_data_since
                         """,
                         (
                             row.window_slug,
@@ -81,6 +99,7 @@ class SQLiteSummaryRepository(SummaryRepository):
                             row.pod_count,
                             row.namespace_count,
                             updated_at,
+                            *_idle_values(row),
                         ),
                     )
                 await conn.commit()
@@ -126,6 +145,7 @@ class SQLiteSummaryRepository(SummaryRepository):
                             pod_count=row["pod_count"],
                             namespace_count=row["namespace_count"],
                             updated_at=datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else None,
+                            **stored_summary_idle_fields(row),
                         )
                         for row in rows
                     ]

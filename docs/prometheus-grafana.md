@@ -97,10 +97,18 @@ The cluster, namespace, pod, node, recommendation, savings, and dashboard famili
 | Metric | Labels | Description |
 |---|---|---|
 | `greenkube_sustainability_score` | `cluster`, `namespace` | Composite sustainability score (0–100) — emitted per namespace and with `namespace="__all__"` for the cluster aggregate |
-| `greenkube_cluster_co2e_grams_total` | `cluster` | Total operational CO₂e emissions (g) |
-| `greenkube_cluster_embodied_co2e_grams_total` | `cluster` | Total embodied (Scope 3) CO₂e (g) |
-| `greenkube_cluster_cost_dollars_total` | `cluster` | Estimated total cloud cost ($) |
-| `greenkube_cluster_energy_joules_total` | `cluster` | Total energy consumed (J) |
+| `greenkube_cluster_co2e_grams_total` | `cluster` | Operational CO₂e allocated to pods (g), latest collection; excludes the node idle share |
+| `greenkube_cluster_embodied_co2e_grams_total` | `cluster` | Embodied (Scope 3) CO₂e allocated to pods (g); excludes the node idle share |
+| `greenkube_cluster_cost_dollars_total` | `cluster` | Estimated cloud cost allocated to pods ($); excludes the node idle share |
+| `greenkube_cluster_energy_joules_total` | `cluster` | Energy allocated to pods (J); excludes the node idle share |
+| `greenkube_cluster_idle_co2e_grams` | `cluster` | Operational CO₂e of the node idle share (unreserved capacity, `__idle__` rows) (g), latest idle row of each node |
+| `greenkube_cluster_idle_embodied_co2e_grams` | `cluster` | Embodied CO₂e of the node idle share (g) |
+| `greenkube_cluster_idle_cost_dollars` | `cluster` | Cost of the node idle share ($) |
+| `greenkube_cluster_idle_energy_joules` | `cluster` | Energy of the node idle share (J) |
+| `greenkube_cluster_with_idle_co2e_grams` | `cluster` | Cluster total operational CO₂e (g) = allocated + idle |
+| `greenkube_cluster_with_idle_embodied_co2e_grams` | `cluster` | Cluster total embodied CO₂e (g) = allocated + idle |
+| `greenkube_cluster_with_idle_cost_dollars` | `cluster` | Cluster total cost ($) = allocated + idle |
+| `greenkube_cluster_with_idle_energy_joules` | `cluster` | Cluster total energy (J) = allocated + idle |
 | `greenkube_cluster_pod_count` | `cluster` | Number of running pods |
 | `greenkube_cluster_namespace_count` | `cluster` | Number of active namespaces |
 | `greenkube_cluster_co2e_saved_grams_total` | `cluster` | Annual projected CO₂e savings rate of applied recommendations still accruing as projected (g/year) — legacy, prefer `greenkube_savings_run_rate_annual_co2e_grams` |
@@ -111,6 +119,8 @@ The cluster, namespace, pod, node, recommendation, savings, and dashboard famili
 | `greenkube_estimated_metrics_ratio` | `cluster`, `namespace` | Fraction of metrics that are estimated (0 = all measured) — emitted per namespace and with `namespace="__all__"` |
 | `greenkube_metrics_total` | `cluster` | Total number of combined metric records in the latest window |
 | `greenkube_last_collection_timestamp_seconds` | `cluster` | Unix timestamp of the most recent metric in the database |
+
+The `greenkube_cluster_idle_*` and `greenkube_cluster_with_idle_*` series are absent (not zero) when no idle row is stored in the last 20 minutes or when a pod row of the snapshot is older than the first stored idle row (`idle_data_since`), the rule of `/metrics/summary`. Never add an idle series to a `with_idle` series, and never add the idle series to the per-namespace or per-pod series: those are allocated to pods only.
 
 ### Namespace-level metrics
 

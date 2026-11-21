@@ -127,6 +127,52 @@ describe('/footprint charts', () => {
 		expect(screen.getByText(/Grafana dashboard/)).toBeInTheDocument();
 	});
 
+	it('shows the node idle share and the cluster total next to the allocated totals', async () => {
+		api.getDashboardSummary.mockResolvedValue({
+			windows: {
+				'24h': {
+					...summary,
+					total_co2e_all_scopes: 1200,
+					idle_co2e_grams: 600,
+					idle_embodied_co2e_grams: 0,
+					idle_cost: 1,
+					idle_energy_joules: 7200000,
+					cluster_total_co2e_grams: 1800,
+					cluster_total_embodied_co2e_grams: 0,
+					cluster_total_cost: 4,
+					cluster_total_energy_joules: 7200000
+				}
+			}
+		});
+		render(FootprintPage);
+
+		const table = await screen.findByRole('table', { name: /idle share/i });
+		const headers = within(table).getAllByRole('columnheader').map((cell) => cell.textContent.trim());
+		expect(headers).toEqual(['', 'Allocated to pods', 'Node idle share', 'Cluster total']);
+		const co2e = within(table).getByRole('row', { name: /CO₂e/ });
+		expect(within(co2e).getByText('1.20 kg')).toBeInTheDocument();
+		expect(within(co2e).getByText(/600/)).toBeInTheDocument();
+		expect(within(co2e).getByText('1.80 kg')).toBeInTheDocument();
+		const cost = within(table).getByRole('row', { name: /Cost/ });
+		expect(within(cost).getByText(/4\.00/)).toBeInTheDocument();
+		expect(within(table).queryByText('not available')).not.toBeInTheDocument();
+	});
+
+	it('shows "not available" when the idle share is unknown', async () => {
+		api.getDashboardSummary.mockResolvedValue({
+			windows: {
+				'24h': { ...summary, idle_energy_joules: null, cluster_total_energy_joules: null, idle_data_since: new Date(Date.now() - 3600e3).toISOString() }
+			}
+		});
+		render(FootprintPage);
+
+		const table = await screen.findByRole('table', { name: /idle share/i });
+		// Idle and cluster total of CO2e, cost and energy.
+		expect(within(table).getAllByText('not available')).toHaveLength(6);
+		// The idle history starts an hour ago, inside the 24h window.
+		expect(screen.getByText(/idle history starts/i)).toBeInTheDocument();
+	});
+
 	it('aborts its requests when the page is unmounted', async () => {
 		const { unmount } = render(FootprintPage);
 		await waitFor(() => expect(api.getDashboardSummary).toHaveBeenCalled());

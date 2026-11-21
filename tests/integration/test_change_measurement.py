@@ -287,6 +287,67 @@ async def test_a_change_is_measured_once_and_split_across_its_recommendations(da
     assert events == ["change_recorded", "measurement_started", "health_checked", "measurement_decided"]
 
 
+async def test_a_measurement_records_its_untrusted_cost_hours(database):
+    """MEA-05 rest: each decided measurement says how many hours of each window had no trusted cost."""
+    scenario = Scenario(database)
+    completed = scenario.completed
+    scenario.add_rows(TimeWindow(start=completed - timedelta(days=8), end=completed))
+    scenario.add_rows(
+        TimeWindow(start=completed, end=completed + timedelta(days=9)), cpu_request=300, memory_request=1024**3
+    )
+    post_start = completed + timedelta(hours=1)
+    tainted = TimeWindow(start=post_start + timedelta(hours=5), end=post_start + timedelta(hours=15))
+    # Ten post-window hours priced with configured rates (not trusted), both replicas.
+    scenario.metrics.pod_rows = [
+        row.model_copy(update={"cost_source": "custom_rate"})
+        if row.timestamp is not None and tainted.start <= row.timestamp < tainted.end
+        else row
+        for row in scenario.metrics.pod_rows
+    ]
+    change, _ = await scenario.apply()
+    await scenario.service.run_due(now=completed + timedelta(hours=2))
+    status = await scenario.changes.get_status(change.change_id)
+    assert status is not None and status.post_window_end is not None
+    await scenario.service.run_due(now=status.post_window_end + DECISION_GRACE)
+
+    measurements = await scenario.changes.list_measurements(change.change_id)
+    assert len(measurements) == 1
+    measurement = measurements[0]
+    assert measurement.untrusted_cost_hours == pytest.approx(10.0)
+    assert measurement.baseline_untrusted_cost_hours == pytest.approx(0.0)
+    # Recorded with the evidence: the digest covers it.
+    assert measurement.with_evidence_digest().evidence_sha256 == measurement.evidence_sha256
+
+
+def test_a_measurement_without_untrusted_cost_hours_keeps_its_digest():
+    """Measurements decided before untrusted_cost_hours was recorded keep a valid evidence digest."""
+    start = hour_now()
+    plan = WindowPlan(
+        pre=TimeWindow(start=start - timedelta(days=7), end=start),
+        post=TimeWindow(start=start, end=start + timedelta(days=7)),
+        warmup_hours=1,
+        min_coverage=0.8,
+    )
+    measurement = ChangeMeasurement(
+        measurement_id="m1",
+        change_id="c1",
+        strategy_key="request_rightsizing",
+        strategy_version="1",
+        windows=plan,
+        outcome=ChangeOutcome.INCONCLUSIVE,
+    )
+    payload = measurement.model_dump(mode="json", exclude={"evidence_sha256", "capacity"})
+    assert "untrusted_cost_hours" not in payload or payload["untrusted_cost_hours"] is None
+    legacy = {
+        key: value
+        for key, value in payload.items()
+        if key not in ("untrusted_cost_hours", "baseline_untrusted_cost_hours")
+    }
+    from greenkube.verify.model import sha256_hex
+
+    assert measurement.with_evidence_digest().evidence_sha256 == sha256_hex(legacy)
+
+
 async def test_not_realized_change_is_remeasured_only_on_request(database):
     scenario = Scenario(database)
     completed = scenario.completed
