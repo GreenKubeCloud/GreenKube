@@ -3,7 +3,7 @@
 
 import logging
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from ...models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord, normalize_savings_method
 from ...utils.date_utils import ensure_utc
@@ -179,6 +179,33 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
                 ids,
             )
         return {int(row["recommendation_id"]): ensure_utc(row["period_end"]) for row in rows if row["period_end"]}
+
+    async def get_measured_totals(self, recommendation_id: int, start: datetime, end: datetime) -> Tuple[float, float]:
+        """Sum of the measured grid accruals of one recommendation inside ``[start, end)`` (LED-12)."""
+        async with self._db.connection_scope() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT SUM(co2e_saved_grams * share) AS co2e, SUM(cost_saved_dollars * share) AS cost
+                FROM (
+                    SELECT co2e_saved_grams, cost_saved_dollars,
+                           (CASE
+                               WHEN period_start >= $2 AND period_end <= $3 THEN 1.0
+                               ELSE GREATEST(
+                                   0.0,
+                                   EXTRACT(EPOCH FROM (LEAST(period_end, $3) - GREATEST(period_start, $2)))
+                               ) / NULLIF(EXTRACT(EPOCH FROM (period_end - period_start)), 0)
+                           END)::DOUBLE PRECISION AS share
+                    FROM savings_accruals_v1
+                    WHERE recommendation_id = $1 AND measurement_method = 'measured'
+                      AND slot_start IS NOT NULL AND NOT superseded
+                      AND period_end > $2 AND period_start < $3
+                ) AS entries
+                """,
+                int(recommendation_id),
+                ensure_utc(start),
+                ensure_utc(end),
+            )
+        return (float(row["co2e"] or 0.0), float(row["cost"] or 0.0)) if row else (0.0, 0.0)
 
     # ------------------------------------------------------------------
     # Reads
