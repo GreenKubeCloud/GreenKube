@@ -803,6 +803,13 @@ def consolidate(
                 source_only += 1
                 continue
             kept = []
+            native_increase = any(
+                is_native(ballot)
+                and ballot.value is not None
+                and ballot.current is not None
+                and ballot.value > ballot.current
+                for ballot in admitted
+            )
             for ballot in admitted:
                 reason = screen.reason(ballot, parsed_policy)
                 if reason is None:
@@ -816,8 +823,9 @@ def consolidate(
                         reason=reason,
                     )
                 )
-                if reason == IGNORED_MIN_CHANGE:
-                    # A small change is a "keep it" vote: it counts at the current value.
+                if reason == IGNORED_MIN_CHANGE and not native_increase:
+                    # A small change is a "keep it" vote: it counts at the current value. Never
+                    # against a native increase (an OOM-driven one must not be cancelled): dropped.
                     kept.append(replace(ballot, value=ballot.current))
             admitted = kept
             if not admitted:

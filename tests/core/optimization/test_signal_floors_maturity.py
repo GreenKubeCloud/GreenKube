@@ -207,6 +207,26 @@ class TestFieldScenarios:
 
             assert await engine.refresh(AsyncMock(), AsyncMock(), repo) == [], vpa_value
 
+    @pytest.mark.parametrize("policy", ["safest", "priority", "median", "weighted"])
+    async def test_a_small_change_never_holds_back_a_native_increase(self, repo, monkeypatch, policy):
+        # Current 400 Mi, native 600 Mi (an increase, e.g. OOM-driven), VPA 410 Mi (below the minimum)
+        # and KRR 380 Mi: "keep 400 Mi" must not win and cancel the increase.
+        engine = _engine(
+            [
+                FakeConnector("greenkube", [_memory(600 * MIB, current=400 * MIB)]),
+                FakeConnector("vpa", [_memory(410 * MIB, "vpa", current=400 * MIB)]),
+                _krr(("seaweedfs", "StatefulSet", "seaweedfs-volume", "volume", 400 * MIB, 380 * MIB)),
+            ]
+        )
+        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", policy)
+
+        await engine.refresh(AsyncMock(), AsyncMock(), repo)
+
+        [record] = await repo.get_active_recommendations()
+        assert record.recommended_memory_request_bytes == 600 * MIB
+        ignored = {vote["source_id"]: vote["reason"] for vote in (record.consensus or {})["ignored_votes"]}
+        assert ignored == {"vpa": "below_min_change"}
+
     def test_a_small_change_stays_listed_as_ignored(self):
         from greenkube.signals.consensus import VoteScreen, ballots_for_signal, consolidate
 
