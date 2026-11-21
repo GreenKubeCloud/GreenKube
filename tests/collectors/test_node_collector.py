@@ -13,7 +13,7 @@ from greenkube.collectors.node_collector import NodeCollector
 
 @pytest.fixture(autouse=True)
 def _detect_the_provider(monkeypatch):
-    """The test environment sets CLOUD_PROVIDER=aws, which overrides detection (COL-15)."""
+    """The test environment sets CLOUD_PROVIDER=aws, which fills in undetected nodes (COL-15)."""
     monkeypatch.setattr(node_collector_module.global_config, "CLOUD_PROVIDER", "unknown", raising=False)
 
 

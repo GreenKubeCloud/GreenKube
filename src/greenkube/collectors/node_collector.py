@@ -222,17 +222,14 @@ class NodeCollector(BaseCollector):
     def _detect_cloud_provider(self, labels: dict, node=None) -> str:
         """Detect the cloud provider of a node (COL-15).
 
-        ``CLOUD_PROVIDER`` overrides detection when configured.  Otherwise the
-        node's ``spec.providerID`` scheme decides, then provider-specific label
-        prefixes.  Region names are never used: GKE ``us-central1``, Linode
+        The node's ``spec.providerID`` scheme decides, then provider-specific
+        label prefixes; ``CLOUD_PROVIDER`` only fills in nodes neither identifies,
+        so a hybrid or mixed cluster keeps each node's real provider.  Region names are never
+        used: GKE ``us-central1``, Linode
         ``us-east`` or OCI ``eu-frankfurt-1`` look like AWS regions.  Providers
         without a GreenKube profile (Linode, Oracle, IBM, Alibaba, bare
         OpenStack) stay ``unknown``, so their PUE and power are flagged defaults.
         """
-        configured = str(getattr(global_config, "CLOUD_PROVIDER", "") or "").strip().lower()
-        if configured and configured != "unknown":
-            return configured
-
         has_label = lambda *prefixes: any(key.startswith(prefixes) for key in labels)  # noqa: E731
         # OVH MKS nodes report an OpenStack providerID: its labels decide first.
         # OVH uses two label prefixes depending on the cluster generation:
@@ -250,7 +247,9 @@ class NodeCollector(BaseCollector):
         for prefixes, provider in _PROVIDER_LABEL_PREFIXES:
             if has_label(*prefixes):
                 return provider
-        return "unknown"
+        # Only nodes nothing identifies take the configured provider (review 5: hybrid clusters).
+        configured = str(getattr(global_config, "CLOUD_PROVIDER", "") or "").strip().lower()
+        return configured or "unknown"
 
     def _extract_instance_type(self, labels: dict, node, cloud_provider: str) -> str:
         """

@@ -70,7 +70,19 @@ def test_ovh_openstack_provider_id_with_ovh_labels_is_ovh():
     assert NodeCollector()._detect_cloud_provider(labels, _node("openstack:///abc")) == "ovh"
 
 
-def test_configured_cloud_provider_overrides_detection(monkeypatch):
+def test_configured_cloud_provider_only_fills_undetected_nodes(monkeypatch):
+    """Review 5: providerID and provider labels win (mixed and hybrid clusters)."""
     monkeypatch.setattr(node_collector_module.global_config, "CLOUD_PROVIDER", "gcp", raising=False)
-    labels = {INSTANCE: "m5.large", REGION: "us-east-1", "eks.amazonaws.com/nodegroup": "ng"}
-    assert NodeCollector()._detect_cloud_provider(labels, _node("aws:///us-east-1a/i-1")) == "gcp"
+    eks = {INSTANCE: "m5.large", REGION: "us-east-1", "eks.amazonaws.com/nodegroup": "ng"}
+    assert NodeCollector()._detect_cloud_provider(eks, _node("aws:///us-east-1a/i-1")) == "aws"
+    assert NodeCollector()._detect_cloud_provider({INSTANCE: "x"}, _node()) == "gcp"
+
+
+@pytest.mark.parametrize("alias", ["on-prem", "on-premise", "on-premises", "onprem", "on_prem"])
+def test_on_prem_aliases_are_not_cloud_providers(monkeypatch, alias):
+    """Review 5: an on-prem node is never looked up in a cloud catalogue or Boavizta's cloud API."""
+    from greenkube.collectors.boavizta_collector import NON_CLOUD_PROVIDERS
+
+    monkeypatch.setattr(node_collector_module.global_config, "CLOUD_PROVIDER", alias, raising=False)
+    assert NodeCollector()._detect_cloud_provider({}, _node()) == alias
+    assert alias in NON_CLOUD_PROVIDERS
