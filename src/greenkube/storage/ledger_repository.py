@@ -185,6 +185,11 @@ def configured_chain_key() -> Optional[bytes]:
     return raw.encode("utf-8") if raw else None
 
 
+def _sqlite_epoch(expression: str) -> str:
+    """SQLite seconds since the epoch of a canonical ledger timestamp, to the microsecond."""
+    return f"(CAST(strftime('%s', {expression}) AS REAL) + CAST(substr({expression}, 21, 6) AS REAL) / 1000000.0)"
+
+
 class LedgerRepository:
     """Append-only savings ledger entries, their chain and their projections.
 
@@ -859,22 +864,40 @@ class LedgerRepository:
         return [self._entry(row) for row in rows]
 
     def _share(self, start: Optional[datetime], end: Optional[datetime]) -> Tuple[str, List[Any]]:
-        """SQL of the share of an entry's period inside ``[start, end)`` (1.0 without a full window)."""
-        if start is None or end is None:
+        """SQL of the share of an entry's period inside ``[start, end)``, the rule of the export's ``window_share``.
+
+        A missing bound does not cut the period (1.0 without any window). A
+        zero-length entry selected by the window filter lies inside it and
+        counts in full (LED-12). SQLite durations are computed from whole
+        seconds plus the stored microseconds, not ``julianday``, whose float
+        days lose about 1e-9 of a share.
+        """
+        if start is None and end is None:
             return "1.0", []
+        # The bounds are inlined as literals: they are datetimes formatted by format_time (digits, '-', ':',
+        # '.', 'T', 'Z'), never user text, and SQLite repeats them in each duration expression.
+        cast = "::timestamptz" if self.postgres else ""
+        begin_bound = f"'{format_time(start)}'{cast}" if start is not None else "period_start"
+        end_bound = f"'{format_time(end)}'{cast}" if end is not None else "period_end"
         if self.postgres:
+            begin = f"GREATEST(period_start, {begin_bound})"
+            finish = f"LEAST(period_end, {end_bound})"
             share = (
-                "CASE WHEN period_start >= ? AND period_end <= ? THEN 1.0 ELSE GREATEST(0.0, "
-                "EXTRACT(EPOCH FROM (LEAST(period_end, ?) - GREATEST(period_start, ?)))) "
-                "/ NULLIF(EXTRACT(EPOCH FROM (period_end - period_start)), 0) END"
+                "CASE WHEN period_end <= period_start THEN 1.0 "
+                f"WHEN period_start >= {begin_bound} AND period_end <= {end_bound} THEN 1.0 "
+                f"ELSE GREATEST(0.0, EXTRACT(EPOCH FROM ({finish} - {begin}))) "
+                "/ EXTRACT(EPOCH FROM (period_end - period_start)) END"
             )
         else:
+            begin = f"MAX(period_start, {begin_bound})"
+            finish = f"MIN(period_end, {end_bound})"
             share = (
-                "CASE WHEN period_start >= ? AND period_end <= ? THEN 1.0 ELSE MAX(0.0, "
-                "MIN(julianday(period_end), julianday(?)) - MAX(julianday(period_start), julianday(?))) "
-                "/ NULLIF(julianday(period_end) - julianday(period_start), 0) END"
+                "CASE WHEN period_end <= period_start THEN 1.0 "
+                f"WHEN period_start >= {begin_bound} AND period_end <= {end_bound} THEN 1.0 "
+                f"ELSE MAX(0.0, {_sqlite_epoch(finish)} - {_sqlite_epoch(begin)}) "
+                f"/ ({_sqlite_epoch('period_end')} - {_sqlite_epoch('period_start')}) END"
             )
-        return share, [self._ts(start), self._ts(end), self._ts(end), self._ts(start)]
+        return share, []
 
     async def accrual_breakdown(
         self,
