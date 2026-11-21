@@ -297,7 +297,9 @@ async def api_key_login(body: ApiKeyLoginRequest, request: Request, response: Re
     with "keep me signed in". Every request checks the signature, the expiry
     and that the key is still active. The signing key derives from the
     bootstrap key ``GREENKUBE_API_KEY``: without one this answers 409, and
-    rotating it signs every browser out. Over plain HTTP only a loopback host
+    rotating it signs every browser out. The request must arrive over HTTPS
+    (directly, through ``TRUSTED_PROXY_IPS``, or as declared by
+    ``SESSION_COOKIE_SECURE=always``); over plain HTTP only a loopback host
     (``kubectl port-forward``) is accepted. Other modes answer 409.
     """
     settings = _settings()
@@ -324,14 +326,18 @@ async def api_key_login(body: ApiKeyLoginRequest, request: Request, response: Re
         raise HTTPException(
             status_code=403, detail={"code": "CSRF_REJECTED", "message": "Cross-site sign-in rejected."}
         )
-    https = is_https(request, settings)
+    # SESSION_COOKIE_SECURE=always: the operator states that browsers reach GreenKube over HTTPS (the chart
+    # renders it with ingress.tls or an https HTTPRoute, where TLS ends at the ingress and no proxy IP is trusted).
+    https = is_https(request, settings) or settings.cookie_secure == "always"
     if not https and not is_loopback_host(request):
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "HTTPS_REQUIRED",
                 "message": "Signing in with an API key needs HTTPS (or localhost through kubectl port-forward): "
-                "over plain HTTP the key and the cookie could be read on the network.",
+                "over plain HTTP the key and the cookie could be read on the network. If TLS ends at an ingress "
+                "or load balancer outside the chart, set config.trustedProxyIps to its addresses (so "
+                "X-Forwarded-Proto is trusted) or auth.session.secureCookie: always.",
             },
         )
     key = body.key.strip()

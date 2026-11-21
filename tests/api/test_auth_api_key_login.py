@@ -263,12 +263,33 @@ def test_a_cross_site_key_sign_in_is_refused(tmp_path, monkeypatch):
 
 
 def test_plain_http_to_a_remote_host_is_refused(tmp_path, monkeypatch):
-    with _harness(tmp_path, monkeypatch, base_url="http://testserver") as h:
+    with _harness(tmp_path, monkeypatch, base_url="http://testserver", SESSION_COOKIE_SECURE="auto") as h:
         response = _key_login(h, LEGACY_KEY, origin="http://testserver")
 
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "HTTPS_REQUIRED"
+    assert "auth.session.secureCookie" in response.json()["detail"]["message"]
+    assert "config.trustedProxyIps" in response.json()["detail"]["message"]
     assert "set-cookie" not in response.headers
+
+
+def test_tls_terminated_by_an_ingress_with_secure_cookie_always_is_accepted(tmp_path, monkeypatch):
+    """Default chart behind a TLS ingress: SESSION_COOKIE_SECURE=always, no TRUSTED_PROXY_IPS, plain HTTP to the pod."""
+    with _harness(
+        tmp_path,
+        monkeypatch,
+        base_url="http://greenkube.example.com",
+        SESSION_COOKIE_SECURE="always",
+        TRUSTED_PROXY_IPS="",
+    ) as h:
+        response = h.client.post(
+            LOGIN,
+            json={"key": LEGACY_KEY},
+            headers={"Origin": "https://greenkube.example.com", "X-Forwarded-Proto": "https"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert _cookie(response)["secure"] is True
 
 
 def test_plain_http_on_loopback_is_accepted(tmp_path, monkeypatch):

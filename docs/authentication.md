@@ -43,7 +43,10 @@ Bearer key and answers with a signed cookie, never the key itself:
 - **Cookie flags:** `HttpOnly; SameSite=Strict`, and `Secure` over HTTPS. Cookie-authenticated mutations need a
   same-origin `Origin` and the `X-CSRF-Token` returned by the sign-in and `/auth/me`, which differs for every cookie.
 - **HTTPS required:** over plain HTTP the sign-in answers `400 HTTPS_REQUIRED`, except for a loopback host
-  (`kubectl port-forward` to `localhost`).
+  (`kubectl port-forward` to `localhost`). HTTPS is recognised directly, through `X-Forwarded-Proto` from
+  `config.trustedProxyIps`, or when `auth.session.secureCookie` is `always`, which the chart renders with
+  `ingress.tls` or an https HTTPRoute. If TLS ends at an ingress or load balancer the chart does not render, set
+  `config.trustedProxyIps` to its addresses or `auth.session.secureCookie: always`.
 - **Rate limit:** failed attempts count against `auth.loginRateLimit` per client IP and attempted key, plus the
   per-IP budget, so one client's typos do not lock out the others behind the same address.
 - **Sign out** clears the cookie in the browser but does not revoke it on the server: a copy of the cookie stays
