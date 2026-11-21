@@ -28,7 +28,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Annotated, Any, Dict, Literal, Optional, Union
+from typing import Annotated, Any, Dict, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -280,6 +280,46 @@ def resource_direction(current: ResourceSpec, proposed: ResourceSpec) -> str:
     if not directions:
         return "unchanged"
     return directions.pop() if len(directions) == 1 else "mixed"
+
+
+#: Resources a container-resources proposal must carry a value for, per capability.
+CAPABILITY_RESOURCES: Dict[str, Tuple[str, ...]] = {
+    "container_requests": ("cpu_request_m", "memory_request_bytes"),
+    "container_limits": ("cpu_limit_m", "memory_limit_bytes"),
+}
+
+
+#: Finding kinds whose consensus groups compare numeric request or limit values (``consensus`` groups).
+RESOURCE_VALUE_KINDS = frozenset({"RIGHTSIZING_CPU", "RIGHTSIZING_MEMORY", "cpu_limit_m", "memory_limit_bytes"})
+
+
+def missing_resource_value(capability: Any, proposal: Any, kind: Optional[str] = None) -> Optional[str]:
+    """Why a container requests or limits signal carries no value for its capability, or None.
+
+    * A ``container_resources`` proposal under ``container_requests`` must
+      propose a CPU or memory request, under ``container_limits`` a CPU or
+      memory limit.
+    * A signal of a request or limit finding kind (``RIGHTSIZING_CPU``,
+      ``RIGHTSIZING_MEMORY``...) must carry a ``container_resources`` proposal:
+      an advisory, replicas or other proposal would join that numeric group,
+      be compared by identity and lose every source's value (and the native
+      OOM floor).
+
+    Advice of another kind (a GKE ``WORKLOAD_UNDERPROVISIONED`` advisory) and
+    other capabilities pass.
+    """
+    name = str(getattr(capability, "value", capability))
+    resources = CAPABILITY_RESOURCES.get(name)
+    if resources is None:
+        return None
+    if not isinstance(proposal, ContainerResourcesProposal):
+        if kind in RESOURCE_VALUE_KINDS:
+            shape = getattr(proposal, "kind", type(proposal).__name__)
+            return f"a {name} signal of kind {kind} needs a container_resources proposal, not {shape}"
+        return None
+    if all(getattr(proposal.proposed, resource) is None for resource in resources):
+        return f"a {name} signal must propose a value for {resources[0]} or {resources[1]}"
+    return None
 
 
 #: Proposal fields outside a signal's identity: the observed state (``current``

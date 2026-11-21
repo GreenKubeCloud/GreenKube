@@ -285,6 +285,9 @@ NATIVE_SOURCE = "greenkube"
 #: Capabilities whose groups need a native ballot to become a recommendation (A.5).
 NATIVE_MEASURED_CAPABILITIES = frozenset({Capability.CONTAINER_REQUESTS, Capability.CONTAINER_LIMITS})
 
+#: Group kinds that compare numeric request or limit values: a non-numeric ballot there is dropped.
+VALUE_GROUP_KINDS = frozenset({*REQUEST_RESOURCE_KINDS.values(), *LIMIT_RESOURCE_KINDS.values()})
+
 #: Known minimum each tool applies to its proposals, per engine family (``SIGNAL_TOOL_FLOORS``):
 #: KRR ``simple`` (``--mem-min 100``, ``--cpu-min 10``) and the Fairwinds VPA chart
 #: (``pod-recommendation-min-memory-mb: 100``, ``pod-recommendation-min-cpu-millicores: 15``).
@@ -302,6 +305,9 @@ OOM_FLOOR_REASON = "oom_kills"
 IGNORED_TOOL_FLOOR = "tool_floor"
 IGNORED_MIN_CHANGE = "below_min_change"
 IGNORED_MATURITY_UNKNOWN = "maturity_unknown"
+#: A container requests or limits ballot without a value for the group's resource (a limit-only,
+#: advisory or replicas proposal): compared by identity it would turn the whole group categorical.
+IGNORED_NOT_NUMERIC = "not_numeric"
 
 
 def maturity_unknown(ballot: "Ballot") -> bool:
@@ -421,7 +427,8 @@ class IgnoredVote(BaseModel):
     source_id: str
     signal_id: str
     value: Optional[int] = None
-    #: ``tool_floor``, ``below_min_change`` (still a "keep" vote at the current value) or ``maturity_unknown``.
+    #: ``tool_floor``, ``below_min_change`` (still a "keep" vote at the current value), ``maturity_unknown``
+    #: or ``not_numeric`` (a container requests or limits proposal without a value for the resource).
     reason: str
 
 
@@ -813,7 +820,7 @@ def native_floor(ballots: Sequence[Ballot]) -> Optional[Ballot]:
     return max(floors, key=lambda ballot: int(ballot.value or 0)) if floors else None
 
 
-def _apply_floor(outcome: ConsensusOutcome, floor: Ballot, priorities: Mapping[str, int]) -> None:
+def _apply_floor(outcome: ConsensusOutcome, floor: Ballot) -> None:
     """Raises the outcome's value to the native floor when the policy chose less, and records the floor."""
     consensus = outcome.consensus
     if consensus.resource is None or consensus.resource != floor.resource or floor.value is None:
@@ -831,8 +838,9 @@ def _apply_floor(outcome: ConsensusOutcome, floor: Ballot, priorities: Mapping[s
     if not applied:
         return
     value = floor.value
-    candidates = [ballot for ballot in outcome.representatives if ballot.value == value] or [floor]
-    chosen = max(candidates, key=lambda ballot: _preference(ballot, priorities))
+    # The native record carries the OOM explanation and projection: it is the base even when an
+    # external ballot proposes the same value (that source stays in chosen_from).
+    chosen = floor
     outcome.chosen = chosen
     consensus.value = value
     consensus.chosen_from = _unique(ballot.source_id for ballot in outcome.ballots if ballot.value == value)
@@ -872,7 +880,9 @@ def consolidate(
     ``ignored_votes``: a tool floor or a decrease of unknown maturity under a
     policy other than ``safest`` is dropped, a change below the minimum votes
     "keep the current value". A container-resources group without a native
-    ballot produces no outcome: its signals stay signals. A native increase
+    ballot produces no outcome: its signals stay signals. In a request or
+    limit group with numeric ballots, a ballot without a value for the
+    resource is listed as ``not_numeric`` and dropped before the policy runs. A native increase
     marked as a floor (an OOM-driven one, :func:`native_floor`) is a lower
     bound of the value under every policy.
     """
@@ -884,6 +894,26 @@ def consolidate(
         if not admitted:
             continue
         ignored: List[IgnoredVote] = []
+        if (
+            admitted[0].signal.capability in NATIVE_MEASURED_CAPABILITIES
+            and admitted[0].kind in VALUE_GROUP_KINDS
+            and any(ballot.numeric for ballot in admitted)
+        ):
+            # A ballot without a value for the resource would turn a numeric group categorical.
+            numeric = []
+            for ballot in admitted:
+                if ballot.numeric:
+                    numeric.append(ballot)
+                    continue
+                ignored.append(
+                    IgnoredVote(
+                        source_id=ballot.source_id,
+                        signal_id=ballot.signal.signal_id,
+                        value=ballot.value,
+                        reason=IGNORED_NOT_NUMERIC,
+                    )
+                )
+            admitted = numeric
         if screen is not None:
             if (
                 screen.require_native
@@ -924,7 +954,7 @@ def consolidate(
         outcome.consensus.ignored_votes = ignored
         floor = native_floor(admitted)
         if floor is not None:
-            _apply_floor(outcome, floor, priorities or {})
+            _apply_floor(outcome, floor)
         outcomes.append(outcome)
     if source_only:
         logger.info(

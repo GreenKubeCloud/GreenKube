@@ -217,3 +217,226 @@ class TestScanPath:
         assert rec.recommended_memory_request_bytes == 96 * MIB
         assert (rec.consensus or {})["floor"]["applied"] is True
         assert rec.consensus["floor"]["policy_value"] == 80 * MIB
+
+
+def _limit_only(source_id: str = "push:evil", capability: Capability = Capability.CONTAINER_REQUESTS) -> SourceSignal:
+    """A container-requests signal whose proposal carries no request value (limits only)."""
+    from greenkube.signals.model import SignalOrigin, SignalProvenance
+
+    return SourceSignal(
+        source_id=source_id,
+        target=TargetRef.for_kind("c1", "Deployment", "api", namespace="shop", container="web"),
+        capability=capability,
+        kind="RIGHTSIZING_MEMORY",
+        proposal=ContainerResourcesProposal(
+            container="web",
+            current=ResourceSpec(memory_limit_bytes=100 * MIB),
+            proposed=ResourceSpec(memory_limit_bytes=50 * MIB),
+        ),
+        algorithm=AlgorithmInfo(name="x"),
+        provenance=SignalProvenance(origin=SignalOrigin.PUSH),
+    )
+
+
+def _native_and_vpa_ballots():
+    native = _memory(600 * MIB, current=400 * MIB).model_copy(update={"floor_reason": "oom_kills"})
+    vpa = _memory(450 * MIB, "vpa", current=400 * MIB)
+    return [
+        *ballots_for_signal(
+            _signal("greenkube", 600 * MIB),
+            source="greenkube",
+            floor_reason="oom_kills",
+            payload=native,
+            payload_kind="RIGHTSIZING_MEMORY",
+        ),
+        *ballots_for_signal(_signal("vpa", 450 * MIB), source="vpa", payload=vpa, payload_kind="RIGHTSIZING_MEMORY"),
+    ]
+
+
+PUSHED_LIMIT_ONLY = {
+    "source_id": "push:evil",
+    "complete": True,
+    "signals": [
+        {
+            "target": {"kind": "Deployment", "namespace": "shop", "name": "api", "container": "web"},
+            "capability": "container_requests",
+            "kind": "RIGHTSIZING_MEMORY",
+            "proposal": {
+                "kind": "container_resources",
+                "container": "web",
+                "current": {"memory_limit_bytes": 1},
+                "proposed": {"memory_limit_bytes": 2},
+            },
+            "algorithm": {"name": "x"},
+        }
+    ],
+}
+
+
+class TestNonNumericBallots:
+    """Review finding 1: a request-group ballot without a request value disabled the floor."""
+
+    @pytest.mark.parametrize("policy", POLICIES)
+    def test_a_ballot_without_a_request_value_is_ignored_and_the_floor_holds(self, policy):
+        from greenkube.core.optimization.dedup import materialize
+        from greenkube.signals.consensus import VoteScreen
+
+        ballots = [*_native_and_vpa_ballots(), *ballots_for_signal(_limit_only())]
+        assert len({ballot.group_key for ballot in ballots}) == 1
+
+        [outcome] = consolidate(ballots, policy, priorities={"vpa": 30, "greenkube": 10}, screen=VoteScreen())
+        rec = materialize(outcome)
+
+        assert rec is not None and rec.recommended_memory_request_bytes == 600 * MIB
+        assert outcome.consensus.floor is not None
+        assert [(vote.source_id, vote.reason) for vote in outcome.consensus.ignored_votes] == [
+            ("push:evil", "not_numeric")
+        ]
+
+    def test_the_push_endpoint_rejects_a_request_signal_without_a_request_value(self):
+        from datetime import datetime, timezone
+
+        from greenkube.signals.connectors.push import parse_batch
+
+        batch, signals, errors = parse_batch(
+            PUSHED_LIMIT_ONLY, cluster_uid="c1", received_at=datetime.now(timezone.utc)
+        )
+
+        assert batch is None and signals == []
+        [error] = errors
+        assert error.pointer == "/signals/0/proposal/proposed"
+        assert error.type == "missing_resource_value"
+        assert "container_requests" in error.message
+
+    def test_the_push_endpoint_rejects_a_limits_signal_without_a_limit_value(self):
+        from copy import deepcopy
+        from datetime import datetime, timezone
+
+        from greenkube.signals.connectors.push import parse_batch
+
+        document = deepcopy(PUSHED_LIMIT_ONLY)
+        document["signals"][0]["capability"] = "container_limits"
+        document["signals"][0]["proposal"]["proposed"] = {"memory_request_bytes": 2}
+        _batch, _signals, errors = parse_batch(document, cluster_uid="c1", received_at=datetime.now(timezone.utc))
+
+        assert [error.type for error in errors] == ["missing_resource_value"]
+
+    async def test_the_source_runner_drops_a_plugin_request_signal_without_a_request_value(self):
+        from datetime import datetime, timezone
+        from typing import ClassVar, FrozenSet
+
+        from greenkube.signals.model import AdvisoryProposal
+        from greenkube.signals.runtime import SourceRunner, SourceRunStatus
+        from greenkube.signals.sdk import CollectContext, Source, SourceBatch, SourceDeps, SourceSettings
+
+        def advisory(kind: str) -> SourceSignal:
+            return _signal("acme.sizer", 1).model_copy(
+                update={"kind": kind, "proposal": AdvisoryProposal(text="increase its requests")}
+            )
+
+        class Sizer(Source):
+            id: ClassVar[str] = "acme.sizer"
+            display_name: ClassVar[str] = "Acme"
+            capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.CONTAINER_REQUESTS})
+
+            async def collect(self, ctx):
+                return SourceBatch(
+                    signals=[
+                        _limit_only("acme.sizer"),
+                        advisory("RIGHTSIZING_MEMORY"),
+                        # Advice of its own kind (like GKE's WORKLOAD_UNDERPROVISIONED) never joins a value group.
+                        advisory("WORKLOAD_UNDERPROVISIONED"),
+                        _signal("acme.sizer", 300 * MIB),
+                    ]
+                )
+
+        source = Sizer(SourceSettings(), SourceDeps(config=Config(), cluster_uid="c1"))
+        source.registry_origin = "plugin"
+        ctx = CollectContext(cluster_uid="c1", namespace=None, window=None, deadline=datetime.now(timezone.utc))
+
+        report = await SourceRunner().run(source, ctx, None)
+
+        assert sorted(signal.kind for signal in report.signals) == ["RIGHTSIZING_MEMORY", "WORKLOAD_UNDERPROVISIONED"]
+        [kept] = [signal for signal in report.signals if signal.kind == "RIGHTSIZING_MEMORY"]
+        assert getattr(kept.proposal, "proposed").memory_request_bytes == 300 * MIB
+        assert report.run.status == SourceRunStatus.INCOMPLETE
+        [dropped] = [d for d in report.run.diagnostics if d.code == "missing_resource_value"]
+        assert dropped.count == 2
+
+    def test_a_group_of_advice_only_keeps_its_behaviour(self):
+        """A request group without any numeric ballot (legacy v1 advice) is not emptied."""
+        from greenkube.signals.model import AdvisoryProposal
+
+        advice = _signal("greenkube", 1).model_copy(update={"proposal": AdvisoryProposal(text="check it")})
+
+        [outcome] = consolidate(ballots_for_signal(advice, source="greenkube"), "safest")
+
+        assert outcome.consensus.ignored_votes == []
+
+
+class TestFloorFollowUps:
+    def test_hysteresis_never_holds_a_stored_value_below_the_floor(self):
+        """Review finding 2: stored 580 Mi stayed in place of a new 600 Mi OOM floor (within the 5 % band)."""
+        from greenkube.core.optimization.dedup import apply_revision_hysteresis
+        from greenkube.models.metrics import RecommendationRecord
+
+        rec = _memory(600 * MIB, current=400 * MIB).model_copy(update={"floor_reason": "oom_kills"})
+        stored = RecommendationRecord.from_recommendation(_memory(580 * MIB, current=400 * MIB))
+
+        [out] = apply_revision_hysteresis([rec], [stored])
+
+        assert out.recommended_memory_request_bytes == 600 * MIB
+
+    def test_hysteresis_still_holds_a_small_non_oom_increase(self):
+        from greenkube.core.optimization.dedup import apply_revision_hysteresis
+        from greenkube.models.metrics import RecommendationRecord
+
+        rec = _memory(600 * MIB, current=400 * MIB)
+        stored = RecommendationRecord.from_recommendation(_memory(580 * MIB, current=400 * MIB))
+
+        [out] = apply_revision_hysteresis([rec], [stored])
+
+        assert out.recommended_memory_request_bytes == 580 * MIB
+
+    def test_an_external_ballot_tied_with_the_floor_never_carries_the_record(self):
+        """Review finding 3: on an exact tie the higher-priority external record was used."""
+        ballots = [
+            *ballots_for_signal(
+                _signal("greenkube", 600 * MIB), source="greenkube", floor_reason="oom_kills", payload="NATIVE"
+            ),
+            *ballots_for_signal(_signal("vpa", 600 * MIB), source="vpa", payload="VPA"),
+            *ballots_for_signal(_signal("krr", 450 * MIB)),
+            *ballots_for_signal(_signal("goldi", 440 * MIB)),
+            *ballots_for_signal(_signal("other", 430 * MIB)),
+        ]
+
+        [outcome] = consolidate(ballots, "median", priorities={"vpa": 30, "krr": 20, "greenkube": 10})
+
+        assert outcome.consensus.floor is not None and outcome.consensus.floor.applied
+        assert outcome.chosen.source == "greenkube" and outcome.chosen.payload == "NATIVE"
+        assert set(outcome.consensus.chosen_from) == {"greenkube", "vpa"}
+
+    async def test_the_reason_names_an_applied_floor(self, monkeypatch):
+        """Review finding 4: the summary with the floor note never reached the reason."""
+        from greenkube.core.config import get_config
+
+        engine = _engine(_sources(oom=True))
+        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", "priority")
+        context = OptimizationContext(config=get_config(), metrics=[])
+
+        [rec] = (await engine.collect(context)).recommendations
+
+        assert rec.consensus is not None and rec.consensus["floor"]["applied"] is True
+        assert "oom_kills floor 600Mi" in rec.reason
+
+    async def test_the_reason_is_unchanged_when_the_floor_did_not_apply(self, monkeypatch):
+        from greenkube.core.config import get_config
+
+        engine = _engine(_sources(oom=True))
+        monkeypatch.setattr(engine.config, "RECOMMENDATION_CONSENSUS_POLICY", "safest")
+        context = OptimizationContext(config=get_config(), metrics=[])
+
+        [rec] = (await engine.collect(context)).recommendations
+
+        assert rec.consensus is not None and rec.consensus["floor"]["applied"] is False
+        assert "floor" not in rec.reason
