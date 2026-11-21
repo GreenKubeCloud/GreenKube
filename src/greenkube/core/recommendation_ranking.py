@@ -227,7 +227,7 @@ async def _action_records_by_id(records: Sequence[Any], reco_repo: Any, pool: Se
         found = []
     for record in found:
         rec_id = getattr(record, "id", None)
-        if rec_id in wanted:
+        if isinstance(rec_id, int) and rec_id in wanted:
             by_id[rec_id] = record
     return by_id
 

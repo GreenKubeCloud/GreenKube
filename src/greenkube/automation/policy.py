@@ -1442,7 +1442,7 @@ def evaluate_sample_coverage(
     for record in records:
         evidence = getattr(record, "evidence", None)
         if evidence is None:
-            invalid_sample_ids.append(getattr(record, "id", None))
+            invalid_sample_ids.append(record.id)
             continue
         sample_count = getattr(evidence, "sample_count", None)
         coverage = getattr(evidence, "coverage_ratio", None)

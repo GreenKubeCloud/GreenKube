@@ -453,5 +453,5 @@ async def test_recommendations_are_fetched_by_ids_in_one_query(db):
 
     found = await repo.get_recommendations_by_ids(wanted)
 
-    assert sorted(record.owner_name for record in found) == ["api", "c"]
+    assert sorted(str(record.owner_name) for record in found) == ["api", "c"]
     assert await repo.get_recommendations_by_ids([]) == []
