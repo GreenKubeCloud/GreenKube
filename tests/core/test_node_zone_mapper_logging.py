@@ -1,12 +1,12 @@
 """F-10: the default-zone fallback is logged once per process and node, not at every collection."""
 
 import logging
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from greenkube.core import node_zone_mapper
+from greenkube.core.config import Config
 from greenkube.core.node_zone_mapper import NodeZoneMapper
 from greenkube.models.node import NodeInfo
 
@@ -33,7 +33,7 @@ def _fallback_records(caplog):
 
 @pytest.mark.asyncio
 async def test_configured_default_zone_is_logged_once_per_node_at_info(caplog):
-    mapper = NodeZoneMapper(MagicMock(), config=SimpleNamespace(DEFAULT_ZONE="FR", DEFAULT_INTENSITY=500.0))
+    mapper = NodeZoneMapper(MagicMock(), config=Config(DEFAULT_ZONE="FR", CLUSTER_NAME="test"))
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         for _ in range(3):
@@ -50,7 +50,7 @@ async def test_configured_default_zone_is_logged_once_per_node_at_info(caplog):
 
 @pytest.mark.asyncio
 async def test_unset_default_zone_warns_once_per_node(caplog):
-    mapper = NodeZoneMapper(MagicMock(), config=SimpleNamespace(DEFAULT_ZONE="unknown", DEFAULT_INTENSITY=500.0))
+    mapper = NodeZoneMapper(MagicMock(), config=Config(DEFAULT_ZONE="unknown", CLUSTER_NAME="test"))
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         for _ in range(3):
