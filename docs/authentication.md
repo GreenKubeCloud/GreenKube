@@ -165,6 +165,27 @@ characters and why the sign-in page is best kept off the public internet. All of
 address: behind an Ingress or load balancer, set `config.trustedProxyIps` (see [Sessions](#sessions)); otherwise
 every user shares the proxy's address, and one client exhausting the per-IP budget blocks everyone for a window.
 
+#### Failed API keys
+
+Wrong API keys are throttled too, so that an operator-chosen bootstrap key cannot be guessed online at the global
+`API_RATE_LIMIT`. Every failed `Authorization: Bearer` authentication (an unknown, revoked or expired key, the wrong
+bootstrap key or scrape token, or a non-Bearer scheme) and every rejected API-key browser cookie (`api_key` mode)
+counts against a per-client-IP budget of four times `AUTH_LOGIN_RATE_LIMIT` (20 a minute by default), in a moving
+window with no exponential lockout. Past it, requests with a credential from that address answer `429
+TOO_MANY_ATTEMPTS` with `Retry-After` until the window frees up.
+
+- **The budget is per address, not per client.** While an address is throttled, every credential sent from it waits,
+  the correct one included: checking it first would tell an attacker which guess was right at the full rate. Clients
+  that share an address (behind a NAT, or behind an Ingress without `config.trustedProxyIps`) share the budget, so one
+  misconfigured client can block the others for at most one window. A correct key from any other address is never
+  affected. The client address is resolved by the same trusted-proxy logic as sign-ins.
+- **Successful authentications never consume or reset it**, so a valid low-privilege key does not buy more guesses
+  at another one.
+- **Prometheus scrapes have their own bucket.** Failures on `/prometheus/metrics` and failures on the API routes are
+  counted apart, so a client sending a wrong key to the API never stops a correct scrape with the scrape token or a
+  `metrics:read` key, even from the same address. The controller and worker metrics listeners are not throttled.
+- An open development instance (no credential configured) has nothing to guess and is never throttled.
+
 At most two password hashes run at once per API process (each scrypt run uses about 32 MiB), so a burst of sign-in
 requests queues instead of exhausting the Pod's memory.
 
@@ -463,7 +484,7 @@ kubectl -n greenkube exec -it greenkube-postgres-0 -- \
 |---|---|
 | Cookie flags | `HttpOnly`, `SameSite=Strict`, `Path=/`, `Secure` (auto via HTTPS or trusted `X-Forwarded-Proto`, or always; always behind an HTTPS Ingress or HTTPRoute); `Strict-Transport-Security` on HTTPS |
 | CSRF | Same-origin `Origin`/`Referer` and `X-CSRF-Token` on every cookie-authenticated mutation; wildcard CORS never credentialed |
-| Rate limits | Per username and client IP (exponential lockout) and per IP (window), `429` with `Retry-After`, `greenkube_auth_failures_total`; the API rate limit is per client and per route template |
+| Rate limits | Per username and client IP (exponential lockout) and per IP (window), failed API keys per IP (window, scrapes apart), `429` with `Retry-After`, `greenkube_auth_failures_total`; the API rate limit is per client and per route template |
 | Hashing | scrypt `N=2^15, r=8, p=1`, per-user salt, rehash on parameter change, dummy hash for unknown users |
 | Session fixation | A new token at every sign-in and password change; a token presented at sign-in is revoked |
 | Constant-time comparisons | API-key secrets, the bootstrap key and CSRF tokens use `hmac.compare_digest`; sessions are looked up by SHA-256 |

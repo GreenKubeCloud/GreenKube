@@ -1,0 +1,2 @@
+### Fixed
+- Failed `Authorization: Bearer` authentications and rejected API-key browser cookies are now throttled per client IP (four times `AUTH_LOGIN_RATE_LIMIT`, no exponential lockout), answering `429 TOO_MANY_ATTEMPTS` with `Retry-After`; before, only the global `API_RATE_LIMIT` bounded online guessing of an operator-chosen bootstrap key. Prometheus scrapes on `/prometheus/metrics` use a separate bucket, successful authentications never consume the budget, and clients sharing one address share it.

@@ -460,7 +460,8 @@ async def authenticate(request: Request) -> None:
     ``/api/v1/*``, ``/api/v2/*`` and ``/prometheus/metrics``; the SPA, liveness, docs, OpenAPI
     schema and the provider webhook ingress route are public. Unsafe methods
     authenticated by a session cookie need a same-origin ``Origin``/``Referer``
-    and an ``X-CSRF-Token`` header matching the session.
+    and an ``X-CSRF-Token`` header matching the session. Failed Bearer keys and
+    API-key cookies are throttled per client address (:class:`CredentialThrottle`).
     """
     from greenkube.core.config import get_config
 
