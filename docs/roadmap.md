@@ -1,6 +1,6 @@
 # GreenKube roadmap
 
-> **Revision 3, updated 2026-11-21.** Baseline: local `dev` after the phase A merges (not pushed; origin `dev` is still `82b3bee1`).
+> **Revision 3, updated 2026-11-21.** Baseline: local `dev` after the phase A, A.9 and phase D (collection, measurement and impact, ledger) merges (not pushed; origin `dev` is still `82b3bee1`).
 > **Audience:** the maintainer, contributors and coding agents. Each task says what to do, where, and how to prove it is done.
 > **Inputs:**
 > - the data-quality audit, [`docs/reviews/data-quality-audit.md`](reviews/data-quality-audit.md): mechanism, evidence and fix of every finding cited here;
@@ -32,6 +32,8 @@
   - API-key sign-in (F-09);
   - static pods, eligibility, singletons and the small items (F-04 to F-10);
   - the two stopped branches, rollups and reads (WP-05) and energy and carbon (WP-04).
+- **A.9 follow-ups:** test thread leak, Bearer key throttling, idle share exposure, impact follow-ups, compressor lock timeout, closed-database errors.
+- **Phase D, first three lanes (section 7):** collection, measurement and impact, and the ledger (reproducible accruals, clock-skew refusal, materialized totals, keyed chain with sequence key boundaries and key rotation). What remains is listed in section 7.
 
 **Field test (section 4):** the issues found on 2026-11-16 are fixed on `dev`, but not yet re-tested on the field cluster. Follow-ups found while fixing them are listed in A.9.
 
@@ -168,9 +170,10 @@ Every surprise becomes an issue in this roadmap. **This is the release gate of p
 - **Idle share and untrusted cost hours:** idle share and cluster totals in the export (opt-in `include_idle`), Prometheus gauges and the Footprint page; export chunks no longer drop a boundary sample; `untrusted_cost_hours` per measurement (`fix/idle-share-exposure`).
 - **Shared-host history, GPU badge, upgrade hour:** recompute groups pre-0183 rows with the current snapshot ids (per node); the nodes page flags estimated or unmeasured GPU power; the 0.3.x upgrade hour leaves CPU/RAM components NULL instead of diluting them (`fix/impact-followups`).
 
+- **PostgreSQL compressor stall:** the slow test was a rollup re-run, not a hang; the compressor transactions now bound their row-lock waits with a lock timeout (`fix/compressor-lock-hang`).
+- **Closed database reopens silently:** using a closed `DatabaseManager` now raises instead of reopening a connection.
+
 **Still open:**
-- **PostgreSQL compressor stall (lane: storage, in progress, high):** a compressor test can stall mid-run on PostgreSQL, timing-dependent; possibly a lock wait introduced by the dirty-hour locking (`fix/compressor-lock-hang`).
-- **Closed database reopens silently (lane: storage):** a closed `DatabaseManager` reopens a connection on first use. Make use after close an error.
 - **Hourly provenance (lane: storage, with C.3):** the hourly tables do not keep `embodied_source` or `gpu_source`.
 - **Energy findings left (lane: impact):** NRG-14 (operators set server power: annotation, node profiles, measured tier), NRG-16 (Wattnet 15-minute points, proxy zones), NRG-17 (doc and code drift, PUE overrides).
 - **Cross-repository Git charts (lane: gitops):** blocked with a clear reason; planning them (chart in one repository, values in another) is a feature to design.
@@ -306,20 +309,34 @@ The appendix lists all 173 audit findings with their status:
 - to re-check after C.3;
 - open.
 
-Open findings and the A.9 follow-ups are done in this order, each with its audit fix specification:
+**Status on 2026-11-21.** Three phase D lanes are merged into `dev`, each reviewed independently and gated on SQLite and PostgreSQL:
+- **Collection (`fix/collection-remaining`):** pod metadata gaps repaired from the last known values of the same pod, with a linear repair migration (COL-01); CPU of consecutive container instances (COL-11); COL-12; provider detection and workload ownership (COL-15, COL-16); restarts from the lifetime counter (COL-20); the container usage source reported in health (part of COL-05); nested PromQL in the test fake (part of COL-21).
+- **Measurement and impact (`fix/measurement-impact-remaining`):** part-time workloads rated per collected time and annualised over 8760 hours (MEA-13); interim verdicts in their own blocks, out of the measured totals (MEA-16); reliability fixes shown at their measured or allocated cost (MEA-14, IMP-07); annualisation over the observed hours (IMP-04); projections scaled by the applied share and bounded by the allocated projection (IMP-06); one de-duplicated projected opportunity (IMP-07).
+- **Ledger (`fix/ledger-remaining`):**
+  - the rate, currency and measurement of each accrual kept, so entries can be reproduced (`ledger/4`, LED-11);
+  - accrual refused on clock skew, never booked for future slots, and resumed per recommendation (LED-06 items 1 and 4, LED-12);
+  - all-time reads served from totals maintained in the append transaction and checked by the full verification (LED-09 item 2);
+  - a keyed hash chain whose status row is signed with the chain key and records the key boundaries by sequence; key rotation with `greenkube db ledger-rotate-key`; restore with `ledger-accept-head` (constrained `--rebuild-boundaries`, audited `--trust-entry-keys`); an alert when the head stops being keyed (LED-05).
+
+**Still open in phase D,** in this order:
 1. **WP-10 (API and exposition):** API-01, API-02, API-09, API-13, API-08, API-10, API-11, API-07 and API-14; after B.7 trims the exposition.
-2. **Remaining WP-01 tasks:**
-   - pod metadata gaps and the repair migration;
-   - COL-05 rest, COL-11, COL-12, COL-15, COL-16, COL-20, COL-21.
-3. **Remaining WP-06/07/08/09 tasks:**
-   - MEA-13, MEA-16 rest, MEA-14 rest;
-   - IMP-04, IMP-06, IMP-07, IMP-08 (the realized-versus-projected calibration loop: the fourth promise of the product, see E.2);
-   - LED-05 rest, LED-06, LED-09, LED-11, LED-12.
-4. **Unaudited dimensions,** in this order:
+2. **Collection rest:**
+   - COL-05 relabel: store Metrics API snapshots under their own usage source on pod-level-only runtimes;
+   - COL-21: test the PromQL semantics against a real Prometheus engine, not only the fake;
+   - COL-18: de-duplicate sum-based series and refuse partial Thanos or Mimir responses.
+3. **Measurement rest:** MEA-15 (deletions measured from their own cost), MEA-17 (baseline snapshot timing); the namespace-scoped raw-rows path of the projector.
+4. **Ledger rest:**
+   - LED-06 item 2: never accrue a slot beyond the newest complete collection watermark;
+   - LED-06 item 3: a repair command that supersedes future rows and resets the watermark;
+   - LED-09 items 1, 3 and 4: day grain, an indexed projection sweep, segmented and resumable verification;
+   - LED-05 rest: an external checkpoint of the signed head and a database role that cannot rewrite the ledger. The documented residuals stay until then: a full keyless rewrite with a missing status row, and a leaked previous key plus a lost status row, which only an explicit, audited trust step accepts;
+   - IMP-08 and LED-07, the calibration loop (E.2).
+5. **Energy rest (WP-04.5, WP-04.6):** NRG-14, NRG-16, NRG-17; with the A.9 hourly provenance.
+6. **Unaudited dimensions,** in this order:
    - GitOps delivery: the field test found F-01, F-02, F-11 and F-13 there;
    - long-term operations;
    - sources and consensus, after B.3.
-   
+
    Use the existing audit briefs in the maintainer's audit workspace.
 
 ## 8. Phase E: prove and release
@@ -392,22 +409,22 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-01 | COST-04 | high | The collection watermark is keyed by the cluster name, which on the kind install fell back to the controller's node n... | addressed on dev (WP-01.3) |
 | WP-01 | RECON-10 | medium | The collection watermark is keyed by the auto-detected cluster name, and a missing watermark row is treated as a firs... | addressed on dev (WP-01.3) |
 | WP-01 | LED-02 | high | The v1 ledger, the accrual watermark and the v2 projection are keyed by CLUSTER_NAME, which falls back to the pod's n... | addressed on dev (WP-01.3) |
-| WP-01 | COL-05 | high | On clusters whose cAdvisor exports only pod-level series (cri-dockerd: Minikube Docker driver, Docker Desktop, Mirant... | partly addressed on dev (WP-01.4): COL-17 and COL-09 done, COL-05 partly |
-| WP-01 | COL-17 | medium | Container rows are all-or-nothing per pod: when one container of the pod spec has no usage sample at the step, no con... | partly addressed on dev (WP-01.4): COL-17 and COL-09 done, COL-05 partly |
-| WP-01 | COL-09 | medium | The pod-cgroup fallback is used only when the container query returns nothing for the whole cluster, so in a cluster ... | partly addressed on dev (WP-01.4): COL-17 and COL-09 done, COL-05 partly |
-| WP-01 | RECON-07 | high | Container usage filled from the Metrics API is stored with usage_source = prometheus and is clamped one-sidedly to th... | partly addressed on dev (WP-01.4): COL-17 and COL-09 done, COL-05 partly |
-| WP-01 | COL-11 | medium | CPU is aggregated with max over all series of a container, so consecutive container instances inside one rate window ... | open |
-| WP-01 | COL-12 | medium | Memory is stored as one instant value per step (the working set at the end of the step), so peaks between two evaluat... | open |
+| WP-01 | COL-05 | high | On clusters whose cAdvisor exports only pod-level series (cri-dockerd: Minikube Docker driver, Docker Desktop, Mirant... | partly addressed on dev (WP-01.4): COL-17 and COL-09 done; COL-05 usage source reported, relabel open |
+| WP-01 | COL-17 | medium | Container rows are all-or-nothing per pod: when one container of the pod spec has no usage sample at the step, no con... | partly addressed on dev (WP-01.4): COL-17 and COL-09 done; COL-05 usage source reported, relabel open |
+| WP-01 | COL-09 | medium | The pod-cgroup fallback is used only when the container query returns nothing for the whole cluster, so in a cluster ... | partly addressed on dev (WP-01.4): COL-17 and COL-09 done; COL-05 usage source reported, relabel open |
+| WP-01 | RECON-07 | high | Container usage filled from the Metrics API is stored with usage_source = prometheus and is clamped one-sidedly to th... | partly addressed on dev (WP-01.4): COL-17 and COL-09 done; COL-05 usage source reported, relabel open |
+| WP-01 | COL-11 | medium | CPU is aggregated with max over all series of a container, so consecutive container instances inside one rate window ... | addressed on dev (WP-01.5) |
+| WP-01 | COL-12 | medium | Memory is stored as one instant value per step (the working set at the end of the step), so peaks between two evaluat... | addressed on dev (WP-01.5) |
 | WP-01 | COL-14 | medium | Network figures of hostNetwork pods are the node's traffic, repeated for every hostNetwork pod of the node, and the s... | obsolete: network no longer collected |
 | WP-01 | COL-13 | medium | Persistent-volume request and usage per pod are joined by PVC name without the namespace, so same-named claims in dif... | obsolete: PVC usage no longer collected |
 | WP-01 | COL-18 | low | Sum-based queries (network, disk, restarts, ephemeral storage) double when the same series is visible twice, and part... | open |
-| WP-01 | COL-20 | low | restart_count stores the lifetime restart counter of the pod, and consumers read it as restarts of the observed period. | open |
+| WP-01 | COL-20 | low | restart_count stores the lifetime restart counter of the pod, and consumers read it as restarts of the observed period. | addressed on dev (WP-01.5) |
 | WP-01 | COL-19 | low | Ephemeral-storage usage is never collected on CRI runtimes, and network and disk are absent on cri-dockerd; the produ... | obsolete: network, disk and ephemeral storage no longer collected |
 | WP-01 | RECON-15 | low | Against a non-deduplicated HA Prometheus pair the stored usage depends on which replica answers: row values differ by... | open |
-| WP-01 | COL-15 | medium | Cloud provider detection classifies GKE nodes in us-* regions, and Linode, Oracle, IBM and Alibaba nodes, as AWS, and... | open |
-| WP-01 | COL-16 | medium | Workload owners are derived by cutting the last dash-separated token of the ReplicaSet name and calling the result a ... | open |
+| WP-01 | COL-15 | medium | Cloud provider detection classifies GKE nodes in us-* regions, and Linode, Oracle, IBM and Alibaba nodes, as AWS, and... | addressed on dev (WP-01.6) |
+| WP-01 | COL-16 | medium | Workload owners are derived by cutting the last dash-separated token of the ReplicaSet name and calling the result a ... | addressed on dev (WP-01.6) |
 | WP-01 | COL-06 | medium | A single failed instant query makes PrometheusCollector replace the configured Prometheus URL with a discovered one f... | open |
-| WP-01 | COL-21 | low | Tests cannot detect PromQL semantic errors: the fake Prometheus takes pre-computed rates and the alternative label na... | open |
+| WP-01 | COL-21 | low | Tests cannot detect PromQL semantic errors: the fake Prometheus takes pre-computed rates and the alternative label na... | partly addressed on dev (WP-01.8): nested PromQL in the fake; real engine tier open |
 | WP-02 | NRG-06 | high | Energy, CO2e and cost are stored as float4 (REAL) in PostgreSQL and summed with SUM(real): totals drift by percents b... | addressed on dev (WP-02.1) |
 | WP-02 | STO-11 | low | The PostgreSQL carbon recompute compares a float4 column with a float8 intensity (`IS DISTINCT FROM`), so every row w... | addressed on dev (WP-02.1) |
 | WP-02 | STO-01 | high | Every metrics upsert overwrites all columns unconditionally and never removes rows the new pass did not produce, so a... | addressed on dev (WP-02.2) |
@@ -506,9 +523,9 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-07 | MEA-03 | high | The measured CO2e saving is the raw difference of two weeks' emissions with no normalisation for grid carbon intensit... | addressed on dev (WP-07.3) |
 | WP-07 | MEA-08 | high | Any pod-template change that leaves the requests untouched (an image deployment, an env change, a rollout restart) co... | addressed on dev (WP-07.4) |
 | WP-07 | MEA-10 | medium | The accelerated end-to-end settings can never produce a decided verdict, so the statistics, attribution, drift and le... | addressed on dev (WP-07.5) |
-| WP-07 | MEA-16 | medium | Two verification systems with different rules write the same 'verified' / 'not_realized' labels: recommendations appl... | partly addressed on dev (WP-07.6): interim verifier on an interval; separate interim totals not done |
-| WP-07 | MEA-14 | medium | A reliability increase that works is still reported as 'not_realized' (recommendation verification 'failed'), because... | partly addressed on dev (WP-07.6): interim verifier on an interval; separate interim totals not done |
-| WP-07 | MEA-13 | medium | Hours are rated per covered time and hours without rows are dropped, so a workload that runs part of each hour (batch... | open |
+| WP-07 | MEA-16 | medium | Two verification systems with different rules write the same 'verified' / 'not_realized' labels: recommendations appl... | addressed on dev (WP-07.6) |
+| WP-07 | MEA-14 | medium | A reliability increase that works is still reported as 'not_realized' (recommendation verification 'failed'), because... | addressed on dev (WP-07.6) |
+| WP-07 | MEA-13 | medium | Hours are rated per covered time and hours without rows are dropped, so a workload that runs part of each hour (batch... | addressed on dev (WP-07.7) |
 | WP-07 | MEA-15 | medium | A deletion is 'measured' by restating its projection: the pre-window cost of a Service or PersistentVolume cannot be ... | open |
 | WP-07 | MEA-17 | low | The baseline snapshot is frozen in the detection pass, before the last baseline samples are written and before provis... | open |
 | WP-08 | IMP-03 | high | On clusters without a detected autoscaler every rightsizing projection is 0 cost and 0 CO2e, reliability increases ar... | addressed on dev (WP-08.2) |
@@ -516,9 +533,9 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-08 | IMP-12 | low | The realization factor silently defaults to 1.0 until the controller process has completed a first autoscaler read (o... | addressed on dev (WP-08.2) |
 | WP-08 | API-12 | medium | On clusters without a node autoscaler every rightsizing recommendation has potential_savings_cost = 0 and potential_s... | addressed on dev (WP-08.2) |
 | WP-08 | MEA-06 | high | Without OpenCost or Kubecost no change can ever get a cost verdict: rows priced with configured rates (custom_rate) o... | open |
-| WP-08 | IMP-04 | medium | Projections are annualized over the span since the target's first observed hour, so collection gaps and the hour-floo... | open |
-| WP-08 | IMP-06 | medium | The 'projected' savings of applied changes and the user-declared bound use the realization-scaled (billable) projecti... | open |
-| WP-08 | IMP-07 | medium | The UI sums the projected savings of overlapping recommendations (namespace deletion, workload deletion, off-peak, ri... | open |
+| WP-08 | IMP-04 | medium | Projections are annualized over the span since the target's first observed hour, so collection gaps and the hour-floo... | addressed on dev (WP-08.4) |
+| WP-08 | IMP-06 | medium | The 'projected' savings of applied changes and the user-declared bound use the realization-scaled (billable) projecti... | addressed on dev (WP-08.5) |
+| WP-08 | IMP-07 | medium | The UI sums the projected savings of overlapping recommendations (namespace deletion, workload deletion, off-peak, ri... | addressed on dev (WP-08.5) |
 | WP-08 | IMP-08 | medium | There is no feedback loop from measured outcomes to projections: realization factors, the incident cost and the annua... | open |
 | WP-08 | LED-07 | medium | The 'compare realized to projected to refine the projection model' loop is not implemented: only a binary realized/no... | open |
 | WP-08 | IMP-11 | low | Orphaned PersistentVolumes on non-cloud CSI or NFS storage are projected at the cloud default rate as an expected bil... | open |
@@ -526,12 +543,12 @@ The "Package" column keeps the work-package numbering of the previous revision (
 | WP-09 | LED-04 | medium | The numbers users actually see (GET /recommendations/savings, overview hero, Prometheus counters and dashboard gauges... | addressed on dev (WP-09.2) |
 | WP-09 | LED-03 | medium | Projected savings accrued before a NOT REALIZED or INCONCLUSIVE verdict stay in the ledger for ever (never reversed, ... | addressed on dev (WP-09.3) |
 | WP-09 | LED-08 | medium | Ledger corrections on rollback are a one-shot best-effort side effect: a failed supersede call is never retried, late... | addressed on dev (WP-09.3) |
-| WP-09 | LED-05 | medium | The hash chain is not tamper-evident against anyone who can write to the database: there is no secret or external anc... | partly addressed (fix/ledger-remaining): HMAC chain key from a chart-generated Secret, keyed-head gauge; no external checkpoint, no separate PostgreSQL role |
-| WP-09 | LED-06 | medium | A forward clock jump makes the attributor accrue up to 168 future hourly slots per run and then freezes all accrual u... | addressed (fix/ledger-remaining): clock-skew refusal on PostgreSQL, per-recommendation cursors, watermark-ahead gauge and alerts; not done: item (2), capping accrual at the collection watermark, and item (3), the repair command for rows written in the future |
-| WP-09 | LED-09 | medium | The ledger grows without bound at one v1 row and two v2 entries per accruing recommendation per hour, with full-table... | partly addressed (fix/ledger-remaining): materialized totals for all-time reads, checked by the full verification; no daily grain, partitioning or archival |
+| WP-09 | LED-05 | medium | The hash chain is not tamper-evident against anyone who can write to the database: there is no secret or external anc... | partly addressed on dev (WP-09.4): keyed chain, signed status with key boundaries, rotate and accept-head; no external checkpoint or dedicated role |
+| WP-09 | LED-06 | medium | A forward clock jump makes the attributor accrue up to 168 future hourly slots per run and then freezes all accrual u... | partly addressed on dev (WP-09.5): items 1 and 4; watermark gate and repair command open |
+| WP-09 | LED-09 | medium | The ledger grows without bound at one v1 row and two v2 entries per accruing recommendation per hour, with full-table... | partly addressed on dev (WP-09.5): totals table; day grain, indexed sweep, segments open |
 | WP-09 | LED-10 | medium | The FOCUS export books projected and user-declared amounts as negative EffectiveCost 'Credit' rows, so summing the st... | obsolete: FOCUS export removed |
-| WP-09 | LED-11 | low | Ledger entries cannot be reproduced from their own provenance: price_card_version, intensity_g_per_kwh and intensity_... | partly addressed (fix/ledger-remaining): annual rate, currency and accrual-time measurement; price card and intensity still empty |
-| WP-09 | LED-12 | low | Minor ledger inconsistencies: drift reversals with mixed signs are projected as accruals, zero-length periods are dro... | addressed (fix/ledger-remaining): (a) row_kind, (b) one-sided windows, (c) per-recommendation cursor, (d) reversal from stored rows |
+| WP-09 | LED-11 | low | Ledger entries cannot be reproduced from their own provenance: price_card_version, intensity_g_per_kwh and intensity_... | addressed on dev (WP-09.5) |
+| WP-09 | LED-12 | low | Minor ledger inconsistencies: drift reversals with mixed signs are projected as accruals, zero-length periods are dro... | addressed on dev (WP-09.5) |
 | WP-10 | API-01 | high | An aggregated report export (aggregate=true) is aggregated per 7-day read chunk, so the file holds several rows for t... | open |
 | WP-10 | API-05 | medium | The report export loses the rows stamped exactly on the first 7-day chunk boundary (a whole hour of every pod for dat... | open |
 | WP-10 | API-16 | low | CSV/JSON export details: negative numbers are written as text with a leading apostrophe, a failure in the middle of a... | open |
