@@ -187,9 +187,11 @@ TOO_MANY_ATTEMPTS` with `Retry-After` until the window frees up.
   `metrics:read` key, even from the same address. The controller and worker metrics listeners keep the same budget
   per TCP peer (they trust no proxy header).
 - **Stale browser cookies.** In `api_key` mode, a cookie that no longer verifies counts as a failure only when the
-  request ends in `401`. The public sign-in routes (`/auth/providers`, `/auth/api-key-login` and the other routes
-  reachable without credentials) ignore it without counting it, and clear it, so a browser can always sign in again;
-  `/auth/api-key-login` keeps its own sign-in throttle. An open development instance clears it too.
+  request ends in `401`. The routes reachable without credentials (such as `/auth/providers`) ignore it without
+  counting it and clear it. The sign-in routes (`/auth/login`, `/auth/api-key-login`) also ignore it without counting
+  it, but do not clear it: a successful sign-in replaces it, and a failed one leaves it in place. So a browser can always
+  sign in again; `/auth/api-key-login` keeps its own sign-in throttle. An open development instance clears a stale
+  cookie on routes that return plain data.
 - A request refused by this throttle is counted as `greenkube_auth_failures_total{reason="key_rate_limited"}`.
 - An open development instance (no credential configured) has nothing to guess and is never throttled.
 
