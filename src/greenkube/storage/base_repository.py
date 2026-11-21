@@ -16,6 +16,7 @@ from ..models.metrics import (
 )
 from ..models.node import NodeInfo
 from ..utils.date_utils import to_iso_z
+from ..utils.time import ensure_utc
 
 #: Upsert outcomes whose record has an active row after the call (inserted, or
 #: matched an active row that was revised, refreshed, kept or given a queued revision).
@@ -287,6 +288,19 @@ class WindowStepProfile:
     pending_cost_rows: int = 0
 
 
+def merge_collected_seconds(raw_stamps: Any, hourly: Any, step_seconds: int) -> dict[datetime, float]:
+    """Collected seconds per hour from distinct raw timestamps and ``(hour, max duration)`` rows (MEA-13)."""
+    seconds: dict[datetime, float] = {}
+    for stamp in raw_stamps:
+        moment = ensure_utc(stamp)
+        hour = moment.replace(minute=0, second=0, microsecond=0)
+        seconds[hour] = seconds.get(hour, 0.0) + float(step_seconds)
+    for hour_value, duration in hourly:
+        hour = ensure_utc(hour_value).replace(minute=0, second=0, microsecond=0)
+        seconds[hour] = seconds.get(hour, 0.0) + float(duration or 0.0)
+    return {hour: min(value, 3600.0) for hour, value in sorted(seconds.items())}
+
+
 def window_step_profiles(rows: Any) -> dict[datetime, WindowStepProfile]:
     """Build :class:`WindowStepProfile` per step from ``(namespace, pod_name, timestamp, cost_source)`` rows."""
     from ..models.provenance import ALLOCATED_COST_SOURCES, CostSource
@@ -365,6 +379,18 @@ class CombinedMetricsRepository(RawHourlySplitMixin, ABC):
         rows written.
         """
         raise NotImplementedError(f"{type(self).__name__} cannot write a collection window atomically")
+
+    async def collected_seconds_by_hour(
+        self, start: datetime, end: datetime, step_seconds: int
+    ) -> dict[datetime, float]:
+        """Seconds of each UTC hour of ``[start, end)`` in which the cluster was collected (MEA-13).
+
+        Cluster-wide, whatever namespace a caller measures: each distinct raw
+        row timestamp covers one step, and an hour read from the hourly table
+        covers its longest pod-hour (``MAX(duration_seconds)``). Capped at the
+        hour. Backends without stored rows return an empty mapping.
+        """
+        return {}
 
     async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, "WindowStepProfile"]:
         """Per step of ``[start, end)``: the stored pods and how many rows carry an allocated cost (STO-01).

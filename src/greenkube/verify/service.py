@@ -304,6 +304,19 @@ class ChangeMeasurementService:
         workload_rows = [row for row in namespace_rows if target_key(row) == target.key]
         slot = self.settings.slot_seconds
         collected = collected_seconds(namespace_rows, window, self._step(), slot_seconds=slot)
+        if slot == 3600:
+            # Cluster-wide collection: a workload alone in its namespace still sees its idle steps as
+            # collected when any other namespace has rows then (MEA-13).
+            try:
+                cluster = await self.combined_repo.collected_seconds_by_hour(window.start, window.end, self._step())
+            except AttributeError:
+                cluster = {}
+            except Exception as exc:
+                raise MeasurementReadError(
+                    f"collected time of {'/'.join(target.key)} could not be read: {exc}"
+                ) from exc
+            for hour, seconds in (cluster or {}).items():
+                collected[hour] = max(collected.get(hour, 0.0), float(seconds))
         return workload_rows, hourly_buckets(
             workload_rows, window, self._step(), slot_seconds=slot, collected=collected
         )

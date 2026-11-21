@@ -19,6 +19,7 @@ from ..base_repository import (
     WindowStepProfile,
     is_persistable_intensity_record,
     measured_intensity_sql,
+    merge_collected_seconds,
     window_step_profiles,
 )
 from ..container_rows import complete_container_rows, container_rows_of
@@ -614,6 +615,30 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                 WHERE namespace = $1 AND pod_name = $2 AND timestamp = $3 AND NOT (container_name = ANY($4::text[]))""",
                 targets,
             )
+
+    async def collected_seconds_by_hour(
+        self, start: datetime, end: datetime, step_seconds: int
+    ) -> dict[datetime, float]:
+        """See :meth:`CombinedMetricsRepository.collected_seconds_by_hour`."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                raw = await conn.fetch(
+                    """SELECT DISTINCT timestamp FROM combined_metrics
+                    WHERE timestamp >= $1 AND timestamp < $2""",
+                    ensure_utc(start),
+                    ensure_utc(end),
+                )
+                hourly = await conn.fetch(
+                    """SELECT hour_bucket, MAX(duration_seconds) AS duration FROM combined_metrics_hourly
+                    WHERE hour_bucket >= $1 AND hour_bucket < $2 GROUP BY hour_bucket""",
+                    ensure_utc(start),
+                    ensure_utc(end),
+                )
+        except Exception as e:
+            raise QueryError(f"Error reading the collected time of a window: {e}") from e
+        return merge_collected_seconds(
+            [row["timestamp"] for row in raw], [(row["hour_bucket"], row["duration"]) for row in hourly], step_seconds
+        )
 
     async def stored_window_profile(self, start: datetime, end: datetime) -> dict[datetime, WindowStepProfile]:
         """See :meth:`CombinedMetricsRepository.stored_window_profile`."""
