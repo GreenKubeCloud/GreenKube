@@ -201,6 +201,13 @@ Welcome to
   cluster, a cluster-name node label, else "default"). Set config.clusterName for a readable name on
   multi-node clusters. Collection is keyed by the kube-system namespace UID, so renaming is safe.
 {{- end }}
+{{- if .Values.secrets.existingSecret }}
+* Savings ledger chain key: add LEDGER_CHAIN_KEY to Secret {{ .Values.secrets.existingSecret }} to key the
+  ledger hash chain; without it the chain uses plain sha256 (warning in the controller logs).
+{{- else if not (or .Values.secrets.ledgerChainKey .Values.rbac.create) }}
+* Savings ledger chain key: not configured (rbac.create=false, so it is not generated). Set
+  secrets.ledgerChainKey to key the ledger hash chain; without it the chain uses plain sha256.
+{{- end }}
 
 * Back up the database before every upgrade: migrations only move forward and a helm rollback
   does not undo them (docs/operations/backup-restore.md).

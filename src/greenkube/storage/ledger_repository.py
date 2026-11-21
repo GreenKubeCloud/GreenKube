@@ -1379,6 +1379,46 @@ class LedgerRepository:
         async with self.db_manager.transaction() as conn:
             await self._upsert_status(conn, status, sign)
 
+    async def record_head_acceptance(
+        self,
+        cluster_uid: str,
+        *,
+        accepted_at: datetime,
+        reason: str,
+        previous: Optional[ChainStatus],
+        head_seq: Optional[int],
+        head_hash: Optional[str],
+    ) -> None:
+        """Keep a lasting audit record of an operator's ledger head acceptance (LED-05)."""
+        async with self.db_manager.transaction() as conn:
+            await self._execute(
+                conn,
+                "INSERT INTO ledger_head_acceptances (cluster_uid, accepted_at, reason, previous_head_seq, "
+                "previous_head_hash, head_seq, head_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    cluster_uid,
+                    self._ts(accepted_at),
+                    reason,
+                    previous.head_seq if previous else None,
+                    previous.head_hash if previous else None,
+                    head_seq,
+                    head_hash,
+                ],
+            )
+
+    async def head_acceptances(self, cluster_uid: str) -> List[dict]:
+        """Operator head acceptances of a cluster, oldest first."""
+        rows = await self._select(
+            "SELECT accepted_at, reason, previous_head_seq, previous_head_hash, head_seq, head_hash "
+            "FROM ledger_head_acceptances WHERE cluster_uid = ? ORDER BY id",
+            [cluster_uid],
+        )
+        for row in rows:
+            for column in ("previous_head_seq", "head_seq"):
+                if row.get(column) is not None:
+                    row[column] = int(row[column])
+        return rows
+
     async def get_chain_status(self, cluster_uid: str) -> Optional[ChainStatus]:
         rows = await self._select(
             "SELECT cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature "

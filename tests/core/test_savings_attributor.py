@@ -520,3 +520,33 @@ class TestReactivation:
         dismissed = _record(applied_at=applied_at, baseline={"accruing_since": dismissed_at.isoformat()})
         await attributor.accrue([dismissed], now=dismissed_at + timedelta(hours=1, minutes=7))
         assert ledger.method_sum("projected") == pytest.approx(2.0)
+
+
+class _BrokenClockLedger(FakeLedger):
+    async def get_database_time(self):
+        raise ConnectionError("database clock unavailable")
+
+
+class TestClockCheckFailures:
+    @pytest.mark.asyncio
+    async def test_a_failed_database_clock_read_is_counted_and_skips_the_run(self):
+        ledger = _BrokenClockLedger()
+        before = _errors("clock_check_failed")
+        result = await SavingsAttributor(ledger, "c", clock=lambda: NOW).accrue([_record()])
+        assert result.written == 0 and result.clock_skew
+        assert _errors("clock_check_failed") == before + 1
+        assert not ledger.rows
+
+    @pytest.mark.asyncio
+    async def test_the_clock_skew_error_is_logged_once_per_interval(self, caplog):
+        import logging
+
+        import greenkube.core.savings_attributor as module
+
+        module._LAST_SKEW_LOG.clear()
+        ledger = _ClockedLedger(NOW)
+        bad = SavingsAttributor(ledger, "c", clock=lambda: NOW + timedelta(days=1))
+        with caplog.at_level(logging.ERROR, logger="greenkube.core.savings_attributor"):
+            for _ in range(5):
+                await bad.accrue([_record()])
+        assert sum("clock" in record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR) == 1

@@ -73,6 +73,21 @@ tests:
       - notMatchRegexRaw:
           pattern: "config.trustedProxyIps is empty"
 
+  - it: warns that the ledger chain key is not generated without RBAC
+    set:
+      rbac.create: false
+      secrets.apiKey: supplied
+    asserts:
+      - matchRegex:
+          path: raw
+          pattern: "Savings ledger chain key: not configured"
+
+  - it: does not warn about the ledger chain key when the chart generates it
+    asserts:
+      - notMatchRegex:
+          path: raw
+          pattern: "Savings ledger chain key"
+
   - it: prints the dashboard and setup URLs
     asserts:
       - matchRegexRaw:

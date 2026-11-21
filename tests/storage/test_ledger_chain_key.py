@@ -191,6 +191,10 @@ async def test_an_operator_accepts_the_head_after_a_restore_lost_the_tail(ledger
         await accept_head(repo, CLUSTER_UID, "  ")
     accepted = await accept_head(repo, CLUSTER_UID, "restored from the backup of 03:00")
     assert accepted.ok and accepted.head_seq == 4
+    # A lasting audit record of the acceptance: reason and replaced head.
+    (audit,) = await repo.head_acceptances(CLUSTER_UID)
+    assert audit["reason"] == "restored from the backup of 03:00"
+    assert audit["previous_head_seq"] == 5 and audit["head_seq"] == 4
     assert (await verify_ledger(repo, checkpoints={}))[CLUSTER_UID].ok
 
     await ledger.execute("UPDATE savings_ledger_entries SET value = value * 2 WHERE seq = 2")

@@ -412,6 +412,14 @@ async def accept_head(
             head_keyed=result.head_keyed,
         )
     )
+    await repo.record_head_acceptance(
+        cluster_uid,
+        accepted_at=moment,
+        reason=reason.strip(),
+        previous=previous,
+        head_seq=result.head_seq,
+        head_hash=result.head_hash,
+    )
     _CHECKPOINTS.pop(cluster_uid, None)
     logger.warning(
         "Savings ledger head of cluster %s accepted by an operator: seq %s (%s) replaces the anchor seq %s (%s). "
@@ -426,10 +434,28 @@ async def accept_head(
     return result
 
 
+_UNKEYED_WARNED = False
+
+
+def warn_if_unkeyed(repo: LedgerRepository) -> bool:
+    """Warn once per process when no ``LEDGER_CHAIN_KEY`` is configured; returns True when it warned."""
+    global _UNKEYED_WARNED
+    if _UNKEYED_WARNED or repo.chain_key:
+        return False
+    _UNKEYED_WARNED = True
+    logger.warning(
+        "LEDGER_CHAIN_KEY is not set: the savings ledger chain uses plain sha256, which anyone who can write to "
+        "the database can recompute. Set secrets.ledgerChainKey (or let the chart generate it) to key it (LED-05)."
+    )
+    return True
+
+
 async def run_ledger_chain() -> None:
     """Controller loop job: catch the v2 ledger up with the v1 ledger, verify its chains and reconcile (LED-04)."""
     from greenkube.storage.ledger_repository import get_ledger_repository
     from greenkube.verify.ledger.projector import build_projector
+
+    warn_if_unkeyed(get_ledger_repository())
 
     result = await build_projector().sync(full=True)
     if result.written:

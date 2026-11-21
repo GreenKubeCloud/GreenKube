@@ -113,6 +113,11 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: Clock-skew errors are logged at most once per interval and cluster (the counter counts every run).
+SKEW_LOG_INTERVAL = timedelta(minutes=15)
+_LAST_SKEW_LOG: dict = {}
+
+
 class InvalidSavingsRecord(ValueError):
     """A recommendation carries savings that cannot be accrued."""
 
@@ -574,10 +579,22 @@ class SavingsAttributor:
         counted and reported in the result.
         """
         if now is None:
-            skew = await self._clock_skew()
+            try:
+                skew = await self._clock_skew()
+            except Exception as exc:
+                # Without the database clock the process clock cannot be trusted: skip this run.
+                ATTRIBUTION_ERRORS.labels(reason="clock_check_failed").inc()
+                logger.warning("Savings attribution skipped: the database clock could not be read: %s", exc)
+                return AccrualResult(clock_skew=True)
             if skew is not None:
                 ATTRIBUTION_ERRORS.labels(reason="clock_skew").inc()
-                logger.error(
+                last = _LAST_SKEW_LOG.get(self._cluster)
+                wall = datetime.now(timezone.utc)
+                level = logging.ERROR if last is None or wall - last >= SKEW_LOG_INTERVAL else logging.DEBUG
+                if level == logging.ERROR:
+                    _LAST_SKEW_LOG[self._cluster] = wall
+                logger.log(
+                    level,
                     "Savings attribution refused: the process clock is %+.0f s away from the database clock "
                     "(tolerance %.0f s). Fix the node's time synchronisation.",
                     skew.total_seconds(),
