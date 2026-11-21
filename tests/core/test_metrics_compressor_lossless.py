@@ -8,6 +8,7 @@ samples once it moved from the raw tables to the hourly tables.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import random
 from datetime import datetime as real_datetime
@@ -27,6 +28,19 @@ from greenkube.storage.postgres.repository import PostgresCombinedMetricsReposit
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 
 T0 = real_datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+
+#: Wall-clock budget of one simulated multi-day compression schedule. The compressor work
+#: of a whole simulation takes a few seconds on PostgreSQL. A lock wait or a pool
+#: starvation must fail the test here instead of stalling the suite.
+SIMULATION_BUDGET_SECONDS = 45.0
+
+
+async def _within_budget(simulation) -> None:
+    """Run ``simulation`` (a coroutine) or fail when it exceeds :data:`SIMULATION_BUDGET_SECONDS`."""
+    try:
+        await asyncio.wait_for(simulation, timeout=SIMULATION_BUDGET_SECONDS)
+    except asyncio.TimeoutError:
+        pytest.fail(f"compression simulation did not finish within {SIMULATION_BUDGET_SECONDS:.0f}s")
 
 
 class _FrozenClock:
@@ -125,11 +139,17 @@ async def test_sim_compress_keeps_every_sample_of_closed_hours(metrics_db, clock
     samples += [_sample(i, container="app") for i in range(samples_per_hour * 24 * 9)]
     await repo.write_combined_metrics(samples)
 
-    compressor = MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None)
+    # The workload usage rollup (tested on its own) re-rolls 24 hours per run: across
+    # ~100 simulated runs it made one PostgreSQL case take 70-95s of silence (the stall).
+    compressor = MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None, rollup_enabled=False)
     start = T0 + timedelta(days=7, hours=2, minutes=37)
-    for hour in range(30):
-        clock.now = start + timedelta(hours=hour)
-        await compressor.run()
+
+    async def simulate() -> None:
+        for hour in range(30):
+            clock.now = start + timedelta(hours=hour)
+            await compressor.run()
+
+    await _within_budget(simulate())
 
     for table in ("combined_metrics_hourly", "container_metrics_hourly"):
         rows = await _fetch(metrics_db, f"SELECT sample_count, total_cost, joules FROM {table} ORDER BY hour_bucket")
@@ -160,11 +180,17 @@ async def test_compression_conserves_sums_with_random_job_offsets(metrics_db, cl
         bucket = sample.timestamp.replace(minute=0, second=0, microsecond=0)
         raw_by_bucket.setdefault(bucket, []).append(sample.total_cost)
 
-    compressor = MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None)
+    # The workload usage rollup (tested on its own) re-rolls 24 hours per run: across
+    # ~100 simulated runs it made one PostgreSQL case take 70-95s of silence (the stall).
+    compressor = MetricsCompressor(metrics_db, Config(), collection_watermark_provider=None, rollup_enabled=False)
     clock.now = T0 + timedelta(days=1, minutes=rng.randint(0, 59), seconds=rng.randint(0, 59))
-    while clock.now < T0 + timedelta(days=5):
-        await compressor.run()
-        clock.now += timedelta(minutes=rng.randint(40, 80), seconds=rng.randint(0, 59))
+
+    async def simulate() -> None:
+        while clock.now < T0 + timedelta(days=5):
+            await compressor.run()
+            clock.now += timedelta(minutes=rng.randint(40, 80), seconds=rng.randint(0, 59))
+
+    await _within_budget(simulate())
 
     hourly = await _fetch(
         metrics_db,
