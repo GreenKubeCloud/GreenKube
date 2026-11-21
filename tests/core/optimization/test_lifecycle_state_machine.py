@@ -184,6 +184,9 @@ class TestTransitions:
         assert event.event_type == "rollback_dismissed"
         assert _payload(event)["reason"] == "restart caused by a node drain"
         assert _payload(event)["dismissed_measurement_id"] == "m1"
+        # Accrual resumes at the dismissal, never over the review (LED-12).
+        assert baseline["accruing_since"]
+        assert datetime.fromisoformat(baseline["accruing_since"]) > applied_at + timedelta(days=3)
 
     async def test_dismiss_requires_rollback_review(self, repo):
         record = await _saved(repo, status=RecommendationStatus.APPLIED, applied_at=datetime.now(timezone.utc))

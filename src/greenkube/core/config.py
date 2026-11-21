@@ -648,6 +648,11 @@ class Config(BaseSettings):
     # --- Savings ledger v2 (roadmap C6) ---
     # How often the controller catches the hash-chained ledger up and verifies its chain (s, m or h).
     LEDGER_CHAIN_VERIFY_INTERVAL: str = "1h"
+    # Secret key of the ledger hash chain (LED-05): new entries are chained with HMAC-SHA256 so that a
+    # database writer without the key cannot recompute the chain. Never stored in the database.
+    LEDGER_CHAIN_KEY: Optional[str] = None
+    # Verify-only previous chain keys of a deliberate rotation, comma-separated (never used to write).
+    LEDGER_CHAIN_PREVIOUS_KEYS: Optional[str] = None
     # Interval between lifecycle jobs (apply detection, verification, expiry).
     RECOMMENDATION_LIFECYCLE_INTERVAL: str = "5m"
     # Interval between scheduled, leader-gated recommendation scans in the

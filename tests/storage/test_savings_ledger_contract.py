@@ -378,3 +378,21 @@ async def test_namespace_filters_select_namespaced_and_cluster_scoped_rows(ledge
     everything = await ledger_db.repo.get_window_totals(CLUSTER, *window)
     assert everything["RIGHTSIZING_CPU"]["co2e_saved_grams"] == pytest.approx(30.0)
     assert await ledger_db.repo.get_window_totals("other-cluster", *window) == {}
+
+
+@pytest.mark.asyncio
+async def test_bad_process_clock_writes_no_accrual(ledger_db: LedgerDatabase):
+    """LED-06: PostgreSQL's clock is a witness; SQLite reads the host clock and has none."""
+    database_now = await ledger_db.repo.get_database_time()
+    if ledger_db.backend == "sqlite":
+        assert database_now is None
+        return
+    assert database_now is not None
+    assert abs(database_now - datetime.now(timezone.utc)) < timedelta(minutes=1)
+    attributor = SavingsAttributor(
+        ledger_db.repo, CLUSTER, clock=lambda: datetime.now(timezone.utc) + timedelta(days=400)
+    )
+    result = await attributor.accrue([_applied(applied_at=datetime.now(timezone.utc) - 3 * HOUR)])
+    assert result.clock_skew and result.written == 0
+    assert await ledger_db.scalar("SELECT COUNT(*) FROM recommendation_savings_ledger") == 0
+    assert await ledger_db.repo.get_accrual_watermark(CLUSTER) is None

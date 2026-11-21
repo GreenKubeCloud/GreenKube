@@ -188,7 +188,8 @@ All node metrics share labels `node`, `instance_type`, `zone`, `region`, `cloud_
 | `greenkube_savings_run_rate_annual_co2e_grams` | `cluster`, `method` | Current annual CO₂e savings rate of applied recommendations, by method (g/year) |
 | `greenkube_savings_run_rate_annual_cost_dollars` | `cluster`, `method` | Current annual cost savings rate of applied recommendations, by method ($/year) |
 | `greenkube_savings_measured_vs_projected_ratio` | `cluster` | Share of net accrued CO₂e savings that is measured rather than projected (0–1) |
-| `greenkube_attribution_errors_total` | `reason` | **Counter.** Recommendations skipped by savings attribution (`invalid_record`) or accrual batches that could not be stored (`persist_failed`). Process-local (see below) |
+| `greenkube_attribution_errors_total` | `reason` | **Counter.** Recommendations skipped by savings attribution (`invalid_record`), accrual batches that could not be stored (`persist_failed`) runs refused because the process clock disagrees with the database clock (`clock_skew`, logged at most every 15 minutes) or because the database clock could not be read (`clock_check_failed`). Process-local (see below) |
+| `greenkube_accrual_watermark_ahead_seconds` | `cluster_name` | **Gauge.** Seconds by which the savings accrual watermark is ahead of the current hour (written by a wrong clock); 0 normally |
 
 ### Pre-computed dashboard summary metrics
 

@@ -48,6 +48,7 @@ from prometheus_client import Counter, Gauge
 
 from greenkube.core.observability import REGISTRY as OBSERVABILITY_REGISTRY
 from greenkube.core.savings_attributor import is_non_representative
+from greenkube.models.savings import DRIFT_REVERSAL_ROW_KIND
 from greenkube.storage.ledger_repository import V1_RAW_TABLE, V1_TABLES, LedgerRepository, Provenance
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.ledger.identity import ClusterIdentity, ClusterIdentityResolver, ClusterIdentityUnavailable
@@ -190,8 +191,18 @@ def _floor_slot(moment: datetime) -> datetime:
 
 
 def _is_drift_reversal(table: str, row: dict, method: str) -> bool:
-    """A v1 reversal written by the drift monitor: off the accrual grid, measured, negative."""
-    if table != V1_RAW_TABLE or row.get("slot_start") is not None or method != METHOD_MEASURED_ALLOCATED:
+    """A v1 reversal written by the drift monitor.
+
+    Rows written since migration 0291 say so (``row_kind``), whatever the
+    signs of their quantities (LED-12). Older rows are recognised as before:
+    off the accrual grid, measured, negative.
+    """
+    if table != V1_RAW_TABLE or method != METHOD_MEASURED_ALLOCATED:
+        return False
+    kind = row.get("row_kind")
+    if kind is not None:
+        return kind == DRIFT_REVERSAL_ROW_KIND
+    if row.get("slot_start") is not None:
         return False
     co2e = float(row.get("co2e_saved_grams") or 0.0)
     cost = float(row.get("cost_saved_dollars") or 0.0)
@@ -353,10 +364,18 @@ class LedgerProjector:
         measured = method == METHOD_MEASURED_ALLOCATED
         # The currency the recommendation was priced in, not today's configuration (a later currency
         # change must not relabel past accruals); the configured currency only when it is unknown.
-        currency_of_row = source.currency or self.currency
-        for quantity, amount, unit, currency in (
-            (QUANTITY_COST, row.get("cost_saved_dollars"), currency_of_row, currency_of_row),
-            (QUANTITY_CO2E, row.get("co2e_saved_grams"), CO2E_UNIT, None),
+        # Rows written since ledger/4 carry the currency and measurement read at accrual time (LED-11).
+        currency_of_row = row.get("currency") or source.currency or self.currency
+        measurement_of_row = row.get("measurement_id") or source.measurement_id
+        for quantity, amount, unit, currency, rate in (
+            (
+                QUANTITY_COST,
+                row.get("cost_saved_dollars"),
+                currency_of_row,
+                currency_of_row,
+                row.get("annual_cost_rate"),
+            ),
+            (QUANTITY_CO2E, row.get("co2e_saved_grams"), CO2E_UNIT, None, row.get("annual_co2e_rate")),
         ):
             value = float(amount or 0.0)
             if value == 0.0:
@@ -384,9 +403,10 @@ class LedgerProjector:
                     namespace=row.get("namespace") or "",
                     recommendation_type=row.get("recommendation_type") or "",
                     change_id=source.change_id,
-                    measurement_id=source.measurement_id if measured else None,
+                    measurement_id=measurement_of_row if measured else None,
                     pr_url=source.pr_url,
                     confidence=float(row["confidence"]) if row.get("confidence") is not None else None,
+                    annual_rate=float(rate) if rate is not None and not drift else None,
                     reverses_entry_id=reverses,
                     source_table=table,
                     source_id=int(row["id"]),
@@ -540,6 +560,7 @@ class LedgerProjector:
                     pr_url=source.pr_url or entry.pr_url,
                     restates_entry_id=entry.restates_entry_id or entry.reverses_entry_id,
                     basis=BASIS_ALLOCATED,
+                    annual_rate=float(annual),
                 )
             )
         return drafts
@@ -939,6 +960,7 @@ def restatement_of(projection: LedgerEntry, *, annual_rate: float, provenance: P
         pr_url=provenance.pr_url or projection.pr_url,
         restates_entry_id=projection.entry_id,
         basis=BASIS_ALLOCATED,
+        annual_rate=float(annual_rate),
     )
     return [reversal, measured]
 

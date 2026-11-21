@@ -3,7 +3,7 @@
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ...models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord, normalize_savings_method
 from ...utils.date_utils import ensure_utc, to_iso_z
@@ -18,8 +18,9 @@ _INSERT_SQL = """
          cost_saved_dollars, period_seconds, timestamp,
          period_start, period_end, slot_start,
          measurement_method, baseline_value, actual_value,
-         confidence, superseded, basis)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         confidence, superseded, basis, row_kind,
+         annual_cost_rate, annual_co2e_rate, currency, measurement_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT DO NOTHING
 """
 
@@ -61,6 +62,11 @@ def _row_params(record: SavingsLedgerRecord) -> tuple:
         record.confidence,
         int(bool(record.superseded)),
         record.basis,
+        record.row_kind,
+        record.annual_cost_rate,
+        record.annual_co2e_rate,
+        record.currency,
+        record.measurement_id,
     )
 
 
@@ -190,6 +196,26 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
                     if period_end:
                         floors[int(rec_id)] = ensure_utc(period_end)
         return floors
+
+    async def get_measured_totals(self, recommendation_id: int, start: datetime, end: datetime) -> Tuple[float, float]:
+        """Sum of the measured grid accruals of one recommendation inside ``[start, end)`` (LED-12)."""
+        params = {"rec": int(recommendation_id), "start": _bound(start), "end": _bound(end)}
+        async with self._db.connection_scope() as conn:
+            cursor = await conn.execute(
+                f"""
+                SELECT SUM(co2e_saved_grams * share), SUM(cost_saved_dollars * share)
+                FROM (
+                    SELECT co2e_saved_grams, cost_saved_dollars, {_WINDOW_SHARE_SQL} AS share
+                    FROM savings_accruals_v1
+                    WHERE recommendation_id = :rec AND measurement_method = 'measured'
+                      AND slot_start IS NOT NULL AND superseded = 0
+                      AND period_end > :start AND period_start < :end
+                ) AS entries
+                """,
+                params,
+            )
+            row = await cursor.fetchone()
+        return (float(row[0] or 0.0), float(row[1] or 0.0)) if row else (0.0, 0.0)
 
     # ------------------------------------------------------------------
     # Reads

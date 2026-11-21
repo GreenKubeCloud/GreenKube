@@ -1,0 +1,68 @@
+suite: savings ledger chain key (LED-05)
+templates:
+  - templates/credentials-bootstrap.yaml
+  - templates/secret.yaml
+  - templates/components.yaml
+release:
+  name: gk
+  namespace: greenkube
+
+tests:
+  - it: generates the ledger chain key once by default
+    templates:
+      - templates/credentials-bootstrap.yaml
+    documentIndex: 3
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_GENERATE_LEDGER_CHAIN_KEY
+            value: "true"
+
+  - it: generates no ledger chain key when one is supplied in values
+    templates:
+      - templates/credentials-bootstrap.yaml
+    documentIndex: 3
+    set:
+      secrets.ledgerChainKey: supplied-key
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GREENKUBE_GENERATE_LEDGER_CHAIN_KEY
+            value: "false"
+
+  - it: renders a supplied ledger chain key in the values Secret
+    templates:
+      - templates/secret.yaml
+    set:
+      secrets.ledgerChainKey: supplied-key
+    asserts:
+      - equal:
+          path: data.LEDGER_CHAIN_KEY
+          value: c3VwcGxpZWQta2V5
+
+  - it: renders supplied previous chain keys in the values Secret
+    templates:
+      - templates/secret.yaml
+    set:
+      secrets.ledgerChainPreviousKeys: old-key
+    asserts:
+      - equal:
+          path: data.LEDGER_CHAIN_PREVIOUS_KEYS
+          value: b2xkLWtleQ==
+
+  - it: projects the ledger chain key into the controller and the API, not the worker
+    templates:
+      - templates/components.yaml
+    set:
+      worker.replicas: 1
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes[0].projected.sources[0].secret.items
+          content:
+            key: LEDGER_CHAIN_KEY
+            path: LEDGER_CHAIN_KEY
+        documentSelector:
+          path: metadata.name
+          value: gk-greenkube-controller

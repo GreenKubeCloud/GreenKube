@@ -519,7 +519,9 @@
       "type": "object",
       "properties": {
         "metricsToken": {"type": "string"},
-        "existingSecretHasMetricsToken": {"type": "boolean"}
+        "existingSecretHasMetricsToken": {"type": "boolean"},
+        "ledgerChainKey": {"type": "string"},
+        "ledgerChainPreviousKeys": {"type": "string"}
       }
     },
     "hooks": {"type": "object"},

@@ -22,6 +22,8 @@ SavingsMethod = Literal["projected", "measured", "user_declared"]
 
 METHOD_PROJECTED = "projected"
 METHOD_MEASURED = "measured"
+#: ``row_kind`` of the reversal row the drift monitor writes (LED-12).
+DRIFT_REVERSAL_ROW_KIND = "drift_reversal"
 METHOD_USER_DECLARED = "user_declared"
 SAVINGS_METHODS: tuple[str, ...] = (METHOD_PROJECTED, METHOD_MEASURED, METHOD_USER_DECLARED)
 
@@ -90,6 +92,25 @@ class SavingsLedgerRecord(BaseModel):
         description=(
             "Accounting basis of the amounts (LED-01): allocated, billable_expected, billed or declared. "
             "None only for rows written without one (drift reversals and demo rows: inferred from the method)."
+        ),
+    )
+    annual_cost_rate: Optional[float] = Field(
+        None, description="Annual cost rate the row was accrued from (LED-11); None on rows stored before 0293."
+    )
+    annual_co2e_rate: Optional[float] = Field(
+        None, description="Annual CO2e rate (grams) the row was accrued from (LED-11); None before 0293."
+    )
+    currency: Optional[str] = Field(
+        None, description="Currency of cost_saved_dollars (the projection's currency, LED-11); None before 0293."
+    )
+    measurement_id: Optional[str] = Field(
+        None, description="Measurement whose rate a measured row uses, read at accrual time (LED-11)."
+    )
+    row_kind: Optional[str] = Field(
+        None,
+        description=(
+            "What the row is when it is not an accrual (LED-12): 'drift_reversal' for the reversal the drift "
+            "monitor writes. None for accruals and for rows stored before migration 0291."
         ),
     )
 

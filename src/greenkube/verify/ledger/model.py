@@ -24,11 +24,21 @@ counters and the dashboard gauges show.
 Each cluster's entries form a hash chain: ``seq`` is a gap-free position and
 ``hash = sha256(prev_hash || canonical_json(entry))``, where the canonical
 JSON covers every column except ``hash`` and ``prev_hash``.
+
+With a chain key (``LEDGER_CHAIN_KEY``, a Kubernetes Secret never stored in
+the database; LED-05) entries are chained with
+``hash = HMAC-SHA256(key, prev_hash || canonical_json(entry))`` and carry
+``chain_key_id``, a keyed fingerprint of the key that is part of the canonical
+JSON. Someone who can write to the database but does not hold the key cannot
+recompute the chain. Entries without ``chain_key_id`` (written before the key
+existed, or without one) keep the plain sha256 rule, so their hash never
+changes.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import uuid
@@ -115,9 +125,11 @@ V1_METHODS = {
 
 #: Version of the ledger writer; part of every entry's ``method_version`` for v1 projections.
 #: ``ledger/2`` entries carry their ``basis`` (part of the hash payload); ``ledger/1`` entries have none.
-#: ``ledger/3`` (IMP-06) scales the allocated projection of a rightsizing applied more conservatively than
-#: recommended by the share of the cut it realizes.
-LEDGER_WRITER_VERSION = "ledger/3"
+#: ``ledger/3`` projected accruals are the allocated projection scaled by the applied share (IMP-06, branch
+#: fix/measurement-impact-remaining). ``ledger/4`` accruals and restatements also carry the ``annual_rate``
+#: they were computed from (LED-11). The version is a label in ``method_version`` (part of the hash
+#: payload), never compared by verification: entries of every version verify by the same rules.
+LEDGER_WRITER_VERSION = "ledger/4"
 
 _NAMESPACE = uuid.UUID("6f1d3c52-5a0e-4c39-9a51-3b8ad0c4f6e1")
 
@@ -190,6 +202,9 @@ class LedgerEntryDraft:
     source_id: Optional[int] = None
     #: Accounting basis (LED-01); ``None`` only on entries stored before migration 0160.
     basis: Optional[str] = None
+    #: Annual rate the value was accrued from: ``value == annual_rate x seconds / year`` (LED-11).
+    #: ``None`` on entries stored before ledger/4 and on corrections.
+    annual_rate: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.entry_kind not in ENTRY_KINDS:
@@ -217,6 +232,8 @@ class LedgerEntry(LedgerEntryDraft):
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     prev_hash: Optional[str] = None
     hash: str = ""
+    #: Fingerprint of the key the entry was chained with (LED-05); ``None`` for the plain sha256 rule.
+    chain_key_id: Optional[str] = None
 
     def canonical(self) -> str:
         """Canonical JSON of every column except ``hash`` and ``prev_hash``."""
@@ -229,6 +246,14 @@ class LedgerEntry(LedgerEntryDraft):
         if data.get("basis") is None:
             # Entries stored before the basis column keep the payload (and hash) they were chained with.
             data.pop("basis", None)
+        if data.get("annual_rate") is None:
+            # Entries stored before ledger/4 keep the payload (and hash) they were chained with.
+            data.pop("annual_rate", None)
+        else:
+            data["annual_rate"] = float(data["annual_rate"])
+        if data.get("chain_key_id") is None:
+            # Entries chained without a key keep the payload (and hash) of the release before LED-05.
+            data.pop("chain_key_id", None)
         for key in ("period_start", "period_end", "slot_start", "created_at"):
             data[key] = format_time(data[key])
         data["value"] = float(self.value)
@@ -243,7 +268,12 @@ class LedgerEntry(LedgerEntryDraft):
         """The stored basis, or the one inferred from the method for entries stored before it existed."""
         return basis_of(self.method, self.basis)
 
-    def computed_hash(self) -> str:
+    def computed_hash(self, key: Optional[bytes] = None) -> str:
+        """The entry's hash: HMAC-SHA256 with ``key`` when it was chained with one, sha256 otherwise."""
+        if self.chain_key_id is not None:
+            if not key:
+                raise ValueError("the entry was chained with a key and no key was given")
+            return keyed_chain_hash(key, self.prev_hash, self.canonical())
         return chain_hash(self.prev_hash, self.canonical())
 
     def as_dict(self) -> Dict[str, Any]:
@@ -263,6 +293,16 @@ def chain_hash(prev_hash: Optional[str], canonical: str) -> str:
     return hashlib.sha256(((prev_hash or "") + canonical).encode("utf-8")).hexdigest()
 
 
+def keyed_chain_hash(key: bytes, prev_hash: Optional[str], canonical: str) -> str:
+    """HMAC-SHA256 chain rule (LED-05): only a holder of ``key`` can compute it."""
+    return hmac.new(key, ((prev_hash or "") + canonical).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def chain_key_id(key: bytes) -> str:
+    """Public fingerprint of a chain key: names the key without revealing it."""
+    return hmac.new(key, b"greenkube-ledger-chain-key-id", hashlib.sha256).hexdigest()[:16]
+
+
 def place(
     draft: LedgerEntryDraft,
     *,
@@ -271,8 +311,9 @@ def place(
     seq: int,
     prev_hash: Optional[str],
     created_at: datetime,
+    chain_key: Optional[bytes] = None,
 ) -> LedgerEntry:
-    """Put ``draft`` on the chain after ``prev_hash`` at position ``seq``."""
+    """Put ``draft`` on the chain after ``prev_hash`` at position ``seq`` (HMAC-chained with ``chain_key``)."""
     values = {name: getattr(draft, name) for name in LedgerEntryDraft.__dataclass_fields__}
     entry = LedgerEntry(
         **values,
@@ -282,8 +323,9 @@ def place(
         seq=seq,
         created_at=ensure_utc(created_at),
         prev_hash=prev_hash,
+        chain_key_id=chain_key_id(chain_key) if chain_key else None,
     )
-    return replace(entry, hash=entry.computed_hash())
+    return replace(entry, hash=entry.computed_hash(chain_key))
 
 
 __all__ = [
@@ -329,6 +371,8 @@ __all__ = [
     "REASON_SUPERSESSION",
     "canonical_json",
     "chain_hash",
+    "chain_key_id",
+    "keyed_chain_hash",
     "entry_id_for",
     "format_time",
     "parse_time",

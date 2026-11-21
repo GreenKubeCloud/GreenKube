@@ -16,6 +16,13 @@ true
 {{- end -}}
 {{- end -}}
 
+{{/* "true" when the bootstrap hook generates the ledger chain key LEDGER_CHAIN_KEY (LED-05). */}}
+{{- define "greenkube.generateLedgerChainKey" -}}
+{{- if and (not .Values.secrets.existingSecret) (not .Values.secrets.ledgerChainKey) .Values.rbac.create -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{/* "true" when the bootstrap hook generates the scrape token GREENKUBE_METRICS_TOKEN. */}}
 {{- define "greenkube.generateMetricsToken" -}}
 {{- if and (not .Values.secrets.existingSecret) (not .Values.secrets.metricsToken) .Values.rbac.create -}}

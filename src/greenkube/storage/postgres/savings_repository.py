@@ -3,7 +3,7 @@
 
 import logging
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ...models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord, normalize_savings_method
 from ...utils.date_utils import ensure_utc
@@ -18,12 +18,14 @@ _INSERT_SQL = """
          cost_saved_dollars, period_seconds, timestamp,
          period_start, period_end, slot_start,
          measurement_method, baseline_value, actual_value,
-         confidence, superseded, basis)
+         confidence, superseded, basis, row_kind,
+         annual_cost_rate, annual_co2e_rate, currency, measurement_id)
     SELECT * FROM unnest(
         $1::INTEGER[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::DOUBLE PRECISION[],
         $6::DOUBLE PRECISION[], $7::INTEGER[], $8::TIMESTAMPTZ[], $9::TIMESTAMPTZ[],
         $10::TIMESTAMPTZ[], $11::TIMESTAMPTZ[], $12::TEXT[], $13::DOUBLE PRECISION[],
-        $14::DOUBLE PRECISION[], $15::DOUBLE PRECISION[], $16::BOOLEAN[], $17::TEXT[]
+        $14::DOUBLE PRECISION[], $15::DOUBLE PRECISION[], $16::BOOLEAN[], $17::TEXT[], $18::TEXT[],
+        $19::DOUBLE PRECISION[], $20::DOUBLE PRECISION[], $21::TEXT[], $22::TEXT[]
     )
     ON CONFLICT DO NOTHING
 """
@@ -49,6 +51,11 @@ def _row_params(record: SavingsLedgerRecord) -> tuple:
         record.confidence,
         bool(record.superseded),
         record.basis,
+        record.row_kind,
+        record.annual_cost_rate,
+        record.annual_co2e_rate,
+        record.currency,
+        record.measurement_id,
     )
 
 
@@ -157,6 +164,12 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
             )
         return ensure_utc(value) if value is not None else None
 
+    async def get_database_time(self) -> Optional[datetime]:
+        """Return the PostgreSQL server clock (LED-06): an independent witness of the process clock."""
+        async with self._db.connection_scope() as conn:
+            value = await conn.fetchval("SELECT clock_timestamp()")
+        return ensure_utc(value) if value is not None else None
+
     async def get_accrual_floors(self, recommendation_ids: Iterable[int]) -> Dict[int, datetime]:
         ids = sorted({int(i) for i in recommendation_ids})
         if not ids:
@@ -172,6 +185,33 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
                 ids,
             )
         return {int(row["recommendation_id"]): ensure_utc(row["period_end"]) for row in rows if row["period_end"]}
+
+    async def get_measured_totals(self, recommendation_id: int, start: datetime, end: datetime) -> Tuple[float, float]:
+        """Sum of the measured grid accruals of one recommendation inside ``[start, end)`` (LED-12)."""
+        async with self._db.connection_scope() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT SUM(co2e_saved_grams * share) AS co2e, SUM(cost_saved_dollars * share) AS cost
+                FROM (
+                    SELECT co2e_saved_grams, cost_saved_dollars,
+                           (CASE
+                               WHEN period_start >= $2 AND period_end <= $3 THEN 1.0
+                               ELSE GREATEST(
+                                   0.0,
+                                   EXTRACT(EPOCH FROM (LEAST(period_end, $3) - GREATEST(period_start, $2)))
+                               ) / NULLIF(EXTRACT(EPOCH FROM (period_end - period_start)), 0)
+                           END)::DOUBLE PRECISION AS share
+                    FROM savings_accruals_v1
+                    WHERE recommendation_id = $1 AND measurement_method = 'measured'
+                      AND slot_start IS NOT NULL AND NOT superseded
+                      AND period_end > $2 AND period_start < $3
+                ) AS entries
+                """,
+                int(recommendation_id),
+                ensure_utc(start),
+                ensure_utc(end),
+            )
+        return (float(row["co2e"] or 0.0), float(row["cost"] or 0.0)) if row else (0.0, 0.0)
 
     # ------------------------------------------------------------------
     # Reads

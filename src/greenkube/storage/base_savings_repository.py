@@ -11,7 +11,7 @@ also exposes the ``legacy_compressed`` hourly rows left by releases before 0.4.
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord
 
@@ -83,6 +83,25 @@ class SavingsLedgerRepository(ABC):
     @abstractmethod
     async def get_accrual_watermark(self, cluster_name: str, stream: str = ATTRIBUTION_STREAM) -> Optional[datetime]:
         """Return the end of the last accrued slot for a stream, or ``None``."""
+
+    async def get_measured_totals(self, recommendation_id: int, start: datetime, end: datetime) -> Tuple[float, float]:
+        """Sum of the measured accruals of one recommendation inside ``[start, end)``, as (CO2e grams, cost).
+
+        Only accruals on the slot grid count (drift reversals are off it);
+        rows that straddle a bound count pro rata. The drift monitor reverses
+        exactly this amount (LED-12), so the reversed interval nets to zero
+        even when some slots were never accrued.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot sum measured accruals")
+
+    async def get_database_time(self) -> Optional[datetime]:
+        """Return the database server's clock, or ``None`` when it is not an independent clock (LED-06).
+
+        The attributor refuses to accrue when the process clock is too far
+        from it. SQLite runs in the process and reads the host clock, so it
+        returns ``None``.
+        """
+        return None
 
     @abstractmethod
     async def get_accrual_floors(self, recommendation_ids: Iterable[int]) -> Dict[int, datetime]:

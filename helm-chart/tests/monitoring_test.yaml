@@ -94,6 +94,27 @@ tests:
       - equal:
           path: spec.groups[3].rules[2].expr
           value: min by (cluster_uid) (greenkube_ledger_reconciliation_ok) == 0
+      - equal:
+          path: spec.groups[3].rules[3].alert
+          value: GreenKubeAttributionClockSkew
+      - equal:
+          path: spec.groups[3].rules[3].expr
+          value: sum(increase(greenkube_attribution_errors_total{reason="clock_skew"}[1h])) > 0
+      - equal:
+          path: spec.groups[3].rules[4].alert
+          value: GreenKubeAccrualWatermarkAhead
+      - equal:
+          path: spec.groups[3].rules[4].expr
+          value: max by (cluster_name) (greenkube_accrual_watermark_ahead_seconds) > 0
+      - equal:
+          path: spec.groups[3].rules[5].alert
+          value: GreenKubeLedgerChainKeyDropped
+      - equal:
+          path: spec.groups[3].rules[5].expr
+          value: max_over_time(greenkube_ledger_chain_head_keyed[30d]) == 1 and greenkube_ledger_chain_head_keyed == 0
+      - equal:
+          path: spec.groups[3].rules[5].labels.severity
+          value: critical
 
   - it: should leave the controller loop alerts out when disabled
     set:

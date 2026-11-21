@@ -21,10 +21,12 @@ Queries are written once with ``?`` placeholders and translated for PostgreSQL.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -36,6 +38,7 @@ from greenkube.verify.ledger.model import (
     REASON_SUPERSESSION,
     LedgerEntry,
     LedgerEntryDraft,
+    chain_key_id,
     format_time,
     parse_time,
     place,
@@ -92,6 +95,8 @@ _COLUMNS = (
     "prev_hash",
     "hash",
     "basis",
+    "chain_key_id",
+    "annual_rate",
 )
 _TIME_COLUMNS = ("period_start", "period_end", "slot_start", "created_at")
 _SELECT = ", ".join(_COLUMNS)
@@ -124,6 +129,28 @@ class ChainStatus:
     head_seq: Optional[int]
     head_hash: Optional[str]
     failure: Optional[str]
+    #: Whether the anchored head is chained with a key (LED-05).
+    head_keyed: bool = False
+    #: ``<key id>:<HMAC>`` of the anchor with LEDGER_CHAIN_KEY, or None (no key, or a row stored before 0294).
+    signature: Optional[str] = None
+    #: Seq of the first keyed entry, recorded at the first keyed append and covered by the signature (0296).
+    first_keyed_seq: Optional[int] = None
+    #: ``(key id, from seq)`` for every key that took over the chain, oldest first (0297): the first key at
+    #: ``first_keyed_seq``, then one per ``greenkube db ledger-rotate-key``. Covered by the signature.
+    key_boundaries: Tuple[Tuple[str, int], ...] = ()
+
+    @property
+    def key_id(self) -> Optional[str]:
+        """Id of the key that signed the row (the current key when the row is valid)."""
+        return (self.signature or "").partition(":")[0] or None
+
+    def key_for(self, seq: int) -> Optional[str]:
+        """Id of the key whose boundary covers ``seq``, or None below ``first_keyed_seq``."""
+        found = None
+        for key_id, from_seq in self.key_boundaries:
+            if from_seq <= seq:
+                found = key_id
+        return found
 
 
 @dataclass(frozen=True)
@@ -152,6 +179,35 @@ _BASIS_SQL = (
 )
 
 
+#: Group columns of ``savings_ledger_totals`` (LED-09), in primary-key order after ``cluster_uid``.
+_TOTAL_KEYS = (
+    "namespace",
+    "recommendation_type",
+    "method",
+    "quantity",
+    "unit",
+    "book",
+    "entry_kind",
+    "basis",
+    "reason_group",
+)
+
+
+def _total_key(entry: LedgerEntry) -> Tuple[str, ...]:
+    """The ``savings_ledger_totals`` group of an entry, by the readers' rules (``_BASIS_SQL``, ``_COST_OF_FIX_SQL``)."""
+    return (
+        entry.namespace or "",
+        entry.recommendation_type or "",
+        entry.method,
+        entry.quantity,
+        entry.unit or "",
+        entry.book,
+        entry.entry_kind,
+        entry.effective_basis,
+        "cost_of_fix" if "cost_of_fix:" in (entry.group_key or "") else "",
+    )
+
+
 def _impact_currency(raw: Any) -> Optional[str]:
     """The ``currency`` of a stored ``impact`` projection (JSON text or a mapping), ``None`` when absent."""
     if isinstance(raw, (str, bytes)):
@@ -176,11 +232,82 @@ class Provenance:
     currency: Optional[str] = None
 
 
-class LedgerRepository:
-    """Append-only savings ledger entries, their chain and their projections."""
+class LedgerChainKeyError(RuntimeError):
+    """The chain's head was written with a key this process does not hold: nothing is appended (LED-05)."""
 
-    def __init__(self, db_manager):
+
+def configured_previous_chain_keys() -> List[bytes]:
+    """Verify-only keys of a deliberate rotation (``LEDGER_CHAIN_PREVIOUS_KEYS``, comma-separated)."""
+    from greenkube.core.config import get_config
+
+    raw = getattr(get_config(), "LEDGER_CHAIN_PREVIOUS_KEYS", None) or ""
+    return [item.strip().encode("utf-8") for item in raw.split(",") if item.strip()]
+
+
+def configured_chain_key() -> Optional[bytes]:
+    """The ledger chain key from ``LEDGER_CHAIN_KEY`` (LED-05), or ``None`` when none is configured."""
+    from greenkube.core.config import get_config
+
+    raw = getattr(get_config(), "LEDGER_CHAIN_KEY", None)
+    return raw.encode("utf-8") if raw else None
+
+
+#: Sentinel: :meth:`LedgerRepository.record_chain_status` without a compare-and-swap.
+_ANY_SIGNATURE = object()
+
+
+def _boundaries(raw: Any) -> Tuple[Tuple[str, int], ...]:
+    """Parse the stored ``key_boundaries`` JSON (``[[key_id, from_seq], ...]``)."""
+    if not raw:
+        return ()
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else raw
+        return tuple((str(key_id), int(from_seq)) for key_id, from_seq in items)
+    except (TypeError, ValueError):
+        logger.warning("Malformed ledger key_boundaries %r: treated as no boundary.", raw)
+        return ()
+
+
+def _sqlite_epoch(expression: str) -> str:
+    """SQLite seconds since the epoch of a canonical ledger timestamp, to the microsecond."""
+    return f"(CAST(strftime('%s', {expression}) AS REAL) + CAST(substr({expression}, 21, 6) AS REAL) / 1000000.0)"
+
+
+class LedgerRepository:
+    """Append-only savings ledger entries, their chain and their projections.
+
+    ``chain_key`` keys the hash chain (LED-05); by default it is read from
+    ``LEDGER_CHAIN_KEY``. An empty value means no key. ``previous_keys``
+    (default ``LEDGER_CHAIN_PREVIOUS_KEYS``) only verify entries chained
+    before a deliberate rotation, and let the writer continue after them.
+    """
+
+    def __init__(
+        self,
+        db_manager,
+        chain_key: Optional[bytes] = None,
+        previous_keys: Optional[Sequence[bytes]] = None,
+    ):
         self.db_manager = db_manager
+        self._chain_key = chain_key
+        self._previous_keys = list(previous_keys) if previous_keys is not None else None
+
+    @property
+    def chain_keys(self) -> Dict[str, bytes]:
+        """Every key this process can verify with, by public fingerprint: the current one and the previous ones."""
+        previous = self._previous_keys if self._previous_keys is not None else configured_previous_chain_keys()
+        keys = {chain_key_id(key): key for key in previous if key}
+        current = self.chain_key
+        if current:
+            keys[chain_key_id(current)] = current
+        return keys
+
+    @property
+    def chain_key(self) -> Optional[bytes]:
+        """Key of the hash chain: the one given, else ``LEDGER_CHAIN_KEY``; ``None`` without a key."""
+        if self._chain_key is not None:
+            return self._chain_key or None
+        return configured_chain_key()
 
     # ------------------------------------------------------------------
     # Dialect helpers
@@ -244,10 +371,15 @@ class LedgerRepository:
         for column in ("seq", "recommendation_id", "source_id"):
             if data.get(column) is not None:
                 data[column] = int(data[column])
-        for column in ("confidence", "intensity_g_per_kwh"):
+        for column in ("confidence", "intensity_g_per_kwh", "annual_rate"):
             if data.get(column) is not None:
                 data[column] = float(data[column])
         return LedgerEntry(**data)
+
+    @staticmethod
+    def _column_names() -> Tuple[str, ...]:
+        """Columns of ``savings_ledger_entries`` in the order of :meth:`_params`."""
+        return _COLUMNS
 
     def _params(self, entry: LedgerEntry) -> List[Any]:
         values: List[Any] = []
@@ -309,6 +441,225 @@ class LedgerRepository:
         )
         return (int(rows[0]["seq"]), rows[0]["hash"]) if rows else (0, None)
 
+    async def _status_in(self, conn, cluster_uid: str) -> Optional[ChainStatus]:
+        rows = await self._fetch(
+            conn,
+            "SELECT verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature, first_keyed_seq, "
+            "key_boundaries FROM ledger_chain_status WHERE cluster_uid = ?",
+            [cluster_uid],
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return ChainStatus(
+            cluster_uid=cluster_uid,
+            verified_at=parse_time(row["verified_at"]) or datetime.now(timezone.utc),
+            ok=bool(row["ok"]),
+            entries=int(row["entries"]),
+            head_seq=int(row["head_seq"]) if row["head_seq"] is not None else None,
+            head_hash=row["head_hash"],
+            failure=row["failure"],
+            head_keyed=bool(row["head_keyed"]),
+            signature=row["signature"],
+            first_keyed_seq=int(row["first_keyed_seq"]) if row["first_keyed_seq"] is not None else None,
+            key_boundaries=_boundaries(row["key_boundaries"]),
+        )
+
+    async def _record_first_keyed(self, conn, cluster_uid: str, moment: datetime, first_seq: int) -> None:
+        """The first keyed append on an unkeyed chain records the boundary and signs the status row (LED-05).
+
+        This is the upgrade path: unkeyed entries below ``first_keyed_seq``
+        stay valid whatever their timestamps, and every later entry must be
+        keyed with the key of its boundary.
+        """
+        stored = await self._status_in(conn, cluster_uid)
+        key = self.chain_key
+        assert key is not None
+        if stored is not None and stored.key_boundaries:
+            return  # never overwritten: append refuses an unkeyed head under recorded boundaries
+        if stored is not None and stored.first_keyed_seq is not None:
+            first_seq = stored.first_keyed_seq
+        base = stored or ChainStatus(
+            cluster_uid=cluster_uid,
+            verified_at=moment,
+            ok=True,
+            entries=0,
+            head_seq=None,
+            head_hash=None,
+            failure=None,
+        )
+        await self._upsert_status(
+            conn,
+            replace(
+                base,
+                signature=None,
+                first_keyed_seq=first_seq,
+                key_boundaries=((chain_key_id(key), first_seq),),
+            ),
+        )
+
+    def _chain_key_refusal(self, cluster_uid: str, detail: str) -> LedgerChainKeyError:
+        from greenkube.verify.ledger.projector import LEDGER_WRITE_ERRORS
+
+        LEDGER_WRITE_ERRORS.labels(reason="chain_key").inc()
+        message = f"The savings ledger of cluster {cluster_uid}: {detail}: nothing is appended."
+        logger.error(message)
+        return LedgerChainKeyError(message)
+
+    async def _check_writer_key(self, conn, cluster_uid: str, chain_key: Optional[bytes]) -> Tuple[bool, bool]:
+        """Fail closed unless this process may continue the chain with its key (LED-05).
+
+        Allowed: the status row names this process's key as the chain's
+        current key (its last boundary and its signer) and the head uses it, or
+        the head uses a previous key and the row already records the boundary of
+        this key (a rotation done with ``ledger-rotate-key``); or the chain holds
+        no keyed entry and the row records no boundary. Everything else (an old
+        pod after a rotation, a new key before the rotation was recorded, an
+        unkeyed head under recorded boundaries) writes nothing: the error is
+        counted (``greenkube_ledger_write_errors_total{reason="chain_key"}``) and
+        logged with what to do. An old pod cannot check the new key's signature,
+        so this is only a fail-closed guard; verification is the proof.
+
+        Returns (whether the head is keyed, whether the row records boundaries).
+        """
+        rows = await self._fetch(
+            conn,
+            "SELECT seq, chain_key_id FROM savings_ledger_entries WHERE cluster_uid = ? ORDER BY seq DESC LIMIT 1",
+            [cluster_uid],
+        )
+        head_key_id = rows[0]["chain_key_id"] if rows else None
+        status = await self._status_in(conn, cluster_uid)
+        has_boundaries = bool(status is not None and status.key_boundaries)
+        current_id = chain_key_id(chain_key) if chain_key else None
+        rotate_hint = (
+            "deploy the Secret with the new key as LEDGER_CHAIN_KEY and the old key in LEDGER_CHAIN_PREVIOUS_KEYS, "
+            "then run `greenkube db ledger-rotate-key`; if the status row is lost or unsigned, "
+            "`greenkube db ledger-rotate-key --trust-entry-keys` (or `ledger-accept-head --trust-entry-keys`) takes "
+            "the boundaries from the entries' own keys, trusting every configured key over the whole chain"
+        )
+        if head_key_id is None:
+            if has_boundaries:
+                raise self._chain_key_refusal(
+                    cluster_uid,
+                    "the head is unkeyed but the status row records key boundaries (a rewrite without the key?); "
+                    "investigate, then `greenkube db ledger-accept-head`",
+                )
+            return False, False
+        if current_id is None:
+            raise self._chain_key_refusal(
+                cluster_uid, f"the head is chained with key {head_key_id} and LEDGER_CHAIN_KEY is not set"
+            )
+        recorded = status.key_boundaries[-1][0] if status is not None and status.key_boundaries else None
+        signer = status.key_id if status is not None else None
+        if (recorded is not None and recorded != current_id) or (
+            signer is not None and signer != current_id and recorded != current_id
+        ):
+            raise self._chain_key_refusal(
+                cluster_uid,
+                f"the status row names key {recorded or signer} as the chain's current key and LEDGER_CHAIN_KEY is "
+                f"key {current_id}; {rotate_hint}",
+            )
+        if current_id == head_key_id:
+            return True, has_boundaries
+        if head_key_id in self.chain_keys:
+            head_seq = int(rows[0]["seq"])
+            if (
+                status is not None
+                and self.status_signature_state(status) == "current"
+                and status.key_for(head_seq + 1) == current_id
+            ):
+                return True, has_boundaries
+            raise self._chain_key_refusal(
+                cluster_uid,
+                f"the head is chained with the previous key {head_key_id} and LEDGER_CHAIN_KEY is key {current_id}; "
+                f"{rotate_hint}",
+            )
+        raise self._chain_key_refusal(
+            cluster_uid,
+            f"the head is chained with key {head_key_id}, which is neither LEDGER_CHAIN_KEY ({current_id}) nor in "
+            "LEDGER_CHAIN_PREVIOUS_KEYS; restore the Secret's key",
+        )
+
+    async def commit_status(
+        self,
+        status: ChainStatus,
+        *,
+        expect_head: Tuple[int, Optional[str]],
+        expect_signature: Optional[str],
+        audit_reason: str,
+        previous: Optional[ChainStatus],
+        accepted_at: datetime,
+    ) -> None:
+        """Write an operator's status row and its audit row in one transaction, under the append lock (LED-05).
+
+        The head and the stored row must still be the ones the operator's
+        verification saw (``expect_head``, ``expect_signature``); otherwise
+        :class:`LedgerConflictError` is raised and nothing is written.
+        """
+        async with self._transaction() as conn:
+            if self.postgres:
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"ledger:{status.cluster_uid}"
+                )
+            head = await self._head(conn, status.cluster_uid)
+            if head != (int(expect_head[0] or 0), expect_head[1]):
+                raise LedgerConflictError(
+                    f"the ledger head of cluster {status.cluster_uid} moved; run the command again"
+                )
+            stored = await self._status_in(conn, status.cluster_uid)
+            if (stored.signature if stored is not None else None) != expect_signature:
+                raise LedgerConflictError(
+                    f"the ledger status of cluster {status.cluster_uid} changed; run the command again"
+                )
+            await self._upsert_status(conn, status)
+            await self._execute(
+                conn,
+                "INSERT INTO ledger_head_acceptances (cluster_uid, accepted_at, reason, previous_head_seq, "
+                "previous_head_hash, head_seq, head_hash, key_boundaries) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    status.cluster_uid,
+                    self._ts(accepted_at),
+                    audit_reason,
+                    previous.head_seq if previous else None,
+                    previous.head_hash if previous else None,
+                    status.head_seq,
+                    status.head_hash,
+                    json.dumps([list(item) for item in status.key_boundaries], separators=(",", ":"))
+                    if status.key_boundaries
+                    else None,
+                ],
+            )
+
+    async def record_verification_result(
+        self,
+        cluster_uid: str,
+        *,
+        verified_at: datetime,
+        ok: bool,
+        failure: Optional[str],
+        expect_signature: Any = _ANY_SIGNATURE,
+    ) -> bool:
+        """Update only the outcome of a verification, leaving the signed anchor and its boundaries untouched.
+
+        Used by a verifier that cannot vouch for the stored row (signed with a key
+        it does not hold, or forged): it must not erase a rotation it cannot see.
+        """
+        flag: Any = bool(ok) if self.postgres else int(bool(ok))
+        async with self._transaction() as conn:
+            if expect_signature is not _ANY_SIGNATURE:
+                # Compare-and-swap: a row accepted or rotated since it was read keeps its outcome.
+                if self.postgres:
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"ledger:{cluster_uid}")
+                stored = await self._status_in(conn, cluster_uid)
+                if (stored.signature if stored is not None else None) != expect_signature:
+                    return False
+            await self._execute(
+                conn,
+                "UPDATE ledger_chain_status SET verified_at = ?, ok = ?, failure = ? WHERE cluster_uid = ?",
+                [self._ts(verified_at), flag, failure, cluster_uid],
+            )
+        return True
+
     async def append(
         self,
         cluster_uid: str,
@@ -332,6 +683,8 @@ class LedgerRepository:
                 await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"ledger:{cluster_uid}")
             existing = await self._existing_keys(conn, cluster_uid, list(unique))
             seq, prev_hash = await self._head(conn, cluster_uid)
+            chain_key = self.chain_key
+            head_keyed_before, has_boundaries = await self._check_writer_key(conn, cluster_uid, chain_key)
             placeholders = ", ".join("?" for _ in _COLUMNS)
             insert = f"INSERT INTO savings_ledger_entries ({_SELECT}) VALUES ({placeholders})"
             for key, draft in unique.items():
@@ -345,10 +698,14 @@ class LedgerRepository:
                     seq=seq,
                     prev_hash=prev_hash,
                     created_at=moment,
+                    chain_key=chain_key,
                 )
                 await self._execute(conn, insert, self._params(entry))
                 prev_hash = entry.hash
                 inserted.append(entry)
+            await self._add_totals(conn, cluster_uid, inserted)
+            if inserted and chain_key and not head_keyed_before and not has_boundaries:
+                await self._record_first_keyed(conn, cluster_uid, moment, inserted[0].seq)
             for source_table, position in (watermarks or {}).items():
                 await self._execute(
                     conn,
@@ -360,6 +717,67 @@ class LedgerRepository:
                     [cluster_uid, source_table, int(position), self._ts(moment)],
                 )
         return inserted
+
+    async def _add_totals(self, conn, cluster_uid: str, entries: Sequence[LedgerEntry]) -> None:
+        """Add ``entries`` to ``savings_ledger_totals`` in the append transaction (LED-09)."""
+        groups: Dict[Tuple[str, ...], List[float]] = {}
+        for entry in entries:
+            sums = groups.setdefault(_total_key(entry), [0.0, 0.0, 0.0, 0.0])
+            value = float(entry.value)
+            sums[0] += value
+            sums[1] += value if value > 0 else 0.0
+            sums[2] += value if value < 0 else 0.0
+            sums[3] += 1
+        columns = ", ".join(("cluster_uid", *_TOTAL_KEYS))
+        upsert = (
+            f"INSERT INTO savings_ledger_totals ({columns}, value, positive, negative, entries) "
+            f"VALUES ({', '.join('?' for _ in range(len(_TOTAL_KEYS) + 5))}) "
+            f"ON CONFLICT ({columns}) DO UPDATE SET value = savings_ledger_totals.value + excluded.value, "
+            "positive = savings_ledger_totals.positive + excluded.positive, "
+            "negative = savings_ledger_totals.negative + excluded.negative, "
+            "entries = savings_ledger_totals.entries + excluded.entries"
+        )
+        for key, (value, positive, negative, count) in groups.items():
+            await self._execute(conn, upsert, [cluster_uid, *key, value, positive, negative, int(count)])
+
+    async def totals_mismatch(self, cluster_uid: str, tolerance: float = 1e-9) -> Optional[str]:
+        """Compare ``savings_ledger_totals`` with a fold of the cluster's entries (LED-09).
+
+        The totals are what users see; they are not chained, so the full
+        verification re-derives them from the chained entries. Returns a
+        description of the first group that differs, or ``None``.
+        """
+        keys = ", ".join(_TOTAL_KEYS)
+        folded = await self._select(
+            f"SELECT {keys}, SUM(value) AS value, SUM(CASE WHEN value > 0 THEN value ELSE 0 END) AS positive, "
+            "SUM(CASE WHEN value < 0 THEN value ELSE 0 END) AS negative, SUM(ABS(value)) AS magnitude, "
+            "COUNT(*) AS entries FROM ("
+            "SELECT COALESCE(namespace, '') AS namespace, "
+            "COALESCE(recommendation_type, '') AS recommendation_type, method, quantity, COALESCE(unit, '') AS unit, "
+            f"book, entry_kind, {_BASIS_SQL} AS basis, "
+            f"CASE WHEN {_COST_OF_FIX_SQL} THEN 'cost_of_fix' ELSE '' END AS reason_group, value "
+            f"FROM savings_ledger_entries WHERE cluster_uid = ?) AS grouped GROUP BY {keys}",
+            [cluster_uid],
+        )
+        stored = await self._select(
+            f"SELECT {keys}, value, positive, negative, entries FROM savings_ledger_totals WHERE cluster_uid = ?",
+            [cluster_uid],
+        )
+        expected = {tuple(row[key] for key in _TOTAL_KEYS): row for row in folded}
+        actual = {tuple(row[key] for key in _TOTAL_KEYS): row for row in stored if int(row["entries"] or 0)}
+        for key in sorted(set(expected) | set(actual)):
+            want, have = expected.get(key), actual.get(key)
+            if want is None or have is None:
+                return f"group {key} is {'missing from the totals' if have is None else 'not in the entries'}"
+            if int(want["entries"]) != int(have["entries"]):
+                return f"group {key}: totals over {have['entries']} entries, entries {want['entries']}"
+            # Relative to the sum of magnitudes: a mixed-sign group whose net is near 0 is not a false mismatch.
+            bound = tolerance * max(1.0, float(want["magnitude"] or 0.0))
+            for column in ("value", "positive", "negative"):
+                folded_sum, total = float(want[column] or 0.0), float(have[column] or 0.0)
+                if abs(folded_sum - total) > bound:
+                    return f"group {key}: totals {column} {total!r}, entries {column} {folded_sum!r}"
+        return None
 
     async def get_watermarks(self, cluster_uid: str) -> Dict[str, int]:
         rows = await self._select(
@@ -404,7 +822,12 @@ class LedgerRepository:
         found, however late it becomes visible.
         """
         slot = "l.slot_start" if table == V1_RAW_TABLE else "NULL AS slot_start"
-        basis = "l.basis" if table == V1_RAW_TABLE else "NULL AS basis"
+        basis = (
+            "l.basis, l.row_kind, l.annual_cost_rate, l.annual_co2e_rate, l.currency, l.measurement_id"
+            if table == V1_RAW_TABLE
+            else "NULL AS basis, NULL AS row_kind, NULL AS annual_cost_rate, NULL AS annual_co2e_rate, "
+            "NULL AS currency, NULL AS measurement_id"
+        )
         where = self._v1_scope(table, unprojected_for)
         params: List[Any] = [cluster_name, int(after_id)]
         if unprojected_for is not None:
@@ -836,22 +1259,40 @@ class LedgerRepository:
         return [self._entry(row) for row in rows]
 
     def _share(self, start: Optional[datetime], end: Optional[datetime]) -> Tuple[str, List[Any]]:
-        """SQL of the share of an entry's period inside ``[start, end)`` (1.0 without a full window)."""
-        if start is None or end is None:
+        """SQL of the share of an entry's period inside ``[start, end)``, the rule of the export's ``window_share``.
+
+        A missing bound does not cut the period (1.0 without any window). A
+        zero-length entry selected by the window filter lies inside it and
+        counts in full (LED-12). SQLite durations are computed from whole
+        seconds plus the stored microseconds, not ``julianday``, whose float
+        days lose about 1e-9 of a share.
+        """
+        if start is None and end is None:
             return "1.0", []
+        # The bounds are inlined as literals: they are datetimes formatted by format_time (digits, '-', ':',
+        # '.', 'T', 'Z'), never user text, and SQLite repeats them in each duration expression.
+        cast = "::timestamptz" if self.postgres else ""
+        begin_bound = f"'{format_time(start)}'{cast}" if start is not None else "period_start"
+        end_bound = f"'{format_time(end)}'{cast}" if end is not None else "period_end"
         if self.postgres:
+            begin = f"GREATEST(period_start, {begin_bound})"
+            finish = f"LEAST(period_end, {end_bound})"
             share = (
-                "CASE WHEN period_start >= ? AND period_end <= ? THEN 1.0 ELSE GREATEST(0.0, "
-                "EXTRACT(EPOCH FROM (LEAST(period_end, ?) - GREATEST(period_start, ?)))) "
-                "/ NULLIF(EXTRACT(EPOCH FROM (period_end - period_start)), 0) END"
+                "CASE WHEN period_end <= period_start THEN 1.0 "
+                f"WHEN period_start >= {begin_bound} AND period_end <= {end_bound} THEN 1.0 "
+                f"ELSE GREATEST(0.0, EXTRACT(EPOCH FROM ({finish} - {begin}))) "
+                "/ EXTRACT(EPOCH FROM (period_end - period_start)) END"
             )
         else:
+            begin = f"MAX(period_start, {begin_bound})"
+            finish = f"MIN(period_end, {end_bound})"
             share = (
-                "CASE WHEN period_start >= ? AND period_end <= ? THEN 1.0 ELSE MAX(0.0, "
-                "MIN(julianday(period_end), julianday(?)) - MAX(julianday(period_start), julianday(?))) "
-                "/ NULLIF(julianday(period_end) - julianday(period_start), 0) END"
+                "CASE WHEN period_end <= period_start THEN 1.0 "
+                f"WHEN period_start >= {begin_bound} AND period_end <= {end_bound} THEN 1.0 "
+                f"ELSE MAX(0.0, {_sqlite_epoch(finish)} - {_sqlite_epoch(begin)}) "
+                f"/ ({_sqlite_epoch('period_end')} - {_sqlite_epoch('period_start')}) END"
             )
-        return share, [self._ts(start), self._ts(end), self._ts(end), self._ts(start)]
+        return share, []
 
     async def accrual_breakdown(
         self,
@@ -873,6 +1314,8 @@ class LedgerRepository:
         v1 names (``measured_allocated`` -> ``measured``). Over a window an
         entry contributes the share of its period inside it, as the v1 report.
         """
+        if start is None and end is None and recommendation_ids is None:
+            return await self._breakdown_from_totals(cluster_uid, namespace, books, reasons)
         where, params = self._filters(cluster_uid, {"namespace": namespace}, start, end)
         if books:
             marks = ", ".join("?" for _ in books)
@@ -911,6 +1354,43 @@ class LedgerRepository:
                 total.co2e_saved_grams += value
         return list(totals.values())
 
+    async def _breakdown_from_totals(
+        self,
+        cluster_uid: str,
+        namespace: Optional[str],
+        books: Optional[Sequence[str]],
+        reasons: Optional[Sequence[str]],
+    ) -> List[SavingsAccrualTotal]:
+        """All-time :meth:`accrual_breakdown` from ``savings_ledger_totals`` (LED-09)."""
+        where = "cluster_uid = ? AND quantity IN ('cost', 'co2e_g') AND reason_group = ?"
+        cost_of_fix = reasons is not None and "cost_of_fix" in reasons
+        params: List[Any] = [cluster_uid, "cost_of_fix" if cost_of_fix else ""]
+        if namespace is not None:
+            where += " AND namespace = ?"
+            params.append(namespace)
+        if books:
+            where += f" AND book IN ({', '.join('?' for _ in books)})"
+            params.extend(books)
+        rows = await self._select(
+            "SELECT namespace, recommendation_type, method, quantity, SUM(value) AS value FROM savings_ledger_totals "
+            f"WHERE {where} GROUP BY namespace, recommendation_type, method, quantity "
+            "ORDER BY namespace, recommendation_type, method",
+            params,
+        )
+        totals: Dict[Tuple[str, str, str], SavingsAccrualTotal] = {}
+        for row in rows:
+            method = V1_METHOD_NAMES.get(row["method"], row["method"])
+            key = (row["namespace"] or "", row["recommendation_type"] or "unknown", method)
+            total = totals.setdefault(
+                key, SavingsAccrualTotal(namespace=key[0], recommendation_type=key[1], method=method)
+            )
+            value = float(row["value"] or 0.0)
+            if row["quantity"] == "cost":
+                total.cost_saved_dollars += value
+            else:
+                total.co2e_saved_grams += value
+        return list(totals.values())
+
     async def lifetime_counters(self, cluster_uid: str) -> List[SavingsCounterTotal]:
         """Monotonic counters per recommendation type and method from the entries (LED-04).
 
@@ -920,12 +1400,9 @@ class LedgerRepository:
         Methods use the v1 names.
         """
         rows = await self._select(
-            "SELECT recommendation_type, method, quantity, "
-            "SUM(CASE WHEN value > 0 THEN value ELSE 0 END) AS accrued, "
-            "SUM(CASE WHEN value < 0 THEN -value ELSE 0 END) AS reversed "
-            "FROM savings_ledger_entries WHERE cluster_uid = ? AND quantity IN ('cost', 'co2e_g') "
-            f"AND NOT ({_COST_OF_FIX_SQL}) "
-            "GROUP BY recommendation_type, method, quantity",
+            "SELECT recommendation_type, method, quantity, SUM(positive) AS accrued, -SUM(negative) AS reversed "
+            "FROM savings_ledger_totals WHERE cluster_uid = ? AND quantity IN ('cost', 'co2e_g') "
+            "AND reason_group = '' GROUP BY recommendation_type, method, quantity",
             [cluster_uid],
         )
         counters: Dict[Tuple[str, str], SavingsCounterTotal] = {}
@@ -945,7 +1422,7 @@ class LedgerRepository:
     async def accrued_book_totals(self, cluster_uid: str) -> Dict[Tuple[str, str], float]:
         """Net ``accrued`` book per (v1 method, quantity): what the v1 ledger must reconcile with."""
         rows = await self._select(
-            "SELECT method, quantity, SUM(value) AS value FROM savings_ledger_entries "
+            "SELECT method, quantity, SUM(value) AS value FROM savings_ledger_totals "
             "WHERE cluster_uid = ? AND book = 'accrued' AND quantity IN ('cost', 'co2e_g') GROUP BY method, quantity",
             [cluster_uid],
         )
@@ -985,6 +1462,17 @@ class LedgerRepository:
         With a window, an entry contributes the share of its period inside
         ``[start, end)``, as ``GET /recommendations/savings`` does.
         """
+        if start is None and end is None:
+            # All time: the materialized totals, not a scan of every entry (LED-09).
+            namespace_sql = " AND namespace = ?" if namespace is not None else ""
+            rows = await self._select(
+                "SELECT method, quantity, unit, book, entry_kind, basis, reason_group, SUM(value) AS value, "
+                "SUM(entries) AS entries FROM savings_ledger_totals WHERE cluster_uid = ?"
+                f"{namespace_sql} GROUP BY method, quantity, unit, book, entry_kind, basis, reason_group "
+                "ORDER BY method, quantity, book, entry_kind, basis, reason_group",
+                [cluster_uid, *([namespace] if namespace is not None else [])],
+            )
+            return [self._summary_row(row) for row in rows]
         where, params = self._filters(cluster_uid, {"namespace": namespace}, start, end)
         share, share_params = self._share(start, end)
         rows = await self._select(
@@ -996,49 +1484,205 @@ class LedgerRepository:
             "ORDER BY method, quantity, book, entry_kind, basis, reason_group",
             [*share_params, *params],
         )
-        return [
-            SummaryRow(
-                method=row["method"],
-                quantity=row["quantity"],
-                unit=row["unit"],
-                book=row["book"],
-                entry_kind=row["entry_kind"],
-                value=float(row["value"] or 0.0),
-                entries=int(row["entries"] or 0),
-                basis=str(row["basis"]),
-                reason_group=str(row["reason_group"] or ""),
-            )
-            for row in rows
-        ]
+        return [self._summary_row(row) for row in rows]
+
+    @staticmethod
+    def _summary_row(row: Mapping[str, Any]) -> SummaryRow:
+        return SummaryRow(
+            method=row["method"],
+            quantity=row["quantity"],
+            unit=row["unit"],
+            book=row["book"],
+            entry_kind=row["entry_kind"],
+            value=float(row["value"] or 0.0),
+            entries=int(row["entries"] or 0),
+            basis=str(row["basis"]),
+            reason_group=str(row["reason_group"] or ""),
+        )
 
     # ------------------------------------------------------------------
     # Chain status
     # ------------------------------------------------------------------
 
-    async def record_chain_status(self, status: ChainStatus) -> None:
+    @staticmethod
+    def _status_message(
+        cluster_uid: str,
+        head_seq: Optional[int],
+        head_hash: Optional[str],
+        keyed: bool,
+        first_keyed_seq: Optional[int] = None,
+        boundaries: Sequence[Tuple[str, int]] = (),
+    ) -> bytes:
+        message = f"ledger-status|{cluster_uid}|{head_seq}|{head_hash}|{int(bool(keyed))}"
+        if first_keyed_seq is not None:
+            message += f"|first-keyed:{first_keyed_seq}"
+        if boundaries:
+            message += "|boundaries:" + json.dumps([list(item) for item in boundaries], separators=(",", ":"))
+        return message.encode("utf-8")
+
+    def sign_status(
+        self,
+        cluster_uid: str,
+        head_seq: Optional[int],
+        head_hash: Optional[str],
+        keyed: bool,
+        first_keyed_seq: Optional[int] = None,
+        boundaries: Sequence[Tuple[str, int]] = (),
+    ):
+        """``<key id>:<HMAC>`` of an anchor with the current chain key, or None without a key (LED-05)."""
+        key = self.chain_key
+        if not key:
+            return None
+        message = self._status_message(cluster_uid, head_seq, head_hash, keyed, first_keyed_seq, boundaries)
+        return f"{chain_key_id(key)}:{hmac.new(key, message, hashlib.sha256).hexdigest()}"
+
+    def status_signature_state(self, status: ChainStatus) -> str:
+        """``current``, ``previous`` (valid with an older key), ``forged`` or ``unsigned`` (LED-05)."""
+        valid = self.status_signature_valid(status)
+        if valid is None:
+            return "unsigned"
+        if not valid:
+            return "forged"
+        current = self.chain_key
+        key_id = (status.signature or "").partition(":")[0]
+        return "current" if current and key_id == chain_key_id(current) else "previous"
+
+    def status_signature_valid(self, status: ChainStatus) -> Optional[bool]:
+        """True or False for a signed status row (checked with any known key), None for an unsigned one."""
+        if not status.signature:
+            return None
+        key_id, _, digest = status.signature.partition(":")
+        key = self.chain_keys.get(key_id)
+        if key is None:
+            return False
+        expected = hmac.new(
+            key,
+            self._status_message(
+                status.cluster_uid,
+                status.head_seq,
+                status.head_hash,
+                status.head_keyed,
+                status.first_keyed_seq,
+                status.key_boundaries,
+            ),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(expected, digest)
+
+    async def _upsert_status(self, conn, status: ChainStatus, sign: bool = True) -> None:
         ok: Any = bool(status.ok) if self.postgres else int(bool(status.ok))
+        keyed: Any = bool(status.head_keyed) if self.postgres else int(bool(status.head_keyed))
+        signature = (
+            self.sign_status(
+                status.cluster_uid,
+                status.head_seq,
+                status.head_hash,
+                status.head_keyed,
+                status.first_keyed_seq,
+                status.key_boundaries,
+            )
+            if sign
+            else None
+        )
+        await self._execute(
+            conn,
+            "INSERT INTO ledger_chain_status (cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, "
+            "head_keyed, signature, first_keyed_seq, key_id, key_boundaries) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cluster_uid) "
+            "DO UPDATE SET verified_at = excluded.verified_at, ok = excluded.ok, entries = excluded.entries, "
+            "head_seq = excluded.head_seq, head_hash = excluded.head_hash, failure = excluded.failure, "
+            "head_keyed = excluded.head_keyed, signature = excluded.signature, "
+            "first_keyed_seq = excluded.first_keyed_seq, key_id = excluded.key_id, "
+            "key_boundaries = excluded.key_boundaries",
+            [
+                status.cluster_uid,
+                self._ts(status.verified_at),
+                ok,
+                int(status.entries),
+                status.head_seq,
+                status.head_hash,
+                status.failure,
+                keyed,
+                signature,
+                status.first_keyed_seq,
+                (signature or "").partition(":")[0] or None,
+                json.dumps([list(item) for item in status.key_boundaries], separators=(",", ":"))
+                if status.key_boundaries
+                else None,
+            ],
+        )
+
+    async def record_chain_status(
+        self, status: ChainStatus, *, sign: bool = True, expect_signature: Any = _ANY_SIGNATURE
+    ) -> bool:
+        """Store the cluster's verification status, signed with the chain key when there is one and ``sign``.
+
+        With ``expect_signature`` the write is a compare-and-swap under the
+        append lock: it is skipped (returns False) when the stored row's
+        signature changed since it was read, so a verifier never overwrites a
+        rotation or an acceptance committed meanwhile.
+        """
+        async with self._transaction() as conn:
+            if expect_signature is not _ANY_SIGNATURE:
+                if self.postgres:
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"ledger:{status.cluster_uid}"
+                    )
+                stored = await self._status_in(conn, status.cluster_uid)
+                if (stored.signature if stored is not None else None) != expect_signature:
+                    logger.info(
+                        "Ledger chain status of cluster %s changed while it was verified: not overwritten.",
+                        status.cluster_uid,
+                    )
+                    return False
+            await self._upsert_status(conn, status, sign)
+        return True
+
+    async def record_head_acceptance(
+        self,
+        cluster_uid: str,
+        *,
+        accepted_at: datetime,
+        reason: str,
+        previous: Optional[ChainStatus],
+        head_seq: Optional[int],
+        head_hash: Optional[str],
+    ) -> None:
+        """Keep a lasting audit record of an operator's ledger head acceptance (LED-05)."""
         async with self.db_manager.transaction() as conn:
             await self._execute(
                 conn,
-                "INSERT INTO ledger_chain_status (cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cluster_uid) DO UPDATE SET "
-                "verified_at = excluded.verified_at, ok = excluded.ok, entries = excluded.entries, "
-                "head_seq = excluded.head_seq, head_hash = excluded.head_hash, failure = excluded.failure",
+                "INSERT INTO ledger_head_acceptances (cluster_uid, accepted_at, reason, previous_head_seq, "
+                "previous_head_hash, head_seq, head_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
-                    status.cluster_uid,
-                    self._ts(status.verified_at),
-                    ok,
-                    int(status.entries),
-                    status.head_seq,
-                    status.head_hash,
-                    status.failure,
+                    cluster_uid,
+                    self._ts(accepted_at),
+                    reason,
+                    previous.head_seq if previous else None,
+                    previous.head_hash if previous else None,
+                    head_seq,
+                    head_hash,
                 ],
             )
 
+    async def head_acceptances(self, cluster_uid: str) -> List[dict]:
+        """Operator head acceptances of a cluster, oldest first."""
+        rows = await self._select(
+            "SELECT accepted_at, reason, previous_head_seq, previous_head_hash, head_seq, head_hash, key_boundaries "
+            "FROM ledger_head_acceptances WHERE cluster_uid = ? ORDER BY id",
+            [cluster_uid],
+        )
+        for row in rows:
+            for column in ("previous_head_seq", "head_seq"):
+                if row.get(column) is not None:
+                    row[column] = int(row[column])
+            row["key_boundaries"] = [list(item) for item in _boundaries(row.get("key_boundaries"))]
+        return rows
+
     async def get_chain_status(self, cluster_uid: str) -> Optional[ChainStatus]:
         rows = await self._select(
-            "SELECT cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure "
-            "FROM ledger_chain_status WHERE cluster_uid = ?",
+            "SELECT cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature, "
+            "first_keyed_seq, key_boundaries FROM ledger_chain_status WHERE cluster_uid = ?",
             [cluster_uid],
         )
         if not rows:
@@ -1054,6 +1698,10 @@ class LedgerRepository:
             head_seq=int(row["head_seq"]) if row["head_seq"] is not None else None,
             head_hash=row["head_hash"],
             failure=row["failure"],
+            head_keyed=bool(row["head_keyed"]),
+            signature=row["signature"],
+            first_keyed_seq=int(row["first_keyed_seq"]) if row["first_keyed_seq"] is not None else None,
+            key_boundaries=_boundaries(row["key_boundaries"]),
         )
 
 
@@ -1076,5 +1724,8 @@ __all__ = [
     "V1_HOURLY_TABLE",
     "V1_RAW_TABLE",
     "V1_TABLES",
+    "configured_chain_key",
+    "configured_previous_chain_keys",
+    "LedgerChainKeyError",
     "get_ledger_repository",
 ]

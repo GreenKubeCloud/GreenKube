@@ -454,3 +454,23 @@ async def test_the_legacy_live_check_compares_sibling_containers(database):  # n
     assert (await monitor.run(now=hour_now() + timedelta(minutes=30)))["closed"] == [change.change_id]
     event = (await scenario.changes.list_events(change.change_id))[-1]
     assert event.event_type == "spec_drift" and "could not be read" in event.reason
+
+
+async def test_a_reversal_with_a_gap_in_accruals_nets_the_reversed_interval_to_zero(database):  # noqa: F811
+    """LED-12 (d): the reversal cancels the measured rows actually present, not rate x duration."""
+    scenario, change, applied, decided_at = await _realized(database, drift_days=4)
+    repo = _savings_repo(database)
+    records = await scenario.records()
+    onset = hour_now().replace(hour=0) - timedelta(days=4)
+    gap = (onset + timedelta(hours=10), onset + timedelta(hours=20))
+    for record in records:
+        await _accrue(repo, record, decided_at.replace(minute=0) + timedelta(hours=1), gap[0])
+        await _accrue(repo, record, gap[1], hour_now())
+    monitor = _monitor(scenario, repo)
+    now = hour_now() + timedelta(minutes=30)
+    await monitor.run(now=now)
+    assert (await monitor.run(now=now + REVERSAL_SETTLE + timedelta(minutes=1)))["reversed"] == [change.change_id]
+
+    window = await repo.get_accrual_breakdown(CLUSTER, start_time=onset, end_time=hour_now())
+    net = sum(row.cost_saved_dollars for row in window if row.method == METHOD_MEASURED)
+    assert net == pytest.approx(0.0, abs=1e-12)

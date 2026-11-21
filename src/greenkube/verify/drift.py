@@ -105,7 +105,6 @@ SPEC_DRIFT_GRACE = timedelta(hours=2)
 REVERSAL_HORIZON = timedelta(days=14)
 #: Interval of the drift monitor loop.
 DRIFT_MONITOR_INTERVAL_SECONDS = 3600.0
-_SECONDS_PER_YEAR = 365.25 * 24 * 3600
 #: The day each (change, measurement) was last assessed: drift is decided on complete days, so a
 #: realized change is read once per day (per process), not on every pass.
 _ASSESSED: Dict[tuple, datetime] = {}
@@ -915,7 +914,7 @@ class DriftMonitor:
             if record.id is None or str(getattr(record.status, "value", record.status)) != "regressed":
                 continue
             start = max(accrual_end, reversed_until.get(record.id, accrual_end))
-            row = self._reversal(record, start, floors.get(record.id))
+            row = await self._reversal(record, start, floors.get(record.id))
             if row is not None:
                 rows.append(row)
                 entries.append(
@@ -952,8 +951,19 @@ class DriftMonitor:
         except Exception as exc:
             logger.warning("Savings ledger v2 pass after a drift reversal failed: %s", exc)
 
-    def _reversal(self, record: Any, start: datetime, floor: Optional[datetime]):
-        from greenkube.models.savings import METHOD_MEASURED, SavingsLedgerRecord, floor_to_slot
+    async def _reversal(self, record: Any, start: datetime, floor: Optional[datetime]):
+        """The v1 row reversing the measured accruals of ``record`` in ``[start, floor)``.
+
+        The amount is the negative sum of the measured rows actually stored in
+        that interval (LED-12), so slots that were never accrued are not
+        reversed and the interval nets to exactly zero.
+        """
+        from greenkube.models.savings import (
+            DRIFT_REVERSAL_ROW_KIND,
+            METHOD_MEASURED,
+            SavingsLedgerRecord,
+            floor_to_slot,
+        )
 
         if floor is None:
             return None
@@ -963,11 +973,9 @@ class DriftMonitor:
         end = ensure_utc(floor)
         if end <= start:
             return None
-        seconds = (end - start).total_seconds()
-        factor = seconds / _SECONDS_PER_YEAR
-        cost = float(record.measured_cost_saved or 0.0)
-        co2e = float(record.measured_co2e_saved_grams or 0.0)
-        if cost == 0.0 and co2e == 0.0:
+        assert self.savings_repo is not None
+        co2e_sum, cost_sum = await self.savings_repo.get_measured_totals(record.id, start, end)
+        if cost_sum == 0.0 and co2e_sum == 0.0:
             return None
         label_start = start
         if floor_to_slot(start) + _SLOT >= end:
@@ -980,8 +988,8 @@ class DriftMonitor:
             cluster_name=self.cluster_name,
             namespace=record.namespace or "",
             recommendation_type=str(getattr(record.type, "value", record.type)),
-            co2e_saved_grams=-co2e * factor,
-            cost_saved_dollars=-cost * factor,
+            co2e_saved_grams=-co2e_sum,
+            cost_saved_dollars=-cost_sum,
             period_seconds=max(1, math.ceil((end - label_start).total_seconds())),
             timestamp=end,
             period_start=label_start,
@@ -989,7 +997,8 @@ class DriftMonitor:
             slot_start=None,
             measurement_method=METHOD_MEASURED,
             baseline_value=record.potential_savings_co2e_grams,
-            actual_value=-co2e,
+            actual_value=-float(record.measured_co2e_saved_grams or 0.0),
+            row_kind=DRIFT_REVERSAL_ROW_KIND,
         )
 
 

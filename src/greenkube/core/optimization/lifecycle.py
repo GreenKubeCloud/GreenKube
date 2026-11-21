@@ -237,6 +237,38 @@ def _plan_status_event_time(
     return latest
 
 
+def _mark_accrual_resumption(current: RecommendationRecord, changes: dict) -> None:
+    """Stamp ``baseline.accruing_since`` when an applied record that had stopped accruing accrues again (LED-12).
+
+    The attributor accrues each record from its own cursor; without this mark
+    a record dismissed from a rollback review, or re-measured after a refuted
+    measurement, would backfill the hours it did not accrue. A first apply is
+    not marked, so a change detected late keeps its history from applied_at.
+    """
+    from ..savings_attributor import ACCRUING_SINCE_KEY, accrues_in
+
+    if current.applied_at is None:
+        return
+    before = accrues_in(current.status, current.verification_status)
+    after = accrues_in(
+        changes.get("status", current.status), changes.get("verification_status", current.verification_status)
+    )
+    if before or not after:
+        return
+    baseline = changes.get("baseline")
+    if baseline is None:
+        baseline = current.baseline
+    if baseline is None:
+        payload: dict = {}
+    elif hasattr(baseline, "model_dump"):
+        payload = baseline.model_dump(mode="json")
+    else:
+        payload = dict(baseline)
+    moment = changes.get("updated_at") or datetime.now(timezone.utc)
+    payload[ACCRUING_SINCE_KEY] = ensure_utc(moment).isoformat()
+    changes["baseline"] = payload
+
+
 class RecommendationLifecycle:
     """Applies lifecycle transitions and writes the matching audit events."""
 
@@ -300,6 +332,7 @@ class RecommendationLifecycle:
             raise RecommendationTransitionError(
                 f"Invalid recommendation transition: {current_value} -> {status_value}."
             )
+        _mark_accrual_resumption(current, changes)
         if emit_event and hasattr(self.repo, "transition_and_record_event"):
             record = await self.repo.transition_and_record_event(
                 rec_id,
