@@ -160,6 +160,11 @@ class WorkloadUsageSummary:
     #: Distinct pods observed in the last observed hour (all nodes): the target's current
     #: replica count as the rollup knows it (F-08). 0 when unknown.
     replicas_latest: int = 0
+    #: Highest hourly p95 over the lookback (node rows merged by maximum): a node row holds the
+    #: samples of the replicas on that node, so this bounds the hottest replica's p95, which the
+    #: per-target baseline rows of the rollup cannot show (F-08 review). None when unknown.
+    cpu_p95_hour_max: Optional[float] = None
+    memory_p95_hour_max: Optional[float] = None
     cpu: Optional[UsageStats] = None
     memory: Optional[UsageStats] = None
     cpu_request: int = 0

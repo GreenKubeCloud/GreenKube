@@ -40,6 +40,21 @@ def _replica_p95_max(series: Sequence[CombinedMetric], attr: str) -> Optional[fl
     return max(percentile(values, 95) for values in by_pod.values())
 
 
+def replica_p95_max(
+    series: Sequence[CombinedMetric], summary: Any, context: "OptimizationContext", resource: str
+) -> Optional[float]:
+    """Highest per-replica p95 of CPU (``"cpu"``) or memory (``"memory"``), the I4 headroom guard.
+
+    From per-pod rows, each pod's p95. The rollup's baseline rows are one pseudo pod per
+    target whose values are hourly averages (a spiky replica with a p95 of 1000m read as a
+    few hundred), so on the rollup path the highest hourly p95 of the container's summary
+    is used instead (F-08 review).
+    """
+    if context.usage_snapshot().source == "rollup":
+        return getattr(summary, f"{resource}_p95_hour_max", None) if summary is not None else None
+    return _replica_p95_max(series, "cpu_usage_millicores" if resource == "cpu" else "memory_usage_bytes")
+
+
 def _current_replicas(series: Sequence[CombinedMetric]) -> Optional[int]:
     """Replicas observed in the latest sampling step; unknown without timestamps.
 
@@ -115,8 +130,8 @@ def build_risk_profile(rec: Recommendation, context: "OptimizationContext") -> W
         oom_unknown_cause = _cause(summary, context.usage_snapshot().reliability_signal_status)
     return WorkloadRiskProfile(
         replicas=observed_replicas(rec, context, series) if rec.owner_kind else None,
-        replica_cpu_p95_max=_replica_p95_max(series, "cpu_usage_millicores"),
-        replica_memory_p95_max=_replica_p95_max(series, "memory_usage_bytes"),
+        replica_cpu_p95_max=replica_p95_max(series, summary, context, "cpu"),
+        replica_memory_p95_max=replica_p95_max(series, summary, context, "memory"),
         oom_events=oom_events,
         oom_unknown_cause=oom_unknown_cause,
         cpu_throttling_ratio=summary.throttling_ratio if summary is not None else None,

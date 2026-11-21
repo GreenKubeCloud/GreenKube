@@ -715,6 +715,11 @@ def _replicas_at_latest_step(totals: "_HourTotals") -> int:
     return sum(count for offset, count in totals.latest_pods if newest - offset <= tolerance)
 
 
+def _highest(values: Iterable[Optional[float]]) -> Optional[float]:
+    present = [value for value in values if value is not None]
+    return max(present) if present else None
+
+
 def _max_optional(left: Optional[float], right: Optional[float]) -> Optional[float]:
     if left is None:
         return right
@@ -864,6 +869,8 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             duration_seconds=sum(item.duration_seconds for item in ordered),
             replicas_max=max(item.pod_count for item in ordered),
             replicas_latest=_replicas_at_latest_step(ordered[-1]),
+            cpu_p95_hour_max=_highest((item.cpu_p.get(95) for item in ordered if item.cpu_n)),
+            memory_p95_hour_max=_highest((item.memory_p.get(95) for item in ordered if item.memory_n)),
             cpu=_stats(
                 sum(item.cpu_n for item in ordered),
                 sum(item.cpu_sum for item in ordered),
