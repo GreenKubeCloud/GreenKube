@@ -120,10 +120,13 @@ def test_direct_em_zone_passthrough(cloud_zone, provider, expected):
 # --- OVH provider detection via node labels ---
 
 
-def test_ovh_provider_detection_via_node_k8s_ovh_label():
+def test_ovh_provider_detection_via_node_k8s_ovh_label(monkeypatch):
     """node.k8s.ovh/type label (used by OVHcloud MKS) must be detected as 'ovh'."""
+    from greenkube.collectors import node_collector
     from greenkube.collectors.node_collector import NodeCollector
 
+    # The test environment sets CLOUD_PROVIDER=aws, which overrides detection (COL-15).
+    monkeypatch.setattr(node_collector.global_config, "CLOUD_PROVIDER", "unknown", raising=False)
     collector = NodeCollector()
 
     # Labels as seen on real OVHcloud MKS nodes (no k8s.ovh.net/ prefix)
