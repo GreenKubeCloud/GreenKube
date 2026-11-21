@@ -553,6 +553,12 @@ describe('buildReportExportUrl', () => {
 		expect(url).not.toContain('granularity=');
 	});
 
+	it('adds include_idle only when asked', () => {
+		expect(buildReportExportUrl({ format: 'csv' })).not.toContain('include_idle');
+		expect(buildReportExportUrl({ format: 'csv', include_idle: false })).not.toContain('include_idle');
+		expect(buildReportExportUrl({ format: 'csv', include_idle: true })).toContain('include_idle=true');
+	});
+
 	it('returns a valid URL string', () => {
 		const url = buildReportExportUrl({});
 		expect(() => new URL(url)).not.toThrow();
