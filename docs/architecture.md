@@ -467,9 +467,6 @@ Schema (33 columns):
 - Resources:
   - CPU: cpu_request, cpu_usage_millicores
   - Memory: memory_request, memory_usage_bytes
-  - Network: network_receive_bytes, network_transmit_bytes
-  - Disk: disk_read_bytes, disk_write_bytes
-  - Storage: storage_request_bytes, storage_usage_bytes, ephemeral_storage_request_bytes, ephemeral_storage_usage_bytes
   - GPU: gpu_usage_millicores
   - Restarts: restart_count
 - Metadata: node, node_instance_type, node_zone, emaps_zone, owner_kind, owner_name
@@ -665,7 +662,6 @@ The controller's `collect_metrics` job is the only production writer of usage, e
      │   ├─ CPU and memory per container and per pod cgroup in one query
      │   │  (pod!="", container!="POD"): a pod's containers when it has any, else its
      │   │  pod cgroup counted once, per pod (mixed runtimes keep every pod, COL-09)
-     │   ├─ Network I/O per pod, disk I/O and ephemeral usage per container
      │   ├─ Restart counts and kube_pod_info (pod → node placement)
      │   ├─ kube_pod_status_phase{phase="Running"} (pods without a CPU sample)
      │   └─ any query error fails the window (never stored as "empty")
@@ -929,7 +925,7 @@ Controlled by `NORMALIZATION_GRANULARITY`:
 
 ### Concurrency
 - **Collectors:** All run concurrently via `asyncio.gather`
-- **Prometheus Queries:** 8 queries in parallel (CPU, mem, net rx/tx, disk r/w, restarts, nodes)
+- **Prometheus Queries:** the range queries of a chunk run in parallel (CPU, memory, memory peak, restarts, pod placement, running pods)
 - **Database Operations:** Connection pooling, batch inserts
 - **Historical Processing:** Day-sized chunks with explicit memory cleanup
 
@@ -1038,8 +1034,6 @@ The API liveness endpoint does not probe optional providers. Readiness is marked
 
 **Extended Metrics:**
 - GPU power consumption (NVIDIA DCGM)
-- Storage I/O per PVC
-- Network traffic per service
 - Custom metrics via PromQL
 
 **Enhanced Reporting:**

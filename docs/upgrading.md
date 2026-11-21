@@ -88,6 +88,28 @@ column. The concurrent index build waits for transactions already open in the da
 writers); a session left `idle in transaction` delays it. At every start the controller logs a warning for any
 sequence above half of its maximum.
 
+### Removed metric dimensions
+
+GreenKube no longer collects network receive and transmit, disk read and write, ephemeral storage, or PVC
+request and usage. Nothing used them for a recommendation or a measurement. After the upgrade:
+
+- The range collection sends 5 fewer Prometheus range queries per chunk (11 instead of 16) and no longer
+  runs the 3 instant PVC queries of each window.
+- New rows of `combined_metrics` leave `network_receive_bytes`, `network_transmit_bytes`, `disk_read_bytes`,
+  `disk_write_bytes`, `storage_request_bytes`, `storage_usage_bytes`, `ephemeral_storage_request_bytes` and
+  `ephemeral_storage_usage_bytes` NULL. The hourly rollup no longer aggregates the first six into
+  `combined_metrics_hourly`. Pod snapshots no longer record the containers' ephemeral-storage request, so each
+  running pod opens one new snapshot version after the upgrade (same owner and requests).
+- The metrics API no longer returns these fields, and `/metrics` no longer exports
+  `greenkube_pod_network_receive_bytes`, `greenkube_pod_network_transmit_bytes`, `greenkube_pod_disk_read_bytes`
+  and `greenkube_pod_disk_write_bytes`. Remove them from your dashboards and alerts.
+- The measured-ledger input no longer records `traffic_ratio` (it was informational). Existing ledger entries
+  are not rewritten.
+
+The columns and their old values stay: migration 0320 only marks them deprecated (a column comment on
+PostgreSQL). A migration after the next release drops them. Take the backup above before that upgrade if you
+want to keep the old values.
+
 ### Deprecated values (accepted for this minor release)
 
 An upgrade that reuses a 0.3.x values file keeps working: the chart maps the old keys and lists each one under

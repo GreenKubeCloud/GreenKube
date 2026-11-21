@@ -18,7 +18,7 @@ GreenKube has two distinct Prometheus integrations that serve different purposes
 
 | Direction | What it does | Required? |
 |---|---|---|
-| GreenKube → Prometheus | GreenKube queries your cluster's Prometheus for CPU, memory, network, and disk metrics | Strongly recommended |
+| GreenKube → Prometheus | GreenKube queries your cluster's Prometheus for CPU, memory, restart and pod placement metrics | Strongly recommended |
 | Prometheus → GreenKube | Prometheus scrapes GreenKube's `/prometheus/metrics` endpoint to expose CO₂e, cost, and sustainability metrics in Grafana | Optional |
 
 ---
@@ -150,10 +150,6 @@ All pod-level metrics share labels `cluster`, `namespace`, `pod`, `node`, `regio
 | `greenkube_pod_memory_usage_bytes` | Memory usage (bytes) |
 | `greenkube_pod_memory_request_bytes` | Memory request (bytes) |
 | `greenkube_pod_memory_efficiency_ratio` | Memory efficiency (usage ÷ request) |
-| `greenkube_pod_network_receive_bytes` | Network RX (bytes) |
-| `greenkube_pod_network_transmit_bytes` | Network TX (bytes) |
-| `greenkube_pod_disk_read_bytes` | Disk read (bytes) |
-| `greenkube_pod_disk_write_bytes` | Disk write (bytes) |
 | `greenkube_pod_restart_count` | Pod restart count |
 | `greenkube_pue` | Power Usage Effectiveness (per pod measurement) |
 | `greenkube_grid_intensity_gco2_kwh` | Grid carbon intensity (gCO₂/kWh, per pod measurement) |
