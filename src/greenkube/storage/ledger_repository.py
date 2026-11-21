@@ -629,20 +629,34 @@ class LedgerRepository:
             )
 
     async def record_verification_result(
-        self, cluster_uid: str, *, verified_at: datetime, ok: bool, failure: Optional[str]
-    ) -> None:
+        self,
+        cluster_uid: str,
+        *,
+        verified_at: datetime,
+        ok: bool,
+        failure: Optional[str],
+        expect_signature: Any = _ANY_SIGNATURE,
+    ) -> bool:
         """Update only the outcome of a verification, leaving the signed anchor and its boundaries untouched.
 
         Used by a verifier that cannot vouch for the stored row (signed with a key
         it does not hold, or forged): it must not erase a rotation it cannot see.
         """
         flag: Any = bool(ok) if self.postgres else int(bool(ok))
-        async with self.db_manager.transaction() as conn:
+        async with self._transaction() as conn:
+            if expect_signature is not _ANY_SIGNATURE:
+                # Compare-and-swap: a row accepted or rotated since it was read keeps its outcome.
+                if self.postgres:
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"ledger:{cluster_uid}")
+                stored = await self._status_in(conn, cluster_uid)
+                if (stored.signature if stored is not None else None) != expect_signature:
+                    return False
             await self._execute(
                 conn,
                 "UPDATE ledger_chain_status SET verified_at = ?, ok = ?, failure = ? WHERE cluster_uid = ?",
                 [self._ts(verified_at), flag, failure, cluster_uid],
             )
+        return True
 
     async def append(
         self,

@@ -485,3 +485,74 @@ async def test_a_verifier_that_read_the_row_before_an_accept_does_not_overwrite_
     after = await rotated.get_chain_status(CLUSTER_UID)
     assert after is not None and rotated_row is not None
     assert (after.signature, after.key_boundaries) == (rotated_row.signature, rotated_row.key_boundaries)
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_rebuild_never_moves_a_boundary_the_anchor_already_verified(ledger: LedgerDb):  # noqa: F811
+    """Leaked K1 re-keys every K2 entry (4-6) after the anchor at 6 verified them under K2: refused."""
+    from greenkube.verify.ledger.verification import accept_head
+
+    rotated = await _rotated_chain(ledger)
+    assert (await verify_ledger(rotated, checkpoints={}, full=True))[CLUSTER_UID].ok  # anchor at seq 6
+    await _rekey_tail_with(ledger, rotated, K1, 3)  # seq 4-6 re-keyed with K1, totals unchanged
+    result = await accept_head(rotated, CLUSTER_UID, "leaked K1", rebuild_boundaries=True)
+    assert not result.ok and result.reason == "boundary_rebuild_refused"
+    status = await rotated.get_chain_status(CLUSTER_UID)
+    assert status is not None and status.key_boundaries == ((chain_key_id(K1), 1), (chain_key_id(K2), 4))
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_deleted_status_row_on_a_keyed_chain_is_recovered_by_trusting_entry_keys(ledger: LedgerDb):  # noqa: F811
+    from greenkube.verify.ledger.verification import accept_head
+
+    rotated = await _rotated_chain(ledger)
+    await ledger.execute("DELETE FROM ledger_chain_status")
+    assert not (await verify_ledger(rotated, checkpoints={}, full=True))[CLUSTER_UID].ok
+    assert not (await accept_head(rotated, CLUSTER_UID, "lost row")).ok
+    assert (await accept_head(rotated, CLUSTER_UID, "lost row", trust_entry_keys=True)).ok
+    status = await rotated.get_chain_status(CLUSTER_UID)
+    assert status is not None and status.key_boundaries == ((chain_key_id(K1), 1), (chain_key_id(K2), 4))
+    assert status.first_keyed_seq == 1
+    audit = (await rotated.head_acceptances(CLUSTER_UID))[-1]
+    assert "trust-entry-keys" in audit["reason"]
+    assert audit["key_boundaries"] == [[chain_key_id(K1), 1], [chain_key_id(K2), 4]]
+    assert (await verify_ledger(rotated, checkpoints={}, full=True))[CLUSTER_UID].ok
+    await rotated.append(CLUSTER_UID, CLUSTER, [_draft("after-recovery")])
+    assert (await verify_ledger(rotated, checkpoints={}, full=True))[CLUSTER_UID].ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_trusting_entry_keys_is_refused_when_a_trusted_row_exists(ledger: LedgerDb):  # noqa: F811
+    from greenkube.verify.ledger.verification import accept_head
+
+    rotated = await _rotated_chain(ledger)
+    with pytest.raises(ValueError, match="trusted"):
+        await accept_head(rotated, CLUSTER_UID, "not needed", trust_entry_keys=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_trusting_entry_keys_refuses_an_old_key_after_a_newer_one(ledger: LedgerDb):  # noqa: F811
+    from greenkube.verify.ledger.verification import accept_head
+
+    rotated = await _rotated_chain(ledger)
+    await _rekey_tail_with(ledger, rotated, K1, 5)  # K1, K2, K1
+    await ledger.execute("DELETE FROM ledger_chain_status")
+    result = await accept_head(rotated, CLUSTER_UID, "lost row", trust_entry_keys=True)
+    assert not result.ok and result.reason == "boundary_rebuild_refused"
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_stale_verifier_does_not_flip_the_outcome_of_a_row_just_accepted(ledger: LedgerDb):  # noqa: F811
+    rotated = await _rotated_chain(ledger)
+    row = await rotated.get_chain_status(CLUSTER_UID)
+    assert row is not None
+    await rotated.record_verification_result(
+        CLUSTER_UID, verified_at=row.verified_at, ok=False, failure="stale", expect_signature="not-the-signature"
+    )
+    after = await rotated.get_chain_status(CLUSTER_UID)
+    assert after is not None and after.ok and after.failure is None

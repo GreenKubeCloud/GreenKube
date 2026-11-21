@@ -366,6 +366,13 @@ def ledger_accept_head_command(
             help="Move the recorded key boundaries later to match the entries (never weaker); audited.",
         ),
     ] = False,
+    trust_entry_keys: Annotated[
+        bool,
+        typer.Option(
+            "--trust-entry-keys",
+            help="Recovery for a lost status row: take the key boundaries from the entries' own keys (audited).",
+        ),
+    ] = False,
 ) -> None:
     """Accept the current savings ledger head after a restore or failover lost entries (LED-05).
 
@@ -382,9 +389,17 @@ def ledger_accept_head_command(
         try:
             repo = get_ledger_repository(manager)
             before = await repo.get_chain_status(cluster_uid)
-            outcome = await accept_head(repo, cluster_uid, reason, rebuild_boundaries=rebuild_boundaries)
+            if trust_entry_keys:
+                typer.echo(
+                    "Warning: --trust-entry-keys trusts every configured key (LEDGER_CHAIN_KEY and "
+                    "LEDGER_CHAIN_PREVIOUS_KEYS) over the whole chain.",
+                    err=True,
+                )
+            outcome = await accept_head(
+                repo, cluster_uid, reason, rebuild_boundaries=rebuild_boundaries, trust_entry_keys=trust_entry_keys
+            )
             after = await repo.get_chain_status(cluster_uid)
-            if rebuild_boundaries:
+            if rebuild_boundaries or trust_entry_keys:
                 typer.echo(f"Key boundaries before: {list(before.key_boundaries) if before else []}")
                 typer.echo(f"Key boundaries after:  {list(after.key_boundaries) if after else []}")
             return outcome
