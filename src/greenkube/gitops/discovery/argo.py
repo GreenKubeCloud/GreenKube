@@ -148,8 +148,17 @@ def discover_argo_application(
         mapped = _owner_named_by_values_mapping(owners, sources, helm_values_mapping)
         if mapped is not None:
             # The operator named the source (F-02): ``source_index`` wins over the tie.
+            owner_selection = {
+                "by": "helm-values-mapping",
+                "source_index": mapped[1],
+                # The planner checks that none of the other owners declares the workload.
+                "manifest_sources": [
+                    _manifest_source_evidence(owner, revisions, source_types)
+                    for owner in owners
+                    if owner is not mapped[0]
+                ],
+            }
             owners = [mapped[0]]
-            owner_selection = {"by": "helm-values-mapping", "source_index": mapped[1]}
         else:
             forced_status = BindingStatus.AMBIGUOUS
             forced_reason = _AMBIGUOUS_OWNER_REASON
@@ -186,7 +195,7 @@ def discover_argo_application(
                     "markers": helm_owner[1],
                     # The planner checks that none of these directories declares the workload.
                     "manifest_sources": [
-                        _manifest_source_evidence(owner, revisions)
+                        _manifest_source_evidence(owner, revisions, source_types)
                         for owner in owners_to_map
                         if owner is not helm_owner[0]
                     ],
@@ -288,6 +297,9 @@ def _is_helm_owner(owner: _ArgoSource, source_type: str | None) -> bool:
 
 def _is_plain_directory_owner(owner: _ArgoSource, source_type: str | None) -> bool:
     """A ``path`` source Argo CD reads as plain manifests: it cannot render a Helm chart."""
+    if owner.raw.get("directory") is not None and (owner.directory is None or owner.directory.get("jsonnet")):
+        # Jsonnet (or an unreadable directory config) can generate any resource.
+        return False
     return (
         owner.chart is None
         and not owner.helm_present
@@ -345,9 +357,15 @@ def _helm_owner_by_ownership_labels(
     return helm_owner, markers
 
 
-def _manifest_source_evidence(owner: _ArgoSource, revisions: list[str | None]) -> dict[str, Any]:
+def _manifest_source_evidence(
+    owner: _ArgoSource,
+    revisions: list[str | None],
+    source_types: list[str | None],
+) -> dict[str, Any]:
     directory = owner.directory or {}
+    source_type = source_types[owner.index] if 0 <= owner.index < len(source_types) else None
     return {
+        "plain_directory": _is_plain_directory_owner(owner, source_type),
         "source_index": owner.index,
         "repo_url": owner.repo_url,
         "ref": owner.ref,

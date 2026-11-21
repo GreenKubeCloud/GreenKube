@@ -958,7 +958,10 @@ def test_helm_values_mapping_source_index_selects_the_owner_without_labels():
     assert binding.source is not None
     assert binding.source.repo_url == VALUES_REPO
     assert binding.source.renderer_config["values_mapping"]["source_index"] == 1
-    assert binding.source.evidence["owner_selection"] == {"by": "helm-values-mapping", "source_index": 1}
+    selection = binding.source.evidence["owner_selection"]
+    assert (selection["by"], selection["source_index"]) == ("helm-values-mapping", 1)
+    assert [entry["source_index"] for entry in selection["manifest_sources"]] == [2]
+    assert selection["manifest_sources"][0]["plain_directory"] is True
 
 
 def test_helm_values_mapping_source_index_matching_no_owner_stays_ambiguous():
@@ -1023,6 +1026,57 @@ def test_a_manifests_source_that_also_declares_the_workload_fails_closed(manifes
             )
     finally:
         snapshot.close()
+
+
+def test_a_mapping_selected_owner_still_fails_closed_when_the_manifests_source_declares_the_workload():
+    """Review of F-02: the ``source_index`` override must not skip the duplicate-declaration check."""
+    registry = FakeChartRegistry()
+    application = _chart_values_manifests_application()
+    application["metadata"]["annotations"] = {
+        "greenkube.cloud/helm-values-mapping": (
+            '{"file_path": "environments/prod/nginx.yaml", "container": "nginx", '
+            '"path": ["resources"], "source_index": 1}'
+        )
+    }
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, "environments/prod/manifests/web.yaml": _MANIFEST_DEPLOYMENT})
+    binding = _bound(_discover_web(application))
+    assert binding.source is not None
+    assert binding.status is BindingStatus.RESOLVED
+
+    try:
+        with pytest.raises(HelmValuesUnsupportedError, match="manifests source"):
+            _planner(_BitnamiRunner(), _fetcher(registry)).plan(
+                _action([_op("nginx", cpu="50m")]), binding.source, snapshot, VALUES_REVISION
+            )
+    finally:
+        snapshot.close()
+
+
+@pytest.mark.parametrize(
+    "jsonnet_file", ["environments/prod/manifests/web.jsonnet", "environments/prod/manifests/lib.libsonnet"]
+)
+def test_a_manifests_source_with_jsonnet_cannot_be_verified_and_fails_closed(jsonnet_file):
+    registry = FakeChartRegistry()
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, jsonnet_file: "{}\n"})
+    binding = _bound(_discover_web(_chart_values_manifests_application(), [_live_deployment(_HELM_LABELS)]))
+    assert binding.source is not None
+
+    try:
+        with pytest.raises(HelmValuesUnsupportedError, match="manifests source"):
+            _planner(_BitnamiRunner(), _fetcher(registry)).plan(
+                _action([_op("nginx", cpu="50m")]), binding.source, snapshot, VALUES_REVISION
+            )
+    finally:
+        snapshot.close()
+
+
+def test_helm_labels_do_not_break_a_tie_against_a_jsonnet_directory_source():
+    application = _chart_values_manifests_application()
+    application["spec"]["sources"][2]["directory"] = {"jsonnet": {"tlas": [{"name": "env", "value": "prod"}]}}
+
+    binding = _bound(_discover_web(application, [_live_deployment(_HELM_LABELS)]))
+
+    assert binding.status is not BindingStatus.RESOLVED
 
 
 def test_a_manifests_source_outside_the_snapshot_cannot_be_verified_and_fails_closed():

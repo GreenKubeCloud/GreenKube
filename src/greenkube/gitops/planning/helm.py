@@ -1340,13 +1340,18 @@ def _reject_workload_declared_by_manifest_sources(
 ) -> None:
     """Fail closed when a competing Argo CD ``path`` source also declares the workload (F-02).
 
-    Discovery binds a Helm-labelled workload to the chart rather than to a plain manifests
-    directory of the same Application, and lists those directories in the evidence. The
-    choice holds only if none of them declares a resource of the workload's kind and name;
-    a directory outside this repository snapshot cannot be checked and blocks the plan.
+    Discovery binds a Helm-labelled workload, or every workload named by the mapping
+    annotation's ``source_index``, to the chart rather than to the other owners of the same
+    Application, and lists those owners in the evidence. The choice holds only if none of
+    them declares a resource of the workload's kind and name. An owner that is not a plain
+    manifests directory, holds Jsonnet, or lies outside this repository snapshot cannot be
+    checked and blocks the plan.
     """
     selection = source.evidence.get("owner_selection")
-    if not isinstance(selection, Mapping) or selection.get("by") != "helm-ownership-labels":
+    if not isinstance(selection, Mapping) or selection.get("by") not in {
+        "helm-ownership-labels",
+        "helm-values-mapping",
+    }:
         return
     manifest_sources = selection.get("manifest_sources")
     if not isinstance(manifest_sources, list):
@@ -1366,6 +1371,12 @@ def _reject_workload_declared_by_manifest_sources(
                 "ambiguous-multi-source-owner: the Application's manifests source is not in this repository "
                 "snapshot, so GreenKube cannot verify that it does not declare the workload"
             )
+        if entry.get("plain_directory") is not True:
+            raise HelmValuesUnsupportedError(
+                "ambiguous-multi-source-owner: another source of the Application (Helm, Kustomize, Jsonnet or a "
+                "plugin) is not a plain manifests source, so GreenKube cannot verify that it does not declare "
+                "the workload"
+            )
         directory = _canonical_path(entry.get("path"), allow_root=True, error=HelmValuesUnsupportedError)
         prefix = "" if directory == "." else f"{directory}/"
         recurse = entry.get("recurse") is True
@@ -1374,7 +1385,13 @@ def _reject_workload_declared_by_manifest_sources(
             relative = path[len(prefix) :] if path.startswith(prefix) else None
             if relative is None or (not recurse and "/" in relative):
                 continue
-            if PurePosixPath(path).suffix.lower() in {".yaml", ".yml", ".json"}:
+            suffix = PurePosixPath(path).suffix.lower()
+            if suffix in {".jsonnet", ".libsonnet"}:
+                raise HelmValuesUnsupportedError(
+                    f"ambiguous-multi-source-owner: {path} in the manifests source is Jsonnet, so GreenKube cannot "
+                    "verify that the source does not declare the workload"
+                )
+            if suffix in {".yaml", ".yml", ".json"}:
                 contents[path] = _read_source_file(root, snapshot_files, path, HelmValuesUnsupportedError)
         if not contents:
             continue
