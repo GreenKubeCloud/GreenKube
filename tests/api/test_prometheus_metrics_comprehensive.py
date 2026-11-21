@@ -131,10 +131,6 @@ def sample_combined_metrics():
             memory_request=536870912,
             cpu_usage_millicores=320,
             memory_usage_bytes=268435456,
-            network_receive_bytes=1024.0,
-            network_transmit_bytes=2048.0,
-            disk_read_bytes=512.0,
-            disk_write_bytes=256.0,
             node="node-1",
             timestamp=now,
         ),
@@ -151,8 +147,6 @@ def sample_combined_metrics():
             memory_request=1073741824,
             cpu_usage_millicores=750,
             memory_usage_bytes=805306368,
-            network_receive_bytes=4096.0,
-            network_transmit_bytes=8192.0,
             node="node-1",
             timestamp=now,
         ),
@@ -452,14 +446,6 @@ class TestComprehensiveClusterMetrics:
 
         output = generate_latest(REGISTRY).decode("utf-8")
         assert "greenkube_pod_embodied_co2e_grams" in output
-
-    def test_update_sets_network_metrics(self, sample_combined_metrics):
-        update_cluster_metrics(sample_combined_metrics)
-        from prometheus_client import generate_latest
-
-        output = generate_latest(REGISTRY).decode("utf-8")
-        assert "greenkube_pod_network_receive_bytes" in output
-        assert "greenkube_pod_network_transmit_bytes" in output
 
     def test_update_with_empty_list_clears_metrics(self):
         update_cluster_metrics([])

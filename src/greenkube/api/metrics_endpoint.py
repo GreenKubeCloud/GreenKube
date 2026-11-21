@@ -107,30 +107,6 @@ POD_MEMORY_USAGE = Gauge(
     POD_LABELS,
     registry=REGISTRY,
 )
-POD_NETWORK_RX = Gauge(
-    "greenkube_pod_network_receive_bytes",
-    "Network bytes received per second per pod",
-    POD_LABELS,
-    registry=REGISTRY,
-)
-POD_NETWORK_TX = Gauge(
-    "greenkube_pod_network_transmit_bytes",
-    "Network bytes transmitted per second per pod",
-    POD_LABELS,
-    registry=REGISTRY,
-)
-POD_DISK_READ = Gauge(
-    "greenkube_pod_disk_read_bytes",
-    "Disk bytes read per second per pod",
-    POD_LABELS,
-    registry=REGISTRY,
-)
-POD_DISK_WRITE = Gauge(
-    "greenkube_pod_disk_write_bytes",
-    "Disk bytes written per second per pod",
-    POD_LABELS,
-    registry=REGISTRY,
-)
 POD_PUE = Gauge(
     "greenkube_pue",
     "Power Usage Effectiveness per pod measurement",
@@ -878,10 +854,6 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         POD_CPU_USAGE,
         POD_MEMORY_REQUEST,
         POD_MEMORY_USAGE,
-        POD_NETWORK_RX,
-        POD_NETWORK_TX,
-        POD_DISK_READ,
-        POD_DISK_WRITE,
         POD_PUE,
         POD_GRID_INTENSITY,
         POD_RESTART_COUNT,
@@ -957,10 +929,6 @@ def update_cluster_metrics(metrics: List[CombinedMetric]) -> None:
         POD_MEMORY_REQUEST.labels(**labels).set(m.memory_request)
         if m.memory_usage_bytes is not None:
             POD_MEMORY_USAGE.labels(**labels).set(m.memory_usage_bytes)
-        POD_NETWORK_RX.labels(**labels).set(m.network_receive_bytes or 0.0)
-        POD_NETWORK_TX.labels(**labels).set(m.network_transmit_bytes or 0.0)
-        POD_DISK_READ.labels(**labels).set(m.disk_read_bytes or 0.0)
-        POD_DISK_WRITE.labels(**labels).set(m.disk_write_bytes or 0.0)
         POD_PUE.labels(**labels).set(m.pue)
         POD_GRID_INTENSITY.labels(**labels).set(m.grid_intensity)
 

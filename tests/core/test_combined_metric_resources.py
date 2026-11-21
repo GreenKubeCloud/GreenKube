@@ -3,9 +3,6 @@
 Tests for the extended CombinedMetric model with additional resource fields.
 
 Validates that CombinedMetric correctly stores:
-- Network I/O (bytes received/transmitted)
-- Disk I/O (bytes read/written)
-- Storage request/usage
 - Pod restart count
 - GPU usage
 """
@@ -24,53 +21,8 @@ class TestCombinedMetricResourceFields:
             pod_name="test-pod",
             namespace="default",
         )
-        assert metric.network_receive_bytes is None
-        assert metric.network_transmit_bytes is None
-        assert metric.disk_read_bytes is None
-        assert metric.disk_write_bytes is None
-        assert metric.storage_request_bytes is None
-        assert metric.storage_usage_bytes is None
         assert metric.gpu_usage_millicores is None
         assert metric.restart_count is None
-        assert metric.ephemeral_storage_request_bytes is None
-        assert metric.ephemeral_storage_usage_bytes is None
-
-    def test_set_network_io_fields(self):
-        """Network I/O fields should store values correctly."""
-        metric = CombinedMetric(
-            pod_name="web-app",
-            namespace="production",
-            network_receive_bytes=1048576,
-            network_transmit_bytes=524288,
-        )
-        assert metric.network_receive_bytes == 1048576
-        assert metric.network_transmit_bytes == 524288
-
-    def test_set_disk_io_fields(self):
-        """Disk I/O fields should store values correctly."""
-        metric = CombinedMetric(
-            pod_name="db-pod",
-            namespace="production",
-            disk_read_bytes=2097152,
-            disk_write_bytes=4194304,
-        )
-        assert metric.disk_read_bytes == 2097152
-        assert metric.disk_write_bytes == 4194304
-
-    def test_set_storage_fields(self):
-        """Storage request/usage fields should store values correctly."""
-        metric = CombinedMetric(
-            pod_name="stateful-app",
-            namespace="data",
-            storage_request_bytes=10_737_418_240,  # 10 GiB
-            storage_usage_bytes=5_368_709_120,  # 5 GiB
-            ephemeral_storage_request_bytes=1_073_741_824,  # 1 GiB
-            ephemeral_storage_usage_bytes=536_870_912,  # 512 MiB
-        )
-        assert metric.storage_request_bytes == 10_737_418_240
-        assert metric.storage_usage_bytes == 5_368_709_120
-        assert metric.ephemeral_storage_request_bytes == 1_073_741_824
-        assert metric.ephemeral_storage_usage_bytes == 536_870_912
 
     def test_set_restart_count(self):
         """Restart count should store values correctly."""
@@ -105,14 +57,6 @@ class TestCombinedMetricResourceFields:
             memory_request=2_147_483_648,
             cpu_usage_millicores=750,
             memory_usage_bytes=1_073_741_824,
-            network_receive_bytes=10_485_760,
-            network_transmit_bytes=5_242_880,
-            disk_read_bytes=20_971_520,
-            disk_write_bytes=10_485_760,
-            storage_request_bytes=10_737_418_240,
-            storage_usage_bytes=5_368_709_120,
-            ephemeral_storage_request_bytes=1_073_741_824,
-            ephemeral_storage_usage_bytes=536_870_912,
             gpu_usage_millicores=500,
             restart_count=0,
             timestamp=ts,
@@ -122,9 +66,6 @@ class TestCombinedMetricResourceFields:
         )
         assert metric.pod_name == "full-pod"
         assert metric.cpu_request == 1000
-        assert metric.network_receive_bytes == 10_485_760
-        assert metric.disk_write_bytes == 10_485_760
-        assert metric.storage_request_bytes == 10_737_418_240
         assert metric.gpu_usage_millicores == 500
         assert metric.restart_count == 0
 
@@ -133,18 +74,8 @@ class TestCombinedMetricResourceFields:
         metric = CombinedMetric(
             pod_name="test",
             namespace="default",
-            network_receive_bytes=1024,
-            disk_read_bytes=2048,
             restart_count=1,
         )
         data = metric.model_dump()
-        assert "network_receive_bytes" in data
-        assert "network_transmit_bytes" in data
-        assert "disk_read_bytes" in data
-        assert "disk_write_bytes" in data
-        assert "storage_request_bytes" in data
-        assert "storage_usage_bytes" in data
         assert "gpu_usage_millicores" in data
         assert "restart_count" in data
-        assert "ephemeral_storage_request_bytes" in data
-        assert "ephemeral_storage_usage_bytes" in data

@@ -162,14 +162,12 @@ def _workload(
     baseline_memory_bytes: int,
     placement: str = "global",
     profile: str = "steady",
-    storage_request_bytes: int | None = None,
-    storage_usage_ratio: float = 0.65,
+    volume_bytes: int | None = None,
     historical_cpu_request: int | None = None,
     historical_memory_request_bytes: int | None = None,
     optimized_days_ago: int | None = None,
     off_peak_after_days_ago: int | None = None,
     batch_shift_after_days_ago: int | None = None,
-    ephemeral_storage_request_bytes: int | None = None,
 ) -> dict[str, Any]:
     return {
         "pod_name": pod_name,
@@ -181,14 +179,12 @@ def _workload(
         "baseline_memory_bytes": baseline_memory_bytes,
         "placement": placement,
         "profile": profile,
-        "storage_request_bytes": storage_request_bytes,
-        "storage_usage_ratio": storage_usage_ratio,
+        "volume_bytes": volume_bytes,
         "historical_cpu_request": historical_cpu_request,
         "historical_memory_request_bytes": historical_memory_request_bytes,
         "optimized_days_ago": optimized_days_ago,
         "off_peak_after_days_ago": off_peak_after_days_ago,
         "batch_shift_after_days_ago": batch_shift_after_days_ago,
-        "ephemeral_storage_request_bytes": ephemeral_storage_request_bytes,
     }
 
 
@@ -415,8 +411,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=70,
                 baseline_memory_bytes=980 * MIB,
                 profile="steady",
-                storage_request_bytes=500 * GIB,
-                storage_usage_ratio=0.72,
+                volume_bytes=500 * GIB,
             ),
             _workload(
                 "prometheus-k8s-1",
@@ -427,8 +422,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=62,
                 baseline_memory_bytes=985 * MIB,
                 profile="steady",
-                storage_request_bytes=500 * GIB,
-                storage_usage_ratio=0.7,
+                volume_bytes=500 * GIB,
             ),
             _workload(
                 "grafana-0",
@@ -543,8 +537,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=68,
                 baseline_memory_bytes=3123 * MIB,
                 profile="storage",
-                storage_request_bytes=1024 * GIB,
-                storage_usage_ratio=0.68,
+                volume_bytes=1024 * GIB,
             ),
             _workload(
                 "minio-1",
@@ -555,8 +548,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=54,
                 baseline_memory_bytes=3342 * MIB,
                 profile="storage",
-                storage_request_bytes=1024 * GIB,
-                storage_usage_ratio=0.7,
+                volume_bytes=1024 * GIB,
             ),
             _workload(
                 "minio-2",
@@ -567,8 +559,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=58,
                 baseline_memory_bytes=3303 * MIB,
                 profile="storage",
-                storage_request_bytes=1024 * GIB,
-                storage_usage_ratio=0.69,
+                volume_bytes=1024 * GIB,
             ),
             _workload(
                 "minio-3",
@@ -579,8 +570,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=92,
                 baseline_memory_bytes=3158 * MIB,
                 profile="storage",
-                storage_request_bytes=1024 * GIB,
-                storage_usage_ratio=0.67,
+                volume_bytes=1024 * GIB,
             ),
         ],
         "dremio": [
@@ -594,8 +584,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_memory_bytes=2630 * MIB,
                 profile="analytics",
                 placement="global",
-                storage_request_bytes=250 * GIB,
-                storage_usage_ratio=0.55,
+                volume_bytes=250 * GIB,
             ),
             _workload(
                 "dremio-coordinator-0",
@@ -607,7 +596,6 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_memory_bytes=2174 * MIB,
                 profile="analytics",
                 placement="global",
-                ephemeral_storage_request_bytes=40 * GIB,
             ),
             _workload(
                 "dremio-executor-0",
@@ -620,7 +608,6 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 profile="batch",
                 batch_shift_after_days_ago=210,
                 placement="global",
-                ephemeral_storage_request_bytes=60 * GIB,
             ),
             _workload(
                 "dremio-executor-1",
@@ -633,7 +620,6 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 profile="batch",
                 batch_shift_after_days_ago=210,
                 placement="global",
-                ephemeral_storage_request_bytes=60 * GIB,
             ),
             _workload(
                 "zk-0",
@@ -662,7 +648,6 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 historical_memory_request_bytes=24 * GIB,
                 optimized_days_ago=210,
                 batch_shift_after_days_ago=210,
-                ephemeral_storage_request_bytes=80 * GIB,
             ),
             _workload(
                 "mageai-trigger-0",
@@ -717,8 +702,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=18,
                 baseline_memory_bytes=92 * MIB,
                 profile="steady",
-                storage_request_bytes=150 * GIB,
-                storage_usage_ratio=0.58,
+                volume_bytes=150 * GIB,
             ),
             _workload(
                 "superset-redis-master-0",
@@ -774,8 +758,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=55,
                 baseline_memory_bytes=1226 * MIB,
                 profile="steady",
-                storage_request_bytes=400 * GIB,
-                storage_usage_ratio=0.62,
+                volume_bytes=400 * GIB,
             ),
             _workload(
                 "datahub-prerequisites-kafka-1",
@@ -786,8 +769,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=72,
                 baseline_memory_bytes=1223 * MIB,
                 profile="steady",
-                storage_request_bytes=400 * GIB,
-                storage_usage_ratio=0.66,
+                volume_bytes=400 * GIB,
             ),
             _workload(
                 "datahub-prerequisites-mysql-0",
@@ -798,8 +780,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=28,
                 baseline_memory_bytes=755 * MIB,
                 profile="steady",
-                storage_request_bytes=200 * GIB,
-                storage_usage_ratio=0.6,
+                volume_bytes=200 * GIB,
             ),
             _workload(
                 "opensearch-cluster-master-0",
@@ -810,8 +791,7 @@ def _build_demo_workloads() -> dict[str, list[dict[str, Any]]]:
                 baseline_cpu=40,
                 baseline_memory_bytes=2850 * MIB,
                 profile="search",
-                storage_request_bytes=500 * GIB,
-                storage_usage_ratio=0.64,
+                volume_bytes=500 * GIB,
             ),
         ],
         "website": [
@@ -1220,9 +1200,8 @@ def _select_node(active_nodes: list[dict[str, Any]], workload: dict[str, Any], t
     return candidates[_stable_rng(workload["pod_name"], bucket).randrange(len(candidates))]
 
 
-def _resource_rates(
-    profile: str, activity: float, storage_request_bytes: int | None
-) -> tuple[float, float, float, float]:
+def _network_rates(profile: str, activity: float) -> tuple[float, float]:
+    """Receive and transmit rates (bytes/s) that price the demo network cost."""
     network_base = {
         "web": (75000.0, 68000.0),
         "api": (42000.0, 36000.0),
@@ -1234,23 +1213,8 @@ def _resource_rates(
         "burst": (28000.0, 25000.0),
         "steady": (10000.0, 8000.0),
     }
-    disk_base = {
-        "web": (1200.0, 900.0),
-        "api": (900.0, 700.0),
-        "search": (3500.0, 2200.0),
-        "analytics": (9000.0, 7000.0),
-        "batch": (14000.0, 12000.0),
-        "storage": (16000.0, 18000.0),
-        "office": (700.0, 500.0),
-        "burst": (2200.0, 1800.0),
-        "steady": (800.0, 700.0),
-    }
     rx_base, tx_base = network_base.get(profile, network_base["steady"])
-    read_base, write_base = disk_base.get(profile, disk_base["steady"])
-    if storage_request_bytes:
-        read_base *= 1.2
-        write_base *= 1.3
-    return rx_base * activity, tx_base * activity, read_base * activity, write_base * activity
+    return rx_base * activity, tx_base * activity
 
 
 def generate_node_snapshots(days: int = 30) -> list[NodeInfo]:
@@ -1378,16 +1342,9 @@ def generate_combined_metrics(days: int = 30) -> list[CombinedMetric]:
                 embodied_hourly = node_state["embodied_emissions_kg"] * 1000 / (4 * 365.25 * 24)
                 embodied_co2e = embodied_hourly * duration_hours * max(0.08, request_share)
 
-                storage_request_bytes = workload.get("storage_request_bytes")
-                storage_usage_bytes = None
-                if storage_request_bytes:
-                    storage_request_bytes = int(storage_request_bytes)
-                    storage_usage_bytes = int(storage_request_bytes * float(workload.get("storage_usage_ratio", 0.65)))
-
-                rx_rate, tx_rate, read_rate, write_rate = _resource_rates(
-                    str(workload["profile"]), activity, storage_request_bytes
-                )
-                storage_cost = ((storage_request_bytes or 0) / GIB) * 0.00012 * duration_hours
+                volume_bytes = int(workload.get("volume_bytes") or 0)
+                rx_rate, tx_rate = _network_rates(str(workload["profile"]), activity)
+                storage_cost = (volume_bytes / GIB) * 0.00012 * duration_hours
                 network_cost = (rx_rate + tx_rate) / (1024**3) * 0.015 * duration_hours
                 compute_cost = (
                     idle_cost_per_workload * duration_hours
@@ -1411,18 +1368,6 @@ def generate_combined_metrics(days: int = 30) -> list[CombinedMetric]:
                         cpu_usage_max_millicores=min(cpu_request, int(cpu_usage * 1.16)),
                         memory_usage_bytes=memory_usage,
                         memory_usage_max_bytes=min(memory_request, int(memory_usage * 1.08)),
-                        network_receive_bytes=round(rx_rate, 2),
-                        network_transmit_bytes=round(tx_rate, 2),
-                        disk_read_bytes=round(read_rate, 2),
-                        disk_write_bytes=round(write_rate, 2),
-                        storage_request_bytes=storage_request_bytes,
-                        storage_usage_bytes=storage_usage_bytes,
-                        ephemeral_storage_request_bytes=workload.get("ephemeral_storage_request_bytes"),
-                        ephemeral_storage_usage_bytes=(
-                            int(int(workload["ephemeral_storage_request_bytes"]) * 0.55)
-                            if workload.get("ephemeral_storage_request_bytes")
-                            else None
-                        ),
                         restart_count=_stable_rng(workload["pod_name"], ts.date()).randint(0, 1),
                         owner_kind=str(workload["owner_kind"]),
                         owner_name=str(workload["owner_name"]),

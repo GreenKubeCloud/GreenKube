@@ -63,7 +63,6 @@ def _processor(cost_metrics: list[CostMetric]) -> HistoricalRangeProcessor:
     config = Config()
     prometheus = MagicMock()
     prometheus.collect_range = AsyncMock(side_effect=lambda **kwargs: _series(kwargs["query"]))
-    prometheus.collect_pod_storage = AsyncMock(return_value={})
     opencost = MagicMock()
     opencost.collect_range = AsyncMock(return_value=cost_metrics)
     node_info = NodeInfo(

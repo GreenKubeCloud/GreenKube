@@ -11,8 +11,7 @@ applied recommendation gets **one fixed-horizon measurement**:
 * only trusted rows: cost provenance (``cost_source``, judged by the shared
   A11 helpers in ``greenkube.models.provenance`` when installed) when the rows
   carry it, otherwise ``total_cost > 0 and is_estimated is False`` (C0.3);
-* rates normalized by the time the rows cover; traffic normalization is
-  disabled until the load-driver counterfactual ships (C0.1, BUG-27);
+* rates normalized by the time the rows cover;
 * health gates per replica and per-pod restart deltas (C0.2, BUG-28), plus
   OOM kills, readiness and CPU throttling from a health collector; a missing
   signal is reported ``not_available``, never silently passed (C0.9, BUG-35);
@@ -247,7 +246,6 @@ class WindowRates:
     co2e_per_hour: Optional[float] = None
     cost_steps: float = 0.0
     co2e_steps: float = 0.0
-    traffic_bytes_per_second: Optional[float] = None
     #: Per-sample hourly rates (``cost``, ``cost_cpu``, ``cost_ram``, ``co2e``), for the interval (MEA-16).
     samples: Dict[str, List[float]] = field(default_factory=dict)
 
@@ -292,19 +290,17 @@ def coverage_steps(series: Sequence, step: int) -> float:
 
 
 def window_rates(series: Sequence, step: int) -> WindowRates:
-    """Per-hour cost, CO2e and traffic rates of a workload over a window.
+    """Per-hour cost and CO2e rates of a workload over a window.
 
     Replica rows are summed per timestamp; a timestamp group counts only when
     every row in it is trusted, so a partially estimated group never biases
     the sum. Rates divide by the covered time, never by row counts, so raw
-    5-minute and hourly rows mix correctly. Traffic is a rate (bytes/s)
-    averaged over covered time; it is informational only.
+    5-minute and hourly rows mix correctly.
     """
     rates = WindowRates()
     cost_total = cpu_total = ram_total = co2_total = 0.0
     cost_cover = co2_cover = 0.0
     components = True
-    traffic_total = traffic_cover = 0.0
     for rows in _timestamp_groups(series).values():
         # The group covers the longest row. Rows are not rescaled to it: in an hourly
         # bucket, pods replaced during a rollout ran one after the other, so scaling
@@ -332,14 +328,6 @@ def window_rates(series: Sequence, step: int) -> WindowRates:
             co2_total += group_co2
             co2_cover += coverage
             rates.samples.setdefault("co2e", []).append(group_co2 * per_hour)
-        traffic = [
-            float(m.network_receive_bytes or 0.0) + float(m.network_transmit_bytes or 0.0)
-            for m in rows
-            if m.network_receive_bytes is not None or m.network_transmit_bytes is not None
-        ]
-        if traffic:
-            traffic_total += sum(traffic) * coverage
-            traffic_cover += coverage
     if cost_cover > 0:
         rates.cost_per_hour = cost_total / cost_cover * 3600
         # Components that are absent, or all zero while the cost is not, cannot split a delta.
@@ -348,8 +336,6 @@ def window_rates(series: Sequence, step: int) -> WindowRates:
             rates.cost_ram_per_hour = ram_total / cost_cover * 3600
     if co2_cover > 0:
         rates.co2e_per_hour = co2_total / co2_cover * 3600
-    if traffic_cover > 0:
-        rates.traffic_bytes_per_second = traffic_total / traffic_cover
     rates.cost_steps = cost_cover / step if step > 0 else 0.0
     rates.co2e_steps = co2_cover / step if step > 0 else 0.0
     return rates
@@ -598,7 +584,6 @@ class _Observation:
     restart_increase: Optional[int] = None
     pods: List[str] = field(default_factory=list)
     health: Optional[WorkloadHealthObservation] = None
-    traffic_ratio: Optional[float] = None
 
 
 @dataclass
@@ -943,12 +928,6 @@ class RecommendationVerifier:
             before = window_rates(pod_before, step)
             after = window_rates(pod_after, step)
 
-        pod_before_rates = before if pod_before is target_before else window_rates(pod_before, step)
-        pod_after_rates = after if pod_after is target_after else window_rates(pod_after, step)
-        traffic_ratio = None
-        if pod_before_rates.traffic_bytes_per_second and pod_after_rates.traffic_bytes_per_second is not None:
-            traffic_ratio = pod_after_rates.traffic_bytes_per_second / pod_before_rates.traffic_bytes_per_second
-
         pods = sorted({metric.pod_name for metric in (pod_after or target_after) if metric.pod_name})
         observation = _Observation(
             scope=scope,
@@ -959,7 +938,6 @@ class RecommendationVerifier:
             memory_p95=per_pod_usage_p95(target_after, "memory_usage_bytes", step),
             restart_increase=restart_increase(pod_after),
             pods=pods,
-            traffic_ratio=traffic_ratio,
         )
         observation.health = await self._collect_health(lead, pods, windows)
         return observation
@@ -1294,7 +1272,6 @@ class RecommendationVerifier:
             after_co2e_grams_per_hour=co2e.after_per_hour if co2e else None,
             sample_count=int(observation.sample_steps),
             readiness_ratio=health.readiness_ratio if health is not None else None,
-            traffic_ratio=observation.traffic_ratio,
             outcome=decision.outcome.value,
             cost_outcome=cost.outcome.value if cost else None,
             co2e_outcome=co2e.outcome.value if co2e else None,

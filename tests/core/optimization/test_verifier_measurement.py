@@ -202,19 +202,6 @@ class TestFixedHorizon:
         # 6h window + 0.6h grace has not elapsed yet.
         assert await _verifier(repo, metrics).verify_due() == []
 
-    async def test_traffic_is_recorded_but_not_used_to_normalize(self, repo):
-        now, applied_at = _timeline()
-        await repo.save_recommendations([_record(applied_at)])
-        metrics = WindowedMetricsRepo(
-            rows(applied_at - WINDOW, applied_at, cost=0.01, network_receive_bytes=500.0, network_transmit_bytes=500.0)
-            + rows(applied_at, now, cost=0.008, network_receive_bytes=1000.0, network_transmit_bytes=1000.0)
-        )
-
-        record = (await _verifier(repo, metrics).verify_due())[0]
-
-        assert record.measured_cost_saved == pytest.approx(0.024 * HOURS_PER_YEAR)
-        assert baseline_of(record)["measured_ledger_input"]["traffic_ratio"] == pytest.approx(2.0)
-
 
 class TestProvenance:
     async def test_cost_source_none_is_not_trusted(self, repo, measurements):

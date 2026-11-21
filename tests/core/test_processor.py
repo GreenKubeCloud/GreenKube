@@ -412,7 +412,6 @@ async def test_run_range_preserves_container_metrics_for_the_scheduled_pipeline(
     mock_translator.return_value = "FR"
     data_processor._range_processor.combined_metrics_repository.read_combined_metrics = AsyncMock(return_value=[])
     data_processor._range_processor.opencost_collector.collect_range = AsyncMock(return_value=[])
-    mock_prometheus_collector.collect_pod_storage = AsyncMock(return_value={})
     mock_pod_collector.collect = AsyncMock(
         return_value=[
             PodMetric(
@@ -510,7 +509,6 @@ async def test_run_range_uses_metrics_api_when_prometheus_drops_container_labels
     data_processor._range_processor._config = Config(KUBERNETES_METRICS_API_ENABLED=True)
     data_processor._range_processor.combined_metrics_repository.read_combined_metrics = AsyncMock(return_value=[])
     data_processor._range_processor.opencost_collector.collect_range = AsyncMock(return_value=[])
-    mock_prometheus_collector.collect_pod_storage = AsyncMock(return_value={})
     mock_node_repository.get_latest_snapshots_before.return_value = [SAMPLE_NODE_INFO["node-1"]]
     mock_node_repository.get_snapshots.return_value = []
     mock_pod_collector.collect = AsyncMock(

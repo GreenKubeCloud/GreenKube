@@ -4,7 +4,7 @@
 ``verify_e2e.py`` and ``verify_container.py`` wrote five-minute metrics into a
 real SQLite database, compressed them with :class:`MetricsCompressor`, and ran
 the verifier over an applied CPU rightsizing recommendation. They reproduced
-BUG-27 (traffic normalization inflated savings ~4x), BUG-28 (replica-summed
+BUG-28 (replica-summed
 p95 sent multi-replica changes to rollback review), BUG-29 (container-scoped
 changes were never measurable) and BUG-31 (``not_realized`` was re-tested
 every few hours with a growing window).
@@ -50,7 +50,6 @@ def _metrics(
     applied_at: datetime,
     *,
     replicas: int,
-    traffic: bool,
     container: bool,
     after_cost: float,
     cpu_usage: int,
@@ -70,8 +69,6 @@ def _metrics(
                 co2e_grams=1.0,
                 cpu_request=300 if after else 1000,
                 cpu_usage_millicores=cpu_usage,
-                network_receive_bytes=1000.0 if traffic else None,
-                network_transmit_bytes=1000.0 if traffic else None,
                 restart_count=0,
                 timestamp=t,
                 duration_seconds=300,
@@ -89,7 +86,6 @@ async def _scenario(
     database,
     *,
     replicas: int,
-    traffic: bool = False,
     container: bool = False,
     after_cost: float = AFTER_COST,
     cpu_usage: int = 200,
@@ -103,7 +99,6 @@ async def _scenario(
             now,
             applied_at,
             replicas=replicas,
-            traffic=traffic,
             container=container,
             after_cost=after_cost,
             cpu_usage=cpu_usage,
@@ -154,14 +149,6 @@ class TestAuditVerifyE2E:
         assert record.status is RecommendationStatus.VERIFIED
         assert record.measured_cost_saved == pytest.approx(TRUE_COST_SAVING_PER_REPLICA, rel=0.05)
         # Usage-based CO2e did not change: rightsizing never claims a carbon saving.
-        assert record.measured_co2e_saved_grams == 0.0
-
-    async def test_traffic_does_not_inflate_measured_savings(self, database):
-        # 100m per replica keeps the old replica-summed p95 under the gate, isolating BUG-27.
-        _, _, _, record = await _scenario(database, replicas=2, traffic=True, cpu_usage=100)
-
-        assert record.status is RecommendationStatus.VERIFIED
-        assert record.measured_cost_saved == pytest.approx(2 * TRUE_COST_SAVING_PER_REPLICA, rel=0.05)
         assert record.measured_co2e_saved_grams == 0.0
 
     async def test_two_replicas_within_their_per_pod_request_do_not_need_rollback_review(self, database):

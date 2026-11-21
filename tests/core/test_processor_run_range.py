@@ -30,7 +30,6 @@ async def test_run_range_never_short_circuits_on_stored_rows():
     mock_repo.read_combined_metrics = AsyncMock(return_value=[_stored_metric()])
     prometheus = MagicMock()
     prometheus.collect_range = AsyncMock(return_value=[])
-    prometheus.collect_pod_storage = AsyncMock(return_value={})
 
     node_collector = MagicMock(collect=AsyncMock(return_value={}), collect_instance_types=AsyncMock(return_value={}))
     node_collector.close = AsyncMock()
@@ -65,7 +64,6 @@ async def test_run_range_raises_when_prometheus_is_unreachable():
     """An outage must fail the window instead of being stored as an empty window."""
     prometheus = MagicMock()
     prometheus.collect_range = AsyncMock(side_effect=RuntimeError("connection refused"))
-    prometheus.collect_pod_storage = AsyncMock(return_value={})
     node_repository = MagicMock()
     node_repository.get_latest_snapshots_before = AsyncMock(return_value=[])
     node_repository.get_snapshots = AsyncMock(return_value=[])

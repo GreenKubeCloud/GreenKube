@@ -35,7 +35,6 @@ CONTAINER_FIELDS: tuple[str, ...] = (
     "kind",
     "cpu_request",
     "memory_request",
-    "ephemeral_storage_request",
     "cpu_limit",
     "memory_limit",
 )
