@@ -13,23 +13,31 @@
 -- Container rows only take a missing owner, when every pod row that has one
 -- agrees on it.
 
+-- Columns every current schema has, added for legacy minimal schemas (no-op otherwise).
+ALTER TABLE combined_metrics ADD COLUMN owner_kind TEXT;
+ALTER TABLE combined_metrics ADD COLUMN owner_name TEXT;
+ALTER TABLE combined_metrics ADD COLUMN cpu_request INTEGER;
+ALTER TABLE combined_metrics ADD COLUMN memory_request INTEGER;
+ALTER TABLE combined_metrics ADD COLUMN metadata_source TEXT;
+ALTER TABLE combined_metrics ADD COLUMN model_version TEXT;
+
 CREATE TEMP TABLE IF NOT EXISTS gk_0270_repair (target_id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL);
 
 DELETE FROM gk_0270_repair;
 
 INSERT INTO gk_0270_repair (target_id, source_id)
 SELECT target_id, source_id FROM (
-    SELECT t.id AS target_id,
-           k.id AS source_id,
+    SELECT t.rowid AS target_id,
+           k.rowid AS source_id,
            ROW_NUMBER() OVER (
-               PARTITION BY t.id
+               PARTITION BY t.rowid
                ORDER BY CASE WHEN julianday(k."timestamp") <= julianday(t."timestamp") THEN 0 ELSE 1 END,
                         ABS(julianday(k."timestamp") - julianday(t."timestamp")),
-                        k.id DESC
+                        k.rowid DESC
            ) AS rank_in_pod
       FROM combined_metrics t
       JOIN combined_metrics k
-        ON k.namespace = t.namespace AND k.pod_name = t.pod_name AND k.id <> t.id
+        ON k.namespace = t.namespace AND k.pod_name = t.pod_name AND k.rowid <> t.rowid
        AND COALESCE(k.metadata_source, '') NOT IN ('missing', 'repaired')
        AND ((t.owner_kind IS NULL AND k.owner_kind IS NOT NULL AND k.owner_name IS NOT NULL)
             OR (COALESCE(t.cpu_request, 0) = 0 AND COALESCE(t.memory_request, 0) = 0
@@ -52,8 +60,8 @@ UPDATE combined_metrics
        metadata_source = 'repaired',
        model_version = COALESCE(combined_metrics.model_version, '') || '+metadata-repaired'
   FROM gk_0270_repair r
-  JOIN combined_metrics s ON s.id = r.source_id
- WHERE combined_metrics.id = r.target_id;
+  JOIN combined_metrics s ON s.rowid = r.source_id
+ WHERE combined_metrics.rowid = r.target_id;
 
 DROP TABLE IF EXISTS gk_0270_repair;
 
