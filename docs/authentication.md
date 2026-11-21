@@ -177,13 +177,20 @@ TOO_MANY_ATTEMPTS` with `Retry-After` until the window frees up.
 - **The budget is per address, not per client.** While an address is throttled, every credential sent from it waits,
   the correct one included: checking it first would tell an attacker which guess was right at the full rate. Clients
   that share an address (behind a NAT, or behind an Ingress without `config.trustedProxyIps`) share the budget, so one
-  misconfigured client can block the others for at most one window. A correct key from any other address is never
-  affected. The client address is resolved by the same trusted-proxy logic as sign-ins.
+  misconfigured client can block the others for as long as the failing client keeps failing; behind an Ingress or
+  load balancer, set `config.trustedProxyIps` so that each client gets its own address. A correct key from any other
+  address is never affected. The client address is resolved by the same trusted-proxy logic as sign-ins.
 - **Successful authentications never consume or reset it**, so a valid low-privilege key does not buy more guesses
   at another one.
 - **Prometheus scrapes have their own bucket.** Failures on `/prometheus/metrics` and failures on the API routes are
   counted apart, so a client sending a wrong key to the API never stops a correct scrape with the scrape token or a
-  `metrics:read` key, even from the same address. The controller and worker metrics listeners are not throttled.
+  `metrics:read` key, even from the same address. The controller and worker metrics listeners keep the same budget
+  per TCP peer (they trust no proxy header).
+- **Stale browser cookies.** In `api_key` mode, a cookie that no longer verifies counts as a failure only when the
+  request ends in `401`. The public sign-in routes (`/auth/providers`, `/auth/api-key-login` and the other routes
+  reachable without credentials) ignore it without counting it, and clear it, so a browser can always sign in again;
+  `/auth/api-key-login` keeps its own sign-in throttle. An open development instance clears it too.
+- A request refused by this throttle is counted as `greenkube_auth_failures_total{reason="key_rate_limited"}`.
 - An open development instance (no credential configured) has nothing to guess and is never throttled.
 
 At most two password hashes run at once per API process (each scrypt run uses about 32 MiB), so a burst of sign-in
@@ -191,7 +198,7 @@ requests queues instead of exhausting the Pod's memory.
 
 Counters live in each API process: with several replicas, an attacker gets at most the budget times the number of
 replicas. `greenkube_auth_failures_total{reason}` counts `bad_credentials`, `rate_limited`, `invalid_session`,
-`invalid_api_key`, `csrf`, `forbidden_scope`, `untrusted_proxy_header` and `sso` rejections.
+`invalid_api_key`, `key_rate_limited`, `csrf`, `forbidden_scope`, `untrusted_proxy_header` and `sso` rejections.
 
 ### Passwords
 
@@ -406,7 +413,10 @@ monitoring:
 ```
 
 That key is rejected everywhere else (`403` on `/api/v1/recommendations`, for example). The controller and worker
-listeners do not read the account store: they accept the scrape token (and the bootstrap key while it is enabled).
+listeners do not read the account store: they accept the scrape token, and the bootstrap key (unless disabled) only
+while no scrape token is configured. The chart gives the Pods the scrape token exactly when its ServiceMonitors send
+it, so their scrapes keep working; a scraper of your own that still sends the bootstrap key to a listener must switch
+to the scrape token.
 
 ### The bootstrap API key
 

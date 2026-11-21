@@ -159,11 +159,13 @@ spec:
   many addresses is bounded per address only. Use SSO or keep the sign-in page off the public internet.
 - **Online key guessing.** Failed `Authorization: Bearer` keys and API-key cookies are throttled per client address
   (four times `AUTH_LOGIN_RATE_LIMIT`, 20 a minute by default, then `429` with `Retry-After`), with Prometheus scrapes
-  in a separate bucket. Guessing spread over many addresses is bounded per address only: generated keys are 256-bit,
+  in a separate bucket; the controller and worker metrics listeners throttle per TCP peer and refuse the bootstrap
+  key once a scrape token is configured. Guessing spread over many addresses is bounded per address only: generated keys are 256-bit,
   but an operator-chosen bootstrap key should be long and random.
 - **Shared client address.** Without `config.trustedProxyIps`, every client behind an Ingress shares one address:
   one client can exhaust the API rate limit, the per-IP sign-in budget and the per-IP failed-key budget for a window.
-  While an address is over its failed-key budget, a correct key from that same address waits too.
+  While an address is over its failed-key budget, a correct key from that same address waits too, for as long as
+  the failing client keeps failing.
 - **Per-replica limits.** Rate limits and lockouts are kept in each API process; with N replicas the effective budget
   is N times larger.
 - **The bootstrap key stays an admin key on upgraded installs** until `auth.legacyApiKey` is changed.
