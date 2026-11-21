@@ -1,3 +1,7 @@
+### Added
+- Chart setting `secrets.ledgerChainKey` (`LEDGER_CHAIN_KEY`), generated once by the credentials bootstrap Job when empty, and metrics `greenkube_ledger_chain_head_keyed{cluster_uid}` and `greenkube_accrual_watermark_ahead_seconds{cluster_name}` (LED-05, LED-06).
+- Migrations 0290 to 0293 (additive): `savings_ledger_entries.chain_key_id` and `annual_rate`, `savings_ledger_totals`, and `row_kind`, `annual_cost_rate`, `annual_co2e_rate`, `currency`, `measurement_id` on `recommendation_savings_ledger`. No stored row or entry is updated: existing entries keep their hash and `chain.ok`.
+
 ### Fixed
 - Savings attribution refuses to run when the process clock is more than 5 minutes from the PostgreSQL clock (`greenkube_attribution_errors_total{reason="clock_skew"}`), never books a slot after the current hour, exposes a watermark left in the future as `greenkube_accrual_watermark_ahead_seconds`, and keeps accruing recommendations while that watermark is ahead (LED-06).
 - Each recommendation accrues from its own cursor: a record that was invalid for some runs gets the missed slots back once valid (LED-12 c).
