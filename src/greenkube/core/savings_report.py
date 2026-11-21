@@ -19,6 +19,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Iterable, List, Optional
 
+from ..models.measurement import INTERIM_METHOD
 from ..models.metrics import RecommendationRecord
 from ..models.savings import (
     METHOD_MEASURED,
@@ -40,6 +41,17 @@ LEGACY_COMPRESSED_DIAGNOSTIC = (
 def _status(record: RecommendationRecord) -> str:
     status = record.status
     return str(status.value if hasattr(status, "value") else status)
+
+
+def is_interim(record: RecommendationRecord) -> bool:
+    """Whether the record's latest decision came from the interim verifier (MEA-16)."""
+    baseline = record.baseline
+    return baseline is not None and baseline.get("measurement_method") == INTERIM_METHOD
+
+
+def interim_recommendation_ids(records: Iterable[RecommendationRecord]) -> List[int]:
+    """Ids of the records decided by the interim verifier (MEA-16), reported apart from measured totals."""
+    return sorted(int(record.id) for record in records if record.id is not None and is_interim(record))
 
 
 def _annual_block(rates: dict, method: str) -> SavingsBlock:
@@ -160,6 +172,7 @@ def assemble_savings_report(
     source: str = "ledger_v2",
     projected_unverified: Optional[List[SavingsAccrualTotal]] = None,
     cost_of_fix: Optional[List[SavingsAccrualTotal]] = None,
+    interim: Optional[List[SavingsAccrualTotal]] = None,
 ) -> SavingsReport:
     """Build the report from applied recommendations and ledger totals.
 
@@ -170,11 +183,28 @@ def assemble_savings_report(
     measurement was inconclusive: reported apart and left out of
     ``projected_to_date`` (LED-03). ``cost_of_fix`` holds the measured cost of
     reliability fixes, reported in ``reliability_cost_to_date``, never netted
-    into a saving.
+    into a saving. ``interim`` holds the ledger totals of the recommendations
+    decided by the interim verifier (MEA-16): their measured amounts are
+    reported in ``interim_run_rate_annual``/``interim_realized_to_date`` and
+    left out of every measured figure.
     """
+    interim_records = [record for record in applied_records if is_interim(record)]
+    measured_records = [record for record in applied_records if not is_interim(record)]
     rates = annual_rates_by_method(applied_records)
+    # MEA-16: interim verdicts (two window means, no counterfactual) never join the measured run rate.
+    rates[METHOD_MEASURED] = annual_rates_by_method(measured_records).get(METHOD_MEASURED, {})
+    interim_rates = annual_rates_by_method(interim_records)
     blocks = {"source": source, "accrued_only": accrued_only}
     realized = _accrued_block(breakdown, METHOD_MEASURED, start, end, **blocks)  # type: ignore[arg-type]
+    interim_block: Optional[SavingsBlock] = None
+    if interim is not None:
+        interim_block = _accrued_block(interim, METHOD_MEASURED, start, end, source=source)
+        realized = realized.model_copy(
+            update={
+                "cost": realized.cost - interim_block.cost,
+                "co2e_grams": realized.co2e_grams - interim_block.co2e_grams,
+            }
+        )
     projected_to_date = _accrued_block(breakdown, METHOD_PROJECTED, start, end, **blocks)  # type: ignore[arg-type]
     unverified_block: Optional[SavingsBlock] = None
     if projected_unverified is not None:
@@ -221,6 +251,8 @@ def assemble_savings_report(
         projected_to_date=projected_to_date,
         user_declared_annual=_annual_block(rates, METHOD_USER_DECLARED),
         projected_unverified_to_date=unverified_block,
+        interim_run_rate_annual=_annual_block(interim_rates, METHOD_MEASURED) if interim_records else None,
+        interim_realized_to_date=interim_block,
         reliability_cost_to_date=(
             _accrued_block(cost_of_fix, METHOD_MEASURED, start, end, source=source) if cost_of_fix is not None else None
         ),
@@ -232,9 +264,9 @@ def assemble_savings_report(
             **blocks,  # type: ignore[arg-type]
         ),
         applied_count=len(applied_records),
-        verified_count=sum(1 for record in applied_records if _status(record) == "verified"),
+        verified_count=sum(1 for record in measured_records if _status(record) == "verified"),
         diagnostics=diagnostics,
-        realization=realization_summary(applied_records),
+        realization=realization_summary(measured_records),
         total_carbon_saved_co2e_grams=realized.co2e_grams,
         total_cost_saved=realized.cost,
         measured_carbon_saved_co2e_grams=realized.co2e_grams,

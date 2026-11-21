@@ -1390,6 +1390,11 @@ class RecommendationVerifier:
         if missing:
             logger.info("Verification of %s: health signals not available: %s", record.id, ", ".join(missing))
 
+        if stored.windows.get("method") == INTERIM_METHOD and not stored.change_id:
+            # MEA-16: the savings totals report interim verdicts apart from change measurements.
+            updated_baseline["measurement_method"] = INTERIM_METHOD
+        else:
+            updated_baseline.pop("measurement_method", None)
         if stored.change_id:
             updated_baseline["change_id"] = stored.change_id
             updated_baseline["change_measurement_id"] = stored.group_id

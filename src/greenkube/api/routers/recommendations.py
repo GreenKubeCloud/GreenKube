@@ -54,7 +54,7 @@ from greenkube.core.optimization.scoring import normalize_profile, profile_names
 from greenkube.core.optimization.track_record import load_track_record
 from greenkube.core.recommendation_ranking import DecisionRequest, decide_records, rank_recommendations
 from greenkube.core.savings_attributor import record_user_declared_savings, validate_user_declared_savings
-from greenkube.core.savings_report import assemble_savings_report
+from greenkube.core.savings_report import assemble_savings_report, interim_recommendation_ids
 from greenkube.models.metrics import (
     ApplyRecommendationRequest,
     IgnoreRecommendationRequest,
@@ -369,6 +369,7 @@ async def get_savings_summary(
     accrued_only = None
     unverified = None
     fixes = None
+    interim = None
     source = "ledger_v2"
     try:
         cluster_name = _get_savings_cluster_name()
@@ -390,6 +391,15 @@ async def get_savings_summary(
             fixes = await ledger_repo.accrual_breakdown(
                 identity[0], start, end, namespace=namespace, reasons=("cost_of_fix",)
             )
+            # MEA-16: interim-method verdicts are reported apart from the measured totals.
+            interim_ids = interim_recommendation_ids(applied)
+            interim = (
+                await ledger_repo.accrual_breakdown(
+                    identity[0], start, end, namespace=namespace, recommendation_ids=interim_ids
+                )
+                if interim_ids
+                else []
+            )
         else:
             source = "ledger_v1"
             breakdown = await savings_repo.get_accrual_breakdown(cluster_name, start, end, namespace=namespace)
@@ -408,6 +418,7 @@ async def get_savings_summary(
         source=source,
         projected_unverified=unverified,
         cost_of_fix=fixes,
+        interim=interim,
     )
 
 

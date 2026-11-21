@@ -282,6 +282,21 @@ class SavingsReport(BaseModel):
             "and left out of projected_to_date. Projections refuted by a not-realized verdict are reversed."
         ),
     )
+    interim_run_rate_annual: Optional[SavingsBlock] = Field(
+        None,
+        description=(
+            "Yearly savings of recommendations decided by the interim verifier (CHANGE_MEASUREMENT_ENABLED=false: "
+            "two window means, no counterfactual, no confounder check, MEA-16). Never part of run_rate_annual; "
+            "null when there is none."
+        ),
+    )
+    interim_realized_to_date: Optional[SavingsBlock] = Field(
+        None,
+        description=(
+            "Measured ledger accruals of the interim-method recommendations over the window (MEA-16), left out "
+            "of realized_to_date."
+        ),
+    )
     applied_count: int = Field(0, description="Recommendations in an applied, verifying, verified or review state.")
     verified_count: int = Field(0, description="Recommendations with a verified (measured) outcome.")
     diagnostics: List[str] = Field(default_factory=list, description="Caveats that apply to these figures.")
