@@ -52,18 +52,23 @@ class FakePrometheus:
             if needle in query:
                 raise RuntimeError(f"prometheus unavailable for {needle}")
 
+        timestamps = []
+        t = start_ts
+        while t <= end_ts + 1e-9:
+            timestamps.append(t)
+            t += step_seconds
+        if _is_composite(query):
+            return [
+                {"metric": labels, "values": [[ts, _format(value)] for ts, value in sorted(samples.items())]}
+                for labels, samples in self._evaluate(query, timestamps).values()
+            ]
+
         metric_name, matchers = self._selector(query)
         by_match = _BY_RE.search(query)
         by = [label.strip() for label in by_match.group(1).split(",")] if by_match else []
         use_max = query.lstrip().startswith("max")
         # ``avg_over_time(metric[w])`` keeps every label of every series (DCGM GPU queries).
         keep_labels = query.lstrip().startswith("avg_over_time(")
-
-        timestamps = []
-        t = start_ts
-        while t <= end_ts + 1e-9:
-            timestamps.append(t)
-            t += step_seconds
 
         grouped: dict[tuple, dict[float, float]] = defaultdict(dict)
         group_labels: dict[tuple, dict[str, str]] = {}
@@ -100,6 +105,44 @@ class FakePrometheus:
             )
         return results
 
+    def _evaluate(self, expr: str, timestamps: list[float]) -> dict[tuple, tuple[dict[str, str], dict[float, float]]]:
+        """Evaluate ``a or b`` and nested ``sum|max(inner) by (labels)`` (COL-11, COL-21).
+
+        Values are keyed by their label set; ``or`` keeps the left operand's
+        series and adds right-hand series whose label set the left lacks.
+        """
+        operands = _split_or(expr)
+        if len(operands) > 1:
+            merged: dict[tuple, tuple[dict[str, str], dict[float, float]]] = {}
+            for operand in operands:
+                for key, item in self._evaluate(operand, timestamps).items():
+                    merged.setdefault(key, item)
+            return merged
+        match = _AGG_RE.fullmatch(expr.strip())
+        if match is None:
+            metric_name, matchers = self._selector(expr)
+            series: dict[tuple, tuple[dict[str, str], dict[float, float]]] = {}
+            for raw in self.series:
+                if raw.metric != metric_name or not _matches(raw.labels, matchers):
+                    continue
+                labels = {k: v for k, v in raw.labels.items() if v}
+                values = {ts: raw.at(ts) for ts in timestamps if raw.at(ts) is not None}
+                series[tuple(sorted(labels.items()))] = (labels, values)
+            return series
+        op, inner, by_clause = match.groups()
+        by = [label.strip() for label in by_clause.split(",") if label.strip()]
+        groups: dict[tuple, tuple[dict[str, str], dict[float, float]]] = {}
+        for labels, values in self._evaluate(inner, timestamps).values():
+            grouped_labels = {label: labels[label] for label in by if labels.get(label)}
+            key = tuple(sorted(grouped_labels.items()))
+            _, current = groups.setdefault(key, (grouped_labels, {}))
+            for ts, value in values.items():
+                if ts not in current:
+                    current[ts] = value
+                else:
+                    current[ts] = max(current[ts], value) if op == "max" else current[ts] + value
+        return groups
+
     async def collect_pod_storage(self):
         return {}
 
@@ -113,6 +156,32 @@ class FakePrometheus:
             if name in names or name.startswith(("container_", "kube_")):
                 return name, _MATCHER_RE.findall(selector or "")
         raise AssertionError(f"Unsupported query: {query}")
+
+
+_AGG_RE = re.compile(r"(sum|max)\((.*)\)\s*by\s*\(([^)]*)\)", re.S)
+
+
+def _split_or(expr: str) -> list[str]:
+    """Split ``expr`` on top-level ``or`` operators (outside parentheses and braces)."""
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(expr):
+        char = expr[i]
+        if char in "({[":
+            depth += 1
+        elif char in ")}]":
+            depth -= 1
+        elif depth == 0 and expr.startswith(" or ", i):
+            parts.append(expr[start:i])
+            start = i + 4
+            i += 3
+        i += 1
+    parts.append(expr[start:])
+    return [part.strip() for part in parts]
+
+
+def _is_composite(query: str) -> bool:
+    """Queries the legacy one-level evaluator cannot handle: ``or`` or nested ``by`` clauses."""
+    return len(_split_or(query)) > 1 or len(_BY_RE.findall(query)) > 1
 
 
 def _matches(labels: dict[str, str], matchers: list[tuple[str, str, str]]) -> bool:

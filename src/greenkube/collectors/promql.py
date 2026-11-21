@@ -13,9 +13,17 @@ Scoping rules (BUG-01 / roadmap A1):
   exported several times, with labels the ``by`` clause drops: kubelet
   ``/metrics/resource`` scraped next to ``/metrics/cadvisor``, two scrape jobs,
   or two cgroup paths (``id``) of one container (systemd/cgroupfs driver
-  mismatch, the old and new cgroup of a restarted container).  CPU and memory
-  usage are therefore aggregated with ``max`` per container, never ``sum``: a
-  sum doubled the usage and the rightsizing increases built on it.
+  mismatch).  CPU and memory usage are therefore aggregated with ``max`` per
+  container instance, never ``sum``: a sum doubled the usage and the
+  rightsizing increases built on it.
+* **Consecutive instances of one container** (COL-11): a restart, a crash loop
+  or a pod recreated under the same name yields one CPU series per instance,
+  each with its own runtime container id in cAdvisor's ``name`` label.  Their
+  rates cover consecutive parts of the rate window, so CPU is the ``max`` per
+  instance (``name``), then the ``sum`` of the instances.  Series without a
+  ``name`` label (kubelet ``/metrics/resource``, pod cgroups) keep the ``max``
+  per container and are used only when no cAdvisor instance series exists.
+  Memory is a gauge and keeps the ``max``.
 * **Pod-scoped series** (network) are only exported on the pod sandbox, never
   per application container, so they are intentionally left unfiltered.
 * **kube-state-metrics series** (restarts, pod info) describe Kubernetes
@@ -119,12 +127,20 @@ class PromQLCatalog:
     # Container-scoped (cAdvisor) — pod cgroup and pause series excluded
     # ------------------------------------------------------------------
 
-    def container_cpu_usage(self) -> str:
-        """CPU cores per container: ``max by (namespace,pod,container,node)`` (duplicate series counted once)."""
+    def _cpu_rate_per_container(self, *matchers: str) -> str:
+        """CPU cores per container: instances (``name``) added, duplicates of one instance counted once (COL-11)."""
+        named = _selector(*matchers, 'name!=""', *self.extra_matchers)
+        unnamed = _selector(*matchers, 'name=""', *self.extra_matchers)
         return (
-            f"max(rate({self._container('container_cpu_usage_seconds_total')}[{self.rate_window}])) "
+            f"sum(max(rate(container_cpu_usage_seconds_total{named}[{self.rate_window}])) "
+            "by (namespace,pod,container,node,name)) by (namespace,pod,container,node) "
+            f"or max(rate(container_cpu_usage_seconds_total{unnamed}[{self.rate_window}])) "
             "by (namespace,pod,container,node)"
         )
+
+    def container_cpu_usage(self) -> str:
+        """CPU cores per container: consecutive instances added, duplicate series counted once (COL-11)."""
+        return self._cpu_rate_per_container(CONTAINER_FILTER)
 
     def node_cpu_usage(self) -> str:
         """Whole-node CPU cores of the kubelet root cgroup (``id="/"``): pods, kubelet, runtime, kernel (NRG-12)."""
@@ -144,11 +160,7 @@ class PromQLCatalog:
         cgroup (counted once), so a cluster mixing runtimes (cri-dockerd
         exporting pod-level series next to containerd) keeps every pod.
         """
-        selector = _selector(POD_LEVEL_OR_CONTAINER_FILTER, *self.extra_matchers)
-        return (
-            f"max(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) "
-            "by (namespace,pod,container,node)"
-        )
+        return self._cpu_rate_per_container(POD_LEVEL_OR_CONTAINER_FILTER)
 
     def memory_working_set_by_level(self) -> str:
         """Working-set bytes of every container and every pod cgroup, chosen per pod by the caller (COL-09)."""
