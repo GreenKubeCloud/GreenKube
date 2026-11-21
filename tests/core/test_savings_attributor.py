@@ -501,3 +501,22 @@ class TestPerRecommendationCursor:
         expected = [NOW.replace(minute=0) + timedelta(hours=h) for h in range(-1, 4)]
         assert slots == expected
         assert ledger.method_sum("projected") == pytest.approx(53 / 60 + 4)
+
+
+class TestReactivation:
+    """A record that stopped accruing (rollback review) and accrues again never books the pause (LED-12)."""
+
+    @pytest.mark.asyncio
+    async def test_a_dismissed_48h_rollback_review_books_only_the_accruing_hours(self):
+        ledger = FakeLedger()
+        attributor = SavingsAttributor(ledger, "c", initial_backfill=timedelta(days=7))
+        applied_at = NOW.replace(minute=0) - timedelta(hours=1)
+        await attributor.accrue([_record(applied_at=applied_at)], now=NOW)
+        assert ledger.method_sum("projected") == pytest.approx(1.0)
+        in_review = _record(applied_at=applied_at, status=RecommendationStatus.ROLLBACK_REVIEW)
+        for hour in range(1, 49):
+            await attributor.accrue([in_review], now=NOW + timedelta(hours=hour))
+        dismissed_at = NOW.replace(minute=0) + timedelta(hours=48)
+        dismissed = _record(applied_at=applied_at, baseline={"accruing_since": dismissed_at.isoformat()})
+        await attributor.accrue([dismissed], now=dismissed_at + timedelta(hours=1, minutes=7))
+        assert ledger.method_sum("projected") == pytest.approx(2.0)

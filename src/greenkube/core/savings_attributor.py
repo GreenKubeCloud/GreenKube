@@ -249,6 +249,38 @@ def _impact_currency(record: RecommendationRecord) -> Optional[str]:
     return currency.strip().upper() or None if isinstance(currency, str) else None
 
 
+#: Recommendation baseline key: when the record last started accruing again after a pause (LED-12).
+ACCRUING_SINCE_KEY = "accruing_since"
+
+
+def accrues_in(status: Any, verification_status: Any) -> bool:
+    """Whether a record in this status and verification status accrues savings (the attributor's rule)."""
+    status_value = _value(status)
+    if status_value in _MEASURED_STATUSES:
+        return True
+    return status_value in _ACCRUING_STATUSES and _value(verification_status) in _PENDING_VERIFICATION
+
+
+def accruing_since(record: RecommendationRecord) -> Optional[datetime]:
+    """When the record started accruing again after a pause (``baseline.accruing_since``), or None.
+
+    Set by the lifecycle when a record that had stopped accruing (rollback
+    review, refuted or inconclusive measurement, regression) accrues again:
+    the attributor never backfills the pause.
+    """
+    baseline = record.baseline
+    if baseline is None:
+        return None
+    values = baseline.model_dump() if hasattr(baseline, "model_dump") else dict(baseline)
+    raw = values.get(ACCRUING_SINCE_KEY)
+    if not raw:
+        return None
+    try:
+        return ensure_utc(raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
 def _latest_measurement_id(record: RecommendationRecord) -> Optional[str]:
     """The measurement whose measured values the record carries (``baseline.latest_measurement_id``)."""
     baseline = record.baseline
@@ -585,6 +617,11 @@ class SavingsAttributor:
                     cursor = max(ensure_utc(record.applied_at), lower_bound)
                 else:
                     cursor = lower_bound
+                resumed = accruing_since(record)
+                if resumed is not None:
+                    # A record that accrues again after a pause never backfills the pause (LED-12).
+                    cursor = max(cursor, resumed)
+                    floor = max(floor, resumed) if floor is not None else resumed
                 rows.extend(self._accruals_for(record, self._record_slots(cursor, horizon), floor))
             except Exception as exc:
                 errors += 1
