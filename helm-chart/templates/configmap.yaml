@@ -274,6 +274,17 @@ data:
   {{- with .Values.sources }}
   SOURCES_PLUGINS_ENABLED: {{ if hasKey . "pluginsEnabled" }}{{ .pluginsEnabled | toString | quote }}{{ else }}"true"{{ end }}
   SOURCES_CONFIG: {{ .settings | default dict | toJson | quote }}
+  {{- if hasKey . "toolFloors" }}
+  SIGNAL_TOOL_FLOORS: {{ .toolFloors | default dict | toJson | quote }}
+  {{- end }}
+  {{- with .minChange }}
+  SIGNAL_MIN_CHANGE_PERCENT: {{ if hasKey . "percent" }}{{ .percent | toString | quote }}{{ else }}"5"{{ end }}
+  SIGNAL_MIN_CHANGE_CPU_MILLICORES: {{ if hasKey . "cpuMillicores" }}{{ .cpuMillicores | int | quote }}{{ else }}"10"{{ end }}
+  SIGNAL_MIN_CHANGE_MEMORY_BYTES: {{ if hasKey . "memoryBytes" }}{{ .memoryBytes | int64 | quote }}{{ else }}"16777216"{{ end }}
+  {{- end }}
+  {{- with .vpa }}
+  VPA_MIN_SAMPLE_HOURS: {{ if hasKey . "minSampleHours" }}{{ .minSampleHours | toString | quote }}{{ else }}"24"{{ end }}
+  {{- end }}
   {{- end }}
 
   # --- Impact Model ---

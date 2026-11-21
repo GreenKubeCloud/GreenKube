@@ -138,7 +138,8 @@ class TestConsensusScan:
 
     async def test_consensus_reaches_the_evidence_and_rewards_agreement(self):
         engine = _engine([FakeConnector("vpa", [_cpu(300, "vpa")]), FakeConnector("greenkube", [_cpu(290)])])
-        alone = _engine([FakeConnector("vpa", [_cpu(300, "vpa")])])
+        # VPA alone never creates a recommendation (A.5): compare with the native value alone.
+        alone = _engine([FakeConnector("greenkube", [_cpu(290)])])
         context = OptimizationContext(config=get_config(), metrics=[])
 
         [agreed] = (await engine.collect(context)).recommendations
@@ -183,13 +184,19 @@ class TestConsensusScan:
 
 class TestRevisionsAcrossScans:
     async def test_a_new_consensus_value_is_a_new_revision(self, repo):
-        await _engine([FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250)]).refresh(AsyncMock(), AsyncMock(), repo)
+        await _engine(
+            [FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250), FakeConnector("greenkube", [_cpu(240)])]
+        ).refresh(AsyncMock(), AsyncMock(), repo)
         first = await _only(repo)
 
-        await _engine([FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250)]).refresh(AsyncMock(), AsyncMock(), repo)
+        await _engine(
+            [FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250), FakeConnector("greenkube", [_cpu(240)])]
+        ).refresh(AsyncMock(), AsyncMock(), repo)
         assert (await _only(repo)).revision == 1
 
-        await _engine([FakeConnector("vpa", [_cpu(320, "vpa")]), _krr(250)]).refresh(AsyncMock(), AsyncMock(), repo)
+        await _engine(
+            [FakeConnector("vpa", [_cpu(320, "vpa")]), _krr(250), FakeConnector("greenkube", [_cpu(240)])]
+        ).refresh(AsyncMock(), AsyncMock(), repo)
         second = await _only(repo)
         assert (second.id, second.revision, second.recommended_cpu_request_millicores) == (first.id, 2, 320)
         [superseded] = await repo.get_revisions(first.id)
@@ -201,10 +208,18 @@ class TestPerSourceReconciliation:
     """E8 with consensus: staleness needs every supporting source to complete without re-emitting."""
 
     async def test_a_failed_supporting_source_keeps_the_last_known_consensus(self, repo):
-        await _engine([FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250)]).refresh(AsyncMock(), AsyncMock(), repo)
+        await _engine(
+            [FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250), FakeConnector("greenkube", [_cpu(240)])]
+        ).refresh(AsyncMock(), AsyncMock(), repo)
 
         # VPA is down: KRR alone (250m) must not overwrite the 300m consensus VPA supported.
-        engine = _engine([FakeConnector("vpa", error=RuntimeError("apiserver timeout")), _krr(250)])
+        engine = _engine(
+            [
+                FakeConnector("vpa", error=RuntimeError("apiserver timeout")),
+                _krr(250),
+                FakeConnector("greenkube", [_cpu(240)]),
+            ]
+        )
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
         record = await _only(repo)
@@ -260,7 +275,7 @@ class TestPerSourceReconciliation:
         assert (record.recommended_cpu_request_millicores, record.revision) == (320, 1)
 
     async def test_a_failed_signal_only_source_never_makes_its_advice_stale(self, repo):
-        await _engine([_krr(250)]).refresh(AsyncMock(), AsyncMock(), repo)
+        await _engine([_krr(350), FakeConnector("greenkube", [_cpu(280)])]).refresh(AsyncMock(), AsyncMock(), repo)
 
         await _engine([_krr(fail=True), FakeConnector("greenkube", [])]).refresh(AsyncMock(), AsyncMock(), repo)
 
@@ -268,14 +283,20 @@ class TestPerSourceReconciliation:
         assert record.status is RecommendationStatus.ACTIVE and record.source == "krr"
 
     async def test_stale_only_when_every_supporting_source_completed_without_it(self, repo):
-        await _engine([FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250)]).refresh(AsyncMock(), AsyncMock(), repo)
+        await _engine(
+            [FakeConnector("vpa", [_cpu(300, "vpa")]), _krr(250), FakeConnector("greenkube", [_cpu(240)])]
+        ).refresh(AsyncMock(), AsyncMock(), repo)
 
         # VPA completes without it, KRR fails: KRR still supports it, so it stays.
-        await _engine([FakeConnector("vpa", []), _krr(fail=True)]).refresh(AsyncMock(), AsyncMock(), repo)
+        await _engine([FakeConnector("vpa", []), _krr(fail=True), FakeConnector("greenkube", [])]).refresh(
+            AsyncMock(), AsyncMock(), repo
+        )
         assert len(await repo.get_active_recommendations()) == 1
 
         # Both complete and neither re-emits it: stale.
-        await _engine([FakeConnector("vpa", []), _empty_krr()]).refresh(AsyncMock(), AsyncMock(), repo)
+        await _engine([FakeConnector("vpa", []), _empty_krr(), FakeConnector("greenkube", [])]).refresh(
+            AsyncMock(), AsyncMock(), repo
+        )
         assert await repo.get_active_recommendations() == []
 
 

@@ -366,6 +366,33 @@
         "pluginsEnabled": {"type": "boolean"},
         "settings": {"type": "object"},
         "priority": {"type": "string"},
+        "toolFloors": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "cpu": {"type": ["string", "number"]},
+              "memory": {"type": ["string", "number"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "minChange": {
+          "type": "object",
+          "properties": {
+            "percent": {"type": "number", "minimum": 0},
+            "cpuMillicores": {"type": "integer", "minimum": 0},
+            "memoryBytes": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        },
+        "vpa": {
+          "type": "object",
+          "properties": {
+            "minSampleHours": {"type": "number", "minimum": 0}
+          },
+          "additionalProperties": false
+        },
         "polaris": {
           "type": "object",
           "properties": {

@@ -42,9 +42,36 @@ class FixtureCollector:
         self.payload = payload if payload is not None else json.loads(FIXTURE.read_text())
         self.skipped_by_mode: dict = {}
 
+    def checkpoints(self) -> dict:
+        """One mature checkpoint (a week of samples) per VPA container of the payload (A.5 maturity)."""
+        items = []
+        for vpa in self.payload.get("items", []):
+            metadata = vpa.get("metadata") or {}
+            recommendation = (vpa.get("status") or {}).get("recommendation") or {}
+            for container in recommendation.get("containerRecommendations") or []:
+                items.append(
+                    {
+                        "metadata": {"namespace": metadata.get("namespace")},
+                        "spec": {
+                            "vpaObjectName": metadata.get("name"),
+                            "containerName": container.get("containerName"),
+                        },
+                        "status": {
+                            "totalSamplesCount": 10080,
+                            "firstSampleStart": "2026-05-19T12:00:00Z",
+                            "lastSampleStart": "2026-05-26T12:00:00Z",
+                        },
+                    }
+                )
+        return {"items": items}
+
     async def collect(self) -> List[VPARecommendation]:
         api = AsyncMock()
-        api.list_cluster_custom_object = AsyncMock(return_value=self.payload)
+
+        async def list_objects(group, version, plural, **kwargs):
+            return self.checkpoints() if plural == "verticalpodautoscalercheckpoints" else self.payload
+
+        api.list_cluster_custom_object = AsyncMock(side_effect=list_objects)
         inner = VPACollector()
         with patch("greenkube.collectors.vpa_collector.get_custom_objects_api", AsyncMock(return_value=api)):
             recs = await inner.collect()

@@ -21,6 +21,13 @@ the others (the former ``dedup.arbitrate``).
   (:func:`independent_vote_count`): one ``signals:write`` key can push as
   several clients and upload reports, so pushed sources never corroborate
   each other (the auto-approval decrease guard needs two independent votes).
+* A :class:`VoteScreen` (roadmap A.5, F-12) sets aside the external numeric
+  ballots that are not signals of need before any policy runs: a value on a
+  known tool minimum (KRR ``simple`` 100 Mi, the Fairwinds VPA chart 100 Mi and
+  15m) and a change below the minimum (5 % and 10m or 16 Mi). They are kept in
+  :attr:`Consensus.ignored_votes`. A container-resources group without a
+  native (GreenKube-measured) ballot never becomes a recommendation: an
+  external source alone stays a signal.
 * A :class:`ConsensusPolicy` picks the consolidated proposal:
 
   ``safest`` (default)
@@ -52,7 +59,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -262,6 +269,149 @@ def ballots_for_signal(
     return [Ballot(signal=signal, source=group_source, family=family, kind=signal.kind, payload=payload)]
 
 
+#: Reconciliation unit of the native analyzers (``greenkube``, ``greenkube.<analyzer>``).
+NATIVE_SOURCE = "greenkube"
+
+#: Capabilities whose groups need a native ballot to become a recommendation (A.5).
+NATIVE_MEASURED_CAPABILITIES = frozenset({Capability.CONTAINER_REQUESTS, Capability.CONTAINER_LIMITS})
+
+#: Known minimum each tool applies to its proposals, per engine family (``SIGNAL_TOOL_FLOORS``):
+#: KRR ``simple`` (``--mem-min 100``, ``--cpu-min 10``) and the Fairwinds VPA chart
+#: (``pod-recommendation-min-memory-mb: 100``, ``pod-recommendation-min-cpu-millicores: 15``).
+DEFAULT_TOOL_FLOORS: Dict[str, Dict[str, int]] = {
+    "krr": {"cpu_request_m": 10, "memory_request_bytes": 100 * 1024 * 1024},
+    "vpa": {"cpu_request_m": 15, "memory_request_bytes": 100 * 1024 * 1024},
+}
+#: Families whose floor applies per pod and is split evenly between its containers (the VPA recommender).
+PER_POD_FLOOR_FAMILIES = frozenset({"vpa"})
+
+#: Why an external ballot was set aside.
+IGNORED_TOOL_FLOOR = "tool_floor"
+IGNORED_MIN_CHANGE = "below_min_change"
+IGNORED_MATURITY_UNKNOWN = "maturity_unknown"
+
+
+def maturity_unknown(ballot: "Ballot") -> bool:
+    """Whether the signal says its source's maturity could not be read (``raw.maturity.state``)."""
+    raw = ballot.signal.raw if isinstance(ballot.signal.raw, dict) else {}
+    maturity = raw.get("maturity")
+    return isinstance(maturity, dict) and maturity.get("state") == "unknown"
+
+
+def is_native(ballot: "Ballot") -> bool:
+    """Whether a ballot comes from GreenKube's own measurement.
+
+    A native analyzer (``greenkube``, ``greenkube.<analyzer>``), or a value a
+    built-in connector computed from GreenKube's usage data under a
+    ``greenkube.*`` engine family (the Polaris missing-request follow-up). A
+    pushed signal is never native, whatever engine family it declares, and the
+    source runner drops plugin signals that declare a ``greenkube.*`` family.
+    """
+    if ballot.source == NATIVE_SOURCE or ballot.source.startswith(NATIVE_SOURCE + "."):
+        return True
+    return not ballot.pushed and ballot.family.startswith(NATIVE_SOURCE + ".")
+
+
+@dataclass(frozen=True)
+class VoteScreen:
+    """Which external numeric ballots are not signals of need (roadmap A.5, F-12).
+
+    ``floors`` maps an engine family (or a source id) to the known minimum of
+    the tool per resource (``cpu_request_m``, ``memory_request_bytes``): a value
+    equal to it is the tool's floor, not a measurement. ``min_change_ratio``
+    and ``min_change`` (per resource) set the smallest change that counts as a
+    vote: both must be reached. Native ballots are never screened.
+    """
+
+    floors: Mapping[str, Mapping[str, int]] = field(default_factory=lambda: DEFAULT_TOOL_FLOORS)
+    min_change_ratio: float = 0.05
+    min_change: Mapping[str, int] = field(
+        default_factory=lambda: {"cpu_request_m": 10, "memory_request_bytes": 16 * 1024 * 1024}
+    )
+    #: A container-resources group without a native ballot never becomes a recommendation.
+    require_native: bool = True
+
+    def floor_for(self, ballot: "Ballot") -> Optional[int]:
+        """The known tool minimum of a ballot's resource, or None.
+
+        The most specific key wins: the source id (``goldilocks``), then the
+        reconciliation unit, then the engine family (``vpa``); a key without
+        this resource falls through to the next.
+        """
+        for key in (ballot.source_id, ballot.source, ballot.family):
+            value = (self.floors.get(key) or {}).get(str(ballot.resource))
+            if value:
+                return int(value)
+        return None
+
+    def on_floor(self, ballot: "Ballot") -> bool:
+        """Whether the ballot's value is its tool's known minimum (split per container for a per-pod floor)."""
+        floor = self.floor_for(ballot)
+        if floor is None or ballot.value is None:
+            return False
+        if ballot.value <= floor and ballot.family not in PER_POD_FLOOR_FAMILIES:
+            return True
+        raw = ballot.signal.raw if isinstance(ballot.signal.raw, dict) else {}
+        containers = raw.get("containers")
+        # An unknown container count is taken as one: guessing a split would discard
+        # small sidecar values (8m is 15m / 2, but also a plausible measured need).
+        count = int(containers) if isinstance(containers, int) and containers > 0 else 1
+        share = floor / count
+        # The recommender rounds a split floor up to the next unit (7.5m -> 8m).
+        return abs(ballot.value - share) <= max(1.0, share * 0.01)
+
+    def below_min_change(self, ballot: "Ballot") -> bool:
+        """Whether the ballot changes its current value by less than the minimum.
+
+        A proposal equal to the current value is a "keep it" vote, not a small
+        change: it still counts (under ``safest`` it holds the current request).
+        """
+        if ballot.value is None or not ballot.current:
+            return False
+        delta = abs(ballot.value - ballot.current)
+        if delta == 0:
+            return False
+        minimum = max(self.min_change_ratio * ballot.current, float(self.min_change.get(str(ballot.resource), 0)))
+        return delta < minimum
+
+    def reason(self, ballot: "Ballot", policy: Optional["ConsensusPolicy"] = None) -> Optional[str]:
+        """Why an external numeric ballot is not counted as proposed, or None when it is a vote.
+
+        ``maturity_unknown``: a decrease from a source whose maturity could not
+        be read (a VPA without checkpoints) may only hold or raise a value, so
+        it is dropped under every policy but ``safest`` (where a lower value
+        never wins anyway).
+        """
+        if is_native(ballot) or not ballot.numeric:
+            return None
+        if self.on_floor(ballot):
+            return IGNORED_TOOL_FLOOR
+        if (
+            policy is not None
+            and policy != ConsensusPolicy.SAFEST
+            and maturity_unknown(ballot)
+            and ballot.value is not None
+            and ballot.current is not None
+            and ballot.value < ballot.current
+        ):
+            return IGNORED_MATURITY_UNKNOWN
+        if self.below_min_change(ballot):
+            return IGNORED_MIN_CHANGE
+        return None
+
+
+class IgnoredVote(BaseModel):
+    """An external proposal that was not counted (a tool floor, an insignificant change)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    source_id: str
+    signal_id: str
+    value: Optional[int] = None
+    #: ``tool_floor``, ``below_min_change`` (still a "keep" vote at the current value) or ``maturity_unknown``.
+    reason: str
+
+
 class ConsensusVote(BaseModel):
     """One signal's part in a consensus."""
 
@@ -310,6 +460,8 @@ class Consensus(BaseModel):
     #: Sources that did not complete the scan and whose last known proposal (``{source_id: value}``)
     #: still supports the record (E8). Filled by the engine, never by :func:`combine`.
     last_known: Dict[str, int] = Field(default_factory=dict)
+    #: External proposals set aside before the policy ran (tool floors, insignificant changes, A.5).
+    ignored_votes: List[IgnoredVote] = Field(default_factory=list)
 
     @property
     def confidence_bonus(self) -> float:
@@ -623,11 +775,68 @@ def consolidate(
     *,
     priorities: Optional[Mapping[str, int]] = None,
     weight_for: Optional[Callable[[Ballot], float]] = None,
+    screen: Optional[VoteScreen] = None,
 ) -> List[ConsensusOutcome]:
-    """One consensus per group of ballots (pushed-only deletions are dropped, :func:`admissible_ballots`)."""
+    """One consensus per group of ballots.
+
+    Pushed-only deletions are dropped (:func:`admissible_ballots`). With a
+    ``screen``, external ballots that are not signals of need are listed in
+    ``ignored_votes``: a tool floor or a decrease of unknown maturity under a
+    policy other than ``safest`` is dropped, a change below the minimum votes
+    "keep the current value". A container-resources group without a native
+    ballot produces no outcome: its signals stay signals.
+    """
     outcomes = []
+    source_only = 0
+    parsed_policy = parse_policy(policy)
     for members in group_ballots(ballots).values():
         admitted = admissible_ballots(members)
-        if admitted:
-            outcomes.append(combine(admitted, policy, priorities=priorities, weight_for=weight_for))
+        if not admitted:
+            continue
+        ignored: List[IgnoredVote] = []
+        if screen is not None:
+            if (
+                screen.require_native
+                and admitted[0].signal.capability in NATIVE_MEASURED_CAPABILITIES
+                and not any(is_native(ballot) for ballot in admitted)
+            ):
+                source_only += 1
+                continue
+            kept = []
+            native_increase = any(
+                is_native(ballot)
+                and ballot.value is not None
+                and ballot.current is not None
+                and ballot.value > ballot.current
+                for ballot in admitted
+            )
+            for ballot in admitted:
+                reason = screen.reason(ballot, parsed_policy)
+                if reason is None:
+                    kept.append(ballot)
+                    continue
+                ignored.append(
+                    IgnoredVote(
+                        source_id=ballot.source_id,
+                        signal_id=ballot.signal.signal_id,
+                        value=ballot.value,
+                        reason=reason,
+                    )
+                )
+                if reason == IGNORED_MIN_CHANGE and not native_increase:
+                    # A small change is a "keep it" vote: it counts at the current value. Never
+                    # against a native increase (an OOM-driven one must not be cancelled): dropped.
+                    kept.append(replace(ballot, value=ballot.current))
+            admitted = kept
+            if not admitted:
+                continue
+        outcome = combine(admitted, policy, priorities=priorities, weight_for=weight_for)
+        outcome.consensus.ignored_votes = ignored
+        outcomes.append(outcome)
+    if source_only:
+        logger.info(
+            "%d container-resources group(s) proposed by external sources only, with no native measurement: "
+            "kept as signals, not recommendations.",
+            source_only,
+        )
     return outcomes

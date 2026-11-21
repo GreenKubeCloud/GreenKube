@@ -230,10 +230,9 @@ async def test_scan_persists_krr_source_runs_and_signals(tmp_path, monkeypatch):
         result = await engine.collect(OptimizationContext(config=Config()))
         await engine.record_source_runs(result.source_reports, None)
 
-        # KRR signals become recommendations only through consensus, under the krr source id.
-        assert result.recommendations
-        assert {rec.source for rec in result.recommendations} == {"krr"}
-        assert all(rec.consensus and rec.consensus.get("votes") for rec in result.recommendations)
+        # KRR alone, with no native measurement of the targets, never creates a recommendation (A.5):
+        # its advice stays a signal, recorded for the Sources page.
+        assert result.recommendations == []
         runs = await repository.list_runs("krr")
         assert [run.status for run in runs] == [SourceRunStatus.SUCCEEDED]
         assert runs[0].signal_count == 6

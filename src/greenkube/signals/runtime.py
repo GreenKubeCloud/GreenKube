@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from greenkube.signals.model import MAX_RAW_BYTES, SourceSignal, raw_size, trim_raw
 from greenkube.signals.sdk import (
+    PLUGIN_ORIGIN,
     CollectContext,
     Diagnostic,
     Source,
@@ -351,7 +352,8 @@ class SourceRunner:
         diagnostics = list(batch.diagnostics)
         kept: List[SourceSignal] = []
         seen: set[str] = set()
-        foreign = outside = duplicates = trimmed = bounded = invalid = 0
+        foreign = outside = duplicates = trimmed = bounded = invalid = reserved = 0
+        plugin = getattr(source, "registry_origin", None) == PLUGIN_ORIGIN
         for signal in batch.signals:
             if not isinstance(signal, SourceSignal):
                 invalid += 1
@@ -361,6 +363,10 @@ class SourceRunner:
                 continue
             if signal.capability not in cls.capabilities:
                 outside += 1
+                continue
+            if plugin and _reserved_engine_family(signal):
+                # A resolved ``greenkube.*`` engine family counts as GreenKube's own measurement (A.5).
+                reserved += 1
                 continue
             if signal.signal_id in seen:
                 duplicates += 1
@@ -379,6 +385,7 @@ class SourceRunner:
             (invalid, "invalid_signal", "items that are not SourceSignal objects were dropped"),
             (foreign, "foreign_source_id", "signals carrying another source id were dropped"),
             (outside, "undeclared_capability", "signals outside the declared capabilities were dropped"),
+            (reserved, "reserved_engine_family", "signals declaring a greenkube engine family were dropped"),
         ):
             if count:
                 rejected = True
@@ -464,3 +471,16 @@ def legacy_outcomes(reports: Sequence[SourceReport]) -> List["SourceRunOutcome"]
             )
         )
     return outcomes
+
+
+def _reserved_engine_family(signal: SourceSignal) -> bool:
+    """Whether a signal resolves to an engine family reserved for GreenKube's own measurement.
+
+    Uses the family the consensus resolves (the signal's ``engine_family``, the
+    algorithm's attribute or ``params["engine_family"]``...), so no spelling of
+    ``greenkube`` / ``greenkube.*`` escapes the check.
+    """
+    from greenkube.signals.consensus import engine_family
+
+    text = engine_family(signal).strip().lower()
+    return text == "greenkube" or text.startswith("greenkube.")

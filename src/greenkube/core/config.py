@@ -115,6 +115,51 @@ ACCELERATED_MIN_POST_WINDOW_DAYS = 1 / 48
 _CLAMP_WARNED: set[tuple[str, float]] = set()
 
 
+#: Resource keys accepted in ``SIGNAL_TOOL_FLOORS`` and the consensus resource each sets.
+_FLOOR_RESOURCES = {"cpu": "cpu_request_m", "memory": "memory_request_bytes"}
+
+
+def parse_tool_floors(value: Any) -> dict[str, dict[str, int]]:
+    """``SIGNAL_TOOL_FLOORS``: the known minimum each tool proposes, per engine family or source id.
+
+    A JSON object such as ``{"krr": {"cpu": "10m", "memory": "100Mi"}, "vpa": {"cpu": "15m",
+    "memory": "100Mi"}}``; quantities use Kubernetes notation (a bare number is millicores for
+    CPU and bytes for memory). Blank means the built-in floors; ``{}`` means no floor. A value
+    equal to a tool's floor is not counted as a consensus vote (roadmap A.5, F-12).
+    """
+    import json
+
+    from greenkube.signals.consensus import DEFAULT_TOOL_FLOORS
+    from greenkube.utils.k8s_quantities import parse_cpu_quantity, parse_memory_quantity
+
+    text = str(value or "").strip()
+    if not text:
+        return {family: dict(floors) for family, floors in DEFAULT_TOOL_FLOORS.items()}
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"SIGNAL_TOOL_FLOORS is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("SIGNAL_TOOL_FLOORS must be a JSON object keyed by source id")
+    floors: dict[str, dict[str, int]] = {}
+    for source, resources in data.items():
+        if not isinstance(resources, dict):
+            raise ValueError(f"SIGNAL_TOOL_FLOORS[{source!r}] must be an object with cpu and/or memory")
+        parsed: dict[str, int] = {}
+        for name, quantity in resources.items():
+            resource = _FLOOR_RESOURCES.get(str(name).strip().lower())
+            if resource is None:
+                raise ValueError(f"SIGNAL_TOOL_FLOORS[{source!r}] accepts cpu and memory, not {name!r}")
+            parser = parse_cpu_quantity if resource == "cpu_request_m" else parse_memory_quantity
+            amount = parser(quantity)
+            if amount is None or amount < 0:
+                raise ValueError(f"SIGNAL_TOOL_FLOORS[{source!r}][{name!r}] is not a quantity: {quantity!r}")
+            if amount:
+                parsed[resource] = int(amount)
+        floors[str(source).strip().lower()] = parsed
+    return floors
+
+
 def _clamp_window(name: str, value: float, minimum: float, why: str) -> float:
     """``value`` raised to ``minimum`` with a warning (once per value), never a startup failure."""
     if value >= minimum - 1e-9:
@@ -497,6 +542,19 @@ class Config(BaseSettings):
     # E6): safest (least aggressive), median, weighted (track-record weighted
     # median) or priority (RECOMMENDATION_SOURCE_PRIORITY wins).
     RECOMMENDATION_CONSENSUS_POLICY: str = "safest"
+    # Known minimum each tool proposes, per engine family or source id (roadmap A.5): a value
+    # equal to it is the tool's floor, not a signal of need, and is not counted as a vote.
+    # JSON object; blank means the built-in KRR simple and Fairwinds VPA chart floors.
+    SIGNAL_TOOL_FLOORS: str = '{"krr": {"cpu": "10m", "memory": "100Mi"}, "vpa": {"cpu": "15m", "memory": "100Mi"}}'
+    # Smallest change an external source must propose to vote for its own value: both the
+    # relative change (percent of the current request) and the absolute one are needed.
+    # A smaller change votes to keep the current request.
+    SIGNAL_MIN_CHANGE_PERCENT: float = 5.0
+    SIGNAL_MIN_CHANGE_CPU_MILLICORES: int = 10
+    SIGNAL_MIN_CHANGE_MEMORY_BYTES: int = 16 * 1024 * 1024
+    # Hours of samples (checkpoint firstSampleStart..lastSampleStart, else totalSamplesCount
+    # at one a minute) a VPA needs before its target is a vote; 0 disables the check.
+    VPA_MIN_SAMPLE_HOURS: float = 24.0
     # Source SDK (roadmap E5, docs/sources.md). Load third-party sources
     # registered under the `greenkube.sources` Python entry points.
     SOURCES_PLUGINS_ENABLED: bool = True
@@ -855,6 +913,25 @@ class Config(BaseSettings):
         from greenkube.signals.consensus import parse_policy
 
         return parse_policy(value).value
+
+    @field_validator("SIGNAL_TOOL_FLOORS", mode="after")
+    @classmethod
+    def _validate_signal_tool_floors(cls, value: str) -> str:
+        parse_tool_floors(value)
+        return value.strip()
+
+    @field_validator(
+        "SIGNAL_MIN_CHANGE_PERCENT",
+        "SIGNAL_MIN_CHANGE_CPU_MILLICORES",
+        "SIGNAL_MIN_CHANGE_MEMORY_BYTES",
+        "VPA_MIN_SAMPLE_HOURS",
+        mode="after",
+    )
+    @classmethod
+    def _validate_non_negative_signal_thresholds(cls, value: Any, info: Any) -> Any:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be zero or positive")
+        return value
 
     @field_validator("RECOMMENDATION_MAX_METRIC_ROWS", mode="after")
     @classmethod

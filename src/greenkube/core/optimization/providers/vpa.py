@@ -18,6 +18,14 @@ are two signals of the same engine) and include increases; the v1
 recommendations are unchanged (decreases only, ambiguous targets dropped).
 ``lowerBound``, ``upperBound`` and ``uncappedTarget`` travel in ``raw``; a
 target close to its ``upperBound`` is flagged as a volatility risk hint.
+
+Maturity (roadmap A.5, F-12): a VPA whose recommender has seen less than
+``VPA_MIN_SAMPLE_HOURS`` of samples (checkpoint ``firstSampleStart`` to
+``lastSampleStart``, else ``totalSamplesCount`` at one sample a minute), or
+whose ``LowConfidence`` condition is true, is not a vote: it yields neither a
+recommendation nor a signal and is counted in the ``immature_vpas``
+diagnostic. When no checkpoint could be read the maturity is unknown: the VPA
+still votes and the ``vpa_maturity_unknown`` warning says so.
 """
 
 import logging
@@ -66,6 +74,39 @@ GOLDILOCKS_NAMESPACE_LABEL = "goldilocks.fairwinds.com/enabled"
 VOLATILE_TARGET_TO_UPPER_RATIO = 0.9
 
 _MIB = 1024 * 1024
+#: The VPA recommender samples container usage once a minute.
+VPA_SAMPLES_PER_HOUR = 60
+
+
+def vpa_sample_hours(vpa: VPARecommendation) -> Optional[float]:
+    """Hours of samples behind a VPA target (checkpoint span, else sample count); None when unknown."""
+    first, last = getattr(vpa, "first_sample_start", None), getattr(vpa, "last_sample_start", None)
+    if first is not None and last is not None:
+        return max(0.0, (last - first).total_seconds() / 3600.0)
+    samples = getattr(vpa, "total_samples", None)
+    if samples is not None:
+        return samples / VPA_SAMPLES_PER_HOUR
+    return None
+
+
+def vpa_maturity(vpa: VPARecommendation, min_hours: float) -> Optional[bool]:
+    """Whether a VPA target is mature enough to vote; None when its maturity cannot be read.
+
+    ``LowConfidence=True`` or ``RecommendationProvided=False`` is immature, as
+    is a sample history shorter than ``min_hours``. ``min_hours <= 0`` turns
+    the check off.
+    """
+    if min_hours <= 0:
+        return True
+    conditions = getattr(vpa, "conditions", None) or {}
+    if str(conditions.get("LowConfidence", "")).lower() == "true":
+        return False
+    if str(conditions.get("RecommendationProvided", "")).lower() == "false":
+        return False
+    hours = vpa_sample_hours(vpa)
+    if hours is None:
+        return None
+    return hours >= min_hours
 
 
 def is_goldilocks_vpa(vpa: VPARecommendation) -> bool:
@@ -107,6 +148,12 @@ def vpa_raw(vpa: VPARecommendation) -> Dict[str, Any]:
             "memory_bytes": getattr(vpa, "memory_uncapped_bytes", None),
         },
         "volatility": volatility_hint(vpa),
+        "containers": getattr(vpa, "containers", None),
+        "maturity": {
+            "conditions": dict(getattr(vpa, "conditions", None) or {}),
+            "total_samples": getattr(vpa, "total_samples", None),
+            "sample_hours": vpa_sample_hours(vpa),
+        },
     }
 
 
@@ -176,10 +223,35 @@ class VpaSource(RecommendationSource):
 
     def __init__(self, config: "Config", collector: Optional[VPACollectorLike] = None):
         self.config = config
-        self._collector = collector if collector is not None else VPACollector()
+        self._collector = collector if collector is not None else VPACollector(config)
         self._available: Optional[bool] = None
         #: VPA container recommendations read by the last ``collect()`` (signals per VPA object).
         self.last_vpas: List[VPARecommendation] = []
+        #: VPA objects (``ns/name``) set aside by the last ``collect()`` as not mature yet.
+        self.immature_vpas: Set[str] = set()
+        #: VPA objects whose maturity the last ``collect()`` could not read (they still vote).
+        self.unknown_maturity_vpas: Set[str] = set()
+
+    def _mature(self, vpas: List[VPARecommendation]) -> List[VPARecommendation]:
+        """The VPA recommendations mature enough to vote; records the others."""
+        min_hours = float(getattr(self.config, "VPA_MIN_SAMPLE_HOURS", 24.0) or 0.0)
+        kept: List[VPARecommendation] = []
+        for vpa in vpas:
+            mature = vpa_maturity(vpa, min_hours)
+            ref = f"{vpa.namespace}/{vpa.vpa_name}"
+            if mature is False:
+                self.immature_vpas.add(ref)
+                continue
+            if mature is None:
+                self.unknown_maturity_vpas.add(ref)
+            kept.append(vpa)
+        if self.immature_vpas:
+            logger.info(
+                "Ignoring %d VPA(s) with less than %.0f h of samples or low confidence.",
+                len(self.immature_vpas),
+                min_hours,
+            )
+        return kept
 
     async def is_available(self) -> bool:
         """Detects the VPA CRD once; sources are skipped cleanly when absent.
@@ -219,14 +291,17 @@ class VpaSource(RecommendationSource):
 
     async def collect(self, context: "OptimizationContext") -> List[Recommendation]:
         self.last_vpas = []
+        self.immature_vpas = set()
+        self.unknown_maturity_vpas = set()
         try:
             vpas = await self._collector.collect()
         except Exception as e:
             logger.warning("VPA collection failed: %s. Proceeding without VPA recommendations.", e)
             return []
+        vpas = self._mature(list(vpas or []))
         if not vpas:
             return []
-        self.last_vpas = list(vpas)
+        self.last_vpas = vpas
 
         target_series = context.target_series()
         projector = ImpactProjector.for_context(context)
@@ -430,6 +505,20 @@ class VpaSignalSource(RecommendationSourceAdapter):
                 return vpa
         return None
 
+    def _raw(self, vpa: Optional[VPARecommendation], rec: Recommendation) -> Dict[str, Any]:
+        """Audit payload; ``maturity.state`` is ``unknown`` when no checkpoint said how mature the VPA is.
+
+        The consensus lets a VPA of unknown maturity hold or raise a value, never
+        push a decrease under a policy other than ``safest`` (roadmap A.5).
+        """
+        if vpa is None:
+            return self.raw_payload(rec) or {}
+        raw = vpa_raw(vpa)
+        unknown = getattr(self.connector, "unknown_maturity_vpas", None) or set()
+        state = "unknown" if f"{vpa.namespace}/{vpa.vpa_name}" in unknown else "mature"
+        raw["maturity"] = {**raw["maturity"], "state": state}
+        return raw
+
     def _signal(self, rec: Recommendation, ctx: CollectContext, fetched_at: Any, *, supports_v1: bool) -> SourceSignal:
         vpa = self._vpa_for(rec)
         signal = signal_from_recommendation(
@@ -441,7 +530,7 @@ class VpaSignalSource(RecommendationSourceAdapter):
             algorithm=AlgorithmInfo(name="vpa-recommender", window=ctx.window),
             observed_window=ctx.window,
             origin=SignalOrigin.ADAPTER,
-            raw=vpa_raw(vpa) if vpa is not None else self.raw_payload(rec),
+            raw=self._raw(vpa, rec),
         )
         update: Dict[str, Any] = {"engine_family": VPA_ENGINE_FAMILY}
         hint = volatility_hint(vpa) if vpa is not None else {}
@@ -489,6 +578,31 @@ class VpaSignalSource(RecommendationSourceAdapter):
     async def _diagnostics(self) -> List[Diagnostic]:
         """VPAs skipped by update mode, and the Goldilocks opt-in namespaces (roadmap G1)."""
         diagnostics: List[Diagnostic] = []
+        immature = getattr(self.connector, "immature_vpas", None) or set()
+        if immature:
+            diagnostics.append(
+                Diagnostic(
+                    code="immature_vpas",
+                    message=(
+                        "VPAs ignored until mature: less than VPA_MIN_SAMPLE_HOURS of samples "
+                        "or LowConfidence (roadmap A.5)"
+                    ),
+                    count=len(immature),
+                )
+            )
+        unknown = getattr(self.connector, "unknown_maturity_vpas", None) or set()
+        if unknown:
+            diagnostics.append(
+                Diagnostic(
+                    level="warning",
+                    code="vpa_maturity_unknown",
+                    message=(
+                        "VPAs whose checkpoint could not be read: their maturity is unknown and they still vote; "
+                        "grant get/list on verticalpodautoscalercheckpoints"
+                    ),
+                    count=len(unknown),
+                )
+            )
         collector = getattr(self.connector, "_collector", None)
         for mode, count in sorted((getattr(collector, "skipped_by_mode", None) or {}).items()):
             diagnostics.append(

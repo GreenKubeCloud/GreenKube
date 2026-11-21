@@ -526,6 +526,53 @@ tests:
           path: data.SOURCES_CONFIG
           value: '{"greenkube.carbon_aware":{"enabled":false},"vpa":{"enabled":"auto"}}'
 
+  - it: should render the tool floors, minimum change and VPA maturity defaults
+    asserts:
+      - equal:
+          path: data.SIGNAL_TOOL_FLOORS
+          value: '{"krr":{"cpu":"10m","memory":"100Mi"},"vpa":{"cpu":"15m","memory":"100Mi"}}'
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_PERCENT
+          value: "5"
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_CPU_MILLICORES
+          value: "10"
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_MEMORY_BYTES
+          value: "16777216"
+      - equal:
+          path: data.VPA_MIN_SAMPLE_HOURS
+          value: "24"
+
+  - it: should render overridden tool floors and thresholds
+    set:
+      sources.toolFloors:
+        krr:
+          memory: 64Mi
+        vpa: null
+      sources.minChange:
+        percent: 10
+        cpuMillicores: 20
+        memoryBytes: 33554432
+      sources.vpa:
+        minSampleHours: 0
+    asserts:
+      - equal:
+          path: data.SIGNAL_TOOL_FLOORS
+          value: '{"krr":{"cpu":"10m","memory":"64Mi"}}'
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_PERCENT
+          value: "10"
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_CPU_MILLICORES
+          value: "20"
+      - equal:
+          path: data.SIGNAL_MIN_CHANGE_MEMORY_BYTES
+          value: "33554432"
+      - equal:
+          path: data.VPA_MIN_SAMPLE_HOURS
+          value: "0"
+
   - it: should schedule recommendation scans hourly by default
     asserts:
       - equal:
