@@ -490,7 +490,14 @@ class MetricsCompressor:
     async def _compress_chunk(
         self, table: _MetricsTable, start: datetime, end: datetime, now: datetime
     ) -> tuple[int, int]:
-        """Aggregate ``[start, end)`` and advance the watermark in one transaction."""
+        """Aggregate ``[start, end)`` and advance the watermark in one transaction.
+
+        The first chunk of a table creates its watermark row with
+        ``raw_pruned_until = start`` (the compression lower bound): raw rows
+        below it (a legacy first hour pruned at a non-aligned cutoff, whose
+        aggregate already exists) are never complete, so a late row there is
+        never rebuilt into a partial hour.
+        """
         backend = self._db.db_type
         sql = table.compress_sql(backend)
         if backend == "postgres":
@@ -505,8 +512,9 @@ class MetricsCompressor:
                     )
                     await conn.execute(
                         """
-                        INSERT INTO metrics_compression_watermarks (table_name, compressed_until, updated_at)
-                        VALUES ($1, $2, $3)
+                        INSERT INTO metrics_compression_watermarks
+                            (table_name, compressed_until, updated_at, raw_pruned_until)
+                        VALUES ($1, $2, $3, $4)
                         ON CONFLICT (table_name) DO UPDATE SET
                             compressed_until = EXCLUDED.compressed_until,
                             updated_at = EXCLUDED.updated_at
@@ -514,6 +522,7 @@ class MetricsCompressor:
                         table.raw,
                         end,
                         now,
+                        start,
                     )
             return _status_count(status), int(aggregated or 0)
 
@@ -538,13 +547,14 @@ class MetricsCompressor:
                     aggregated = (await count_cursor.fetchone())[0]
                 await conn.execute(
                     """
-                    INSERT INTO metrics_compression_watermarks (table_name, compressed_until, updated_at)
-                    VALUES (?, ?, ?)
+                    INSERT INTO metrics_compression_watermarks
+                        (table_name, compressed_until, updated_at, raw_pruned_until)
+                    VALUES (?, ?, ?, ?)
                     ON CONFLICT (table_name) DO UPDATE SET
                         compressed_until = excluded.compressed_until,
                         updated_at = excluded.updated_at
                     """,
-                    (table.raw, end_iso, to_iso_z(now)),
+                    (table.raw, end_iso, to_iso_z(now), start_iso),
                 )
                 await conn.commit()
             except BaseException:
