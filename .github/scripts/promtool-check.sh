@@ -15,6 +15,9 @@ PROMETHEUS_IMAGE="${PROMETHEUS_IMAGE:-prom/prometheus@sha256:4a61322ac1103a0e3ae
 
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
+# The Prometheus image runs promtool as an unprivileged user (nobody): the
+# bind-mounted directory and its files must be world-readable on Linux.
+chmod 755 "${work}"
 
 helm template greenkube "${CHART_DIR}" \
   --set monitoring.prometheusRule.enabled=true \
@@ -38,5 +41,6 @@ else
   promtool_cmd=(docker run --rm -v "${work}:/work" -w /work --entrypoint promtool "${PROMETHEUS_IMAGE}")
 fi
 
+chmod 644 "${work}"/*.yaml
 "${promtool_cmd[@]}" check rules greenkube-rules.yaml
 "${promtool_cmd[@]}" test rules "${tests[@]}"
