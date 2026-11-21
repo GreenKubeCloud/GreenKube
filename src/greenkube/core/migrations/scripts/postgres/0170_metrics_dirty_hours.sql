@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS metrics_dirty_hours (
 );
 
 ALTER TABLE metrics_compression_watermarks ADD COLUMN IF NOT EXISTS raw_pruned_until TIMESTAMP WITH TIME ZONE;
+-- A NULL compressed_until means not compressed yet: every table has a row
+-- from the start (seeded below), so the trigger always has a row to lock.
+ALTER TABLE metrics_compression_watermarks ALTER COLUMN compressed_until DROP NOT NULL;
 
 -- Concurrency: the watermark row is read FOR SHARE, so a compression or a
 -- rebuild of this table (which lock it FOR UPDATE first) waits for the
@@ -92,3 +95,10 @@ FROM container_metrics
 WHERE timestamp < (SELECT compressed_until FROM metrics_compression_watermarks WHERE table_name = 'container_metrics')
   AND timestamp >= (SELECT raw_pruned_until FROM metrics_compression_watermarks WHERE table_name = 'container_metrics')
 ON CONFLICT DO NOTHING;
+
+-- Seed a watermark row for tables never compressed, with compressed_until
+-- NULL. The trigger locks it FOR SHARE, so the first compression (which
+-- upserts it first) waits for raw writers that are still open.
+INSERT INTO metrics_compression_watermarks (table_name, compressed_until, updated_at)
+VALUES ('combined_metrics', NULL, NOW()), ('container_metrics', NULL, NOW())
+ON CONFLICT (table_name) DO NOTHING;

@@ -514,7 +514,10 @@ class MetricsCompressor:
                         VALUES ($1, $2, $3, $4)
                         ON CONFLICT (table_name) DO UPDATE SET
                             compressed_until = EXCLUDED.compressed_until,
-                            updated_at = EXCLUDED.updated_at
+                            updated_at = EXCLUDED.updated_at,
+                            raw_pruned_until = COALESCE(
+                                metrics_compression_watermarks.raw_pruned_until, EXCLUDED.raw_pruned_until
+                            )
                         """,
                         table.raw,
                         end,

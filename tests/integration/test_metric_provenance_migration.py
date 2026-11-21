@@ -243,7 +243,9 @@ async def test_postgres_upgrade_backfills_provenance_of_legacy_rows():
                 "SELECT pod_name, cost_source, usage_source, intensity_source FROM combined_metrics_hourly"
             )
         }
-        watermarks = await connection.fetchval("SELECT COUNT(*) FROM metrics_compression_watermarks")
+        watermarks = await connection.fetchval(
+            "SELECT COUNT(*) FROM metrics_compression_watermarks WHERE compressed_until IS NOT NULL"
+        )
         intensities = {
             (row["zone"], row["carbon_intensity"])
             for row in await connection.fetch("SELECT zone, carbon_intensity FROM carbon_intensity_history")

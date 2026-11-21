@@ -38,3 +38,8 @@ DROP TRIGGER IF EXISTS trg_node_idle_metrics_dirty_hour ON node_idle_metrics;
 CREATE TRIGGER trg_node_idle_metrics_dirty_hour
     AFTER INSERT OR UPDATE OR DELETE ON node_idle_metrics
     FOR EACH ROW EXECUTE FUNCTION greenkube_mark_dirty_metric_hour();
+
+-- Seed the idle watermark row with compressed_until NULL (see migration 0170).
+INSERT INTO metrics_compression_watermarks (table_name, compressed_until, updated_at)
+VALUES ('node_idle_metrics', NULL, NOW())
+ON CONFLICT (table_name) DO NOTHING;

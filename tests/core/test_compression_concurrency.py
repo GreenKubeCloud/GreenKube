@@ -140,3 +140,23 @@ async def test_a_write_committed_while_its_hour_is_compressed_is_not_lost(pg):
     hourly, raw = await _hour_vs_raw(writer, hour)
     assert raw == pytest.approx(111.0)
     assert hourly == pytest.approx(raw)
+
+
+async def test_a_write_committed_during_the_first_compression_is_not_lost(pg):
+    """No watermark row has been written yet: the seeded row still makes the compressor wait for the writer."""
+    manager, writer = pg
+    repo = PostgresCombinedMetricsRepository(manager)
+    await repo.write_combined_metrics([_sample(i) for i in range(12 * 30)])
+    compressor = _compressor(manager)
+    hour = T0 + timedelta(hours=2)
+
+    await _while_open(
+        writer,
+        "UPDATE combined_metrics SET total_cost = 51 WHERE pod_name = 'p' AND timestamp = $1",
+        hour + timedelta(minutes=5),
+        action=lambda: compressor._compress_to_hourly(T0 + timedelta(hours=27)),
+    )
+    await compressor._reaggregate_dirty_hours()
+    hourly, raw = await _hour_vs_raw(writer, hour)
+    assert raw == pytest.approx(62.0)
+    assert hourly == pytest.approx(raw)
