@@ -28,6 +28,7 @@ from greenkube.gitops.contracts import (
     RendererKind,
     ValidationResult,
     WorkloadSource,
+    same_repository,
 )
 from greenkube.gitops.discovery.common import safe_repo_path
 from greenkube.gitops.planning.digest import RENDERER_EGRESS_UNENFORCED_WARNING, with_plan_warnings
@@ -1173,7 +1174,8 @@ def _archive_contents(
         if (
             isinstance(chart, Mapping)
             and chart.get("source_kind") == "GitRepository"
-            and chart.get("repo_url") == source.repo_url
+            and isinstance(chart.get("repo_url"), str)
+            and same_repository(chart["repo_url"], source.repo_url)
         ):
             raw_chart_path = chart.get("name")
             if not isinstance(raw_chart_path, str):

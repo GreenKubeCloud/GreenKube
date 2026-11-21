@@ -15,7 +15,7 @@ from greenkube.gitops.contracts import (
     ControllerKind,
     RendererKind,
     WorkloadSource,
-    canonical_repository_identity,
+    same_repository,
 )
 from greenkube.gitops.discovery.common import (
     SUPPORTED_WORKLOAD_KINDS,
@@ -39,6 +39,7 @@ SOURCE_TYPE_UNKNOWN_REASON = "source_type_unknown"
 #: Binding reason of a Helm chart read from another Git repository than its values (not plannable).
 CROSS_REPOSITORY_GIT_CHART_REASON = "cross-repository-git-chart"
 _MAX_HELM_VALUES_MAPPING_BYTES = 4096
+_AMBIGUOUS_OWNER_REASON = "ambiguous-multi-source-owner"
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,13 @@ def discover_argo_application(
     owners = _owner_sources(sources)
     forced_status: BindingStatus | None = None
     forced_reason: str | None = None
+    owner_selection: dict[str, Any] | None = None
+    context_unresolved = (
+        text(metadata.get("name")) is None
+        or text(metadata.get("namespace")) is None
+        or text(cluster) is None
+        or text(provider_id) is None
+    )
 
     if source_form_error == "conflicting-source-forms":
         owners = sources
@@ -137,15 +145,25 @@ def discover_argo_application(
         forced_status = BindingStatus.BLOCKED
         forced_reason = "workload-source-unresolved"
     elif len(owners) > 1:
-        forced_status = BindingStatus.AMBIGUOUS
-        forced_reason = "ambiguous-multi-source-owner"
+        mapped = _owner_named_by_values_mapping(owners, sources, helm_values_mapping)
+        if mapped is not None:
+            # The operator named the source (F-02): ``source_index`` wins over the tie.
+            owner_selection = {
+                "by": "helm-values-mapping",
+                "source_index": mapped[1],
+                # The planner checks that none of the other owners declares the workload.
+                "manifest_sources": [
+                    _manifest_source_evidence(owner, revisions, source_types)
+                    for owner in owners
+                    if owner is not mapped[0]
+                ],
+            }
+            owners = [mapped[0]]
+        else:
+            forced_status = BindingStatus.AMBIGUOUS
+            forced_reason = _AMBIGUOUS_OWNER_REASON
 
-    if forced_status is None and (
-        text(metadata.get("name")) is None
-        or text(metadata.get("namespace")) is None
-        or text(cluster) is None
-        or text(provider_id) is None
-    ):
+    if forced_status is None and context_unresolved:
         forced_status = BindingStatus.UNRESOLVED
         forced_reason = "application-context-unresolved"
 
@@ -158,9 +176,34 @@ def discover_argo_application(
     else:
         owners_to_map = owners
 
+    live_workloads = [mapping for item in live_resources if (mapping := as_mapping(item)) is not None]
     candidates: list[WorkloadSource] = []
-    for owner in owners_to_map:
-        for resource in resources:
+    for resource in resources:
+        resource_owners = owners_to_map
+        resource_status, resource_reason, resource_selection = forced_status, forced_reason, owner_selection
+        if forced_reason == _AMBIGUOUS_OWNER_REASON:
+            helm_owner = _helm_owner_by_ownership_labels(
+                owners_to_map,
+                source_types,
+                _live_workload(live_workloads, resource),
+                application_name=controller_name,
+            )
+            if helm_owner is not None:
+                resource_owners = [helm_owner[0]]
+                resource_selection = {
+                    "by": "helm-ownership-labels",
+                    "markers": helm_owner[1],
+                    # The planner checks that none of these directories declares the workload.
+                    "manifest_sources": [
+                        _manifest_source_evidence(owner, revisions, source_types)
+                        for owner in owners_to_map
+                        if owner is not helm_owner[0]
+                    ],
+                }
+                resource_status, resource_reason = (
+                    (BindingStatus.UNRESOLVED, "application-context-unresolved") if context_unresolved else (None, None)
+                )
+        for owner in resource_owners:
             candidates.append(
                 _candidate_for_workload(
                     owner=owner,
@@ -181,8 +224,9 @@ def discover_argo_application(
                     application_source_type=(
                         source_types[owner.index] if 0 <= owner.index < len(source_types) else None
                     ),
-                    forced_status=forced_status,
-                    forced_reason=forced_reason,
+                    forced_status=resource_status,
+                    forced_reason=resource_reason,
+                    owner_selection=resource_selection,
                     controller_state=controller_state,
                     observed_at=observed_at,
                 )
@@ -192,6 +236,143 @@ def discover_argo_application(
         # cluster, even when one has the same namespace and name (fail closed, explained).
         return [mark_destination_remote(candidate, destination_evidence(destination)) for candidate in candidates]
     return candidates
+
+
+def _owner_named_by_values_mapping(
+    owners: list[_ArgoSource],
+    sources: list[_ArgoSource],
+    helm_values_mapping: Mapping[str, Any] | None,
+) -> tuple[_ArgoSource, int] | None:
+    """The single owner the ``helm-values-mapping`` annotation names through ``source_index``.
+
+    ``source_index`` names either the owner itself or the ``$ref`` source of one of its
+    values files (the usual chart + ``ref: values`` layout). No match or several matches
+    return ``None``: the tie stays ambiguous.
+    """
+    if helm_values_mapping is None:
+        return None
+    source_index = helm_values_mapping.get("source_index")
+    if not isinstance(source_index, int) or isinstance(source_index, bool):
+        return None
+    matches = [
+        owner
+        for owner in owners
+        if owner.index == source_index or source_index in _referenced_values_source_indexes(owner, sources)
+    ]
+    return (matches[0], source_index) if len(matches) == 1 else None
+
+
+def _referenced_values_source_indexes(owner: _ArgoSource, sources: list[_ArgoSource]) -> set[int]:
+    """Indexes of the ``$ref`` sources that the owner's Helm ``valueFiles`` read."""
+    raw_values = (owner.helm or {}).get("valueFiles")
+    if not isinstance(raw_values, list):
+        return set()
+    by_ref = {source.ref_name: source.index for source in sources if source.ref_name is not None}
+    indexes: set[int] = set()
+    for raw_value in raw_values:
+        value = text(raw_value)
+        if value is None or not value.startswith("$"):
+            continue
+        ref_name = value[1:].partition("/")[0]
+        if ref_name in by_ref:
+            indexes.add(by_ref[ref_name])
+    return indexes
+
+
+def _live_workload(live_workloads: list[Mapping[str, Any]], resource: _ArgoWorkload) -> Mapping[str, Any] | None:
+    for item in live_workloads:
+        metadata = as_mapping(item.get("metadata")) or {}
+        if (
+            text(item.get("kind")) == resource.kind
+            and text(metadata.get("namespace")) == resource.namespace
+            and text(metadata.get("name")) == resource.name
+        ):
+            return item
+    return None
+
+
+def _is_helm_owner(owner: _ArgoSource, source_type: str | None) -> bool:
+    return owner.chart is not None or owner.helm_present or source_type == "helm"
+
+
+def _is_plain_directory_owner(owner: _ArgoSource, source_type: str | None) -> bool:
+    """A ``path`` source Argo CD reads as plain manifests: it cannot render a Helm chart."""
+    if owner.raw.get("directory") is not None and (owner.directory is None or owner.directory.get("jsonnet")):
+        # Jsonnet (or an unreadable directory config) can generate any resource.
+        return False
+    return (
+        owner.chart is None
+        and not owner.helm_present
+        and not owner.kustomize_present
+        and owner.raw.get("plugin") is None
+        and (source_type == "directory" or (source_type is None and owner.directory is not None))
+    )
+
+
+def _helm_owner_by_ownership_labels(
+    owners: list[_ArgoSource],
+    source_types: list[str | None],
+    live_workload: Mapping[str, Any] | None,
+    *,
+    application_name: str,
+) -> tuple[_ArgoSource, list[str]] | None:
+    """Break a chart-versus-manifests tie with the workload's Helm ownership metadata (F-02).
+
+    The tie is broken only when exactly one owner renders a Helm chart, every other owner
+    is a plain directory of manifests (Kustomize can inflate charts, a plugin can do
+    anything), and the live workload carries Helm ownership markers that do not name
+    another release. Anything else returns ``None`` and the workload stays ambiguous.
+    """
+    if live_workload is None:
+        return None
+
+    def source_type(owner: _ArgoSource) -> str | None:
+        return source_types[owner.index] if 0 <= owner.index < len(source_types) else None
+
+    helm_owners = [owner for owner in owners if _is_helm_owner(owner, source_type(owner))]
+    if len(helm_owners) != 1:
+        return None
+    helm_owner = helm_owners[0]
+    if not all(_is_plain_directory_owner(owner, source_type(owner)) for owner in owners if owner is not helm_owner):
+        return None
+
+    metadata = as_mapping(live_workload.get("metadata")) or {}
+    labels = as_mapping(metadata.get("labels")) or {}
+    annotations = as_mapping(metadata.get("annotations")) or {}
+    markers: list[str] = []
+    if text(labels.get("app.kubernetes.io/managed-by")) == "Helm":
+        markers.append("app.kubernetes.io/managed-by")
+    if text(labels.get("heritage")) == "Helm":
+        markers.append("heritage")
+    if text(labels.get("helm.sh/chart")) is not None:
+        markers.append("helm.sh/chart")
+    release_name = text(annotations.get("meta.helm.sh/release-name"))
+    if release_name is not None:
+        expected_release = text((helm_owner.helm or {}).get("releaseName")) or application_name
+        if release_name != expected_release:
+            return None
+        markers.append("meta.helm.sh/release-name")
+    if not markers:
+        return None
+    return helm_owner, markers
+
+
+def _manifest_source_evidence(
+    owner: _ArgoSource,
+    revisions: list[str | None],
+    source_types: list[str | None],
+) -> dict[str, Any]:
+    directory = owner.directory or {}
+    source_type = source_types[owner.index] if 0 <= owner.index < len(source_types) else None
+    return {
+        "plain_directory": _is_plain_directory_owner(owner, source_type),
+        "source_index": owner.index,
+        "repo_url": owner.repo_url,
+        "ref": owner.ref,
+        "revision": revisions[owner.index] if 0 <= owner.index < len(revisions) else None,
+        "path": owner.path,
+        "recurse": directory.get("recurse") is True,
+    }
 
 
 def _source_types(status: Mapping[str, Any], source_count: int) -> list[str | None]:
@@ -507,6 +688,7 @@ def _candidate_for_workload(
     application_source_type: str | None,
     forced_status: BindingStatus | None,
     forced_reason: str | None,
+    owner_selection: Mapping[str, Any] | None,
     controller_state: Mapping[str, Any],
     observed_at: datetime | None,
 ) -> WorkloadSource:
@@ -606,6 +788,8 @@ def _candidate_for_workload(
             for source in sources
         ],
     }
+    if owner_selection is not None:
+        evidence["owner_selection"] = deepcopy(dict(owner_selection))
     if resource.tracking_id is not None:
         evidence["tracking_id_fallback"] = True
         evidence["tracking_id"] = resource.tracking_id
@@ -668,17 +852,11 @@ def _git_values_binding_source(
     values_source = sources[source_index]
     if values_source.chart is not None or values_source.repo_url is None:
         return owner
-    if owner.chart is None and _same_repository(values_source.repo_url, owner.repo_url):
+    if owner.chart is None and same_repository(values_source.repo_url, owner.repo_url):
         # Monorepo: the chart and its ``$values`` source share one repository, so the chart
         # source (with its chart path) stays the binding and the planner finds the chart.
         return owner
     return values_source
-
-
-def _same_repository(left: str | None, right: str | None) -> bool:
-    if left is None or right is None:
-        return False
-    return canonical_repository_identity(left) == canonical_repository_identity(right)
 
 
 def _renderer_configuration(

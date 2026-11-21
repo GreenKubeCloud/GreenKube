@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from ruamel.yaml import YAML
 
+from greenkube.gitops.bindings.resolver import WorkloadBindingResolver
 from greenkube.gitops.contracts import (
     ActionPlanV3,
     BindingStatus,
@@ -42,6 +43,7 @@ from greenkube.gitops.renderers.charts import ChartReference, FetchedChart, Remo
 from greenkube.gitops.renderers.helm import HelmRenderer
 from greenkube.gitops.renderers.sandbox import BoundedSubprocessRunner, SandboxResult
 from greenkube.gitops.snapshots import RepositorySnapshot, snapshot_from_files
+from greenkube.storage.base_gitops_repository import WorkloadBinding
 from tests.gitops.chart_registry import (  # pyrefly: ignore[missing-import]
     FakeChartRegistry,
     chart_files,
@@ -569,6 +571,56 @@ def test_monorepo_git_chart_with_a_ref_values_source_in_the_same_repository_plan
         snapshot.close()
 
 
+@pytest.mark.parametrize(
+    "values_repo_spelling",
+    [
+        "https://github.com/acme/env-config",
+        "https://github.com/acme/env-config/",
+        "git@github.com:acme/env-config.git",
+        "ssh://git@github.com/acme/env-config.git",
+    ],
+)
+def test_monorepo_spelled_two_ways_binds_to_the_chart_source_and_plans(values_repo_spelling):
+    """One repository written two ways is still a monorepo, not a cross-repository Git chart."""
+    application = {
+        "metadata": {"name": "payments", "namespace": "argocd"},
+        "spec": {
+            "destination": {"namespace": "prod"},
+            "sources": [
+                {
+                    "repoURL": VALUES_REPO,
+                    "targetRevision": "main",
+                    "path": "charts/payments",
+                    "helm": {"releaseName": "payments", "valueFiles": ["$values/apps/prod/values.yaml"]},
+                },
+                {"repoURL": values_repo_spelling, "targetRevision": "main", "ref": "values"},
+            ],
+        },
+        "status": {
+            "sync": {"revisions": [VALUES_REVISION, VALUES_REVISION]},
+            "resources": [
+                {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "prod", "name": "payments-api"}
+            ],
+        },
+    }
+    (source,) = discover_argo_application(application, cluster="prod", provider_id="github-main")
+    assert source.status is BindingStatus.RESOLVED, source.reason
+    assert source.path == "charts/payments"
+    snapshot = _snapshot({**_LOCAL_CHART, "apps/prod/values.yaml": _LOCAL_VALUES})
+    target = ResourceTarget(api_version="apps/v1", kind="Deployment", namespace="prod", name="payments-api")
+
+    try:
+        plan = _planner(_BitnamiRunner(), _StubFetcher(_unknown_chart())).plan(
+            _action([_op("api", cpu="250m")], target),
+            source,
+            snapshot,
+            VALUES_REVISION,
+        )
+        assert plan.files[0].path == "apps/prod/values.yaml"
+    finally:
+        snapshot.close()
+
+
 def test_registry_rules_propose_bitnami_component_paths():
     identity = ChartIdentity(
         name="postgresql",
@@ -806,5 +858,240 @@ def test_flux_helm_repository_chart_renders_the_deployed_version_of_a_range():
             "remote Helm chart https://charts.bitnami.com/bitnami nginx@18.3.1 rendered from "
             f"sha256:{hashlib.sha256(registry.archive).hexdigest()}"
         ]
+    finally:
+        snapshot.close()
+
+
+# F-02: a chart from a Helm repository, a ``ref: values`` source and a ``path`` source of
+# non-workload kinds. The chart and the path source are both candidate owners.
+_HELM_LABELS = {"app.kubernetes.io/managed-by": "Helm", "helm.sh/chart": "nginx-18.3.1"}
+
+
+def _chart_values_manifests_application() -> dict[str, Any]:
+    with (DISCOVERY_FIXTURES / "argo-multi-source-chart-values-manifests.yaml").open(encoding="utf-8") as stream:
+        return _load(stream.read())
+
+
+def _live_deployment(labels: Mapping[str, str], annotations: Mapping[str, str] | None = None) -> dict[str, Any]:
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": "web-nginx",
+            "namespace": "web",
+            "labels": dict(labels),
+            "annotations": dict(annotations or {}),
+        },
+    }
+
+
+def _discover_web(application: Mapping[str, Any], live: Sequence[Mapping[str, Any]] = ()) -> list[WorkloadSource]:
+    return [
+        source
+        for source in discover_argo_application(
+            application, cluster="prod", provider_id="github-main", live_resources=live
+        )
+        if source.workload_kind == "Deployment"
+    ]
+
+
+def _bound(sources: Sequence[WorkloadSource]) -> WorkloadBinding:
+    return WorkloadBindingResolver().resolve(sources, now=sources[0].observed_at)
+
+
+def test_chart_values_manifests_app_without_ownership_evidence_stays_ambiguous():
+    binding = _bound(_discover_web(_chart_values_manifests_application()))
+
+    assert binding.status is BindingStatus.AMBIGUOUS
+    assert binding.reason == "conflicting-equal-priority-source-units"
+
+
+@pytest.mark.parametrize(
+    ("labels", "annotations"),
+    [
+        (_HELM_LABELS, {}),
+        ({"heritage": "Helm", "chart": "nginx-18.3.1"}, {}),
+        ({}, {"meta.helm.sh/release-name": "web"}),
+    ],
+)
+def test_helm_ownership_labels_bind_the_workload_to_the_values_source(labels, annotations):
+    sources = _discover_web(_chart_values_manifests_application(), [_live_deployment(labels, annotations)])
+    binding = _bound(sources)
+
+    assert binding.status is BindingStatus.RESOLVED
+    assert binding.source is not None
+    assert binding.source.repo_url == VALUES_REPO
+    assert binding.source.renderer is RendererKind.HELM_VALUES
+    assert binding.source.renderer_config["values_files"] == [VALUES_PATH]
+    assert binding.source.evidence["owner_selection"]["by"] == "helm-ownership-labels"
+
+
+def test_helm_release_annotation_of_another_release_keeps_the_workload_ambiguous():
+    live = [_live_deployment(_HELM_LABELS, {"meta.helm.sh/release-name": "other"})]
+
+    binding = _bound(_discover_web(_chart_values_manifests_application(), live))
+
+    assert binding.status is BindingStatus.AMBIGUOUS
+
+
+def test_helm_labels_do_not_break_a_tie_against_a_kustomize_path_source():
+    application = _chart_values_manifests_application()
+    application["status"]["sourceTypes"][2] = "Kustomize"
+
+    binding = _bound(_discover_web(application, [_live_deployment(_HELM_LABELS)]))
+
+    assert binding.status is BindingStatus.AMBIGUOUS
+
+
+def test_helm_values_mapping_source_index_selects_the_owner_without_labels():
+    application = _chart_values_manifests_application()
+    application["metadata"]["annotations"] = {
+        "greenkube.cloud/helm-values-mapping": (
+            '{"file_path": "environments/prod/nginx.yaml", "container": "nginx", '
+            '"path": ["resources"], "source_index": 1}'
+        )
+    }
+
+    binding = _bound(_discover_web(application))
+
+    assert binding.status is BindingStatus.RESOLVED
+    assert binding.source is not None
+    assert binding.source.repo_url == VALUES_REPO
+    assert binding.source.renderer_config["values_mapping"]["source_index"] == 1
+    selection = binding.source.evidence["owner_selection"]
+    assert (selection["by"], selection["source_index"]) == ("helm-values-mapping", 1)
+    assert [entry["source_index"] for entry in selection["manifest_sources"]] == [2]
+    assert selection["manifest_sources"][0]["plain_directory"] is True
+
+
+def test_helm_values_mapping_source_index_matching_no_owner_stays_ambiguous():
+    application = _chart_values_manifests_application()
+    application["metadata"]["annotations"] = {
+        "greenkube.cloud/helm-values-mapping": (
+            '{"file_path": "environments/prod/other.yaml", "container": "nginx", '
+            '"path": ["resources"], "source_index": 7}'
+        )
+    }
+
+    binding = _bound(_discover_web(application))
+
+    assert binding.status is BindingStatus.AMBIGUOUS
+
+
+def test_chart_values_manifests_app_plans_end_to_end():
+    registry = FakeChartRegistry()
+    route = "apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: web\n"
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, "environments/prod/manifests/route.yaml": route})
+    action = _action([_op("nginx", cpu="50m", memory="64Mi"), _op("metrics", cpu="20m")])
+    binding = _bound(_discover_web(_chart_values_manifests_application(), [_live_deployment(_HELM_LABELS)]))
+    assert binding.source is not None
+
+    try:
+        plan = _planner(_BitnamiRunner(), _fetcher(registry)).plan(action, binding.source, snapshot, VALUES_REVISION)
+
+        assert [edit.path for edit in plan.files] == [VALUES_PATH]
+        assert plan.files[0].content == EXPECTED_VALUES
+        assert plan.validation.passed
+    finally:
+        snapshot.close()
+
+
+_MANIFEST_DEPLOYMENT = """\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-extra
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-nginx
+"""
+
+
+@pytest.mark.parametrize(
+    "manifest_path", ["environments/prod/manifests/web.yaml", "environments/prod/manifests/web.yml"]
+)
+def test_a_manifests_source_that_also_declares_the_workload_fails_closed(manifest_path):
+    """F-02: the Helm labels are not enough when the ``path`` source renders the same kind and name."""
+    registry = FakeChartRegistry()
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, manifest_path: _MANIFEST_DEPLOYMENT})
+    binding = _bound(_discover_web(_chart_values_manifests_application(), [_live_deployment(_HELM_LABELS)]))
+    assert binding.source is not None
+
+    try:
+        with pytest.raises(HelmValuesUnsupportedError, match="manifests source"):
+            _planner(_BitnamiRunner(), _fetcher(registry)).plan(
+                _action([_op("nginx", cpu="50m")]), binding.source, snapshot, VALUES_REVISION
+            )
+    finally:
+        snapshot.close()
+
+
+def test_a_mapping_selected_owner_still_fails_closed_when_the_manifests_source_declares_the_workload():
+    """Review of F-02: the ``source_index`` override must not skip the duplicate-declaration check."""
+    registry = FakeChartRegistry()
+    application = _chart_values_manifests_application()
+    application["metadata"]["annotations"] = {
+        "greenkube.cloud/helm-values-mapping": (
+            '{"file_path": "environments/prod/nginx.yaml", "container": "nginx", '
+            '"path": ["resources"], "source_index": 1}'
+        )
+    }
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, "environments/prod/manifests/web.yaml": _MANIFEST_DEPLOYMENT})
+    binding = _bound(_discover_web(application))
+    assert binding.source is not None
+    assert binding.status is BindingStatus.RESOLVED
+
+    try:
+        with pytest.raises(HelmValuesUnsupportedError, match="manifests source"):
+            _planner(_BitnamiRunner(), _fetcher(registry)).plan(
+                _action([_op("nginx", cpu="50m")]), binding.source, snapshot, VALUES_REVISION
+            )
+    finally:
+        snapshot.close()
+
+
+@pytest.mark.parametrize(
+    "jsonnet_file", ["environments/prod/manifests/web.jsonnet", "environments/prod/manifests/lib.libsonnet"]
+)
+def test_a_manifests_source_with_jsonnet_cannot_be_verified_and_fails_closed(jsonnet_file):
+    registry = FakeChartRegistry()
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES, jsonnet_file: "{}\n"})
+    binding = _bound(_discover_web(_chart_values_manifests_application(), [_live_deployment(_HELM_LABELS)]))
+    assert binding.source is not None
+
+    try:
+        with pytest.raises(HelmValuesUnsupportedError, match="manifests source"):
+            _planner(_BitnamiRunner(), _fetcher(registry)).plan(
+                _action([_op("nginx", cpu="50m")]), binding.source, snapshot, VALUES_REVISION
+            )
+    finally:
+        snapshot.close()
+
+
+def test_helm_labels_do_not_break_a_tie_against_a_jsonnet_directory_source():
+    application = _chart_values_manifests_application()
+    application["spec"]["sources"][2]["directory"] = {"jsonnet": {"tlas": [{"name": "env", "value": "prod"}]}}
+
+    binding = _bound(_discover_web(application, [_live_deployment(_HELM_LABELS)]))
+
+    assert binding.status is not BindingStatus.RESOLVED
+
+
+def test_a_manifests_source_outside_the_snapshot_cannot_be_verified_and_fails_closed():
+    registry = FakeChartRegistry()
+    application = _chart_values_manifests_application()
+    application["spec"]["sources"][2]["repoURL"] = "https://github.com/acme/routes.git"
+    snapshot = _snapshot({VALUES_PATH: PROD_VALUES})
+    binding = _bound(_discover_web(application, [_live_deployment(_HELM_LABELS)]))
+    assert binding.source is not None
+    assert binding.status is BindingStatus.RESOLVED
+
+    try:
+        with pytest.raises(HelmValuesUnsupportedError, match="manifests source"):
+            _planner(_BitnamiRunner(), _fetcher(registry)).plan(
+                _action([_op("nginx", cpu="50m")]), binding.source, snapshot, VALUES_REVISION
+            )
     finally:
         snapshot.close()

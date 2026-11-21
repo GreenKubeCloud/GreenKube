@@ -36,7 +36,7 @@ from greenkube.gitops.contracts import (
     SetContainerResources,
     ValidationResult,
     WorkloadSource,
-    canonical_repository_identity,
+    same_repository,
 )
 from greenkube.gitops.discovery.common import flux_release_name, text
 from greenkube.gitops.planning.digest import plan_digest
@@ -848,7 +848,9 @@ def _prepare_helm_values_plan(
         chart_path = stack.enter_context(_staged_remote_chart(root, snapshot_files, remote_chart, HelmValuesPlanError))
     else:
         chart_repository = chart_config.get("repo")
-        if chart_repository not in (None, "", source.repo_url):
+        if chart_repository not in (None, "") and (
+            not isinstance(chart_repository, str) or not same_repository(chart_repository, source.repo_url)
+        ):
             raise HelmValuesUnsupportedError("remote or cross-repository Helm charts cannot be planned")
         _reject_inline_helm_values(config)
         chart_path = _canonical_path(source.path, allow_root=True, error=HelmValuesUnsupportedError)
@@ -882,6 +884,7 @@ def _prepare_helm_values_plan(
     if len(set(values_files)) != len(values_files):
         raise HelmValuesUnsupportedError("Helm values file order contains duplicate paths")
     _validate_argo_values_sources(source, base_revision)
+    _reject_workload_declared_by_manifest_sources(source, base_revision, root, snapshot_files)
     for values_path in values_files:
         if values_path not in snapshot_files:
             raise HelmValuesUnsupportedError(
@@ -1329,6 +1332,84 @@ def _validate_common_request(
     return operations, root, snapshot_files
 
 
+def _reject_workload_declared_by_manifest_sources(
+    source: WorkloadSource,
+    base_revision: str,
+    root: Path,
+    snapshot_files: Mapping[str, Any],
+) -> None:
+    """Fail closed when a competing Argo CD ``path`` source also declares the workload (F-02).
+
+    Discovery binds a Helm-labelled workload, or every workload named by the mapping
+    annotation's ``source_index``, to the chart rather than to the other owners of the same
+    Application, and lists those owners in the evidence. The choice holds only if none of
+    them declares a resource of the workload's kind and name. An owner that is not a plain
+    manifests directory, holds Jsonnet, or lies outside this repository snapshot cannot be
+    checked and blocks the plan.
+    """
+    selection = source.evidence.get("owner_selection")
+    if not isinstance(selection, Mapping) or selection.get("by") not in {
+        "helm-ownership-labels",
+        "helm-values-mapping",
+    }:
+        return
+    manifest_sources = selection.get("manifest_sources")
+    if not isinstance(manifest_sources, list):
+        raise HelmValuesUnsupportedError("ambiguous-multi-source-owner: manifests source evidence is missing")
+    for entry in manifest_sources:
+        if not isinstance(entry, Mapping):
+            raise HelmValuesUnsupportedError("ambiguous-multi-source-owner: manifests source evidence is invalid")
+        repo_url = entry.get("repo_url")
+        revision = entry.get("revision")
+        if (
+            not isinstance(repo_url, str)
+            or not same_repository(repo_url, source.repo_url)
+            or entry.get("ref") != source.ref
+            or (revision is not None and not _revision_matches_snapshot(revision, base_revision))
+        ):
+            raise HelmValuesUnsupportedError(
+                "ambiguous-multi-source-owner: the Application's manifests source is not in this repository "
+                "snapshot, so GreenKube cannot verify that it does not declare the workload"
+            )
+        if entry.get("plain_directory") is not True:
+            raise HelmValuesUnsupportedError(
+                "ambiguous-multi-source-owner: another source of the Application (Helm, Kustomize, Jsonnet or a "
+                "plugin) is not a plain manifests source, so GreenKube cannot verify that it does not declare "
+                "the workload"
+            )
+        directory = _canonical_path(entry.get("path"), allow_root=True, error=HelmValuesUnsupportedError)
+        prefix = "" if directory == "." else f"{directory}/"
+        recurse = entry.get("recurse") is True
+        contents: dict[str, str] = {}
+        for path in sorted(snapshot_files):
+            relative = path[len(prefix) :] if path.startswith(prefix) else None
+            if relative is None or (not recurse and "/" in relative):
+                continue
+            suffix = PurePosixPath(path).suffix.lower()
+            if suffix in {".jsonnet", ".libsonnet"}:
+                raise HelmValuesUnsupportedError(
+                    f"ambiguous-multi-source-owner: {path} in the manifests source is Jsonnet, so GreenKube cannot "
+                    "verify that the source does not declare the workload"
+                )
+            if suffix in {".yaml", ".yml", ".json"}:
+                contents[path] = _read_source_file(root, snapshot_files, path, HelmValuesUnsupportedError)
+        if not contents:
+            continue
+        try:
+            rendered = render_raw(contents)
+        except (RawRenderError, RecursionError, TypeError, ValueError) as exc:
+            raise HelmValuesUnsupportedError(
+                f"ambiguous-multi-source-owner: the manifests source {directory} could not be read to verify "
+                "that it does not declare the workload"
+            ) from exc
+        for resource in rendered.resources:
+            if resource.target.kind == source.workload_kind and resource.target.name == source.workload_name:
+                raise HelmValuesUnsupportedError(
+                    f"ambiguous-multi-source-owner: {resource.source_path} in the manifests source also declares "
+                    f"{source.workload_kind}/{source.workload_name}"
+                )
+
+
 def _validate_argo_values_sources(source: WorkloadSource, base_revision: str) -> None:
     raw_sources = source.renderer_config.get("values_sources", [])
     if raw_sources is None:
@@ -1338,7 +1419,12 @@ def _validate_argo_values_sources(source: WorkloadSource, base_revision: str) ->
     for item in raw_sources:
         if not isinstance(item, Mapping):
             raise HelmValuesUnsupportedError("Argo values source metadata must be a mapping")
-        if item.get("repo_url") != source.repo_url or item.get("ref") != source.ref:
+        repo_url = item.get("repo_url")
+        if (
+            not isinstance(repo_url, str)
+            or not same_repository(repo_url, source.repo_url)
+            or item.get("ref") != source.ref
+        ):
             raise HelmValuesUnsupportedError("cross-repository or remote Helm values sources are unsupported")
         revision = item.get("source_revision")
         if revision is not None and not _revision_matches_snapshot(revision, base_revision):
@@ -1727,6 +1813,7 @@ def _load_values(
     if round_trip:
         yaml.preserve_quotes = True
         yaml.indent(mapping=2, sequence=4, offset=2)
+        yaml.width = 4_096
         if "\r\n" in content and "\n" not in content.replace("\r\n", ""):
             yaml.line_break = "\r\n"
     try:
@@ -2002,7 +2089,8 @@ def _validate_flux_manifest_owner(source: WorkloadSource, base_revision: str) ->
         raise FluxHelmReleaseUnsupportedError("HelmRelease manifest is not explicitly owned by Git")
     if (
         manifest_source.get("provider_id") != source.provider_id
-        or manifest_source.get("repo_url") != source.repo_url
+        or not isinstance(manifest_repo_url := manifest_source.get("repo_url"), str)
+        or not same_repository(manifest_repo_url, source.repo_url)
         or manifest_source.get("ref") != source.ref
     ):
         raise FluxHelmReleaseUnsupportedError(
@@ -2224,9 +2312,7 @@ def _flux_chart_context(
     if configured_chart.get("source_kind") != "GitRepository":
         raise FluxHelmReleaseUnsupportedError("Flux Helm chart source is not a GitRepository")
     configured_repo_url = configured_chart.get("repo_url")
-    if not isinstance(configured_repo_url, str) or canonical_repository_identity(
-        configured_repo_url
-    ) != canonical_repository_identity(source.repo_url):
+    if not isinstance(configured_repo_url, str) or not same_repository(configured_repo_url, source.repo_url):
         raise FluxHelmReleaseUnsupportedError(
             "chart-source-not-in-snapshot: Flux Git chart belongs to another repository"
         )
@@ -2450,11 +2536,7 @@ def _load_flux_values_from(
 
         repo_url = text(discovered.get("repo_url"))
         ref = text(discovered.get("ref"))
-        if (
-            repo_url is None
-            or canonical_repository_identity(repo_url) != canonical_repository_identity(source.repo_url)
-            or ref != source.ref
-        ):
+        if repo_url is None or not same_repository(repo_url, source.repo_url) or ref != source.ref:
             raise FluxHelmReleaseUnsupportedError(
                 "valuesFrom source is not present in the HelmRelease repository snapshot"
             )
@@ -2671,6 +2753,7 @@ def _roundtrip_yaml(content: str) -> YAML:
     yaml.allow_duplicate_keys = False
     yaml.preserve_quotes = True
     yaml.indent(mapping=2, sequence=4, offset=2)
+    yaml.width = 4_096
     if "\r\n" in content and "\n" not in content.replace("\r\n", ""):
         yaml.line_break = "\r\n"
     return yaml

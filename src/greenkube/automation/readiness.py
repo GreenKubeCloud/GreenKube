@@ -68,7 +68,7 @@ from prometheus_client import Gauge
 from greenkube.automation.delivery import DELIVERY_DIRECT, configured_delivery_mode
 from greenkube.core.config import DISCOVERED_REPOSITORIES
 from greenkube.core.observability import REGISTRY
-from greenkube.gitops.contracts import BindingStatus
+from greenkube.gitops.contracts import BindingStatus, same_repository
 from greenkube.storage.automation_capability_repository import (
     SCOPE_GLOBAL,
     SCOPE_REPOSITORY,
@@ -1023,12 +1023,16 @@ def _serves_only_as_chart_source(source: Any, url: str) -> bool:
     if not isinstance(config, Mapping):
         return False
     chart = config.get("chart")
-    if not isinstance(chart, Mapping) or chart.get("repo") != url:
+    chart_repo = chart.get("repo") if isinstance(chart, Mapping) else None
+    if not isinstance(chart, Mapping) or not isinstance(chart_repo, str) or not same_repository(chart_repo, url):
         return False
     if chart.get("name") not in (None, ""):
         return True
     values_sources = [entry for entry in config.get("values_sources") or [] if isinstance(entry, Mapping)]
-    return bool(values_sources) and all(entry.get("repo_url") != url for entry in values_sources)
+    return bool(values_sources) and all(
+        not isinstance(entry.get("repo_url"), str) or not same_repository(entry["repo_url"], url)
+        for entry in values_sources
+    )
 
 
 def _resolved_repository_urls(bindings: Sequence[WorkloadBinding]) -> set[str]:

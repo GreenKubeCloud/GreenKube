@@ -258,6 +258,55 @@ def sanitize_repository_url(value: str) -> str:
 
 canonical_repository_identity = sanitize_repository_url
 
+_GIT_REMOTE_SCHEMES = frozenset({"http", "https", "ssh", "git", "git+ssh", "ssh+git"})
+
+
+def repository_identity(value: str) -> str:
+    """The repository a Git remote names, independent of how the remote is spelled.
+
+    ``https://host/ops/app.git``, ``https://host/ops/app``, ``https://host/ops/app/``,
+    ``git@host:ops/app.git`` and ``ssh://git@host[:port]/ops/app.git`` all give
+    ``host/ops/app``: the lowercased host (no credentials, no port) and the path without
+    a trailing ``.git`` or ``/``. Anything else (a Helm or OCI registry, an unparsable
+    value) keeps its ``canonical_repository_identity``. Use it to compare repositories,
+    never as the persisted form.
+
+    The port is ignored on purpose: a self-hosted forge commonly serves SSH on a custom
+    port (``ssh://git@host:2222/...``) and HTTPS on 443 for the same repository. Two
+    different forges on one host distinguished only by port would compare equal.
+    """
+    candidate = value.strip()
+    host: str | None = None
+    path = ""
+    if "://" in candidate:
+        try:
+            parts = urlsplit(candidate)
+            parsed_host = parts.hostname
+            # An invalid port (``host:abc``) or a mixed scp/URL form (``ssh://git@host:org/repo``)
+            # raises here and keeps the canonical form instead of matching another repository.
+            _ = parts.port
+        except ValueError:
+            return canonical_repository_identity(value)
+        if parts.scheme.lower() in _GIT_REMOTE_SCHEMES and not parts.query and not parts.fragment:
+            host, path = parsed_host, parts.path
+    elif (match := _SCP_REPOSITORY_PATTERN.fullmatch(candidate)) is not None:
+        host, path = match.group("host"), match.group("path")
+    segments = [segment for segment in path.strip("/").removesuffix(".git").split("/") if segment]
+    if not host or not segments:
+        return canonical_repository_identity(value)
+    return f"{host.lower().rstrip('.')}/{'/'.join(segments)}"
+
+
+def same_repository(left: str | None, right: str | None) -> bool:
+    """Whether two Git remotes name the same repository (see ``repository_identity``)."""
+    if left is None or right is None or "unresolved" in {left, right}:
+        return False
+    if left.strip() == right.strip():
+        return True
+    left_identity, right_identity = repository_identity(left), repository_identity(right)
+    # Two unparsable values both sanitize to "redacted": that is no evidence of one repository.
+    return left_identity == right_identity and left_identity != "redacted"
+
 
 def public_repository_url(value: str) -> str:
     """Repository URL safe to return from the API: bounded, printable and credential-free."""

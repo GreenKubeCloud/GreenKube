@@ -802,3 +802,25 @@ def test_repositories_that_only_serve_as_a_chart_source_are_never_suggested():
     bindings.append(_binding(values_repo))
 
     assert _repository_urls(bindings) == [GITHUB_REPO, values_repo]
+
+
+def test_a_monorepo_chart_whose_values_spell_the_repository_differently_is_still_suggested():
+    """One repository written as ``.../gitops.git`` and ``git@host:.../gitops`` is not a chart-only repository."""
+    chart_repo = "https://gitlab.example.com/ops/gitops.git"
+    monorepo_chart = _helm_source(
+        chart_repo,
+        {"name": None, "repo": chart_repo},
+        [{"source_index": 1, "source_ref": "values", "repo_url": "git@gitlab.example.com:ops/gitops"}],
+        "app-0",
+    )
+    binding = WorkloadBinding(
+        cluster="default",
+        namespace="payments",
+        workload_kind="Deployment",
+        workload_name="app-0",
+        status=BindingStatus.BLOCKED,
+        confidence=0.1,
+        candidates=(monorepo_chart,),
+    )
+
+    assert _repository_urls([binding]) == [chart_repo]
