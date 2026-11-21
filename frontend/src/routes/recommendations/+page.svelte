@@ -47,7 +47,7 @@
 	import OomHistoryWarning from '$lib/components/OomHistoryWarning.svelte';
 	import { capacitySummary } from '$lib/releasedCapacity.js';
 	import { etaFrom, OPPORTUNITY_LABEL, serverOpportunity } from '$lib/overview.js';
-	import { SAVINGS_TERMS, realizationText, savingPhrase, savingsFigures, visibleDiagnostics } from '$lib/savingsVocabulary.js';
+	import { SAVINGS_TERMS, appliedCostFigure, realizationText, savingPhrase, savingsFigures, visibleDiagnostics } from '$lib/savingsVocabulary.js';
 
 	// --- State ---
 	let activeRecs = [];
@@ -2008,6 +2008,11 @@
 						<div class="card-compact text-center" data-testid="savings-tab-cost">
 							<p class="stat-label">{SAVINGS_TERMS.measuredAllocated}</p>
 							<p class="stat-value text-2xl text-blue-400">{formatCost(savingsTabFigures.measuredAllocatedToDate?.cost ?? savings.measured_cost_saved ?? 0)}</p>
+							{#if savingsTabFigures.reliabilityCostToDate?.cost}
+								<p class="text-[10px] text-purple-300 mt-1" data-testid="savings-tab-reliability-cost">
+									Reliability fixes cost {formatCost(-savingsTabFigures.reliabilityCostToDate.cost)} to date (not netted)
+								</p>
+							{/if}
 							<p class="text-[10px] text-dark-600 uppercase tracking-wide mt-1">
 								measured, to date · projected separately {formatCost(savingsTabFigures.projectedToDate?.cost ?? savings.prorated_cost_saved ?? 0)}
 							</p>
@@ -2114,12 +2119,11 @@
 													</div>
 												{/if}
 												{#if rec.cost_saved}
+													{@const costFigure = appliedCostFigure(rec)}
 													<div>
-														<p class="text-[10px] uppercase text-dark-600">
-															{rec.status === 'verified' && rec.measured_cost_saved != null ? 'Cost Measured' : 'Cost Projected'}
-														</p>
-														<p class="text-xs text-blue-400 font-semibold">
-															{formatCost(rec.status === 'verified' && rec.measured_cost_saved != null ? rec.measured_cost_saved : rec.cost_saved)}
+														<p class="text-[10px] uppercase text-dark-600">{costFigure.label}</p>
+														<p class="text-xs font-semibold {costFigure.reliability ? 'text-purple-300' : 'text-blue-400'}">
+															{costFigure.reliability ? '+' : ''}{formatCost(costFigure.value ?? 0)}{costFigure.reliability ? '/yr' : ''}
 														</p>
 													</div>
 												{/if}
