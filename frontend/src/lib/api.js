@@ -8,7 +8,9 @@
  * Browsers authenticate with the HttpOnly session cookie set by
  * POST /auth/login (F14); the client never sees or stores it. Mutations send
  * the session's CSRF token, learnt from /auth/me or the sign-in response and
- * kept in memory only. Machines use Bearer API keys directly, not this client.
+ * kept in memory only. Machines use Bearer API keys directly, not this client;
+ * in API_AUTH_MODE=api_key a browser exchanges its key for the same kind of
+ * HttpOnly cookie (POST /auth/api-key-login).
  */
 
 const BASE = '/api/v1';
@@ -841,6 +843,14 @@ export async function login({ username, password, remember = false }) {
 	return rememberCsrf(await request(`${BASE}/auth/login`, {}, jsonOptions('POST', { username, password, remember })));
 }
 
+/**
+ * Sign in with an API key (API_AUTH_MODE=api_key, F-09). The server checks the
+ * key and keeps it in its HttpOnly cookie: this client forgets it at once.
+ */
+export async function loginWithApiKey({ key, remember = false }) {
+	return rememberCsrf(await request(`${BASE}/auth/api-key-login`, {}, jsonOptions('POST', { key, remember })));
+}
+
 /** Revoke the current session server-side and clear the cookie. */
 export async function logout() {
 	try {
@@ -893,7 +903,7 @@ export function revokeApiKey(keyId) {
 // ---------------------------------------------------------------------------
 
 /**
- * Sign-in options: {mode, password, sso: {kind: 'oidc'|'proxy', name, login_path} | null}.
+ * Sign-in options: {mode, password, api_key, sso: {kind: 'oidc'|'proxy', name, login_path} | null}.
  * Public and best effort: resolves to null on any error (the password form stays).
  */
 export async function getAuthProviders() {

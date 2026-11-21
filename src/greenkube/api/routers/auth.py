@@ -1,6 +1,6 @@
 """Sign-in, sessions, SSO, users and scoped API keys (roadmap F14, F15, F16).
 
-``/api/v1/auth/login``, ``/logout``, ``/providers`` and the OpenID Connect
+``/api/v1/auth/login``, ``/api-key-login``, ``/logout``, ``/providers`` and the OpenID Connect
 ``/oidc/login`` and ``/oidc/callback`` routes are reachable without
 credentials; every other route here goes through the global
 :func:`authenticate` dependency, which already enforced CSRF for
@@ -12,15 +12,20 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from greenkube.api.dependencies import get_auth_service, get_principal
-from greenkube.auth import oidc
+from greenkube.api.dependencies import (
+    browser_key_principal_for,
+    get_auth_service,
+    get_principal,
+    resolve_key_principal,
+)
+from greenkube.auth import browser_key, oidc
 from greenkube.auth.bootstrap import erase_consumed_initial_password, initial_admin_secret_from_config
 from greenkube.auth.http import (
     clear_session_cookie,
@@ -29,6 +34,7 @@ from greenkube.auth.http import (
     cookie_secure,
     from_trusted_proxy,
     is_https,
+    is_loopback_host,
     is_same_origin,
     set_session_cookie,
 )
@@ -39,7 +45,7 @@ from greenkube.auth.principal import Principal, Scope
 from greenkube.auth.service import AuthError, AuthService, IssuedSession
 from greenkube.auth.settings import AuthSettings
 from greenkube.auth.throttle import LoginThrottle
-from greenkube.auth.tokens import constant_time_equals, sha256_hex
+from greenkube.auth.tokens import constant_time_equals, parse_api_key, sha256_hex
 from greenkube.core.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -52,6 +58,11 @@ _NO_STORE = {"Cache-Control": "no-store"}
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=256)
     password: str = Field(..., min_length=1, max_length=1024)
+    remember: bool = False
+
+
+class ApiKeyLoginRequest(BaseModel):
+    key: str = Field(..., min_length=1, max_length=1024)
     remember: bool = False
 
 
@@ -276,6 +287,101 @@ async def login(body: LoginRequest, request: Request, response: Response):
     return _issued_me(issued, settings)
 
 
+@router.post("/api-key-login", response_model=MeResponse)
+async def api_key_login(body: ApiKeyLoginRequest, request: Request, response: Response):
+    """Sign a browser in with an API key in ``API_AUTH_MODE=api_key`` (field report F-09).
+
+    The key is checked like a Bearer key and exchanged for a signed, expiring
+    cookie ``v1.<kid>.<exp>.<mac>`` (HttpOnly, ``SameSite=Strict``) that never
+    contains the key. It lasts 12 hours, or ``AUTH_SESSION_REMEMBER_LIFETIME``
+    with "keep me signed in". Every request checks the signature, the expiry
+    and that the key is still active. The signing key derives from the
+    bootstrap key ``GREENKUBE_API_KEY``: without one this answers 409, and
+    rotating it signs every browser out. The request must arrive over HTTPS
+    (directly, through ``TRUSTED_PROXY_IPS``, or as declared by
+    ``SESSION_COOKIE_SECURE=always``); over plain HTTP only a loopback host
+    (``kubectl port-forward``) is accepted. Other modes answer 409.
+    """
+    settings = _settings()
+    if settings.mode != "api_key":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "API_KEY_LOGIN_DISABLED",
+                "message": "Sign in with a username and password or single sign-on (API_AUTH_MODE is not api_key).",
+            },
+        )
+    signing = browser_key.signing_key(settings)
+    if signing is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "API_KEY_LOGIN_UNAVAILABLE",
+                "message": "Browser sign-in with an API key needs the bootstrap key GREENKUBE_API_KEY, "
+                "which signs the browser cookie. Configure it or switch to API_AUTH_MODE=session.",
+            },
+        )
+    if not is_same_origin(request, settings, require=False):
+        record_auth_failure("csrf")
+        raise HTTPException(
+            status_code=403, detail={"code": "CSRF_REJECTED", "message": "Cross-site sign-in rejected."}
+        )
+    # SESSION_COOKIE_SECURE=always: the operator states that browsers reach GreenKube over HTTPS (the chart
+    # renders it with ingress.tls or an https HTTPRoute, where TLS ends at the ingress and no proxy IP is trusted).
+    https = is_https(request, settings) or settings.cookie_secure == "always"
+    if not https and not is_loopback_host(request):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "HTTPS_REQUIRED",
+                "message": "Signing in with an API key needs HTTPS (or localhost through kubectl port-forward): "
+                "over plain HTTP the key and the cookie could be read on the network. If TLS ends at an ingress "
+                "or load balancer outside the chart, set config.trustedProxyIps to its addresses (so "
+                "X-Forwarded-Proto is trusted) or auth.session.secureCookie: always.",
+            },
+        )
+    key = body.key.strip()
+    parsed = parse_api_key(key)
+    subject = browser_key.throttle_subject(key, parsed[0] if parsed else None)
+    ip = client_ip(request, settings)
+    throttle = _throttle(request, settings)
+    _enforce_throttle(throttle, ip, subject)
+    service = get_auth_service(request)
+    principal = await resolve_key_principal(key, settings, service)
+    kid = browser_key.LEGACY_KID if principal is not None and principal.legacy else None
+    if principal is not None and kid is None:
+        kid = principal.api_key_id
+    if principal is None:
+        throttle.record_failure(ip, subject)
+        record_auth_failure("invalid_api_key")
+        raise HTTPException(status_code=401, detail={"code": "INVALID_API_KEY", "message": "Invalid API key."})
+    throttle.record_success(ip, subject)
+    if kid is None or not principal.has_scope(Scope.READ.value):
+        record_auth_failure("forbidden_scope")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "INSUFFICIENT_SCOPE",
+                "message": "This key cannot open the UI: it needs the 'read' scope (scrape tokens never can).",
+            },
+        )
+    now = service.now() if service is not None else datetime.now(UTC)
+    lifetime = settings.remember_lifetime if body.remember else browser_key.DEFAULT_LIFETIME
+    cookie, _expires_at = browser_key.issue_cookie(signing, kid, now=now, lifetime=lifetime)
+    response.set_cookie(
+        settings.cookie_name,
+        cookie,
+        max_age=int(lifetime.total_seconds()) if body.remember else None,
+        path=cookie_path(request),
+        secure=True if https else cookie_secure(request, settings),
+        httponly=True,
+        samesite="strict",
+    )
+    response.headers.update(_NO_STORE)
+    logger.info("A browser signed in with API key %s.", principal.actor)
+    return _me(browser_key_principal_for(principal, signing, cookie), settings)
+
+
 @router.post("/logout", status_code=204)
 async def logout(request: Request):
     """Revoke the current session server-side and clear the cookie."""
@@ -467,6 +573,9 @@ class AuthProviders(BaseModel):
 
     mode: str
     password: bool
+    api_key: bool = Field(
+        default=False, description="The form asks for an API key (API_AUTH_MODE=api_key, field report F-09)."
+    )
     sso: SsoProvider | None = None
 
 
@@ -480,7 +589,9 @@ async def providers(response: Response):
         sso = SsoProvider(kind="oidc", name=settings.oidc_provider_name, login_path="/auth/oidc/login")
     elif settings.proxy_enabled:
         sso = SsoProvider(kind="proxy", name="your authentication proxy")
-    return AuthProviders(mode=settings.mode, password=settings.password_login_enabled, sso=sso)
+    return AuthProviders(
+        mode=settings.mode, password=settings.password_login_enabled, api_key=settings.mode == "api_key", sso=sso
+    )
 
 
 def _oidc_cookie_name(settings: AuthSettings) -> str:

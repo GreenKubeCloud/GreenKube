@@ -455,6 +455,13 @@ class AuthService:
     async def revoke_api_key(self, key_id: str) -> bool:
         return await self.repository.revoke_api_key(key_id, now=self.now())
 
+    async def active_api_key(self, key_id: str) -> ApiKey | None:
+        """The key ``key_id`` if it exists and is active now (no secret check: the caller verified a signed cookie)."""
+        key = await self.repository.get_api_key(key_id)
+        if key is None or not key.is_active(self.now()):
+            return None
+        return key
+
     async def resolve_api_key(self, token: str) -> ApiKey | None:
         parsed = parse_api_key(token)
         if parsed is None:

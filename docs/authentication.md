@@ -21,10 +21,38 @@ The mode is `config.apiAuthMode` (setting `API_AUTH_MODE`):
 | `session` (default) | local accounts (username and password) | scoped keys (and a bootstrap key kept from an earlier install) | Every installation |
 | `proxy` | single sign-on through an authentication proxy (oauth2-proxy, Authentik, Pomerium), plus local accounts | same | Clusters that already front their tools with an auth proxy |
 | `oidc` | native OpenID Connect (**Sign in with ...**), plus local accounts | same | Any OpenID Connect provider (Keycloak, Dex, Entra ID, Okta, Google, GitLab) |
-| `api_key` | no (`POST /auth/login` answers `409`) | scoped keys and the bootstrap key | Headless installations driven only by machines |
+| `api_key` | an API key, no accounts (`POST /auth/login` answers `409`, see [Browser sign-in with an API key](#browser-sign-in-with-an-api-key)) | scoped keys and the bootstrap key | Headless installations driven only by machines |
 
 Every browser mode ends in the same server-side session, cookie and CSRF protection described below; only the way
 the user proves who they are differs. See [Single sign-on](#single-sign-on) and [Roles](#roles).
+
+### Browser sign-in with an API key
+
+In `api_key` mode there are no accounts: the sign-in page asks for an API key (the bootstrap key
+`GREENKUBE_API_KEY` or a scoped `gk_` key with the `read` scope; the scrape token and `metrics:read`-only keys are
+refused with `403`). `POST /api/v1/auth/api-key-login` (`{"key": "...", "remember": false}`) checks the key like a
+Bearer key and answers with a signed cookie, never the key itself:
+
+- **Format:** `v1.<kid>.<exp>.<mac>`, where `kid` is the scoped key id or `legacy` for the bootstrap key, `exp` the
+  expiry (Unix time) and `mac` an HMAC-SHA256 over the rest. The signing key is derived from the bootstrap key, so
+  this sign-in needs `GREENKUBE_API_KEY` (without it the endpoint answers `409`), and **rotating the bootstrap key
+  signs every browser out**.
+- **Lifetime:** 12 hours, or `auth.session.rememberLifetime` (30 days by default) with "Keep me signed in".
+- **Every request** checks the signature (constant time) and the expiry, re-reads a scoped key and requires it
+  active, so revoking or expiring the key signs its browsers out. A cookie that fails a check is refused and cleared.
+- **Cookie flags:** `HttpOnly; SameSite=Strict`, and `Secure` over HTTPS. Cookie-authenticated mutations need a
+  same-origin `Origin` and the `X-CSRF-Token` returned by the sign-in and `/auth/me`, which differs for every cookie.
+- **HTTPS required:** over plain HTTP the sign-in answers `400 HTTPS_REQUIRED`, except for a loopback host
+  (`kubectl port-forward` to `localhost`). HTTPS is recognised directly, through `X-Forwarded-Proto` from
+  `config.trustedProxyIps`, or when `auth.session.secureCookie` is `always`, which the chart renders with
+  `ingress.tls` or an https HTTPRoute. If TLS ends at an ingress or load balancer the chart does not render, set
+  `config.trustedProxyIps` to its addresses or `auth.session.secureCookie: always`.
+- **Rate limit:** failed attempts count against `auth.loginRateLimit` per client IP and attempted key, plus the
+  per-IP budget, so one client's typos do not lock out the others behind the same address.
+- **Sign out** clears the cookie in the browser but does not revoke it on the server: a copy of the cookie stays
+  valid until its `exp`, unless the key is revoked or the bootstrap key rotated.
+
+For user accounts, roles and per-person audit, use `session` mode instead.
 
 ## First sign-in
 

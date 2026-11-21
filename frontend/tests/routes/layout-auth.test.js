@@ -39,6 +39,8 @@ function installServer({ principal = null, mustChange = false } = {}) {
 		const path = new URL(url).pathname;
 		const method = options.method || 'GET';
 		if (path === '/api/v1/health') return Promise.resolve(ok({ status: 'ok', version: '0.4.0' }));
+		// Public, like the real endpoint.
+		if (path === '/api/v1/auth/providers') return Promise.resolve(ok({ mode: 'session', password: true, api_key: false, sso: null }));
 		if (path === '/api/v1/auth/login') {
 			const body = JSON.parse(options.body);
 			if (body.password !== 'correct-password') {
@@ -244,4 +246,33 @@ describe('TLS warning', () => {
 			expect(screen.queryByTestId('tls-warning')).not.toBeInTheDocument();
 		}
 	);
+});
+
+describe('browser signed in with an API key (api_key mode, F-09)', () => {
+	const KEY_PRINCIPAL = {
+		authenticated: true,
+		kind: 'apikey',
+		name: 'legacy',
+		actor: 'api-key:digest',
+		role: 'admin',
+		scopes: ['admin', 'read', 'write'],
+		must_change_password: false,
+		csrf_token: 'csrf-key',
+		auth_mode: 'api_key'
+	};
+
+	it('offers the account link and sign out, which clears the cookie', async () => {
+		const state = installServer({ principal: KEY_PRINCIPAL });
+		render(Layout);
+
+		const signOut = await screen.findByRole('button', { name: 'Sign out' });
+		expect(screen.getByRole('link', { name: 'Account' })).toHaveAttribute('href', '/settings/account');
+		await fireEvent.click(signOut);
+
+		await waitFor(() => expect(state.principal).toBeNull());
+		expect(fetch).toHaveBeenCalledWith(
+			expect.stringContaining('/api/v1/auth/logout'),
+			expect.objectContaining({ method: 'POST' })
+		);
+	});
 });

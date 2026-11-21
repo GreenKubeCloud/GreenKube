@@ -70,6 +70,9 @@ class Principal:
     actor_override: str | None = None
     # How a user signed in: "local", "proxy" or "oidc" (F16); None for keys and anonymous.
     auth_source: str | None = None
+    # An API key a browser exchanged for its HttpOnly cookie in ``api_key`` mode (F-09):
+    # mutations then need the CSRF token, as with a session.
+    browser_key: bool = False
 
     @property
     def actor(self) -> str:

@@ -202,6 +202,8 @@
 				<div class="flex flex-wrap gap-3">
 					{#if $currentUser.kind === 'user'}
 						<a href="/settings/account" class="btn-secondary text-sm">Account, password and sessions</a>
+					{:else if $currentUser.kind === 'apikey'}
+						<a href="/settings/account" class="btn-secondary text-sm">Account and sign-out</a>
 					{/if}
 					{#if hasScope($currentUser, 'admin')}
 						<a href="/settings/api-keys" class="btn-secondary text-sm">API keys</a>
