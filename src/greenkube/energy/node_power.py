@@ -53,6 +53,22 @@ class NodePowerProfile:
     def is_fallback(self) -> bool:
         return self.source == POWER_SOURCE_DEFAULT_PROFILE
 
+    @property
+    def known_cores(self) -> Optional[float]:
+        """vCPUs of the node when the profile knows them; ``None`` for ``DEFAULT_INSTANCE_PROFILE``.
+
+        The default profile's ``vcores`` describe the fallback wattage, not the node: using
+        them for embodied emissions would charge 1 vCPU of the per-vCPU fallback instead of
+        the flat default (NRG-01).
+        """
+        if self.is_fallback:
+            return None
+        try:
+            cores = float(self.profile.get("vcores") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return cores if cores > 0 else None
+
 
 @lru_cache(maxsize=1)
 def _provider_coefficients() -> dict[str, dict[str, float]]:

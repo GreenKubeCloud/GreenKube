@@ -710,7 +710,7 @@ class HistoricalRangeProcessor:
             info,
             boavizta_cache,
             config,
-            cpu_capacity_cores=(info.cpu_capacity_cores if info else None) or profile.get("vcores"),
+            cpu_capacity_cores=(info.cpu_capacity_cores if info else None) or power.known_cores,
         )
         return NodeSpec(
             name=node_name,

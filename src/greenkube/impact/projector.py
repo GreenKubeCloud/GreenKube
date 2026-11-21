@@ -98,6 +98,8 @@ class _PowerProfile:
     min_watts: float
     max_watts: float
     source: PowerSource
+    #: vCPUs the profile knows of the node; None for DEFAULT_INSTANCE_PROFILE (NRG-01).
+    known_cores: Optional[float] = None
 
 
 def _resolved_power(
@@ -129,6 +131,7 @@ def _resolved_power(
         min_watts=float(profile.get("minWatts", 0.0) or 0.0),
         max_watts=float(profile.get("maxWatts", 0.0) or 0.0),
         source=PowerSource(power.source),
+        known_cores=power.known_cores,
     )
 
 
@@ -437,7 +440,7 @@ class ImpactProjector:
             ),
             known_profiles(),
             config,
-            cpu_capacity_cores=cores,
+            cpu_capacity_cores=capacity_cores or power.known_cores,
         )
         embodied_g_per_hour = embodied.g_per_hour
 

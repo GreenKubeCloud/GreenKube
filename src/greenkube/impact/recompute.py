@@ -203,7 +203,7 @@ class MetricRecomputer:
             info,
             self._embodied_profiles,
             self.config,
-            cpu_capacity_cores=float(profile.get("vcores", 0.0) or 0.0) or None,
+            cpu_capacity_cores=power.known_cores,
         )
         return NodeSpec(
             name=node_name,
