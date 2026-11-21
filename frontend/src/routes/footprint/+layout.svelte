@@ -1,8 +1,8 @@
 <script>
 	/**
 	 * Footprint (K7): the visibility pages — footprint charts, nodes and the
-	 * report builder — as supporting context for the savings loop. Grafana
-	 * stays the deep-analysis surface.
+	 * report builder with its CSV and JSON exports — as supporting context for
+	 * the savings loop. They are the footprint analysis surface.
 	 */
 	import { page } from '$app/state';
 	import { FOOTPRINT_SECTIONS, isFootprintSectionActive } from './sections.js';

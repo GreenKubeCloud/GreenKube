@@ -1187,7 +1187,8 @@ postgres:
 # Prometheus → GreenKube monitoring integration (optional).
 # This controls whether Prometheus scrapes GreenKube's own /prometheus/metrics endpoint.
 # This is NOT required for GreenKube to collect metrics FROM Prometheus — that works automatically.
-# Enable this only if you want GreenKube-computed metrics (CO₂e, cost, energy) in Grafana.
+# Enable it to alert on GreenKube itself (collection, loops, scans, measurement, ledger health) and to
+# chart the ledger savings counters (dashboards/greenkube-operations.json).
 # IMPORTANT: ServiceMonitor requires the Prometheus Operator CRDs to be installed
 # (e.g. via kube-prometheus-stack). If you don't have Prometheus Operator,
 # leave serviceMonitor.enabled=false to avoid installation errors.

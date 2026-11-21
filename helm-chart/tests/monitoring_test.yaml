@@ -189,14 +189,32 @@ tests:
           path: spec.endpoints[0].interval
           value: 1m
 
-  - it: ServiceMonitor should include the label relabeling rules
+  - it: ServiceMonitor restores only the exported cluster label and defaults an empty one
     set:
       monitoring.serviceMonitor.enabled: true
     templates:
       - templates/servicemonitor.yaml
     asserts:
-      - isNotEmpty:
+      - lengthEqual:
           path: spec.endpoints[0].metricRelabelings
+          count: 3
+      - equal:
+          path: spec.endpoints[0].metricRelabelings[0]
+          value:
+            sourceLabels: [exported_cluster]
+            targetLabel: cluster
+            regex: (.+)
+            action: replace
+      - equal:
+          path: spec.endpoints[0].metricRelabelings[1]
+          value:
+            regex: exported_cluster
+            action: labeldrop
+      - equal:
+          path: spec.endpoints[0].metricRelabelings[2].replacement
+          value: default
+      - notMatchRegexRaw:
+          pattern: exported_(namespace|pod|region)
 
   - it: ServiceMonitor should authenticate with the generated scrape token by default
     set:

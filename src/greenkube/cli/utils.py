@@ -19,11 +19,6 @@ from ..storage.base_collection_window_repository import create_collection_window
 from ..storage.installation_repository import create_installation_repository
 from ..utils.date_utils import parse_duration
 
-try:
-    from ..api.metrics_endpoint import update_cluster_metrics
-except Exception:  # pragma: no cover – optional dependency
-    update_cluster_metrics = None  # type: ignore[assignment]
-
 logger = logging.getLogger(__name__)
 
 
@@ -124,13 +119,6 @@ async def write_combined_metrics_to_database(
                 report.rows_written,
                 report.watermark.isoformat() if report.watermark else None,
             )
-
-        # Update Prometheus gauges with the most recent window for Grafana scraping
-        if update_cluster_metrics is not None and report.latest_rows:
-            try:
-                update_cluster_metrics(report.latest_rows)
-            except Exception as e:
-                logger.warning("Failed to update Prometheus cluster metrics: %s", e)
         return report
     finally:
         await processor.close()

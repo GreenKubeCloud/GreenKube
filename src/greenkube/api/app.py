@@ -38,8 +38,6 @@ from greenkube.api.dependencies import authenticate as authenticate_request
 from greenkube.api.dependencies import (
     get_combined_metrics_repository,
     get_gitops_binding_repository,
-    get_node_repository,
-    get_recommendation_repository,
 )
 from greenkube.api.metrics_endpoint import get_metrics_output, refresh_metrics_from_db
 from greenkube.api.routers import auth as auth_router
@@ -69,7 +67,7 @@ from greenkube.automation.plan_runtime import PlanRuntimeConfigurationError, bui
 from greenkube.automation.pr_lifecycle_runtime import create_pull_request_lifecycle_reconciler
 from greenkube.automation.webhook_runtime import create_webhook_processing_service
 from greenkube.core.config import get_config
-from greenkube.core.factory import get_savings_ledger_repository, get_summary_repository
+from greenkube.core.factory import get_savings_ledger_repository
 
 logger = logging.getLogger(__name__)
 _MANUAL_BINDING_RESOLUTION_PATH = re.compile(r"^/api/v1/gitops/bindings/[^/]+/[^/]+/[^/]+/resolve$")
@@ -429,24 +427,18 @@ def create_app(use_lifespan: bool = False) -> FastAPI:
             "timestamp": datetime.now(timezone.utc),
         }
 
-    # Prometheus metrics endpoint for Grafana dashboards
+    # Prometheus metrics endpoint (operational metrics and ledger savings counters).
     # Exposed at /prometheus/metrics to avoid collision with the SPA /metrics route.
     @app.get("/prometheus/metrics", include_in_schema=False)
     async def prometheus_metrics(
         combined_repo=Depends(get_combined_metrics_repository),
-        node_repo=Depends(get_node_repository),
-        reco_repo=Depends(get_recommendation_repository),
-        summary_repo=Depends(get_summary_repository),
         gitops_repository=Depends(get_gitops_binding_repository),
     ):
         """Expose Prometheus-compatible metrics for scraping."""
         # The scheduler writes data to the DB in a separate container/process,
         await refresh_metrics_from_db(
             combined_repo,
-            node_repo,
-            reco_repo,
             savings_repo=get_savings_ledger_repository(),
-            summary_repo=summary_repo,
             gitops_repository=gitops_repository,
         )
         return Response(

@@ -144,23 +144,6 @@ async def test_analyze_nodes_handles_initialization_failure():
 
 
 @pytest.mark.asyncio
-async def test_analyze_nodes_ignores_node_metric_update_failure():
-    node_collector = MagicMock()
-    node_collector.collect = AsyncMock(return_value={"node-a": NodeInfo(name="node-a", zone="eu-west-3a")})
-    node_collector.close = AsyncMock()
-    node_repo = MagicMock()
-    node_repo.save_nodes = AsyncMock(return_value=1)
-
-    with patch("greenkube.cli.start.NodeCollector", return_value=node_collector):
-        with patch("greenkube.cli.start.get_node_repository", return_value=node_repo):
-            with patch("greenkube.cli.start.update_node_metrics", side_effect=RuntimeError("gauge failed")):
-                await start_module.analyze_nodes()
-
-    node_repo.save_nodes.assert_awaited_once()
-    node_collector.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_scheduled_write_metrics_delegates_to_async_writer():
     with patch("greenkube.cli.start.async_write_combined_metrics_to_database", new_callable=AsyncMock) as writer:
         await start_module.scheduled_write_metrics()
@@ -326,21 +309,17 @@ async def test_compress_metrics_handles_errors():
 @pytest.mark.asyncio
 async def test_refresh_dashboard_summary_success():
     summary_repo = MagicMock()
-    summary_repo.get_rows = AsyncMock(return_value=["row"])
     refresher = MagicMock()
     refresher.run = AsyncMock(return_value=1)
-    update_metrics = MagicMock()
 
     with patch("greenkube.core.factory.get_summary_repository", return_value=summary_repo):
         with patch("greenkube.core.factory.get_combined_metrics_repository", return_value=MagicMock()):
             with patch("greenkube.core.factory.get_timeseries_cache_repository", return_value=MagicMock()):
-                with patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=refresher):
-                    with patch("greenkube.api.metrics_endpoint.update_dashboard_summary_metrics", update_metrics):
-                        await start_module.refresh_dashboard_summary()
+                with patch("greenkube.core.summary_refresher.SummaryRefresher", return_value=refresher) as cls:
+                    await start_module.refresh_dashboard_summary()
 
     refresher.run.assert_awaited_once()
-    summary_repo.get_rows.assert_awaited_once_with(namespace=None)
-    update_metrics.assert_called_once_with(["row"], reset=True)
+    assert cls.call_args.kwargs["summary_repo"] is summary_repo
 
 
 @pytest.mark.asyncio

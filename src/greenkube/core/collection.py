@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, Protocol
@@ -270,8 +270,6 @@ class CollectionReport:
     cost_pending_steps: int | None = None
     watermark: datetime | None = None
     error: str | None = None
-    #: Rows of the most recent collected sample (pod and container rows).
-    latest_rows: list[CombinedMetric] = field(default_factory=list)
     #: Start of the first window planned in this run; failed steps from there on are not retried in the same run.
     planned_from: datetime | None = None
 
@@ -575,10 +573,6 @@ class MetricsCollectionJob:
                 watermark = advanced
                 advance = False
         report.windows_collected += 1
-        if rows:
-            # Dashboard gauges describe "now": keep only the most recent sample.
-            latest = max((row.timestamp for row in rows if row.timestamp is not None), default=None)
-            report.latest_rows = [row for row in rows if row.timestamp == latest]
         collection_telemetry.record_window(self.source, monotonic() - started)
 
         if not advance:

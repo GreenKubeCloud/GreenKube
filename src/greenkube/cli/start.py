@@ -33,11 +33,6 @@ from ..core.loops import report_loop_failure
 from ..core.node_zone_mapper import NodeZoneMapper
 from .utils import write_combined_metrics_to_database
 
-try:
-    from ..api.metrics_endpoint import update_node_metrics
-except Exception:  # pragma: no cover – optional dependency
-    update_node_metrics = None  # type: ignore[assignment]
-
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(name="start", help="Start the GreenKube data collection service.")
@@ -159,13 +154,6 @@ async def analyze_nodes() -> None:
         saved_count = await node_repo.save_nodes(list(nodes_info.values()))
         logger.info("Successfully updated %s nodes in the database.", saved_count)
 
-        # Update Prometheus gauges for Grafana scraping
-        if update_node_metrics is not None:
-            try:
-                update_node_metrics(list(nodes_info.values()))
-            except Exception as e:
-                logger.warning("Failed to update Prometheus node metrics: %s", e)
-
     except Exception as e:
         logger.error("Failed to analyze nodes: %s", e)
         report_loop_failure(e)
@@ -259,7 +247,6 @@ async def refresh_dashboard_summary() -> None:
     """Refresh the pre-computed dashboard summary table."""
     logger.info("--- Starting dashboard summary refresh task ---")
     try:
-        from ..api.metrics_endpoint import update_dashboard_summary_metrics
         from ..core.factory import (
             get_combined_metrics_repository,
             get_summary_repository,
@@ -274,8 +261,6 @@ async def refresh_dashboard_summary() -> None:
             timeseries_cache_repo=get_timeseries_cache_repository(),
         )
         count = await refresher.run()
-        rows = await summary_repo.get_rows(namespace=None)
-        update_dashboard_summary_metrics(rows, reset=True)
         logger.info("Dashboard summary refresh complete: %d rows upserted.", count)
     except Exception as e:
         logger.error("Dashboard summary refresh failed: %s", e)

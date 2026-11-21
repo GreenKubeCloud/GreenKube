@@ -166,37 +166,26 @@ class TestServiceMonitor:
         sm = api_service_monitor(docs)
         assert sm["metadata"]["namespace"] == "custom-monitoring"  # type: ignore[index]
 
-    def test_servicemonitor_has_metric_relabelings(self):
-        """ServiceMonitor must restore exported_namespace/exported_pod labels so that
-        Grafana sees the real K8s namespace of the measured pod, not greenkube."""
+    def test_servicemonitor_restores_only_the_exported_cluster_label(self):
+        """No API series has a namespace, pod or region label of its own any more (B.7): only cluster is restored."""
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = api_service_monitor(docs)
         relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])  # type: ignore[index]
-        assert len(relabelings) >= 4, "ServiceMonitor should have at least 4 metricRelabelings"
+        restored = {r.get("targetLabel") for r in relabelings if r.get("sourceLabels", [""])[0].startswith("exported_")}
+        assert restored == {"cluster"}
+        assert not any("exported_namespace" in str(r) or "exported_pod" in str(r) for r in relabelings)
 
-    def test_servicemonitor_relabeling_restores_namespace(self):
-        """exported_namespace must be copied back to namespace."""
+    def test_servicemonitor_defaults_an_empty_cluster_label(self):
         docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
         sm = api_service_monitor(docs)
         relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])  # type: ignore[index]
-        ns_rule = next(
-            (r for r in relabelings if r.get("targetLabel") == "namespace"),
-            None,
-        )
-        assert ns_rule is not None, "No relabeling rule restoring namespace label"
-        assert "exported_namespace" in ns_rule.get("sourceLabels", [])
-
-    def test_servicemonitor_relabeling_restores_pod(self):
-        """exported_pod must be copied back to pod."""
-        docs = helm_template(["monitoring.serviceMonitor.enabled=true"])
-        sm = api_service_monitor(docs)
-        relabelings = sm["spec"]["endpoints"][0].get("metricRelabelings", [])  # type: ignore[index]
-        pod_rule = next(
-            (r for r in relabelings if r.get("targetLabel") == "pod"),
-            None,
-        )
-        assert pod_rule is not None, "No relabeling rule restoring pod label"
-        assert "exported_pod" in pod_rule.get("sourceLabels", [])
+        assert {
+            "sourceLabels": ["cluster"],
+            "regex": "^$",
+            "replacement": "default",
+            "targetLabel": "cluster",
+            "action": "replace",
+        } in relabelings
 
 
 class TestNetworkPolicy:

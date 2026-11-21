@@ -490,17 +490,6 @@ async def test_lease_taken_over_and_regained_still_aborts(stack):
 
 
 @pytest.mark.asyncio
-async def test_report_keeps_only_the_latest_sample_for_dashboard_gauges(stack):
-    await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
-
-    report = await _run_scheduled(stack, BASE + 3 * STEP + timedelta(minutes=1))
-
-    assert report.windows_collected == 1
-    assert {row.timestamp for row in report.latest_rows} == {BASE + 2 * STEP}
-    assert {row.pod_name for row in report.latest_rows if not row.container_name} == {"p", "q"}
-
-
-@pytest.mark.asyncio
 async def test_intensity_lookup_error_does_not_advance_the_watermark(stack):
     """COL-08 acceptance (S10): rows are not dropped silently; the window is retried."""
     await stack["watermarks"].advance("test-cluster", METRICS_WATERMARK_SOURCE, BASE)
