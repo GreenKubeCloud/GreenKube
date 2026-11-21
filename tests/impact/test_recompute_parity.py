@@ -260,3 +260,52 @@ async def test_a_dropped_node_reason_clears_is_estimated(stores):
     _, after_rows, _ = await _store_and_recompute(stores, cfg, nodes, [stale], [], t0)
     assert after_rows[0].estimation_reasons == []
     assert after_rows[0].is_estimated is False
+
+
+async def test_pre_0183_snapshots_take_the_host_ids_of_the_current_snapshot(stores):
+    """Snapshots stored before 0183 have no host or provider id: recompute groups by the current ids (A.9)."""
+    t0 = _t0()
+    cfg = Config()
+    names = ("kind-control-plane", "kind-worker", "kind-worker2")
+    historical = {n: _kind_node(n, t0, host_id=None, provider_id=None) for n in names}
+    current = {n: _kind_node(n, t0, timestamp=t0 + timedelta(hours=1)) for n in names}
+    expected_rows, expected_idle = _collect(cfg, current, t0, node_cpu=None)
+    await stores[1].save_nodes(list(historical.values()))
+    old_rows = [_row(name, t0, model_version="3.0.0", joules=1.0) for name in names]
+    _, after_rows, after_idle = await _store_and_recompute(stores, cfg, current, old_rows, [], t0)
+    assert len(after_rows) == 3
+    assert _totals(after_rows, after_idle) == pytest.approx(_totals(expected_rows, expected_idle))
+    for row in after_rows:
+        reasons = [r for r in row.estimation_reasons if r.startswith("Shared host")]
+        assert len(reasons) == 1
+        assert "3 nodes share one host (bootID boot-1)" in reasons[0]
+        assert "current node snapshot" in reasons[0]
+    assert [i.host_share for i in after_idle] == pytest.approx([1 / 3] * 3)
+
+
+async def test_recompute_all_repairs_pre_0183_rows_recomputed_without_a_group(stores):
+    """Rows an earlier recompute stamped with share 1 (no ids in force) are split by ``recompute --all``."""
+    t0 = _t0()
+    cfg = Config()
+    names = ("kind-control-plane", "kind-worker")
+    historical = {n: _kind_node(n, t0, host_id=None, provider_id=None) for n in names}
+    current = {n: _kind_node(n, t0, timestamp=t0 + timedelta(hours=1)) for n in names}
+    unsplit_rows, unsplit_idle = _collect(cfg, historical, t0, node_cpu=None)
+    assert {i.host_share for i in unsplit_idle} == {1.0}
+    expected_rows, expected_idle = _collect(cfg, current, t0, node_cpu=None)
+    await stores[1].save_nodes(list(historical.values()))
+    _, after_rows, after_idle = await _store_and_recompute(stores, cfg, current, unsplit_rows, unsplit_idle, t0)
+    assert _totals(after_rows, after_idle) == pytest.approx(_totals(expected_rows, expected_idle))
+    assert all("current node snapshot" in " ".join(r.estimation_reasons) for r in after_rows)
+
+
+async def test_pre_0183_snapshot_of_a_lone_node_stays_unshared(stores):
+    """A node alone on its host per its current snapshot keeps the whole host."""
+    t0 = _t0()
+    cfg = Config()
+    await stores[1].save_nodes([_kind_node("solo", t0, host_id=None, provider_id=None)])
+    current = {"solo": _kind_node("solo", t0, timestamp=t0 + timedelta(hours=1))}
+    old_rows = [_row("solo", t0, model_version="3.0.0", joules=1.0)]
+    _, after_rows, after_idle = await _store_and_recompute(stores, cfg, current, old_rows, [], t0)
+    assert not any(r.startswith("Shared host") for r in after_rows[0].estimation_reasons)
+    assert after_idle[0].host_share == pytest.approx(1.0)

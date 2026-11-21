@@ -33,6 +33,20 @@ def _kind_node(name: str, boot_id: str | None = "boot-1", provider_id: str | Non
     )
 
 
+def test_nodes_without_ids_take_the_ids_of_their_current_snapshot():
+    historical = {name: _kind_node(name, boot_id=None) for name in ("cp", "w1")}
+    current = {name: _kind_node(name) for name in ("cp", "w1")}
+    assert shared_host_groups(historical) == {}
+    groups = shared_host_groups(historical, current)
+    assert {name: group.share for name, group in groups.items()} == pytest.approx({"cp": 0.5, "w1": 0.5})
+    assert all(group.from_current_snapshot for group in groups.values())
+    assert "current node snapshot" in groups["cp"].reason("cp")
+    # Ids in force are never replaced by the current ones.
+    moved = {"cp": _kind_node("cp", boot_id="old"), "w1": _kind_node("w1", boot_id="old")}
+    assert not any(group.from_current_snapshot for group in shared_host_groups(moved, current).values())
+    assert "current node snapshot" not in shared_host_groups(current)["cp"].reason("cp")
+
+
 def test_nodes_with_the_same_boot_id_form_one_host():
     nodes = {name: _kind_node(name) for name in ("cp", "w1", "w2")}
     groups = shared_host_groups(nodes)
