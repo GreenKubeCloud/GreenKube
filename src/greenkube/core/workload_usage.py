@@ -853,6 +853,7 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
     profile_n: Dict[TargetKey, List[int]] = defaultdict(lambda: [0] * 24)
     node_hours: Dict[Tuple[str, Optional[datetime]], List[float]] = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0])
     first_hour: Optional[datetime] = None
+    collected: Dict[datetime, int] = {}
 
     for hour in hours:
         key = (hour.target, hour.container_name)
@@ -863,6 +864,8 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
         _merge_hour(totals, hour)
         if hour.hour_bucket is not None and (first_hour is None or hour.hour_bucket < first_hour):
             first_hour = hour.hour_bucket
+        if hour.hour_bucket is not None:
+            collected[hour.hour_bucket] = max(collected.get(hour.hour_bucket, 0), int(hour.step_count or 0))
         if hour.container_name != POD_LEVEL:
             continue
         if hour.hour_of_day is not None and hour.cpu_usage_avg is not None and hour.cpu_sample_count:
@@ -876,7 +879,9 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             acc[3] += hour.cpu_request_sum
             acc[4] += hour.memory_request_sum
 
-    snapshot = UsageSnapshot(source=source, first_hour=first_hour)
+    snapshot = UsageSnapshot(
+        source=source, first_hour=first_hour, collected_steps_by_hour=dict(sorted(collected.items()))
+    )
     for (target, container), hourly in per_hour.items():
         ordered = sorted(hourly.values(), key=lambda item: _sort_key(item.hour_bucket))
         last = ordered[-1]
@@ -889,6 +894,7 @@ def summarize(hours: Iterable[WorkloadUsageHour], *, source: str = "rows") -> Us
             container_name=container,
             first_hour=buckets[0] if buckets else None,
             last_hour=buckets[-1] if buckets else None,
+            first_hour_steps=next((item.step_count for item in ordered if item.hour_bucket is not None), 0),
             hours_observed=len(ordered),
             sample_count=sum(item.sample_count for item in ordered),
             step_count=sum(item.step_count for item in ordered),

@@ -427,6 +427,12 @@ class ObservedCoverage:
     observed_hours: float
     basis: str
     first_observed: Optional[datetime] = None
+    #: Wall-clock span from the first observation to the window end (IMP-04); ``None`` when the
+    #: collection of the cluster is unknown, and ``observed_hours`` is then that span.
+    span_hours: Optional[float] = None
+    #: Hours of the span in which the collector observed the cluster (IMP-04): ``observed_hours``
+    #: when known, so collection gaps stay out of the annualization.
+    collected_hours: Optional[float] = None
 
 
 @dataclass(frozen=True)

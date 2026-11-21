@@ -288,7 +288,8 @@ class PostgresWorkloadUsageRepository(WorkloadUsageRepository):
         summaries = await self._fetch(q.summary_sql(_ph, namespace, scope), params)
         profiles = await self._fetch(q.hour_profile_sql(_ph, namespace, scope), params)
         nodes = await self._fetch(q.node_sql(_ph, namespace, scope), params)
-        return q.build_snapshot(summaries, profiles, nodes, _decode)
+        collection = await self._fetch(q.collection_sql(_ph, namespace, scope), params)
+        return q.build_snapshot(summaries, profiles, nodes, _decode, collection)
 
     async def read_baseline_rows(
         self,

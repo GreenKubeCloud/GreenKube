@@ -332,14 +332,15 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
     ) -> UsageSnapshot:
         scope = sorted(namespaces) if namespaces is not None else None
         params = q.scope_params(_encode(start), _encode(end), namespace, scope)
-        summaries, profiles, nodes = await self._fetch_bounded(
+        summaries, profiles, nodes, collection = await self._fetch_bounded(
             [
                 (q.summary_sql(_ph, namespace, scope), params),
                 (q.hour_profile_sql(_ph, namespace, scope), params),
                 (q.node_sql(_ph, namespace, scope), params),
+                (q.collection_sql(_ph, namespace, scope), params),
             ]
         )
-        return q.build_snapshot(summaries, profiles, nodes, _decode)
+        return q.build_snapshot(summaries, profiles, nodes, _decode, collection)
 
     async def read_baseline_rows(
         self,

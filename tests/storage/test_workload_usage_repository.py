@@ -195,12 +195,16 @@ async def test_sql_snapshot_matches_the_reference_summary(db):
 
     assert snapshot.source == "rollup"
     assert set(snapshot.summaries) == set(reference.summaries)
+    # IMP-04: the collection steps of each hour, the same in SQL and in the reference.
+    assert snapshot.collected_steps_by_hour == reference.collected_steps_by_hour
+    assert len(snapshot.collected_steps_by_hour) == 5
     for target, containers in reference.summaries.items():
         assert set(snapshot.summaries[target]) == set(containers)
         for container, expected in containers.items():
             actual = snapshot.summaries[target][container]
             assert actual.hours_observed == expected.hours_observed == 5
             assert actual.first_hour == expected.first_hour
+            assert actual.first_hour_steps == expected.first_hour_steps > 0  # IMP-04
             assert actual.last_hour == expected.last_hour
             assert actual.sample_count == expected.sample_count
             assert actual.step_count == expected.step_count

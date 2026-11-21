@@ -174,7 +174,7 @@ class TestTwoHourWorkloadInFourteenDayLookback:
 
 
 class TestMinimumCoverage:
-    def test_a_few_minutes_are_annualized_as_one_hour(self):
+    def test_a_few_minutes_are_annualized_over_the_minimum_coverage(self):
         now = _now()
         rows = _rows(now, 1 / 6)  # two 5-minute samples
         projector = ImpactProjector(Config(), rows=rows, analysis_window_seconds=LOOKBACK, window_end=now)
