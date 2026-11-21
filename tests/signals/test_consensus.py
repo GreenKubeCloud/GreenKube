@@ -231,6 +231,22 @@ class TestConfiguration:
             assert name in warnings[0]
         assert not hasattr(config, "RECOMMENDATION_CONSENSUS_POLICY")
 
+    def test_removed_settings_in_the_env_file_are_warned_too(self, tmp_path, monkeypatch, caplog):
+        """The .env file Config loads is read as well: a removed setting there is not ignored silently."""
+        from greenkube.core import config as config_module
+
+        monkeypatch.setattr(config_module, "_REMOVED_WARNED", set())
+        for name in ("RECOMMENDATION_CONSENSUS_POLICY", "RECOMMENDATION_SOURCE_PRIORITY", "SOURCES_CONFIG"):
+            monkeypatch.delenv(name, raising=False)
+        (tmp_path / ".env").write_text('# legacy\nexport RECOMMENDATION_CONSENSUS_POLICY="weighted"\nOTHER=1\n')
+        monkeypatch.chdir(tmp_path)
+        with caplog.at_level("WARNING", logger="greenkube.core.config"):
+            config_module.Config()
+        warnings = [record.getMessage() for record in caplog.records if "removed setting" in record.getMessage()]
+        assert len(warnings) == 1
+        assert "RECOMMENDATION_CONSENSUS_POLICY" in warnings[0]
+        assert "RECOMMENDATION_SOURCE_PRIORITY" not in warnings[0]
+
 
 class TestEngineFamiliesAndPushCaps:
     def test_the_signal_engine_family_field_is_the_vote_unit(self):

@@ -125,9 +125,31 @@ REMOVED_SETTINGS: dict[str, str] = {
 _REMOVED_WARNED: set[str] = set()
 
 
-def removed_settings_in_use(environ: Optional[dict[str, str]] = None, sources_config: Any = "") -> list[str]:
-    """The removed settings (and ``SOURCES_CONFIG`` entries of removed sources) still configured."""
-    env = os.environ if environ is None else environ
+def _env_file_values(path: str) -> dict[str, str]:
+    """``NAME=value`` pairs of a dotenv file (the ``.env`` the configuration loads); empty when unreadable."""
+    values: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        name, _, value = text.removeprefix("export ").partition("=")
+        values[name.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def removed_settings_in_use(
+    environ: Optional[dict[str, str]] = None, sources_config: Any = "", env_file: Optional[str] = ".env"
+) -> list[str]:
+    """The removed settings (and ``SOURCES_CONFIG`` entries of removed sources) still configured.
+
+    Read from the environment and from ``env_file`` (the ``.env`` file :class:`Config` loads).
+    """
+    env = {**(_env_file_values(env_file) if env_file else {}), **(os.environ if environ is None else environ)}
     names = [name for name in REMOVED_SETTINGS if str(env.get(name) or "").strip()]
     try:
         from greenkube.signals.registry import REMOVED_SOURCE_IDS, parse_sources_config
