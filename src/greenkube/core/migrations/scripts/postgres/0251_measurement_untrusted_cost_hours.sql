@@ -1,0 +1,9 @@
+-- 0251: Untrusted cost hours of each decided change measurement (MEA-05).
+--
+-- untrusted_cost_hours and baseline_untrusted_cost_hours hold the observed
+-- workload hours without trusted cost in the post-window and in the baseline
+-- window, so an inconclusive cost verdict says why. Measurements decided
+-- before this migration keep NULL (their evidence digest leaves them out).
+ALTER TABLE change_measurements
+    ADD COLUMN IF NOT EXISTS untrusted_cost_hours DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS baseline_untrusted_cost_hours DOUBLE PRECISION;

@@ -96,6 +96,9 @@ async def test_list_and_read_a_measured_change(measured):
         assert capacity["method"] == "measured" and capacity["units"]["cpu_core_hours"] == "core-hours"
         assert capacity["verdict"] == "unknown"
         assert capacity["requests_source"]["before"] == "missing"
+        # MEA-05: hours of each window without trusted cost (every row of this scenario is trusted).
+        assert measurement["untrusted_cost_hours"] == 0.0
+        assert measurement["baseline_untrusted_cost_hours"] == 0.0
 
         assert client.get("/api/v2/changes/missing").status_code == 404
         assert client.get("/api/v2/changes/missing/measurements").status_code == 404
