@@ -1,9 +1,9 @@
 <script>
 	import { onMount } from 'svelte';
-	import { currentUser, hasScope } from '$lib/stores.js';
-	import DataState from '$lib/components/DataState.svelte';
-	import ControllerFamilyCard from '$lib/components/automation/ControllerFamilyCard.svelte';
-	import { groupControllerFamilies } from '$lib/components/automation/gitopsControllers.js';
+	import { currentUser, hasScope } from '#lib/stores.js';
+	import DataState from '#lib/components/DataState.svelte';
+	import ControllerFamilyCard from '#lib/components/automation/ControllerFamilyCard.svelte';
+	import { groupControllerFamilies } from '#lib/components/automation/gitopsControllers.js';
 	import {
 		getAutomationStatus,
 		getGitOpsBindings,
@@ -11,7 +11,7 @@
 		getGitOpsStatus,
 		refreshGitOpsDiscovery,
 		resolveGitOpsBinding
-	} from '$lib/api.js';
+	} from '#lib/api.js';
 
 	const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 	const SAFE_REVISION =

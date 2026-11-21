@@ -3,7 +3,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
-import StatCard from '$lib/components/StatCard.svelte';
+import StatCard from '#lib/components/StatCard.svelte';
 
 
 describe('StatCard', () => {

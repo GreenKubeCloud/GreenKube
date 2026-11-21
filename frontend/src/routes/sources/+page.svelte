@@ -1,9 +1,9 @@
 <script>
 	import { onDestroy, onMount } from 'svelte';
-	import { getSourceTrackRecord, listSourceRuns, listSources } from '$lib/api.js';
-	import { formatDate, formatRelativeTime } from '$lib/utils/format.js';
-	import { runTone, sortSources, sourceStatus, trackRecordFor } from '$lib/sources.js';
-	import StatusPill from '$lib/components/StatusPill.svelte';
+	import { getSourceTrackRecord, listSourceRuns, listSources } from '#lib/api.js';
+	import { formatDate, formatRelativeTime } from '#lib/utils/format.js';
+	import { runTone, sortSources, sourceStatus, trackRecordFor } from '#lib/sources.js';
+	import StatusPill from '#lib/components/StatusPill.svelte';
 
 	const RUN_LIMIT = 20;
 

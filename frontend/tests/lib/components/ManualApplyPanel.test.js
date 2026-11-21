@@ -4,10 +4,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import ManualApplyPanel from '../../../src/lib/components/ManualApplyPanel.svelte';
-import * as api from '$lib/api.js';
-import { currentUser } from '$lib/stores.js';
+import * as api from '#lib/api.js';
+import { currentUser } from '#lib/stores.js';
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	getManualGuide: vi.fn(),
 	markAppliedManually: vi.fn()
 }));

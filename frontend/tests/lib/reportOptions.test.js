@@ -7,7 +7,7 @@ import {
 	aggregationLevels,
 	groupByOptions,
 	buildReportRequestParams
-} from '$lib/reportOptions.js';
+} from '#lib/reportOptions.js';
 
 
 describe('reportTimeRanges', () => {

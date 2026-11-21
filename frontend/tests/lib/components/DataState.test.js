@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
-import DataState from '$lib/components/DataState.svelte';
+import DataState from '#lib/components/DataState.svelte';
 
 
 describe('DataState', () => {

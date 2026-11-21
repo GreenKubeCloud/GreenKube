@@ -6,7 +6,7 @@ import {
 	CONTROLLER_FAMILIES,
 	groupControllerFamilies,
 	resourceKindState
-} from '$lib/components/automation/gitopsControllers.js';
+} from '#lib/components/automation/gitopsControllers.js';
 
 const ALL_KEYS = [
 	'argocd',

@@ -42,7 +42,7 @@ import {
 	listChanges,
 	getChange,
 	getChangeMeasurements
-} from '$lib/api.js';
+} from '#lib/api.js';
 
 
 // ---------------------------------------------------------------------------

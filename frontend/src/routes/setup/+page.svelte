@@ -1,7 +1,7 @@
 <script>
 	import { onDestroy, onMount } from 'svelte';
-	import { ApiError, allowlistRepositories, getRepositorySuggestions, getSetupStatus } from '$lib/api.js';
-	import { currentUser, hasScope } from '$lib/stores.js';
+	import { ApiError, allowlistRepositories, getRepositorySuggestions, getSetupStatus } from '#lib/api.js';
+	import { currentUser, hasScope } from '#lib/stores.js';
 	import {
 		CHECK_STATUS,
 		allowLabel,
@@ -11,8 +11,8 @@
 		normalizeSetupStatus,
 		normalizeSuggestions,
 		setupStatus
-	} from '$lib/setup.js';
-	import StatusPill from '$lib/components/StatusPill.svelte';
+	} from '#lib/setup.js';
+	import StatusPill from '#lib/components/StatusPill.svelte';
 
 	let status = null;
 	let statusError = '';

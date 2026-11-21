@@ -6,7 +6,7 @@
 	 */
 	import { createEventDispatcher } from 'svelte';
 	import HealthBadge from './HealthBadge.svelte';
-	import { helmSnippetFor } from '$lib/configSnippets.js';
+	import { helmSnippetFor } from '#lib/configSnippets.js';
 
 	/** @type {Object|null} */
 	export let services = null;

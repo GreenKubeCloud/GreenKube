@@ -16,7 +16,7 @@ import {
 	normalizeSuggestions,
 	normalizeUiAction,
 	setupBannerDismissed
-} from '$lib/setup.js';
+} from '#lib/setup.js';
 import { createMemoryStorage, installStorage } from '../helpers/storage.js';
 // Generated from the FastAPI app by tests/api/test_ui_contract_fixtures.py.
 import INCOMPLETE from '../fixtures/api/setup_status_incomplete.json';

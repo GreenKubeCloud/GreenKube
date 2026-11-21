@@ -7,10 +7,10 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/sve
 import SettingsPage from '../../src/routes/settings/+page.svelte';
 import AccountPage from '../../src/routes/settings/account/+page.svelte';
 import ApiKeysPage from '../../src/routes/settings/api-keys/+page.svelte';
-import * as api from '$lib/api.js';
-import { currentUser } from '$lib/stores.js';
+import * as api from '#lib/api.js';
+import { currentUser } from '#lib/stores.js';
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	ApiError: class ApiError extends Error {},
 	getConfig: vi.fn(),
 	getVersion: vi.fn(),

@@ -1,7 +1,7 @@
 <script>
 	import { createEventDispatcher } from 'svelte';
 
-	/** Normalized setup status (see $lib/setup.js normalizeSetupStatus). */
+	/** Normalized setup status (see #lib/setup.js normalizeSetupStatus). */
 	export let status = null;
 
 	const dispatch = createEventDispatcher();

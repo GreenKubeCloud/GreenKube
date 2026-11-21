@@ -1,14 +1,14 @@
 <script>
 	import { onDestroy } from 'svelte';
-	import { demoMode, selectedNamespace } from '$lib/stores.js';
-	import { getActiveRecommendations, getRecommendationSavings, getOpenPullRequests, listChanges } from '$lib/api.js';
-	import { formatCO2, formatCost } from '$lib/utils/format.js';
-	import { savingPhrase } from '$lib/savingsVocabulary.js';
-	import Filters from '$lib/components/Filters.svelte';
-	import SavingsHero from '$lib/components/SavingsHero.svelte';
-	import StatusPill from '$lib/components/StatusPill.svelte';
-	import { describeExpectedValue, isReliabilityLane } from '$lib/utils/decision.js';
-	import { buildSavingsOverview, deliveryHint, etaFrom, targetName, warmUpOf } from '$lib/overview.js';
+	import { demoMode, selectedNamespace } from '#lib/stores.js';
+	import { getActiveRecommendations, getRecommendationSavings, getOpenPullRequests, listChanges } from '#lib/api.js';
+	import { formatCO2, formatCost } from '#lib/utils/format.js';
+	import { savingPhrase } from '#lib/savingsVocabulary.js';
+	import Filters from '#lib/components/Filters.svelte';
+	import SavingsHero from '#lib/components/SavingsHero.svelte';
+	import StatusPill from '#lib/components/StatusPill.svelte';
+	import { describeExpectedValue, isReliabilityLane } from '#lib/utils/decision.js';
+	import { buildSavingsOverview, deliveryHint, etaFrom, targetName, warmUpOf } from '#lib/overview.js';
 
 	/** Top inbox items shown on the Overview (server EV order). */
 	const TOP_COUNT = 5;

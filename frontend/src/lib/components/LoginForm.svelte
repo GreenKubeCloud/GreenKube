@@ -9,7 +9,7 @@
 	 * is sent once and kept by the server in an HttpOnly cookie, never here.
 	 */
 	import { createEventDispatcher, onMount } from 'svelte';
-	import { ApiError, getAuthProviders, login, loginWithApiKey, ssoLoginUrl } from '$lib/api.js';
+	import { ApiError, getAuthProviders, login, loginWithApiKey, ssoLoginUrl } from '#lib/api.js';
 
 	const dispatch = createEventDispatcher();
 

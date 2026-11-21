@@ -5,13 +5,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/svelte';
 
-vi.mock('$lib/api.js', async (importOriginal) => {
+vi.mock('#lib/api.js', async (importOriginal) => {
 	const actual = await importOriginal();
 	return { ...actual, getNodes: vi.fn() };
 });
 
-import * as api from '$lib/api.js';
-import { gpuPowerBadge } from '$lib/nodeGpu.js';
+import * as api from '#lib/api.js';
+import { gpuPowerBadge } from '#lib/nodeGpu.js';
 import NodesPage from '../../src/routes/footprint/nodes/+page.svelte';
 
 describe('gpuPowerBadge', () => {

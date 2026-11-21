@@ -1,13 +1,13 @@
 <script>
 	import { onDestroy } from 'svelte';
-	import { getChangeMeasurements, getRecommendationSavings, listChanges } from '$lib/api.js';
-	import { formatCO2, formatDate } from '$lib/utils/format.js';
-	import { formatMoney } from '$lib/utils/decision.js';
-	import { CHANGE_STATES, changeTarget, latestMeasurement, resolveChange, stateLabel, stateTone } from '$lib/changes.js';
-	import { safeHttpUrl } from '$lib/recommendationDetail.js';
-	import StatusPill from '$lib/components/StatusPill.svelte';
-	import MeasurementTable from '$lib/components/MeasurementTable.svelte';
-	import { SAVINGS_TERMS, realizationText, savingsFigures } from '$lib/savingsVocabulary.js';
+	import { getChangeMeasurements, getRecommendationSavings, listChanges } from '#lib/api.js';
+	import { formatCO2, formatDate } from '#lib/utils/format.js';
+	import { formatMoney } from '#lib/utils/decision.js';
+	import { CHANGE_STATES, changeTarget, latestMeasurement, resolveChange, stateLabel, stateTone } from '#lib/changes.js';
+	import { safeHttpUrl } from '#lib/recommendationDetail.js';
+	import StatusPill from '#lib/components/StatusPill.svelte';
+	import MeasurementTable from '#lib/components/MeasurementTable.svelte';
+	import { SAVINGS_TERMS, realizationText, savingsFigures } from '#lib/savingsVocabulary.js';
 
 	/** @type {{change: string|null}} */
 	export let data;

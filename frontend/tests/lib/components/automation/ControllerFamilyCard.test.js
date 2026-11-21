@@ -3,8 +3,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
-import ControllerFamilyCard from '$lib/components/automation/ControllerFamilyCard.svelte';
-import { groupControllerFamilies } from '$lib/components/automation/gitopsControllers.js';
+import ControllerFamilyCard from '#lib/components/automation/ControllerFamilyCard.svelte';
+import { groupControllerFamilies } from '#lib/components/automation/gitopsControllers.js';
 
 const available = { available: true, reason: null };
 const missing = { available: false, reason: 'crd-not-found' };

@@ -7,11 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import RecommendationsPage from '../../src/routes/recommendations/+page.svelte';
-import * as api from '$lib/api.js';
-import { selectedNamespace } from '$lib/stores.js';
-import { resetOptimizationRunsSupport } from '$lib/optimizationRuns.js';
+import * as api from '#lib/api.js';
+import { selectedNamespace } from '#lib/stores.js';
+import { resetOptimizationRunsSupport } from '#lib/optimizationRuns.js';
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	approveAutomationPlan: vi.fn(),
 	cancelAutomationPlan: vi.fn(),
 	createAutomationPlan: vi.fn(),

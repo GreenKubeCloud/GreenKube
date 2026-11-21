@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('$lib/api.js', async () => {
+vi.mock('#lib/api.js', async () => {
 	class ApiError extends Error {
 		constructor(message, status) {
 			super(message);
@@ -11,7 +11,7 @@ vi.mock('$lib/api.js', async () => {
 	return { ApiError, getChange: vi.fn(), listChanges: vi.fn() };
 });
 
-import * as api from '$lib/api.js';
+import * as api from '#lib/api.js';
 import {
 	changeTarget,
 	latestMeasurement,
@@ -20,7 +20,7 @@ import {
 	resolveChange,
 	stateLabel,
 	stateTone
-} from '$lib/changes.js';
+} from '#lib/changes.js';
 
 const notFound = () => new api.ApiError('Change not found.', 404);
 

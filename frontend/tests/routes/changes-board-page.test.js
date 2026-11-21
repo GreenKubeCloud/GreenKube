@@ -6,16 +6,19 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/sve
 
 const pageUrl = vi.hoisted(() => ({ href: 'http://localhost:3000/changes' }));
 
-vi.mock('$app/stores', async () => {
-	const { readable } = await import('svelte/store');
-	return {
-		page: {
-			subscribe: (run) => readable({ url: new URL(pageUrl.href), params: {}, route: { id: '/changes' }, status: 200 }).subscribe(run)
-		}
-	};
-});
+vi.mock('$app/state', () => ({
+	page: {
+		get url() {
+			return new URL(pageUrl.href);
+		},
+		params: {},
+		route: { id: '/changes' },
+		status: 200,
+		state: {}
+	}
+}));
 
-vi.mock('$lib/api.js', () => {
+vi.mock('#lib/api.js', () => {
 	class ApiError extends Error {
 		constructor(message, status) {
 			super(message);
@@ -34,7 +37,7 @@ vi.mock('$lib/api.js', () => {
 	};
 });
 
-import * as api from '$lib/api.js';
+import * as api from '#lib/api.js';
 import ChangesPage from '../../src/routes/changes/+page.svelte';
 
 const ago = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();

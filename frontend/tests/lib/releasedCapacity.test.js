@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
-import ReleasedCapacity from '$lib/components/ReleasedCapacity.svelte';
-import { capacitySummary, formatCapacity, releasedCapacityOf } from '$lib/releasedCapacity.js';
+import ReleasedCapacity from '#lib/components/ReleasedCapacity.svelte';
+import { capacitySummary, formatCapacity, releasedCapacityOf } from '#lib/releasedCapacity.js';
 
 const projected = {
 	method: 'projected',

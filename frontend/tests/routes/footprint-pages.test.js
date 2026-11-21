@@ -9,18 +9,19 @@ import { isRedirect } from '@sveltejs/kit';
 
 const pageUrl = vi.hoisted(() => ({ href: 'http://localhost:3000/footprint' }));
 
-vi.mock('$app/stores', async () => {
-	const { readable } = await import('svelte/store');
-	return {
-		page: {
-			subscribe: (run) => readable({ url: new URL(pageUrl.href), params: {}, route: { id: null }, status: 200 }).subscribe(run)
+vi.mock('$app/state', () => ({
+	page: {
+		get url() {
+			return new URL(pageUrl.href);
 		},
-		navigating: readable(null),
-		updated: readable(false)
-	};
-});
+		params: {},
+		route: { id: null },
+		status: 200,
+		state: {}
+	}
+}));
 
-vi.mock('$lib/api.js', async (importOriginal) => {
+vi.mock('#lib/api.js', async (importOriginal) => {
 	const actual = await importOriginal();
 	return {
 		...actual,
@@ -39,7 +40,7 @@ vi.mock('echarts', () => ({
 	init: () => ({ setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn() })
 }));
 
-import * as api from '$lib/api.js';
+import * as api from '#lib/api.js';
 import FootprintPage from '../../src/routes/footprint/+page.svelte';
 import FootprintLayout from '../../src/routes/footprint/+layout.svelte';
 import Layout from '../../src/routes/+layout.svelte';

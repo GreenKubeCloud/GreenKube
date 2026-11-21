@@ -4,8 +4,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
-import SavingsHero from '$lib/components/SavingsHero.svelte';
-import { buildSavingsOverview } from '$lib/overview.js';
+import SavingsHero from '#lib/components/SavingsHero.svelte';
+import { buildSavingsOverview } from '#lib/overview.js';
 
 const savings = {
 	realized_to_date: { method: 'measured', basis: 'accrued', cost: 120, co2e_grams: 4000 },

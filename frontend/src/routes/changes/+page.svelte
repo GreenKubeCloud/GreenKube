@@ -5,7 +5,7 @@
 	 * the Automation page; reads only.
 	 */
 	import { onDestroy, onMount } from 'svelte';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import {
 		BOARD_STAGES,
 		boardFilterQuery,
@@ -16,7 +16,7 @@
 		loadChangeBoard,
 		loadMoreChanges,
 		parseBoardFilters
-	} from '$lib/changes.js';
+	} from '#lib/changes.js';
 	import ChangeRow from './ChangeRow.svelte';
 
 	let data = null;
@@ -25,7 +25,7 @@
 	let moreError = '';
 	let controller = new AbortController();
 
-	const initial = parseBoardFilters($page?.url?.searchParams);
+	const initial = parseBoardFilters(page?.url?.searchParams);
 	let stage = initial.stage;
 	let namespace = initial.namespace;
 	let attention = initial.attention;

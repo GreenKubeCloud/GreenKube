@@ -14,7 +14,7 @@ import {
 	requestRows,
 	safeHttpUrl,
 	valueOf
-} from '$lib/recommendationDetail.js';
+} from '#lib/recommendationDetail.js';
 
 describe('impactOf', () => {
 	it('maps the Impact Model projection with its non-zero components', () => {

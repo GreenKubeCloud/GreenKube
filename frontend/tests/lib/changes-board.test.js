@@ -4,7 +4,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('$lib/api.js', () => {
+vi.mock('#lib/api.js', () => {
 	class ApiError extends Error {
 		constructor(message, status) {
 			super(message);
@@ -23,7 +23,7 @@ vi.mock('$lib/api.js', () => {
 	};
 });
 
-import * as api from '$lib/api.js';
+import * as api from '#lib/api.js';
 import {
 	BOARD_STAGES,
 	boardAttention,
@@ -36,7 +36,7 @@ import {
 	loadChangeBoard,
 	loadMoreChanges,
 	parseBoardFilters
-} from '$lib/changes.js';
+} from '#lib/changes.js';
 
 const ago = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
 

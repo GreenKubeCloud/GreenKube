@@ -4,7 +4,7 @@
 	 * report builder — as supporting context for the savings loop. Grafana
 	 * stays the deep-analysis surface.
 	 */
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { FOOTPRINT_SECTIONS, isFootprintSectionActive } from './sections.js';
 </script>
 
@@ -12,7 +12,7 @@
 	<nav aria-label="Footprint sections" data-testid="footprint-nav">
 		<ul class="flex flex-wrap gap-1 border-b border-dark-700/50">
 			{#each FOOTPRINT_SECTIONS as section (section.href)}
-				{@const active = isFootprintSectionActive(section.href, $page?.url?.pathname ?? '')}
+				{@const active = isFootprintSectionActive(section.href, page?.url?.pathname ?? '')}
 				<li>
 					<a
 						href={section.href}

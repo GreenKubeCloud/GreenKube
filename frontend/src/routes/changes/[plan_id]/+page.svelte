@@ -1,13 +1,13 @@
 <script>
 	import { onDestroy } from 'svelte';
-	import { ApiError, getAutomationPlan, getChangeMeasurements, getRecommendationPullRequests } from '$lib/api.js';
-	import { formatDate } from '$lib/utils/format.js';
-	import { changeTarget, formatUntrustedHours, latestMeasurement, resolveChange, stateLabel, stateTone } from '$lib/changes.js';
-	import { safeHttpUrl } from '$lib/recommendationDetail.js';
-	import StatusPill from '$lib/components/StatusPill.svelte';
-	import MeasurementTable from '$lib/components/MeasurementTable.svelte';
-	import ReleasedCapacity from '$lib/components/ReleasedCapacity.svelte';
-	import { demoMode } from '$lib/stores.js';
+	import { ApiError, getAutomationPlan, getChangeMeasurements, getRecommendationPullRequests } from '#lib/api.js';
+	import { formatDate } from '#lib/utils/format.js';
+	import { changeTarget, formatUntrustedHours, latestMeasurement, resolveChange, stateLabel, stateTone } from '#lib/changes.js';
+	import { safeHttpUrl } from '#lib/recommendationDetail.js';
+	import StatusPill from '#lib/components/StatusPill.svelte';
+	import MeasurementTable from '#lib/components/MeasurementTable.svelte';
+	import ReleasedCapacity from '#lib/components/ReleasedCapacity.svelte';
+	import { demoMode } from '#lib/stores.js';
 
 	/** @type {{planId: string}} */
 	export let data;

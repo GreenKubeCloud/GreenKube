@@ -4,7 +4,7 @@
 	 * the account page. Password managers recognise the new-password field.
 	 */
 	import { createEventDispatcher } from 'svelte';
-	import { ApiError, changePassword } from '$lib/api.js';
+	import { ApiError, changePassword } from '#lib/api.js';
 
 	/** Username, so password managers update the right entry. */
 	export let username = '';

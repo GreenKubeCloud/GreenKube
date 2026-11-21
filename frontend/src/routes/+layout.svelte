@@ -1,7 +1,7 @@
 <script>
 	import '../app.css';
-	import { page } from '$app/stores';
-	import { sidebarCollapsed, servicesHealth, healthPopupDismissed, currentUser, hasScope, demoMode } from '$lib/stores.js';
+	import { page } from '$app/state';
+	import { sidebarCollapsed, servicesHealth, healthPopupDismissed, currentUser, hasScope, demoMode } from '#lib/stores.js';
 	import {
 		ApiError,
 		AUTH_REQUIRED_EVENT,
@@ -12,14 +12,14 @@
 		getServicesHealth,
 		getSetupStatus,
 		logout
-	} from '$lib/api.js';
+	} from '#lib/api.js';
 	import { onMount } from 'svelte';
-	import HealthPopup from '$lib/components/HealthPopup.svelte';
-	import LoginForm from '$lib/components/LoginForm.svelte';
-	import PasswordChangeForm from '$lib/components/PasswordChangeForm.svelte';
-	import SetupBanner from '$lib/components/SetupBanner.svelte';
-	import { normalizeSetupStatus, setupBannerDismissed, setupStatus } from '$lib/setup.js';
-	import { setDisplayCurrency } from '$lib/utils/format.js';
+	import HealthPopup from '#lib/components/HealthPopup.svelte';
+	import LoginForm from '#lib/components/LoginForm.svelte';
+	import PasswordChangeForm from '#lib/components/PasswordChangeForm.svelte';
+	import SetupBanner from '#lib/components/SetupBanner.svelte';
+	import { normalizeSetupStatus, setupBannerDismissed, setupStatus } from '#lib/setup.js';
+	import { setDisplayCurrency } from '#lib/utils/format.js';
 
 	let health = null;
 	let healthError = false;
@@ -283,9 +283,9 @@
 				<a
 					href={item.href}
 					aria-label={item.label}
-					aria-current={isActive(item.href, $page.url.pathname) ? 'page' : undefined}
+					aria-current={isActive(item.href, page.url.pathname) ? 'page' : undefined}
 					class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all duration-200
-					       {isActive(item.href, $page.url.pathname)
+					       {isActive(item.href, page.url.pathname)
 								? 'bg-green-600/15 text-green-400 font-medium'
 								: 'text-dark-400 hover:text-dark-200 hover:bg-dark-800'}"
 				>
@@ -414,7 +414,7 @@
 				Password changed. The initial admin password was erased from its Kubernetes Secret.
 			</div>
 		{/if}
-		{#if !$demoMode && !$setupBannerDismissed && !$page.url.pathname.startsWith('/setup')}
+		{#if !$demoMode && !$setupBannerDismissed && !page.url.pathname.startsWith('/setup')}
 			<SetupBanner status={$setupStatus} on:dismiss={() => setupBannerDismissed.set(true)} />
 		{/if}
 		{#key authEpoch}

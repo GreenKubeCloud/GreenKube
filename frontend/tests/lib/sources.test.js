@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runTone, sortSources, sourceStatus, trackRecordFor } from '$lib/sources.js';
+import { runTone, sortSources, sourceStatus, trackRecordFor } from '#lib/sources.js';
 
 describe('sources', () => {
 	it('labels every status with text and an icon', () => {

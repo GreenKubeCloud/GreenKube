@@ -8,9 +8,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import Layout from '../../src/routes/+layout.svelte';
-import { clearCsrfToken, getConfig } from '$lib/api.js';
-import { currentUser } from '$lib/stores.js';
-import { getDisplayCurrency, setDisplayCurrency } from '$lib/utils/format.js';
+import { clearCsrfToken, getConfig } from '#lib/api.js';
+import { currentUser } from '#lib/stores.js';
+import { getDisplayCurrency, setDisplayCurrency } from '#lib/utils/format.js';
 import { createMemoryStorage, installStorage } from '../helpers/storage.js';
 
 const ADMIN = {

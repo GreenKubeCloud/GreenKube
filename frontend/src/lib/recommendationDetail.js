@@ -4,7 +4,7 @@
  * sources (Recommendation v2, shown only when the server returns it) and
  * measured outcome. Projected and measured values stay in separate blocks.
  */
-import { currencyOrDefault } from '$lib/utils/format.js';
+import { currencyOrDefault } from '#lib/utils/format.js';
 
 function finite(value) {
 	const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;

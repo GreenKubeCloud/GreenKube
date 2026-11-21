@@ -118,7 +118,7 @@ describe('sign-in form in session mode', () => {
 
 describe('account page signed in with an API key', () => {
 	it('explains the key instead of listing sessions or offering a password change', async () => {
-		const { currentUser } = await import('$lib/stores.js');
+		const { currentUser } = await import('#lib/stores.js');
 		const AccountPage = (await import('../../src/routes/settings/account/+page.svelte')).default;
 		installFetch({});
 		currentUser.set(PRINCIPAL);

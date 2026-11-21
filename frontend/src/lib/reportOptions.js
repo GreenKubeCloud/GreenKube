@@ -1,4 +1,4 @@
-import { timeRanges } from '$lib/stores.js';
+import { timeRanges } from '#lib/stores.js';
 
 export const reportTimeRanges = timeRanges;
 

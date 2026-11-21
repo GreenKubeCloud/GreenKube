@@ -1,10 +1,10 @@
 <script>
-	import { formatCO2 } from '$lib/utils/format.js';
-	import { formatMoney } from '$lib/utils/decision.js';
-	import StatusPill from '$lib/components/StatusPill.svelte';
-	import { SAVINGS_TERMS, realizationText } from '$lib/savingsVocabulary.js';
+	import { formatCO2 } from '#lib/utils/format.js';
+	import { formatMoney } from '#lib/utils/decision.js';
+	import StatusPill from '#lib/components/StatusPill.svelte';
+	import { SAVINGS_TERMS, realizationText } from '#lib/savingsVocabulary.js';
 
-	/** Output of buildSavingsOverview ($lib/overview.js); null while unknown. */
+	/** Output of buildSavingsOverview (#lib/overview.js); null while unknown. */
 	export let overview = null;
 	export let loading = false;
 	/** Error message when the savings report could not be read. */

@@ -14,7 +14,7 @@ import {
 	formatRelativeTime,
 	formatDate,
 	formatNumber
-} from '$lib/utils/format.js';
+} from '#lib/utils/format.js';
 
 
 // ---------------------------------------------------------------------------

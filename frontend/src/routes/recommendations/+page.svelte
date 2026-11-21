@@ -1,5 +1,5 @@
 <script>
-	import { currentUser, demoMode, hasScope, selectedNamespace } from '$lib/stores.js';
+	import { currentUser, demoMode, hasScope, selectedNamespace } from '#lib/stores.js';
 	import { onDestroy, onMount } from 'svelte';
 	import {
 		getActiveRecommendations,
@@ -20,21 +20,21 @@
 		reportPlanDelivery,
 		planPatchUrl,
 		getRecommendationEvents
-	} from '$lib/api.js';
+	} from '#lib/api.js';
 	import {
 		findPendingOptimizationRun,
 		isRunPending,
 		startOptimizationScan,
 		waitForOptimizationRun
-	} from '$lib/optimizationRuns.js';
-	import { formatCO2, formatCost, formatCPU, formatBytes } from '$lib/utils/format.js';
-	import { groupConsecutiveEvents } from '$lib/utils/lifecycle.js';
+	} from '#lib/optimizationRuns.js';
+	import { formatCO2, formatCost, formatCPU, formatBytes } from '#lib/utils/format.js';
+	import { groupConsecutiveEvents } from '#lib/utils/lifecycle.js';
 	import {
 		describeRankingFactors,
 		formatRankingScore,
 		rankingFactorLabel,
 		topRankingFactor
-	} from '$lib/utils/ranking.js';
+	} from '#lib/utils/ranking.js';
 	import {
 		describeExpectedValue,
 		eligibilityOf,
@@ -42,12 +42,12 @@
 		isReliabilityLane,
 		oomHistoryWarningOf,
 		planTargetFor
-	} from '$lib/utils/decision.js';
-	import DataState from '$lib/components/DataState.svelte';
-	import OomHistoryWarning from '$lib/components/OomHistoryWarning.svelte';
-	import { capacitySummary } from '$lib/releasedCapacity.js';
-	import { etaFrom, OPPORTUNITY_LABEL, serverOpportunity } from '$lib/overview.js';
-	import { SAVINGS_TERMS, appliedCostFigure, realizationText, savingPhrase, savingsFigures, visibleDiagnostics } from '$lib/savingsVocabulary.js';
+	} from '#lib/utils/decision.js';
+	import DataState from '#lib/components/DataState.svelte';
+	import OomHistoryWarning from '#lib/components/OomHistoryWarning.svelte';
+	import { capacitySummary } from '#lib/releasedCapacity.js';
+	import { etaFrom, OPPORTUNITY_LABEL, serverOpportunity } from '#lib/overview.js';
+	import { SAVINGS_TERMS, appliedCostFigure, realizationText, savingPhrase, savingsFigures, visibleDiagnostics } from '#lib/savingsVocabulary.js';
 
 	// --- State ---
 	let activeRecs = [];

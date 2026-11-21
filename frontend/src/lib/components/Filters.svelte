@@ -1,6 +1,6 @@
 <script>
-	import { selectedNamespace, selectedTimeRange, timeRanges } from '$lib/stores.js';
-	import { getNamespaces } from '$lib/api.js';
+	import { selectedNamespace, selectedTimeRange, timeRanges } from '#lib/stores.js';
+	import { getNamespaces } from '#lib/api.js';
 	import { onMount } from 'svelte';
 
 	/** Hide the period on pages that do not read a time window (the Overview, K7). */

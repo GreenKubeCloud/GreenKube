@@ -16,9 +16,9 @@
  *
  * None of the returned objects carries a total across kinds, by design.
  */
-import { eligibilityOf, expectedValue } from '$lib/utils/decision.js';
-import { getDisplayCurrency } from '$lib/utils/format.js';
-import { savingsFigures, visibleDiagnostics } from '$lib/savingsVocabulary.js';
+import { eligibilityOf, expectedValue } from '#lib/utils/decision.js';
+import { getDisplayCurrency } from '#lib/utils/format.js';
+import { savingsFigures, visibleDiagnostics } from '#lib/savingsVocabulary.js';
 
 function finite(value) {
 	const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;

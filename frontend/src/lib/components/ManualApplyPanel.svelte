@@ -5,8 +5,8 @@
 	 * pull request. The guide is fetched on demand; nothing here writes to the cluster.
 	 */
 	import { createEventDispatcher } from 'svelte';
-	import { getManualGuide, markAppliedManually } from '$lib/api.js';
-	import { currentUser, hasScope } from '$lib/stores.js';
+	import { getManualGuide, markAppliedManually } from '#lib/api.js';
+	import { currentUser, hasScope } from '#lib/stores.js';
 
 	/** @type {number} */
 	export let recommendationId;

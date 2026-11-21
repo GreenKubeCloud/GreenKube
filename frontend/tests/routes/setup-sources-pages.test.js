@@ -8,9 +8,9 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/sve
 import { get } from 'svelte/store';
 import SetupPage from '../../src/routes/setup/+page.svelte';
 import SourcesPage from '../../src/routes/sources/+page.svelte';
-import * as api from '$lib/api.js';
-import { currentUser } from '$lib/stores.js';
-import { setupStatus } from '$lib/setup.js';
+import * as api from '#lib/api.js';
+import { currentUser } from '#lib/stores.js';
+import { setupStatus } from '#lib/setup.js';
 import INCOMPLETE_FIXTURE from '../fixtures/api/setup_status_incomplete.json';
 import HOST_MISMATCH_FIXTURE from '../fixtures/api/setup_status_host_mismatch.json';
 import PAUSED_FIXTURE from '../fixtures/api/setup_status_paused.json';
@@ -18,7 +18,7 @@ import COMPLETE_FIXTURE from '../fixtures/api/setup_status_complete.json';
 import SUGGESTIONS_FIXTURE from '../fixtures/api/repository_suggestions.json';
 import ALLOWLIST_FIXTURE from '../fixtures/api/repository_allowlist.json';
 
-vi.mock('$lib/api.js', () => {
+vi.mock('#lib/api.js', () => {
 	class ApiError extends Error {
 		constructor(message, status) {
 			super(message);
