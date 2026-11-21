@@ -75,6 +75,15 @@ def test_a_node_removal_is_not_added_to_the_pod_savings_it_overlaps():
     assert opportunity_of(records).cost_annual == pytest.approx(67.0)
 
 
+def test_the_reliability_cost_is_the_allocated_cost_on_fixed_nodes():
+    """Fixed nodes: the billable projection of an increase is 0, its allocated cost is not."""
+    increase = _rec(1, RecommendationType.RIGHTSIZING_MEMORY, "ns", 0.0, owner="a", current=1, recommended=2)
+    increase = increase.model_copy(update={"impact": {"allocated_cost_annual": -12.0, "realization_factor": 0.0}})
+    summary = opportunity_of([increase])
+    assert summary.reliability_count == 1
+    assert summary.reliability_cost_annual == pytest.approx(12.0)
+
+
 def test_the_savings_report_serves_the_opportunity_to_every_page():
     report = assemble_savings_report([], [], active=_fixture())
     assert report.opportunity is not None

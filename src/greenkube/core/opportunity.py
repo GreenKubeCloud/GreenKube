@@ -86,7 +86,7 @@ def _metrics(record: RecommendationRecord) -> _Metrics:
 def _is_reliability(record: RecommendationRecord, metrics: _Metrics) -> bool:
     from greenkube.verify.strategy import is_reliability_increase
 
-    return is_reliability_increase(record) or metrics[0] < 0
+    return is_reliability_increase(record) or metrics[0] < 0 or metrics[1] < 0
 
 
 def _add(left: _Metrics, right: _Metrics) -> _Metrics:
@@ -114,7 +114,8 @@ def opportunity_of(records: Iterable[RecommendationRecord]) -> OpportunitySummar
     for record in records:
         metrics = _metrics(record)
         if _is_reliability(record, metrics):
-            reliability += max(-metrics[0], 0.0)
+            # The allocated cost (the billable one is 0 on fixed nodes, where a fix still costs capacity).
+            reliability += max(-metrics[1], -metrics[0], 0.0)
             reliability_count += 1
             continue
         count += 1
