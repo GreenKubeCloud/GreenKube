@@ -498,8 +498,22 @@ class TestCarbonAwareScheduling:
 # ---------------------------------------------------------------------------
 
 
+def _restarting(pod_name: str, restarts: int) -> list:
+    """Two rows of a pod whose lifetime counter grows by ``restarts`` inside the period (COL-20)."""
+    start = datetime(2025, 1, 1, 11, 0, tzinfo=timezone.utc)
+    return [
+        _metric(pod_name=pod_name, restart_count=2, timestamp=start),
+        _metric(pod_name=pod_name, restart_count=2 + restarts),
+    ]
+
+
 class TestStability:
-    """Pod restart counts drive the stability score."""
+    """Restarts inside the period drive the stability score (COL-20)."""
+
+    def test_old_restarts_do_not_count(self):
+        metrics = [*_restarting("old-1", 0), _metric(pod_name="old-2", restart_count=216)]
+        result = SustainabilityScorer().compute(metrics)
+        assert result.dimension_scores["stability"] == 100.0
 
     def test_zero_restarts_scores_100(self):
         metrics = [
@@ -512,8 +526,8 @@ class TestStability:
 
     def test_many_restarts_scores_low(self):
         metrics = [
-            _metric(pod_name="crasher-1", restart_count=15),
-            _metric(pod_name="crasher-2", restart_count=20),
+            *_restarting("crasher-1", 15),
+            *_restarting("crasher-2", 20),
         ]
         scorer = SustainabilityScorer()
         result = scorer.compute(metrics)
@@ -521,8 +535,8 @@ class TestStability:
 
     def test_moderate_restarts(self):
         metrics = [
-            _metric(pod_name="flaky-1", restart_count=3),
-            _metric(pod_name="flaky-2", restart_count=5),
+            *_restarting("flaky-1", 3),
+            *_restarting("flaky-2", 5),
         ]
         scorer = SustainabilityScorer()
         result = scorer.compute(metrics)

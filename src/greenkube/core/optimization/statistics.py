@@ -54,6 +54,8 @@ def usage_stats(
     Rows aggregated from the usage rollup (``BaselineMetric``) contribute a
     quantile sketch of their target's per-step distribution instead of their
     average, so percentiles of the points match the usage summary (E3, E9).
+    A raw step row with a step peak contributes ``max(usage, peak)``, like the
+    usage summaries rightsizing reads (COL-12 review).
     """
     weighted_total = 0.0
     sample_total = 0
@@ -76,6 +78,10 @@ def usage_stats(
         sketch = _sketch_points(metric, usage_attr, row_max)
         if sketch is not None:
             average_points.extend(sketch)
+        elif sample_count == 1 and max_usage is not None:
+            # A raw step row with its step peak: the point is the peak, the basis rightsizing
+            # sizes on (COL-12 review), so evidence percentiles and thresholds match it.
+            average_points.append(max(usage_float, float(max_usage)))
         else:
             average_points.append(usage_float)
 

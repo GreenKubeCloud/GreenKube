@@ -8,7 +8,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from typing import Any, List
+from typing import Any, List, Optional
 
 from .. import __version__
 from ..collectors import dcgm_collector
@@ -21,7 +21,7 @@ from ..collectors.opencost_collector import (
     OpenCostCollector,
     opencost_step_shares,
 )
-from ..collectors.pod_collector import PodCollector
+from ..collectors.pod_collector import PodCollector, resolve_workload_owner
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..collectors.promql import PromQLCatalog
 from ..core import collection_telemetry
@@ -79,7 +79,16 @@ logger = logging.getLogger(__name__)
 #: seconds in each step (OpenCost ``start``/``end``), not ``step / running time`` per row.  ``+range.6``
 #: rows of catch-up and backfill windows keep their cost: re-collect a window inside retention to apply it.
 #: range.8 (COST-02): container rows split the pod cost by reservation max(request, usage), not by usage.
-CALCULATION_VERSION = f"{__version__}+range.8"
+#: range.9 (COL-11): CPU of a container adds its consecutive instances (cAdvisor ``name``) inside the rate
+#: window instead of keeping the largest; duplicates of one instance still count once.  ``+range.8`` rows
+#: under-count CPU around restarts: re-collect a window inside Prometheus retention to apply it.
+#: COL-12: memory_usage_bytes is the working-set average over the step (avg_over_time), no longer the
+#: instant value at the step boundary, and container rows store the step peak (max_over_time) in
+#: memory_usage_max_bytes.  Older rows keep a NULL peak (rightsizing then uses the step value).
+#: COL-15: the node provider comes from CLOUD_PROVIDER, the providerID or provider labels, never from a
+#: region prefix (GKE us-* nodes were aws).  Rows and node snapshots stored before keep their provider and
+#: PUE; re-collect a window inside Prometheus retention to apply it.
+CALCULATION_VERSION = f"{__version__}+range.9"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
 # Prometheus evaluation timestamps are exact multiples of the step; tolerate float noise.
@@ -312,12 +321,19 @@ class HistoricalRangeProcessor:
 
     @staticmethod
     def _series_identity(series: dict) -> tuple[str, str, str, str]:
+        """``(namespace, pod, container, node)`` of a series of the PromQL catalog.
+
+        Only the labels the catalog groups by are read: alternative names
+        (``kubernetes_namespace``, ``pod_name``...) are removed by the ``by``
+        clauses before the parser sees them (COL-21).
+        """
         metric = series.get("metric", {}) or {}
-        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("namespace_name") or ""
-        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name") or ""
-        container = metric.get("container") or metric.get("container_name") or ""
-        node = metric.get("node") or metric.get("kubernetes_node") or ""
-        return namespace, pod, container, node
+        return (
+            metric.get("namespace") or "",
+            metric.get("pod") or "",
+            metric.get("container") or "",
+            metric.get("node") or "",
+        )
 
     @classmethod
     def _pod_series_by_sample(cls, results, chunk: CollectionWindow) -> dict[int, dict[tuple[str, str], float]]:
@@ -568,6 +584,10 @@ class HistoricalRangeProcessor:
         becomes container usage (rightsizing reports ``pod_level_usage_only``).
         """
         return await self._query_range(chunk, self._promql.memory_working_set_by_level())
+
+    async def _collect_memory_peak(self, chunk: CollectionWindow):
+        """Largest working-set scrape inside each step, same series as :meth:`_collect_memory` (COL-12)."""
+        return await self._query_range(chunk, self._promql.memory_working_set_peak_by_level())
 
     async def _collect_gpu(self, chunk: CollectionWindow) -> dict[int, list[dcgm_collector.GpuSample]]:
         """DCGM GPU power and utilization per step; empty when DCGM is absent (B5).
@@ -848,18 +868,24 @@ class HistoricalRangeProcessor:
                     values = containers[(namespace, pod, sample_start)][(container, kind)]
                     if suffix is not None:
                         values[f"{resource}_{suffix}"] = value
-        owner_at: dict[tuple[str, str, int], tuple[str, str]] = {}
+        direct_owner_at: dict[tuple[str, str, int], tuple[str, str]] = {}
         for series in series_by_query["owners"]:
             metric = series.get("metric", {}) or {}
             namespace, pod, _container, _node = self._series_identity(series)
             kind, name = metric.get("owner_kind"), metric.get("owner_name")
             if (namespace, pod) not in pods or not kind or not name or kind == "<none>":
                 continue
-            if kind == "ReplicaSet" and "-" in name:
-                kind, name = "Deployment", name.rsplit("-", 1)[0]
             for sample_start, value in self._iter_window_samples(series, chunk):
                 if value >= 1:
-                    owner_at[(namespace, pod, sample_start)] = (kind, name)
+                    direct_owner_at[(namespace, pod, sample_start)] = (kind, name)
+        controllers = await self._ksm_controller_owners(chunk, set(direct_owner_at.values()))
+        owner_at: dict[tuple[str, str, int], tuple[str, str]] = {}
+        for key, (kind, name) in direct_owner_at.items():
+            resolved_kind, resolved_name = resolve_workload_owner(
+                key[0], kind, name, controllers.get("ReplicaSet"), controllers.get("Job")
+            )
+            if resolved_kind and resolved_name:
+                owner_at[key] = (resolved_kind, resolved_name)
         result: dict[tuple[str, str, int], list[PodMetric]] = {}
         for key in set(containers) | set(owner_at):
             namespace, pod, _sample = key
@@ -881,6 +907,49 @@ class HistoricalRangeProcessor:
                 for (container, kind), values in sorted(by_container.items())
             ]
         return result, failed
+
+    async def _ksm_controller_owners(
+        self, chunk: CollectionWindow, owners: set[tuple[str, str]]
+    ) -> dict[str, Optional[dict[tuple[str, str], Optional[tuple[str, str]]]]]:
+        """Controllers of the ReplicaSets and Jobs owning pods, from kube-state-metrics (COL-16).
+
+        Returns ``{"ReplicaSet": map, "Job": map}`` with ``(namespace, name) ->
+        (kind, name)`` or ``None`` (no controller).  A failed query leaves its map
+        ``None``: ReplicaSets then use the name rule and Jobs stay Jobs, with a warning.
+        """
+        result: dict[str, Optional[dict[tuple[str, str], Optional[tuple[str, str]]]]] = {}
+        for kind, label in (("ReplicaSet", "replicaset"), ("Job", "job_name")):
+            names = sorted({name for owner_kind, name in owners if owner_kind == kind})
+            if not names:
+                result[kind] = {}
+                continue
+            mapping: dict[tuple[str, str], Optional[tuple[str, str]]] = {}
+            try:
+                for chunk_names in _name_chunks(names):
+                    for series in (
+                        await self._query_range(chunk, self._promql.controller_owner(kind, chunk_names)) or []
+                    ):
+                        metric = series.get("metric", {}) or {}
+                        namespace, name = metric.get("namespace") or "", metric.get(label) or ""
+                        owner_kind, owner_name = metric.get("owner_kind"), metric.get("owner_name")
+                        if not namespace or not name:
+                            continue
+                        if owner_kind and owner_name and owner_kind != "<none>":
+                            if metric.get("owner_is_controller") == "true":
+                                mapping[(namespace, name)] = (owner_kind, owner_name)
+                        else:
+                            mapping.setdefault((namespace, name), None)
+            except Exception as error:
+                logger.warning(
+                    "kube-state-metrics %s owners unavailable (%s): pod owners use the %s.",
+                    kind,
+                    error,
+                    "name rule <deployment>-<hash>" if kind == "ReplicaSet" else "Job itself",
+                )
+                result[kind] = None
+                continue
+            result[kind] = mapping
+        return result
 
     def _list_failure_budget_spent(self, resource: str, start: datetime, end: datetime, error: Exception) -> bool:
         """Count a failed pod or node list for the window; True once COLLECTION_K8S_LIST_MAX_FAILURES is reached.
@@ -1365,6 +1434,7 @@ class HistoricalRangeProcessor:
                     disk_write_results,
                     restart_results,
                     memory_results,
+                    memory_peak_results,
                     ephemeral_usage_results,
                     pod_node_results,
                     pod_running_results,
@@ -1375,6 +1445,7 @@ class HistoricalRangeProcessor:
                     self._query_range(chunk, promql.pod_disk_write()),
                     self._query_range(chunk, promql.pod_restarts()),
                     self._collect_memory(chunk),
+                    self._collect_memory_peak(chunk),
                     self._query_range(chunk, promql.pod_ephemeral_storage_usage()),
                     self._query_range(chunk, promql.pod_node()),
                     self._query_range(chunk, promql.pod_running()),
@@ -1392,6 +1463,9 @@ class HistoricalRangeProcessor:
             ephemeral_usage_by_sample = self._pod_series_by_sample(ephemeral_usage_results, chunk)
             memory_by_sample, container_memory_samples, memory_nodes = self._container_series_by_sample(
                 memory_results, chunk
+            )
+            memory_peak_by_sample, container_memory_peak_samples, _peak_nodes = self._container_series_by_sample(
+                memory_peak_results, chunk
             )
 
             # Pod -> node placement from kube-state-metrics, for cAdvisor series without `node` (A10).
@@ -1411,7 +1485,7 @@ class HistoricalRangeProcessor:
             for sample_start, by_pod in self._pod_series_by_sample(pod_running_results, chunk).items():
                 running_by_sample[sample_start].update(key for key, value in by_pod.items() if value >= 1)
 
-            del memory_results, ephemeral_usage_results, pod_node_results, pod_running_results
+            del memory_results, memory_peak_results, ephemeral_usage_results, pod_node_results, pod_running_results
 
             # Parse CPU results into per-sample pod and container usage (cores).
             samples: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
@@ -1562,6 +1636,8 @@ class HistoricalRangeProcessor:
                     unknown_power_nodes.add(node_name)
                 range_cpu_usage_map = cpu_usage_by_sample.get(sample_key, {})
                 range_memory_map = memory_by_sample.get(sample_key, {})
+                # Pod peak: its pod cgroup peak, or the sum of its container peaks (review 1, COL-12).
+                range_memory_peak_map = memory_peak_by_sample.get(sample_key, {})
                 range_net_rx_map = net_rx_by_sample.get(sample_key, {})
                 range_net_tx_map = net_tx_by_sample.get(sample_key, {})
                 range_disk_read_map = disk_read_by_sample.get(sample_key, {})
@@ -1703,6 +1779,11 @@ class HistoricalRangeProcessor:
                             memory_usage_bytes=(
                                 int(range_memory_map[pod_key]) if pod_key in range_memory_map else None
                             ),
+                            memory_usage_max_bytes=(
+                                max(int(range_memory_peak_map[pod_key]), int(range_memory_map[pod_key]))
+                                if pod_key in range_memory_map and pod_key in range_memory_peak_map
+                                else None
+                            ),
                             network_receive_bytes=range_net_rx_map.get(pod_key),
                             network_transmit_bytes=range_net_tx_map.get(pod_key),
                             disk_read_bytes=range_disk_read_map.get(pod_key),
@@ -1789,6 +1870,12 @@ class HistoricalRangeProcessor:
                 container_memory_usage = {
                     key: int(round(value)) for key, value in container_memory_samples.get(sample_key, {}).items()
                 }
+                # Peaks only for containers whose average comes from the same Prometheus series (COL-12).
+                container_memory_peak = {
+                    key: int(round(value))
+                    for key, value in container_memory_peak_samples.get(sample_key, {}).items()
+                    if key in container_memory_usage
+                }
                 container_sample_count_map = {}
                 #: Containers filled from the Metrics API carry their own usage source (COL-05).
                 container_usage_source_map: dict[tuple[str, str, str], str] = {}
@@ -1833,6 +1920,7 @@ class HistoricalRangeProcessor:
                     PodResourceMaps(
                         container_cpu_usage_map=container_cpu_usage,
                         container_memory_usage_map=container_memory_usage,
+                        container_memory_peak_map=container_memory_peak,
                         container_sample_count_map=container_sample_count_map,
                         container_usage_source_map=container_usage_source_map,
                     )

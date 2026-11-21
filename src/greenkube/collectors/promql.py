@@ -13,9 +13,17 @@ Scoping rules (BUG-01 / roadmap A1):
   exported several times, with labels the ``by`` clause drops: kubelet
   ``/metrics/resource`` scraped next to ``/metrics/cadvisor``, two scrape jobs,
   or two cgroup paths (``id``) of one container (systemd/cgroupfs driver
-  mismatch, the old and new cgroup of a restarted container).  CPU and memory
-  usage are therefore aggregated with ``max`` per container, never ``sum``: a
-  sum doubled the usage and the rightsizing increases built on it.
+  mismatch).  CPU and memory usage are therefore aggregated with ``max`` per
+  container instance, never ``sum``: a sum doubled the usage and the
+  rightsizing increases built on it.
+* **Consecutive instances of one container** (COL-11): a restart, a crash loop
+  or a pod recreated under the same name yields one CPU series per instance,
+  each with its own runtime container id in cAdvisor's ``name`` label.  Their
+  rates cover consecutive parts of the rate window, so CPU is the ``max`` per
+  instance (``name``), then the ``sum`` of the instances.  Series without a
+  ``name`` label (kubelet ``/metrics/resource``, pod cgroups) keep the ``max``
+  per container and are used only when no cAdvisor instance series exists.
+  Memory is a gauge and keeps the ``max``.
 * **Pod-scoped series** (network) are only exported on the pod sandbox, never
   per application container, so they are intentionally left unfiltered.
 * **kube-state-metrics series** (restarts, pod info) describe Kubernetes
@@ -119,12 +127,20 @@ class PromQLCatalog:
     # Container-scoped (cAdvisor) — pod cgroup and pause series excluded
     # ------------------------------------------------------------------
 
-    def container_cpu_usage(self) -> str:
-        """CPU cores per container: ``max by (namespace,pod,container,node)`` (duplicate series counted once)."""
+    def _cpu_rate_per_container(self, *matchers: str) -> str:
+        """CPU cores per container: instances (``name``) added, duplicates of one instance counted once (COL-11)."""
+        named = _selector(*matchers, 'name!=""', *self.extra_matchers)
+        unnamed = _selector(*matchers, 'name=""', *self.extra_matchers)
         return (
-            f"max(rate({self._container('container_cpu_usage_seconds_total')}[{self.rate_window}])) "
+            f"sum(max(rate(container_cpu_usage_seconds_total{named}[{self.rate_window}])) "
+            "by (namespace,pod,container,node,name)) by (namespace,pod,container,node) "
+            f"or max(rate(container_cpu_usage_seconds_total{unnamed}[{self.rate_window}])) "
             "by (namespace,pod,container,node)"
         )
+
+    def container_cpu_usage(self) -> str:
+        """CPU cores per container: consecutive instances added, duplicate series counted once (COL-11)."""
+        return self._cpu_rate_per_container(CONTAINER_FILTER)
 
     def node_cpu_usage(self) -> str:
         """Whole-node CPU cores of the kubelet root cgroup (``id="/"``): pods, kubelet, runtime, kernel (NRG-12)."""
@@ -144,16 +160,32 @@ class PromQLCatalog:
         cgroup (counted once), so a cluster mixing runtimes (cri-dockerd
         exporting pod-level series next to containerd) keeps every pod.
         """
+        return self._cpu_rate_per_container(POD_LEVEL_OR_CONTAINER_FILTER)
+
+    def memory_working_set_by_level(self) -> str:
+        """Average working-set bytes over the step of every container and pod cgroup (COL-09, COL-12).
+
+        The step average, not the instant value at the step boundary, is the
+        memory a row holds for allocation; the caller chooses per pod between
+        its containers and its pod cgroup.
+        """
         selector = _selector(POD_LEVEL_OR_CONTAINER_FILTER, *self.extra_matchers)
         return (
-            f"max(rate(container_cpu_usage_seconds_total{selector}[{self.rate_window}])) "
+            f"max(avg_over_time(container_memory_working_set_bytes{selector}[{self.step}])) "
             "by (namespace,pod,container,node)"
         )
 
-    def memory_working_set_by_level(self) -> str:
-        """Working-set bytes of every container and every pod cgroup, chosen per pod by the caller (COL-09)."""
+    def memory_working_set_peak_by_level(self) -> str:
+        """Largest working-set scrape inside the step of every container and pod cgroup (COL-12).
+
+        Stored as ``memory_usage_max_bytes`` on container rows: rightsizing and
+        risk checks size memory on the peaks between two evaluation points.
+        """
         selector = _selector(POD_LEVEL_OR_CONTAINER_FILTER, *self.extra_matchers)
-        return f"max(container_memory_working_set_bytes{selector}) by (namespace,pod,container,node)"
+        return (
+            f"max(max_over_time(container_memory_working_set_bytes{selector}[{self.step}])) "
+            "by (namespace,pod,container,node)"
+        )
 
     def container_cpu_counter_max(self) -> str:
         """Largest CPU counter value of each container within the step (COL-03 step 3).
@@ -265,6 +297,19 @@ class PromQLCatalog:
         """kube-state-metrics controller owner of each pod (WP-01.1 step 2)."""
         selector = self._ksm_selector(pods, 'owner_is_controller="true"')
         return f"max(kube_pod_owner{selector}) by (namespace,pod,owner_kind,owner_name)"
+
+    def controller_owner(self, kind: str, names: Sequence[str]) -> str:
+        """kube-state-metrics owner of ReplicaSets (``kube_replicaset_owner``) or Jobs (``kube_job_owner``), COL-16.
+
+        Not filtered on ``owner_is_controller``: a ReplicaSet without owner has a
+        ``<none>`` series, which tells a bare ReplicaSet from a missing series.
+        """
+        metric, label = (
+            ("kube_replicaset_owner", "replicaset") if kind == "ReplicaSet" else ("kube_job_owner", "job_name")
+        )
+        pattern = "|".join(sorted({name.replace(".", "[.]") for name in names}))
+        selector = _selector(f'{label}=~"{pattern}"' if pattern else "", *self.extra_matchers)
+        return f"max({metric}{selector}) by (namespace,{label},owner_kind,owner_name,owner_is_controller)"
 
     def scrape_probe(self) -> str:
         """Number of cAdvisor CPU series, pod or not (COL-04).

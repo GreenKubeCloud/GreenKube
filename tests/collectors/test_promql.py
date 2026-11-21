@@ -18,7 +18,9 @@ def test_container_scoped_expressions_exclude_pod_cgroup_and_pause_series():
     catalog = PromQLCatalog(step_seconds=300)
 
     assert catalog.container_cpu_usage() == (
-        'max(rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[300s])) '
+        'sum(max(rate(container_cpu_usage_seconds_total{container!="",container!="POD",name!=""}[300s])) '
+        "by (namespace,pod,container,node,name)) by (namespace,pod,container,node) "
+        'or max(rate(container_cpu_usage_seconds_total{container!="",container!="POD",name=""}[300s])) '
         "by (namespace,pod,container,node)"
     )
     assert catalog.container_memory_working_set() == (
@@ -46,7 +48,8 @@ def test_pod_scoped_and_kube_state_expressions_are_unfiltered_by_container():
 def test_extra_matchers_are_applied_to_every_selector():
     catalog = PromQLCatalog(step_seconds=300, extra_matchers=('cluster="eu-1"',))
 
-    assert '{container!="",container!="POD",cluster="eu-1"}' in catalog.container_cpu_usage()
+    assert '{container!="",container!="POD",name!="",cluster="eu-1"}' in catalog.container_cpu_usage()
+    assert '{container!="",container!="POD",name="",cluster="eu-1"}' in catalog.container_cpu_usage()
     assert 'container_network_receive_bytes_total{cluster="eu-1"}' in catalog.pod_network_receive()
     assert 'kube_pod_info{node!="",cluster="eu-1"}' in catalog.pod_node()
 

@@ -183,6 +183,17 @@ class SQLiteCollectionWindowRepository(CollectionWindowRepository):
             ) as cursor:
                 return await cursor.fetchone() is not None
 
+    async def latest_container_usage_sources(self) -> set[str]:
+        """Distinct ``usage_source`` values of the container rows of the newest stored step (COL-05)."""
+        query = (
+            "SELECT DISTINCT usage_source FROM container_metrics "
+            'WHERE "timestamp" = (SELECT MAX("timestamp") FROM container_metrics) AND usage_source IS NOT NULL'
+        )
+        async with self.db_manager.connection_scope() as conn:
+            async with conn.execute(query) as cursor:
+                rows = await cursor.fetchall()
+        return {str(row[0]) for row in rows}
+
     async def stored_metric_timestamps(self, since: datetime | None = None) -> list[datetime]:
         """Distinct timestamps of the stored pod rows."""
         query = 'SELECT DISTINCT "timestamp" FROM combined_metrics WHERE "timestamp" IS NOT NULL'

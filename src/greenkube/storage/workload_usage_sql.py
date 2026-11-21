@@ -44,6 +44,8 @@ RAW_POD_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("duration_seconds", "duration_seconds"),
     ("cpu_usage_millicores", "cpu_usage_millicores"),
     ("memory_usage_bytes", "memory_usage_bytes"),
+    # Step peak of the pod (COL-12 review): sum of its container peaks, or its pod cgroup peak.
+    ("memory_usage_max_bytes", "memory_usage_max_bytes"),
     ("cpu_request", "cpu_request"),
     ("memory_request", "memory_request"),
     ("restart_count", "restart_count"),
@@ -110,6 +112,7 @@ def _hourly_columns(raw: Tuple[Tuple[str, str], ...]) -> Tuple[Tuple[str, str], 
     names = {name for _, name in columns}
     if "cpu_usage_max_millicores" not in names:
         columns.append(("cpu_usage_max", "cpu_usage_max_millicores"))
+    if "memory_usage_max_bytes" not in names:
         columns.append(("memory_usage_max", "memory_usage_max_bytes"))
     columns.append(("sample_count", "sample_count"))
     return tuple(columns)

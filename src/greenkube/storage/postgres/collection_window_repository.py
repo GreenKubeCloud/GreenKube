@@ -196,6 +196,15 @@ class PostgresCollectionWindowRepository(CollectionWindowRepository):
             )
         return row is not None
 
+    async def latest_container_usage_sources(self) -> set[str]:
+        """Distinct ``usage_source`` values of the container rows of the newest stored step (COL-05)."""
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT usage_source FROM container_metrics "
+                "WHERE timestamp = (SELECT MAX(timestamp) FROM container_metrics) AND usage_source IS NOT NULL"
+            )
+        return {str(row["usage_source"]) for row in rows}
+
     async def stored_metric_timestamps(self, since: datetime | None = None) -> list[datetime]:
         """Distinct timestamps of the stored pod rows."""
         async with self.db_manager.connection_scope() as conn:

@@ -160,7 +160,8 @@ async def test_non_finite_samples_are_dropped_and_negative_rates_clamped(make_pr
     # [10:00) and [10:05) were NaN/Inf and are dropped; [10:10) negative -> 0; [10:15) is valid.
     assert [(r.timestamp, r.cpu_usage_millicores) for r in pods] == [(BASE + 2 * STEP, 0), (BASE + 3 * STEP, 300)]
     assert all(r.memory_usage_bytes is None for r in pods)
-    assert _dropped(collection_telemetry.DROP_REASON_NON_FINITE) == non_finite_before + 2 + 4
+    # 2 CPU samples, 4 memory average samples and 4 memory peak samples (COL-12).
+    assert _dropped(collection_telemetry.DROP_REASON_NON_FINITE) == non_finite_before + 2 + 4 + 4
     assert _dropped(collection_telemetry.DROP_REASON_NEGATIVE) == negative_before + 1
 
 

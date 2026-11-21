@@ -59,6 +59,23 @@ def _gpu_count(node) -> int | None:
     return total or None
 
 
+#: ``spec.providerID`` schemes of the providers GreenKube has profiles for (COL-15).
+_PROVIDER_ID_SCHEMES: tuple[tuple[str, str], ...] = (
+    ("aws://", "aws"),
+    ("gce://", "gcp"),
+    ("azure://", "azure"),
+    ("scaleway://", "scaleway"),
+    ("ovhcloud://", "ovh"),
+)
+#: Provider-specific node label prefixes, used when the providerID is absent or not recognised.
+_PROVIDER_LABEL_PREFIXES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("kubernetes.azure.com/",), "azure"),
+    (("eks.amazonaws.com/", "karpenter.k8s.aws/", "k8s.amazonaws.com/"), "aws"),
+    (("cloud.google.com/",), "gcp"),
+    (("k8s.scaleway.com/",), "scaleway"),
+)
+
+
 class NodeCollector(BaseCollector):
     """Collects node zone information and instance types from the Kubernetes cluster."""
 
@@ -203,45 +220,39 @@ class NodeCollector(BaseCollector):
         }
 
     def _detect_cloud_provider(self, labels: dict, node=None) -> str:
+        """Detect the cloud provider of a node (COL-15).
+
+        The node's ``spec.providerID`` scheme decides, then provider-specific
+        label prefixes; ``CLOUD_PROVIDER`` only fills in nodes without any providerID,
+        so a hybrid or mixed cluster keeps each node's real provider.  Region names are never
+        used: GKE ``us-central1``, Linode
+        ``us-east`` or OCI ``eu-frankfurt-1`` look like AWS regions.  Providers
+        without a GreenKube profile (Linode, Oracle, IBM, Alibaba, bare
+        OpenStack) stay ``unknown``, so their PUE and power are flagged defaults.
         """
-        Detect the cloud provider from node labels and, optionally, providerID.
-        """
-        # Check for OVH-specific labels.
-        # OVH Managed Kubernetes Service (MKS) uses two label prefixes depending
-        # on the cluster generation:
-        #   - k8s.ovh.net/  (legacy clusters)
-        #   - node.k8s.ovh/ (current MKS — e.g. node.k8s.ovh/type=standard)
-        if any(key.startswith(("k8s.ovh.net/", "node.k8s.ovh/")) for key in labels.keys()):
+        has_label = lambda *prefixes: any(key.startswith(prefixes) for key in labels)  # noqa: E731
+        # OVH MKS nodes report an OpenStack providerID: its labels decide first.
+        # OVH uses two label prefixes depending on the cluster generation:
+        # k8s.ovh.net/ (legacy) and node.k8s.ovh/ (current MKS).
+        if has_label("k8s.ovh.net/", "node.k8s.ovh/"):
             return "ovh"
 
-        # Check for Azure-specific labels
-        if any(key.startswith("kubernetes.azure.com/") for key in labels.keys()):
-            return "azure"
-
-        # Check for AWS-specific labels
-        if any(key.startswith("eks.amazonaws.com/") for key in labels.keys()):
-            return "aws"
-        if "node.kubernetes.io/instance-type" in labels and labels.get("topology.kubernetes.io/region", "").startswith(
-            ("us-", "eu-", "ap-", "ca-", "sa-")
-        ):
-            # AWS regions typically start with these prefixes
-            return "aws"
-
-        # Check for GCP-specific labels
-        if any(key.startswith("cloud.google.com/") for key in labels.keys()):
-            return "gcp"
-
-        # Check for Scaleway Kapsule labels (k8s.scaleway.com/* prefix)
-        if any(key.startswith("k8s.scaleway.com/") for key in labels.keys()):
-            return "scaleway"
-
-        # Fallback: inspect node.spec.provider_id for Scaleway's "scaleway://" scheme
+        provider_id = ""
         if node is not None:
-            provider_id = getattr(getattr(node, "spec", None), "provider_id", None) or ""
-            if provider_id.startswith("scaleway://"):
-                return "scaleway"
+            provider_id = str(getattr(getattr(node, "spec", None), "provider_id", None) or "").lower()
+        for prefix, provider in _PROVIDER_ID_SCHEMES:
+            if provider_id.startswith(prefix):
+                return provider
 
-        return "unknown"
+        for prefixes, provider in _PROVIDER_LABEL_PREFIXES:
+            if has_label(*prefixes):
+                return provider
+        # Only nodes without any providerID take the configured provider (hybrid clusters): an
+        # unrecognised scheme (k3s://, kind://, openstack://) names a known non-cloud or other setup.
+        if provider_id:
+            return "unknown"
+        configured = str(getattr(global_config, "CLOUD_PROVIDER", "") or "").strip().lower()
+        return configured or "unknown"
 
     def _extract_instance_type(self, labels: dict, node, cloud_provider: str) -> str:
         """

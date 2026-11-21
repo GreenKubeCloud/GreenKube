@@ -40,7 +40,14 @@ def mock_settings_env_vars(monkeypatch):
     .. seealso:: BUG-003 / TEST-004 in the issue plan.
     """
     from greenkube.core.config import config
+    from greenkube.core.db import db_manager
     from greenkube.core.factory import clear_caches
+
+    # A closed manager raises instead of reopening (roadmap A.9). The process-wide
+    # manager is shared by every test: one closed by an earlier test (an app
+    # lifespan, a fixture teardown) opens on first use again, as it would at a
+    # process start.
+    db_manager._closed = False
 
     # --- Core env vars for safe, isolated tests ---
     monkeypatch.setenv("DB_TYPE", "sqlite")

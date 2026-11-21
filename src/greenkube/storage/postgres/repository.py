@@ -381,7 +381,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                         cost_source, usage_source, power_source, intensity_source,
                         model_version, gpu_power_watts, node_source, metadata_source, embodied_source, gpu_source,
-                        collected_at, collection_run_id
+                        collected_at, collection_run_id, memory_usage_max_bytes
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8,
@@ -400,7 +400,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         $36, $37, $38, $39, $40,
                         $41, $42, $43, $44,
                         $45, $46, $47, $48,
-                        $49, $50, $51, $52
+                        $49, $50, $51, $52, $53
                     )
                     ON CONFLICT (pod_name, namespace, timestamp) DO UPDATE SET
                         co2e_grams = EXCLUDED.co2e_grams,
@@ -409,6 +409,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                         joules = EXCLUDED.joules,
                         cpu_usage_millicores = EXCLUDED.cpu_usage_millicores,
                         memory_usage_bytes = EXCLUDED.memory_usage_bytes,
+                        memory_usage_max_bytes = EXCLUDED.memory_usage_max_bytes,
                         network_receive_bytes = EXCLUDED.network_receive_bytes,
                         network_transmit_bytes = EXCLUDED.network_transmit_bytes,
                         disk_read_bytes = EXCLUDED.disk_read_bytes,
@@ -493,6 +494,7 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
                             *_row_source_values(metric),
                             collected_at,
                             run_id,
+                            metric.memory_usage_max_bytes,
                         )
                     )
 

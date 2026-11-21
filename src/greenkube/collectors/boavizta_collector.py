@@ -6,12 +6,14 @@ import httpx
 
 from greenkube.collectors.base_collector import BaseCollector
 from greenkube.core.config import config
+from greenkube.data.datacenter_pue_profiles import ON_PREMISES_PROVIDERS
 from greenkube.models.boavizta import BoaviztaResponse
 
 logger = logging.getLogger(__name__)
 
 #: Providers of local or on-prem clusters, absent from Boavizta's cloud-instance catalogue.
-NON_CLOUD_PROVIDERS = frozenset({"unknown", "local", "minikube", "on_prem", "on-prem", "kind", "k3s", "k3d"})
+#: Providers without a cloud instance catalogue; on-prem aliases keep their configured PUE (COL-15 review).
+NON_CLOUD_PROVIDERS = frozenset({"unknown", "local", "minikube", "kind", "k3s", "k3d"}) | ON_PREMISES_PROVIDERS
 
 
 def is_cloud_provider(provider: Optional[str]) -> bool:

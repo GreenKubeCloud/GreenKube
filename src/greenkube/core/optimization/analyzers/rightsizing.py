@@ -357,6 +357,10 @@ def bounded_by_pod(
     statistic's unit), the container data contradicts the pod cgroup (e.g. a
     Metrics API working set that counts page cache), so every statistic is
     bounded by the pod's. Returns ``(stats, bounded)``.
+
+    Both sides include the step peaks (COL-12 review): pod rows carry the sum of
+    their container peaks (or their pod cgroup peak), so a spiky container is
+    compared peak with peak and never cut down to the pod's averages.
     """
     if stats is None or pod_stats is None or pod_stats.sample_count <= 0:
         return stats, False

@@ -138,6 +138,21 @@ _TRUSTED_COST = (
 _TRUSTED_UNSPLIT = f"({_UNSPLIT_COST_ROW}) AND {_TRUSTED_COST}"
 
 
+def _newest_version(timestamp: str, backend: str) -> str:
+    """The calculation version of the hour's newest row that has one (review 7).
+
+    ``MAX(calculation_version)`` compares strings: ``+range.10`` sorts below
+    ``+range.9`` and ``0.10.0`` below ``0.9.0``. The newest row carries the
+    version that computed the hour's latest values.
+    """
+    if backend == "sqlite":
+        tagged = f"MAX(CASE WHEN calculation_version IS NOT NULL THEN {timestamp} || '|' || calculation_version END)"
+        return f"SUBSTR({tagged}, INSTR({tagged}, '|') + 1)"
+    return (
+        f"(ARRAY_AGG(calculation_version ORDER BY {timestamp} DESC) FILTER (WHERE calculation_version IS NOT NULL))[1]"
+    )
+
+
 @dataclass(frozen=True)
 class _MetricsTable:
     raw: str
@@ -171,7 +186,9 @@ class _MetricsTable:
             ("cpu_usage_avg", cast_int.format(c="cpu_usage_millicores")),
             ("cpu_usage_max", "MAX(cpu_usage_millicores)"),
             ("memory_usage_avg", cast_big.format(c="memory_usage_bytes")),
-            ("memory_usage_max", "MAX(memory_usage_bytes)"),
+            # Pod and container rows keep the step peak of the working set (COL-12); older rows only
+            # have the step value.
+            ("memory_usage_max", "MAX(COALESCE(memory_usage_max_bytes, memory_usage_bytes))"),
             ("owner_kind", _mode("owner_kind", backend)),
             ("owner_name", _mode("owner_name", backend)),
             ("duration_seconds", "SUM(COALESCE(duration_seconds, 0))"),
@@ -180,7 +197,7 @@ class _MetricsTable:
                 "MAX(COALESCE(is_estimated, 0))" if backend == "sqlite" else "BOOL_OR(COALESCE(is_estimated, FALSE))",
             ),
             ("estimation_reasons", "'[]'"),
-            ("calculation_version", "MAX(calculation_version)"),
+            ("calculation_version", _newest_version(self.timestamp_column(backend), backend)),
             ("cost_cpu", _split_component("cost_cpu")),
             ("cost_ram", _split_component("cost_ram")),
             ("cost_storage", "SUM(cost_storage)"),

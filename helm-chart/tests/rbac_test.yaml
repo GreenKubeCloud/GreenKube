@@ -168,6 +168,9 @@ tests:
       - contains:
           path: rules[6].resources
           content: appprojects
+      - contains:
+          path: rules[6].resources
+          content: rollouts
       - equal:
           path: rules[9].verbs
           value: ["get", "list", "watch"]
@@ -253,7 +256,7 @@ tests:
           path: rules
           content:
             apiGroups: ["batch"]
-            resources: ["cronjobs"]
+            resources: ["cronjobs", "jobs"]
             verbs: ["get", "list"]
       - contains:
           path: rules

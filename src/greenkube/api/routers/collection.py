@@ -126,7 +126,23 @@ async def collection_status(
             else None
         ),
         identity_mismatch=await _identity_mismatch(),
+        container_usage_source=await _container_usage_source(windows),
     )
+
+
+async def _container_usage_source(windows: CollectionWindowRepository) -> str | None:
+    """``prometheus``, ``metrics_server``, ``mixed`` or ``None`` for the newest container rows (COL-05)."""
+    reader = getattr(windows, "latest_container_usage_sources", None)
+    if reader is None:
+        return None
+    try:
+        sources = await reader()
+    except Exception as error:  # table missing or database down: never fail /health
+        logger.debug("Container usage source unreadable for /health (%s).", type(error).__name__)
+        return None
+    if not sources:
+        return None
+    return next(iter(sources)) if len(sources) == 1 else "mixed"
 
 
 async def get_installation_repository():

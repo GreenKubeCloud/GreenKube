@@ -244,6 +244,14 @@ class CollectionWindowRepository(ABC):
     async def stored_metric_timestamps(self, since: datetime | None = None) -> list[datetime]:
         """Distinct timestamps of the stored pod rows (``combined_metrics``), to seed the table."""
 
+    async def latest_container_usage_sources(self) -> set[str]:
+        """Distinct ``usage_source`` values of the container rows of the newest stored step (COL-05).
+
+        ``{"metrics_server"}`` means container usage is sampled from the Metrics API because
+        cAdvisor exports pod-level series only (cri-dockerd). Empty when no container row exists.
+        """
+        return set()
+
 
 def create_collection_window_repository(db_manager: Any, db_type: str) -> CollectionWindowRepository:
     """Build the collection window repository matching ``DB_TYPE``."""

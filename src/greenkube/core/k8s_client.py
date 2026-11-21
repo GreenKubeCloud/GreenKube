@@ -95,6 +95,14 @@ async def get_apps_v1_api() -> typing.Optional[client.AppsV1Api]:
     return None
 
 
+async def get_batch_v1_api() -> typing.Optional[client.BatchV1Api]:
+    """Returns a configured BatchV1Api instance for Job reads (pod owner chain, COL-16)."""
+    if await ensure_k8s_config():
+        api_client = await _get_shared_api_client()
+        return client.BatchV1Api(api_client=api_client)
+    return None
+
+
 async def get_policy_v1_api() -> typing.Optional[client.PolicyV1Api]:
     """
     Returns a configured PolicyV1Api instance for PodDisruptionBudget reads.

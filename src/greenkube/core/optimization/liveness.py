@@ -6,15 +6,22 @@ its recommendations (refreshing their TTL) until its last hour left the
 lookback. Before the analyzers run, :func:`filter_live_targets` removes from
 the usage snapshot:
 
-* every ``Job`` target: one run's requests are not a workload's. CronJob runs
-  are attributed to their Job (the collectors do not resolve a Job to its
-  CronJob), so a CronJob gets no rightsizing at all for now. A running Job,
+* every ``Job`` target: one run's requests are not a workload's. Runs of a
+  CronJob are attributed to the CronJob (COL-16); targets ``Job/<run>`` of
+  rows stored before that are retired like any finished Job. A running Job,
   or a Job whose pods could not be listed, is ``not_running`` (records kept);
   only a Job confirmed finished (pods listed, none running) is ``gone``;
 * containers no longer in the pod spec of a running target;
 * targets without a running pod whose last sample is older than
   :data:`TARGET_MAX_STALENESS` before the scan, and bare pods without a
   running pod.
+
+A ``Deployment/<x>`` target of stored rows whose pods belong to an Argo Rollout
+(the owner was cut from the ReplicaSet name before COL-16) has no running pod
+and no Deployment scaled to zero, so it is retired as ``gone``. A Rollout or
+bare ReplicaSet scaled to zero, and a CronJob that still exists (suspended or
+between two runs), are ``not_running``; a CronJob absent from the CronJob list
+is ``gone``.
 
 A removed target is reported ``gone`` (its records are retired with the
 reason ``target_gone``) only when the cluster confirms it: the pod list was
@@ -41,8 +48,11 @@ logger = logging.getLogger(__name__)
 TARGET_MAX_STALENESS = timedelta(hours=2)
 #: Target kinds never rightsized from their own usage (one run of a CronJob, a one-off Job).
 EPHEMERAL_KINDS = frozenset({"Job"})
-#: Controllers that may be scaled to zero while they still exist.
-SCALABLE_KINDS = ("Deployment", "StatefulSet")
+#: Controllers that may be scaled to zero while they still exist (Rollout, bare ReplicaSet: COL-16 review).
+SCALABLE_KINDS = ("Deployment", "StatefulSet", "ReplicaSet", "Rollout")
+#: Targets whose existence is checked against the cluster before they are retired: the scalable
+#: controllers, and CronJobs, which run no pod between two runs (present or suspended: not_running).
+CONTROLLER_CHECK_KINDS = (*SCALABLE_KINDS, "CronJob")
 #: Controllers that may run no pod while they exist (no node matches their selector): never retired.
 PODLESS_KINDS = frozenset({"DaemonSet"})
 
@@ -107,7 +117,7 @@ def filter_live_targets(
         if (
             live_targets is None
             or target[1] in PODLESS_KINDS
-            or (target[1] in SCALABLE_KINDS and scaled_to_zero is None)
+            or (target[1] in CONTROLLER_CHECK_KINDS and scaled_to_zero is None)
         ):
             report.not_running.add(target)
         elif scaled_to_zero is not None and target in scaled_to_zero:
@@ -172,12 +182,12 @@ def needs_controller_check(
     live_containers: Optional[Set[ContainerKey]],
     max_staleness: timedelta = TARGET_MAX_STALENESS,
 ) -> bool:
-    """True when a stale scalable target has no running pod (only then are controllers listed)."""
+    """True when a stale scalable target or CronJob has no running pod (only then are controllers listed)."""
     if live_containers is None:
         return False
     live_targets = {target for target, _container in live_containers}
     for target, containers in snapshot.summaries.items():
-        if target[1] not in SCALABLE_KINDS or target in live_targets:
+        if target[1] not in CONTROLLER_CHECK_KINDS or target in live_targets:
             continue
         last = _last_hour(containers)
         if last is None or last + timedelta(hours=1) < end - max_staleness:
@@ -186,17 +196,25 @@ def needs_controller_check(
 
 
 async def read_scaled_to_zero() -> Optional[Set[TargetKey]]:
-    """Deployments and StatefulSets present with ``spec.replicas == 0``; None when they cannot be read."""
-    try:
-        from greenkube.core.k8s_client import get_apps_v1_api
+    """Controllers that exist without running pods; None when one of the lists fails (fail closed).
 
-        api = await get_apps_v1_api()
-        if api is None:
+    Deployments, StatefulSets, bare ReplicaSets and Argo Rollouts present with
+    ``spec.replicas == 0``, and every CronJob present (suspended or between two
+    runs, COL-16 review). A cluster without the Rollout CRD (HTTP 404) has no
+    Rollouts; any other failed list returns None, so nothing is retired.
+    """
+    try:
+        from greenkube.core import k8s_client
+
+        apps = await k8s_client.get_apps_v1_api()
+        batch = await k8s_client.get_batch_v1_api()
+        if apps is None or batch is None:
             return None
         found: Set[TargetKey] = set()
         for kind, reader in (
-            ("Deployment", api.list_deployment_for_all_namespaces),
-            ("StatefulSet", api.list_stateful_set_for_all_namespaces),
+            ("Deployment", apps.list_deployment_for_all_namespaces),
+            ("StatefulSet", apps.list_stateful_set_for_all_namespaces),
+            ("ReplicaSet", apps.list_replica_set_for_all_namespaces),
         ):
             result: Any = await reader()
             for item in getattr(result, "items", None) or []:
@@ -204,7 +222,34 @@ async def read_scaled_to_zero() -> Optional[Set[TargetKey]]:
                 if metadata is None or spec is None or getattr(spec, "replicas", None) != 0:
                     continue
                 found.add((metadata.namespace, kind, metadata.name))
+        cron_jobs: Any = await batch.list_cron_job_for_all_namespaces()
+        for item in getattr(cron_jobs, "items", None) or []:
+            metadata = getattr(item, "metadata", None)
+            if metadata is not None:
+                found.add((metadata.namespace, "CronJob", metadata.name))
+        found |= await _rollouts_scaled_to_zero(k8s_client)
         return found
     except Exception as error:
-        logger.warning("Liveness: could not list controllers scaled to zero (%s).", type(error).__name__)
+        logger.warning("Liveness: could not list controllers without running pods (%s).", type(error).__name__)
         return None
+
+
+async def _rollouts_scaled_to_zero(k8s_client: Any) -> Set[TargetKey]:
+    """Argo Rollouts with ``spec.replicas == 0``; empty without the CRD, raises on any other failure."""
+    from kubernetes_asyncio.client.rest import ApiException
+
+    api = await k8s_client.get_custom_objects_api()
+    if api is None:
+        raise RuntimeError("custom objects API unavailable")
+    try:
+        result: Any = await api.list_cluster_custom_object(group="argoproj.io", version="v1alpha1", plural="rollouts")
+    except ApiException as error:
+        if error.status == 404:
+            return set()
+        raise
+    found: Set[TargetKey] = set()
+    for item in (result or {}).get("items", []) or []:
+        metadata, spec = item.get("metadata") or {}, item.get("spec") or {}
+        if spec.get("replicas") == 0 and metadata.get("namespace") and metadata.get("name"):
+            found.add((metadata["namespace"], "Rollout", metadata["name"]))
+    return found

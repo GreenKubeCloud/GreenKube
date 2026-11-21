@@ -16,6 +16,8 @@ class PodResourceMaps:
     estimated_cpu_usage_map: Dict[tuple, int] = field(default_factory=dict)
     memory_usage_map: Dict[tuple, int] = field(default_factory=dict)
     container_memory_usage_map: Dict[tuple, int] = field(default_factory=dict)
+    #: Largest working-set scrape inside the step per container (COL-12); absent for Metrics API samples.
+    container_memory_peak_map: Dict[tuple, int] = field(default_factory=dict)
     container_restart_map: Dict[tuple, int] = field(default_factory=dict)
     container_timestamp_map: Dict[tuple, datetime] = field(default_factory=dict)
     container_duration_seconds_map: Dict[tuple, int] = field(default_factory=dict)

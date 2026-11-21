@@ -26,7 +26,9 @@ from greenkube.models.metrics import PodMetric
 #: Owners whose pods get a generated name (a recreated pod has a new name), so a version
 #: observed after a sample still describes the pod that ran then.  StatefulSet and bare
 #: pods reuse their names.
-GENERATED_NAME_OWNERS: frozenset[str | None] = frozenset({"Deployment", "ReplicaSet", "DaemonSet", "Job"})
+GENERATED_NAME_OWNERS: frozenset[str | None] = frozenset(
+    {"Deployment", "ReplicaSet", "DaemonSet", "Job", "CronJob", "Rollout"}  # CronJob, Rollout: COL-16
+)
 #: PodMetric fields stored per container in ``pod_snapshots.containers``.
 CONTAINER_FIELDS: tuple[str, ...] = (
     "container_name",

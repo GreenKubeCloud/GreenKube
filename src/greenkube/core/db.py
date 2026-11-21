@@ -8,6 +8,7 @@ import aiosqlite
 import asyncpg
 
 from .config import Config, get_config
+from .exceptions import DatabaseClosedError
 from .migrations import MigrationRunner
 from .migrations.online import complete_online_column_upgrades, pending_online_upgrades
 
@@ -114,6 +115,8 @@ class DatabaseManager:
         self._sqlite_operation_lock = _ReentrantAsyncLock()
         self._savepoint_counter = 0
         self._schema_current = False
+        #: Set by :meth:`close`: implicit use then raises instead of reopening (roadmap A.9).
+        self._closed = False
         #: Background backfill of large-table column upgrades started by the migrating process (NRG-06).
         self._online_upgrade_task: asyncio.Task | None = None
         #: Seconds between two attempts of a pending online upgrade (a swap that missed its lock).
@@ -128,6 +131,19 @@ class DatabaseManager:
         return self.config.DB_TYPE
 
     async def connect(self) -> None:
+        """Open the SQLite connection or the PostgreSQL pool (and migrate); a no-op when open.
+
+        An explicit call also reopens a manager closed by :meth:`close`; implicit use of a
+        closed manager (:meth:`connection_scope`, :meth:`transaction`) raises instead.
+        """
+        self._closed = False
+        await self._open()
+
+    def _raise_if_closed(self) -> None:
+        if self._closed:
+            raise DatabaseClosedError("The database manager was closed; call connect() or setup_*() to open it again.")
+
+    async def _open(self) -> None:
         async with self._lock:
             if self.connection is not None or self.pool is not None:
                 return
@@ -137,7 +153,7 @@ class DatabaseManager:
                 try:
                     await self.setup_sqlite()
                 except BaseException:
-                    await self.close()
+                    await self._release()
                     raise
                 return
             if self.db_type == "postgres":
@@ -157,7 +173,7 @@ class DatabaseManager:
                     )
                     await self.setup_postgres()
                 except BaseException:
-                    await self.close()
+                    await self._release()
                     raise
                 return
             raise ValueError(f"Unsupported database type specified in config: {self.db_type}")
@@ -230,9 +246,14 @@ class DatabaseManager:
             await connection.commit()
 
     async def ensure_connection(self) -> None:
+        """Make sure the connection or pool is open; raise :class:`DatabaseClosedError` after :meth:`close`.
+
+        A SQLite connection that broke underneath (not closed by :meth:`close`) is reopened.
+        """
+        self._raise_if_closed()
         if self.db_type == "postgres":
             if self.pool is None:
-                await self.connect()
+                await self._open()
             return
         if self.connection is not None:
             try:
@@ -241,9 +262,15 @@ class DatabaseManager:
             except Exception:
                 logger.warning("SQLite connection was closed or invalid; reconnecting.")
                 self.connection = None
-        await self.connect()
+        await self._open()
 
     async def close(self) -> None:
+        """Close the connection or pool; later implicit use raises :class:`DatabaseClosedError` (roadmap A.9)."""
+        self._closed = True
+        await self._release()
+
+    async def _release(self) -> None:
+        """Drop the connection or pool without marking the manager closed (failed open)."""
         task, self._online_upgrade_task = self._online_upgrade_task, None
         if task is not None and not task.done():
             task.cancel()
@@ -261,13 +288,15 @@ class DatabaseManager:
             await connection.close()
 
     async def setup_sqlite(self, db_path: str | None = None) -> None:
+        """Open (``db_path``: a new connection) and migrate the SQLite database; reopens a closed manager."""
+        self._closed = False
         if db_path is not None:
             if self.connection is not None:
                 await self.connection.close()
             self.connection = await aiosqlite.connect(db_path)
             self.connection.row_factory = aiosqlite.Row
         if self.connection is None:
-            await self.connect()
+            await self._open()
             return
         await self.connection.execute("PRAGMA journal_mode=WAL")
         await self.connection.execute("PRAGMA cache_size=-65536")
@@ -279,8 +308,10 @@ class DatabaseManager:
         self._schema_current = True
 
     async def setup_postgres(self) -> None:
+        """Migrate the PostgreSQL schema, opening the pool when needed; reopens a closed manager."""
+        self._closed = False
         if self.pool is None:
-            await self.connect()
+            await self._open()
             return
         async with self.connection_scope() as connection:
             schema = self.config.DB_SCHEMA

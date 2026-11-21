@@ -395,7 +395,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                               cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                               cost_source, usage_source, power_source, intensity_source,
                               model_version, gpu_power_watts, node_source, metadata_source, embodied_source, gpu_source,
-                              collected_at, collection_run_id)
+                              collected_at, collection_run_id, memory_usage_max_bytes)
                         VALUES (
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -403,7 +403,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             ?,
                             ?, ?, ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?,
-                            ?, ?, ?, ?
+                            ?, ?, ?, ?, ?
                         )
                         ON CONFLICT(pod_name, namespace, "timestamp") DO UPDATE SET
                             co2e_grams = excluded.co2e_grams,
@@ -412,6 +412,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             joules = excluded.joules,
                             cpu_usage_millicores = excluded.cpu_usage_millicores,
                             memory_usage_bytes = excluded.memory_usage_bytes,
+                            memory_usage_max_bytes = excluded.memory_usage_max_bytes,
                             network_receive_bytes = excluded.network_receive_bytes,
                             network_transmit_bytes = excluded.network_transmit_bytes,
                             disk_read_bytes = excluded.disk_read_bytes,
@@ -488,6 +489,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                             *_row_source_values(metric),
                             collected_at,
                             run_id,
+                            metric.memory_usage_max_bytes,
                         ),
                     )
 
@@ -696,7 +698,8 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                            calculation_version,
                            cost_cpu, cost_ram, cost_storage, cost_network, cost_lb,
                            cost_source, usage_source, power_source, intensity_source,
-                           model_version, gpu_power_watts, node_source, metadata_source, embodied_source, gpu_source
+                           model_version, gpu_power_watts, node_source, metadata_source, embodied_source, gpu_source,
+                           memory_usage_max_bytes
                     FROM combined_metrics
                     WHERE "timestamp" >= ? AND "timestamp" < ?
                 """,
@@ -725,6 +728,7 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
                                 memory_request=row["memory_request"],
                                 cpu_usage_millicores=row["cpu_usage_millicores"],
                                 memory_usage_bytes=row["memory_usage_bytes"],
+                                memory_usage_max_bytes=row["memory_usage_max_bytes"],
                                 network_receive_bytes=row["network_receive_bytes"],
                                 network_transmit_bytes=row["network_transmit_bytes"],
                                 disk_read_bytes=row["disk_read_bytes"],

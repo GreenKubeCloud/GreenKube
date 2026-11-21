@@ -610,3 +610,9 @@ class TestIntervalDecision:
         assert record.status is RecommendationStatus.VERIFIED
         cost = (await measurements.list_for_recommendation(record.id))[0].estimates[0]
         assert cost.ci_low_per_hour == pytest.approx(0.024) and cost.ci_high_per_hour == pytest.approx(0.024)
+
+
+def test_metrics_api_point_samples_never_back_a_usage_gate():
+    """COL-05 acceptance: a gate requiring Prometheus usage rejects Metrics API container rows."""
+    assert verifier_module.usage_is_trusted(SimpleNamespace(usage_source="metrics_server")) is False
+    assert verifier_module.usage_is_trusted(SimpleNamespace(usage_source="prometheus")) is True
