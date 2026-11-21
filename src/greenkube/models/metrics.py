@@ -456,6 +456,15 @@ class Recommendation(BaseModel):
     consensus: Optional[dict] = Field(
         None, description="How the consolidated proposal was chosen across sources (policy, agreement, spread)."
     )
+    floor_reason: Optional[str] = Field(
+        None,
+        exclude=True,
+        description=(
+            "Why a native request increase is a lower bound of the consensus (``oom_kills``): no external "
+            "source may bring the consolidated value below it, under any policy. Set by the analyzer, read by "
+            "the consensus (which records it in ``consensus.floor``); never serialized or persisted."
+        ),
+    )
 
     @field_validator("source", mode="before")
     @classmethod

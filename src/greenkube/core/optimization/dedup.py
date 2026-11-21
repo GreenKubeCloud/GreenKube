@@ -281,6 +281,7 @@ def apply_consensus_assessment(recs: Sequence[Recommendation], config: "Config")
 
 
 def ballots_for_entries(entries: Sequence[SignalEntry]) -> List[Ballot]:
+    """The consensus ballots of every entry, carrying each v1 recommendation's floor marker."""
     ballots: List[Ballot] = []
     for signal, source, rec in entries:
         ballots.extend(
@@ -289,6 +290,8 @@ def ballots_for_entries(entries: Sequence[SignalEntry]) -> List[Ballot]:
                 source=source,
                 payload=rec,
                 payload_kind=_type_value(rec) if rec is not None else None,
+                # A native analyzer marks an OOM-driven increase as a consensus lower bound.
+                floor_reason=getattr(rec, "floor_reason", None) if rec is not None else None,
             )
         )
     return ballots
