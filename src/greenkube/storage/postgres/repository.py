@@ -930,6 +930,19 @@ class PostgresCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetr
             params.extend(split.hourly_params())
         return parts, params
 
+    async def idle_data_since(self) -> Optional[datetime]:
+        """First instant covered by a node idle row, raw or hourly; ``None`` when none is stored (NRG-02)."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                value = await conn.fetchval(
+                    "SELECT LEAST((SELECT MIN(timestamp) FROM node_idle_metrics), "
+                    "(SELECT MIN(hour_bucket) FROM node_idle_metrics_hourly))"
+                )
+            return value.astimezone(timezone.utc) if value is not None else None
+        except Exception as e:
+            logger.error("idle_data_since failed: %s", e)
+            raise QueryError(f"idle_data_since failed: {e}") from e
+
     async def aggregate_idle_summary(self, start_time: datetime, end_time: datetime) -> Optional[dict]:
         """Totals of the node ``__idle__`` share in ``[start, end)`` (NRG-02), raw and hourly rows.
 

@@ -413,6 +413,10 @@ class CombinedMetricsRepository(RawHourlySplitMixin, ABC):
         ``idle_cost``, ``idle_energy_joules``) in ``[start, end)``; ``None`` when unknown (NRG-02)."""
         return None
 
+    async def idle_data_since(self) -> Optional[datetime]:
+        """First instant covered by a node idle row, raw or hourly; ``None`` when none is stored (NRG-02)."""
+        return None
+
     async def aggregate_idle_timeseries(
         self, start_time: datetime, end_time: datetime, granularity: str = "hour"
     ) -> List[dict]:

@@ -133,8 +133,29 @@ async def metrics_summary(
     scope2 = summary.get("total_co2e_grams", 0.0)
     scope3 = summary.get("total_embodied_co2e_grams", 0.0)
     # The node idle share belongs to no namespace: cluster-wide scope only (NRG-02).
-    idle = None if namespace else await repo.aggregate_idle_summary(start, end)
-    return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3, **with_idle_share(summary, idle))
+    idle_fields: dict = {}
+    if not namespace:
+        since, short = await idle_history_gap(repo, start, end)
+        idle = None if short else await repo.aggregate_idle_summary(start, end)
+        idle_fields = {"idle_data_since": since, **with_idle_share(summary, idle)}
+    return MetricsSummaryResponse(**summary, total_co2e_all_scopes=scope2 + scope3, **idle_fields)
+
+
+async def idle_history_gap(
+    repo: CombinedMetricsRepository, start: datetime, end: datetime
+) -> tuple[Optional[datetime], bool]:
+    """First instant of the stored idle rows, and whether pod rows of ``[start, end)`` precede it.
+
+    Idle rows exist only since the upgrade that added them (about the raw
+    retention before the first compression): a window with pod rows before
+    that instant would get an idle share, and a cluster total, that cover only
+    part of it. Such a window reports them as unknown (review of NRG-02).
+    """
+    since = await repo.idle_data_since()
+    if since is None or since <= start:
+        return since, False
+    before = await repo.aggregate_summary(start_time=start, end_time=min(since, end), namespace=None)
+    return since, bool(before.get("row_count"))
 
 
 #: Allocated measure → idle and cluster-total field suffix (NRG-02).

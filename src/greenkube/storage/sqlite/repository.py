@@ -1477,6 +1477,20 @@ class SQLiteCombinedMetricsRepository(CombinedMetricsRepository, ContainerMetric
             params.extend(to_iso_z(v) for v in split.hourly_params())
         return parts, params
 
+    async def idle_data_since(self) -> Optional[datetime]:
+        """First instant covered by a node idle row, raw or hourly; ``None`` when none is stored (NRG-02)."""
+        try:
+            async with self.db_manager.connection_scope() as conn:
+                async with conn.execute(
+                    'SELECT MIN(first) FROM (SELECT MIN("timestamp") AS first FROM node_idle_metrics '
+                    "UNION ALL SELECT MIN(hour_bucket) FROM node_idle_metrics_hourly)"
+                ) as cursor:
+                    row = await cursor.fetchone()
+            return ensure_utc(row[0]) if row and row[0] else None
+        except sqlite3.Error as e:
+            logging.error("idle_data_since failed: %s", e)
+            raise QueryError(f"idle_data_since failed: {e}") from e
+
     async def aggregate_idle_summary(self, start_time: datetime, end_time: datetime) -> Optional[dict]:
         """Totals of the node ``__idle__`` share in ``[start, end)`` (NRG-02), raw and hourly rows.
 

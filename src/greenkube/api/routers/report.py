@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from greenkube.api.dependencies import get_combined_metrics_repository, validate_namespace
-from greenkube.api.routers.metrics import with_idle_share
+from greenkube.api.routers.metrics import idle_history_gap, with_idle_share
 from greenkube.api.schemas import ReportSummaryResponse
 from greenkube.core.aggregator import aggregate_metrics
 from greenkube.storage.base_repository import CombinedMetricsRepository
@@ -152,19 +152,24 @@ async def _idle_share_for_ranges(
     """Idle share and cluster totals of the report, summed over ``ranges`` (NRG-02).
 
     The node idle share belongs to no namespace: empty for a namespace report,
-    and empty when no range holds an idle row (unknown, never zero).
+    and empty when no range holds an idle row (unknown, never zero) or when a
+    range holds pod rows older than the first idle row (partial idle history).
     """
     if namespace:
         return {}
     idle: Optional[dict] = None
+    since: Optional[datetime] = None
     for range_start, range_end in ranges:
+        since, short = await idle_history_gap(repo, range_start, range_end)
+        if short:
+            return {"since": since}
         part = await repo.aggregate_idle_summary(range_start, range_end)
         if part is None:
             continue
         idle = idle or {}
         for key, value in part.items():
             idle[key] = idle.get(key, 0.0) + float(value or 0.0)
-    return {"idle": idle}
+    return {"idle": idle, "since": since}
 
 
 def _report_summary(total_rows: int, agg: dict, idle: dict) -> ReportSummaryResponse:
@@ -180,6 +185,7 @@ def _report_summary(total_rows: int, agg: dict, idle: dict) -> ReportSummaryResp
         total_energy_joules=agg["total_energy_joules"],
         unique_pods=agg["pod_count"],
         unique_namespaces=agg["namespace_count"],
+        **({"idle_data_since": idle.get("since")} if idle else {}),
         **with_idle_share(agg, idle.get("idle")),
     )
 

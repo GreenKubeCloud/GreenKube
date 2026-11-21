@@ -434,3 +434,16 @@ class TestReportSummaryIdleShare:
         data = client.get("/api/v1/report/summary").json()
         assert data["idle_energy_joules"] is None
         assert data["cluster_total_cost"] is None
+
+    def test_a_short_idle_history_leaves_the_idle_share_unknown(
+        self, client, mock_combined_metrics_repo, sample_combined_metrics
+    ):
+        """Pod rows older than the first idle row: the idle share would cover part of the report only."""
+        since = datetime.now(timezone.utc)
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=sample_combined_metrics)
+        mock_combined_metrics_repo.aggregate_idle_summary = AsyncMock(return_value=dict(IDLE))
+        mock_combined_metrics_repo.idle_data_since = AsyncMock(return_value=since)
+        data = client.get("/api/v1/report/summary").json()
+        assert data["idle_energy_joules"] is None
+        assert data["cluster_total_energy_joules"] is None
+        assert data["idle_data_since"] is not None

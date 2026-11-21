@@ -140,6 +140,7 @@ def mock_combined_metrics_repo():
     # No node idle share unless a test sets one (NRG-02).
     repo.aggregate_idle_summary = AsyncMock(return_value=None)
     repo.aggregate_idle_timeseries = AsyncMock(return_value=[])
+    repo.idle_data_since = AsyncMock(return_value=None)
 
     # The raw/hourly boundary of the base class (ROL-01).
     async def _compression_boundary(raw_table):

@@ -159,3 +159,34 @@ async def test_a_namespace_filtered_summary_has_no_idle_share(db):
     assert filtered.total_energy_joules == pytest.approx(12 * POD_JOULES)
     assert filtered.idle_energy_joules is None
     assert filtered.cluster_total_energy_joules is None
+
+
+async def test_an_idle_history_shorter_than_the_window_leaves_the_cluster_totals_unknown(db):
+    """Right after the upgrade idle rows start later than pod rows: a cluster total would understate the window."""
+    repo = _repository(db)
+    await _seed(repo)
+    earlier = [HOUR - timedelta(hours=1) + timedelta(minutes=5 * i) for i in range(12)]
+    await repo.write_combined_metrics(
+        [
+            CombinedMetric(
+                pod_name="api",
+                namespace="prod",
+                total_cost=0.01,
+                joules=POD_JOULES,
+                timestamp=step,
+                duration_seconds=300,
+                node="node-a",
+            )
+            for step in earlier
+        ]
+    )
+    summary = await _summary(repo)
+    assert summary.total_energy_joules == pytest.approx(24 * POD_JOULES)
+    assert summary.idle_data_since == HOUR
+    assert summary.idle_energy_joules is None
+    assert summary.cluster_total_energy_joules is None
+
+    # A window that starts once idle rows exist keeps the idle share.
+    covered = await metrics_summary(namespace=None, last="30h", repo=repo)
+    assert covered.idle_energy_joules is not None and covered.idle_energy_joules > 0
+    assert covered.cluster_total_energy_joules is not None

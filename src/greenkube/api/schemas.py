@@ -443,6 +443,11 @@ class MetricsSummaryResponse(BaseModel):
     cluster_total_energy_joules: Optional[float] = Field(
         None, description="Energy of the cluster in Joules: allocated + idle share."
     )
+    idle_data_since: Optional[datetime] = Field(
+        None,
+        description="First instant covered by stored idle rows. When the window holds pod rows before it, the "
+        "idle and cluster-total fields are null (the idle history covers only part of the window).",
+    )
 
 
 class TimeseriesPoint(BaseModel):
@@ -569,6 +574,11 @@ class ReportSummaryResponse(BaseModel):
     cluster_total_cost: Optional[float] = Field(None, description="Cost of the cluster: allocated + idle share.")
     cluster_total_energy_joules: Optional[float] = Field(
         None, description="Energy of the cluster in Joules: allocated + idle share."
+    )
+    idle_data_since: Optional[datetime] = Field(
+        None,
+        description="First instant covered by stored idle rows. When the window holds pod rows before it, the "
+        "idle and cluster-total fields are null (the idle history covers only part of the window).",
     )
 
 
