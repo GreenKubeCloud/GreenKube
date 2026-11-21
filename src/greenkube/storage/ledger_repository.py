@@ -153,6 +153,35 @@ _BASIS_SQL = (
 )
 
 
+#: Group columns of ``savings_ledger_totals`` (LED-09), in primary-key order after ``cluster_uid``.
+_TOTAL_KEYS = (
+    "namespace",
+    "recommendation_type",
+    "method",
+    "quantity",
+    "unit",
+    "book",
+    "entry_kind",
+    "basis",
+    "reason_group",
+)
+
+
+def _total_key(entry: LedgerEntry) -> Tuple[str, ...]:
+    """The ``savings_ledger_totals`` group of an entry, by the readers' rules (``_BASIS_SQL``, ``_COST_OF_FIX_SQL``)."""
+    return (
+        entry.namespace or "",
+        entry.recommendation_type or "",
+        entry.method,
+        entry.quantity,
+        entry.unit or "",
+        entry.book,
+        entry.entry_kind,
+        entry.effective_basis,
+        "cost_of_fix" if "cost_of_fix:" in (entry.group_key or "") else "",
+    )
+
+
 def _impact_currency(raw: Any) -> Optional[str]:
     """The ``currency`` of a stored ``impact`` projection (JSON text or a mapping), ``None`` when absent."""
     if isinstance(raw, (str, bytes)):
@@ -377,6 +406,7 @@ class LedgerRepository:
                 await self._execute(conn, insert, self._params(entry))
                 prev_hash = entry.hash
                 inserted.append(entry)
+            await self._add_totals(conn, cluster_uid, inserted)
             for source_table, position in (watermarks or {}).items():
                 await self._execute(
                     conn,
@@ -388,6 +418,28 @@ class LedgerRepository:
                     [cluster_uid, source_table, int(position), self._ts(moment)],
                 )
         return inserted
+
+    async def _add_totals(self, conn, cluster_uid: str, entries: Sequence[LedgerEntry]) -> None:
+        """Add ``entries`` to ``savings_ledger_totals`` in the append transaction (LED-09)."""
+        groups: Dict[Tuple[str, ...], List[float]] = {}
+        for entry in entries:
+            sums = groups.setdefault(_total_key(entry), [0.0, 0.0, 0.0, 0.0])
+            value = float(entry.value)
+            sums[0] += value
+            sums[1] += value if value > 0 else 0.0
+            sums[2] += value if value < 0 else 0.0
+            sums[3] += 1
+        columns = ", ".join(("cluster_uid", *_TOTAL_KEYS))
+        upsert = (
+            f"INSERT INTO savings_ledger_totals ({columns}, value, positive, negative, entries) "
+            f"VALUES ({', '.join('?' for _ in range(len(_TOTAL_KEYS) + 5))}) "
+            f"ON CONFLICT ({columns}) DO UPDATE SET value = savings_ledger_totals.value + excluded.value, "
+            "positive = savings_ledger_totals.positive + excluded.positive, "
+            "negative = savings_ledger_totals.negative + excluded.negative, "
+            "entries = savings_ledger_totals.entries + excluded.entries"
+        )
+        for key, (value, positive, negative, count) in groups.items():
+            await self._execute(conn, upsert, [cluster_uid, *key, value, positive, negative, int(count)])
 
     async def get_watermarks(self, cluster_uid: str) -> Dict[str, int]:
         rows = await self._select(
@@ -919,6 +971,8 @@ class LedgerRepository:
         v1 names (``measured_allocated`` -> ``measured``). Over a window an
         entry contributes the share of its period inside it, as the v1 report.
         """
+        if start is None and end is None and recommendation_ids is None:
+            return await self._breakdown_from_totals(cluster_uid, namespace, books, reasons)
         where, params = self._filters(cluster_uid, {"namespace": namespace}, start, end)
         if books:
             marks = ", ".join("?" for _ in books)
@@ -957,6 +1011,43 @@ class LedgerRepository:
                 total.co2e_saved_grams += value
         return list(totals.values())
 
+    async def _breakdown_from_totals(
+        self,
+        cluster_uid: str,
+        namespace: Optional[str],
+        books: Optional[Sequence[str]],
+        reasons: Optional[Sequence[str]],
+    ) -> List[SavingsAccrualTotal]:
+        """All-time :meth:`accrual_breakdown` from ``savings_ledger_totals`` (LED-09)."""
+        where = "cluster_uid = ? AND quantity IN ('cost', 'co2e_g') AND reason_group = ?"
+        cost_of_fix = reasons is not None and "cost_of_fix" in reasons
+        params: List[Any] = [cluster_uid, "cost_of_fix" if cost_of_fix else ""]
+        if namespace is not None:
+            where += " AND namespace = ?"
+            params.append(namespace)
+        if books:
+            where += f" AND book IN ({', '.join('?' for _ in books)})"
+            params.extend(books)
+        rows = await self._select(
+            "SELECT namespace, recommendation_type, method, quantity, SUM(value) AS value FROM savings_ledger_totals "
+            f"WHERE {where} GROUP BY namespace, recommendation_type, method, quantity "
+            "ORDER BY namespace, recommendation_type, method",
+            params,
+        )
+        totals: Dict[Tuple[str, str, str], SavingsAccrualTotal] = {}
+        for row in rows:
+            method = V1_METHOD_NAMES.get(row["method"], row["method"])
+            key = (row["namespace"] or "", row["recommendation_type"] or "unknown", method)
+            total = totals.setdefault(
+                key, SavingsAccrualTotal(namespace=key[0], recommendation_type=key[1], method=method)
+            )
+            value = float(row["value"] or 0.0)
+            if row["quantity"] == "cost":
+                total.cost_saved_dollars += value
+            else:
+                total.co2e_saved_grams += value
+        return list(totals.values())
+
     async def lifetime_counters(self, cluster_uid: str) -> List[SavingsCounterTotal]:
         """Monotonic counters per recommendation type and method from the entries (LED-04).
 
@@ -966,12 +1057,9 @@ class LedgerRepository:
         Methods use the v1 names.
         """
         rows = await self._select(
-            "SELECT recommendation_type, method, quantity, "
-            "SUM(CASE WHEN value > 0 THEN value ELSE 0 END) AS accrued, "
-            "SUM(CASE WHEN value < 0 THEN -value ELSE 0 END) AS reversed "
-            "FROM savings_ledger_entries WHERE cluster_uid = ? AND quantity IN ('cost', 'co2e_g') "
-            f"AND NOT ({_COST_OF_FIX_SQL}) "
-            "GROUP BY recommendation_type, method, quantity",
+            "SELECT recommendation_type, method, quantity, SUM(positive) AS accrued, -SUM(negative) AS reversed "
+            "FROM savings_ledger_totals WHERE cluster_uid = ? AND quantity IN ('cost', 'co2e_g') "
+            "AND reason_group = '' GROUP BY recommendation_type, method, quantity",
             [cluster_uid],
         )
         counters: Dict[Tuple[str, str], SavingsCounterTotal] = {}
@@ -991,7 +1079,7 @@ class LedgerRepository:
     async def accrued_book_totals(self, cluster_uid: str) -> Dict[Tuple[str, str], float]:
         """Net ``accrued`` book per (v1 method, quantity): what the v1 ledger must reconcile with."""
         rows = await self._select(
-            "SELECT method, quantity, SUM(value) AS value FROM savings_ledger_entries "
+            "SELECT method, quantity, SUM(value) AS value FROM savings_ledger_totals "
             "WHERE cluster_uid = ? AND book = 'accrued' AND quantity IN ('cost', 'co2e_g') GROUP BY method, quantity",
             [cluster_uid],
         )
@@ -1031,6 +1119,17 @@ class LedgerRepository:
         With a window, an entry contributes the share of its period inside
         ``[start, end)``, as ``GET /recommendations/savings`` does.
         """
+        if start is None and end is None:
+            # All time: the materialized totals, not a scan of every entry (LED-09).
+            namespace_sql = " AND namespace = ?" if namespace is not None else ""
+            rows = await self._select(
+                "SELECT method, quantity, unit, book, entry_kind, basis, reason_group, SUM(value) AS value, "
+                "SUM(entries) AS entries FROM savings_ledger_totals WHERE cluster_uid = ?"
+                f"{namespace_sql} GROUP BY method, quantity, unit, book, entry_kind, basis, reason_group "
+                "ORDER BY method, quantity, book, entry_kind, basis, reason_group",
+                [cluster_uid, *([namespace] if namespace is not None else [])],
+            )
+            return [self._summary_row(row) for row in rows]
         where, params = self._filters(cluster_uid, {"namespace": namespace}, start, end)
         share, share_params = self._share(start, end)
         rows = await self._select(
@@ -1042,20 +1141,21 @@ class LedgerRepository:
             "ORDER BY method, quantity, book, entry_kind, basis, reason_group",
             [*share_params, *params],
         )
-        return [
-            SummaryRow(
-                method=row["method"],
-                quantity=row["quantity"],
-                unit=row["unit"],
-                book=row["book"],
-                entry_kind=row["entry_kind"],
-                value=float(row["value"] or 0.0),
-                entries=int(row["entries"] or 0),
-                basis=str(row["basis"]),
-                reason_group=str(row["reason_group"] or ""),
-            )
-            for row in rows
-        ]
+        return [self._summary_row(row) for row in rows]
+
+    @staticmethod
+    def _summary_row(row: Mapping[str, Any]) -> SummaryRow:
+        return SummaryRow(
+            method=row["method"],
+            quantity=row["quantity"],
+            unit=row["unit"],
+            book=row["book"],
+            entry_kind=row["entry_kind"],
+            value=float(row["value"] or 0.0),
+            entries=int(row["entries"] or 0),
+            basis=str(row["basis"]),
+            reason_group=str(row["reason_group"] or ""),
+        )
 
     # ------------------------------------------------------------------
     # Chain status
