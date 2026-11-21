@@ -1,6 +1,6 @@
 ### Added
 - `GET /api/v1/health` reports `collection.container_usage_source` (`prometheus`, `metrics_server`, `mixed` or null): `metrics_server` means container usage is sampled from the Metrics API because cAdvisor exports pod-level series only, for example on cri-dockerd (COL-05).
-- Container rows store the largest working-set scrape inside each step in `memory_usage_max_bytes`; rightsizing percentiles, the observed maximum and the memory risk checks use it (COL-12).
+- Container and pod rows store the largest working-set scrape inside each step in `memory_usage_max_bytes` (pod rows: the pod cgroup peak, or the sum of the container peaks; migration 0271); hourly rows take the maximum of the peaks, and the per-replica headroom guard reads them; rightsizing percentiles, the observed maximum and the memory risk checks use it (COL-12).
 
 ### Changed
 - Calculation version `+range.9`. Rows stored before keep their values; re-collect a window inside Prometheus retention to apply the changes below.
