@@ -226,6 +226,24 @@ def configured_previous_chain_keys() -> List[bytes]:
     return [item.strip().encode("utf-8") for item in raw.split(",") if item.strip()]
 
 
+#: Grace period after ``LEDGER_CHAIN_KEY_SINCE`` for unkeyed entries and unsigned status rows (LED-05).
+CHAIN_KEY_GRACE = timedelta(hours=2)
+
+
+def configured_chain_key_since() -> Optional[datetime]:
+    """``LEDGER_CHAIN_KEY_SINCE`` as a UTC datetime, or None when unset or unparsable (logged)."""
+    from greenkube.core.config import get_config
+
+    raw = getattr(get_config(), "LEDGER_CHAIN_KEY_SINCE", None)
+    if not raw:
+        return None
+    try:
+        return ensure_utc(datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00")))
+    except ValueError:
+        logger.error("LEDGER_CHAIN_KEY_SINCE=%r is not an ISO 8601 UTC time: it is ignored.", raw)
+        return None
+
+
 def configured_chain_key() -> Optional[bytes]:
     """The ledger chain key from ``LEDGER_CHAIN_KEY`` (LED-05), or ``None`` when none is configured."""
     from greenkube.core.config import get_config
@@ -248,10 +266,46 @@ class LedgerRepository:
     before a deliberate rotation, and let the writer continue after them.
     """
 
-    def __init__(self, db_manager, chain_key: Optional[bytes] = None, previous_keys: Optional[Sequence[bytes]] = None):
+    def __init__(
+        self,
+        db_manager,
+        chain_key: Optional[bytes] = None,
+        previous_keys: Optional[Sequence[bytes]] = None,
+        key_since: Optional[datetime] = None,
+    ):
         self.db_manager = db_manager
         self._chain_key = chain_key
         self._previous_keys = list(previous_keys) if previous_keys is not None else None
+        self._key_since = ensure_utc(key_since) if key_since is not None else None
+
+    @property
+    def key_since(self) -> Optional[datetime]:
+        """When the current chain key was created (``LEDGER_CHAIN_KEY_SINCE``), or None; only with a key."""
+        if not self.chain_key:
+            return None
+        if self._key_since is not None:
+            return self._key_since
+        if self._chain_key is not None:
+            return None
+        return configured_chain_key_since()
+
+    def within_key_grace(self, moment: datetime) -> bool:
+        """Whether ``moment`` is no later than ``LEDGER_CHAIN_KEY_SINCE`` plus the grace period."""
+        since = self.key_since
+        return since is not None and ensure_utc(moment) <= since + CHAIN_KEY_GRACE
+
+    @property
+    def chain_key_order(self) -> List[str]:
+        """Key ids from the newest (current) to the oldest previous key: a chain only moves to newer keys."""
+        previous = self._previous_keys if self._previous_keys is not None else configured_previous_chain_keys()
+        order: List[str] = []
+        current = self.chain_key
+        if current:
+            order.append(chain_key_id(current))
+        for key in previous:
+            if key and chain_key_id(key) not in order:
+                order.append(chain_key_id(key))
+        return order
 
     @property
     def chain_keys(self) -> Dict[str, bytes]:
@@ -416,9 +470,27 @@ class LedgerRepository:
         )
         if rows:
             row = rows[0]
-            if row["signature"] is None and not row["head_keyed"]:
-                # A status row stored before the key (upgrade): its anchor is signed as it is, once.
-                verified_at = parse_time(row["verified_at"]) or moment
+            stored = ChainStatus(
+                cluster_uid=cluster_uid,
+                verified_at=parse_time(row["verified_at"]) or moment,
+                ok=bool(row["ok"]),
+                entries=int(row["entries"]),
+                head_seq=int(row["head_seq"]) if row["head_seq"] is not None else None,
+                head_hash=row["head_hash"],
+                failure=row["failure"],
+                head_keyed=bool(row["head_keyed"]),
+                signature=row["signature"],
+            )
+            state = self.status_signature_state(stored)
+            since = self.key_since
+            in_grace = self.within_key_grace(moment)
+            # An unsigned row stored before the key (upgrade), or a row signed with a previous key (rotation), is
+            # signed with the current key only inside the grace period of LEDGER_CHAIN_KEY_SINCE; without that
+            # anchor, as before (unsigned and not keyed, or a previous key).
+            if (state == "unsigned" and not stored.head_keyed and (since is None or in_grace)) or (
+                state == "previous" and (since is None or in_grace)
+            ):
+                verified_at = stored.verified_at
                 await self._upsert_status(
                     conn,
                     ChainStatus(
@@ -429,7 +501,7 @@ class LedgerRepository:
                         head_seq=int(row["head_seq"]) if row["head_seq"] is not None else None,
                         head_hash=row["head_hash"],
                         failure=row["failure"],
-                        head_keyed=False,
+                        head_keyed=stored.head_keyed,
                     ),
                 )
             return
@@ -463,8 +535,12 @@ class LedgerRepository:
         if head_key_id is None:
             return
         current_id = chain_key_id(chain_key) if chain_key else None
-        if current_id == head_key_id or (current_id is not None and head_key_id in self.chain_keys):
+        if current_id == head_key_id:
             return
+        if current_id is not None and head_key_id in self.chain_keys:
+            # Continuing after a previous key is a rotation; with LEDGER_CHAIN_KEY_SINCE only inside its grace period.
+            if self.key_since is None or self.within_key_grace(datetime.now(timezone.utc)):
+                return
         from greenkube.verify.ledger.projector import LEDGER_WRITE_ERRORS
 
         LEDGER_WRITE_ERRORS.labels(reason="chain_key").inc()
@@ -1332,6 +1408,17 @@ class LedgerRepository:
             return None
         digest = hmac.new(key, self._status_message(cluster_uid, head_seq, head_hash, keyed), hashlib.sha256)
         return f"{chain_key_id(key)}:{digest.hexdigest()}"
+
+    def status_signature_state(self, status: ChainStatus) -> str:
+        """``current``, ``previous`` (valid with an older key), ``forged`` or ``unsigned`` (LED-05)."""
+        valid = self.status_signature_valid(status)
+        if valid is None:
+            return "unsigned"
+        if not valid:
+            return "forged"
+        current = self.chain_key
+        key_id = (status.signature or "").partition(":")[0]
+        return "current" if current and key_id == chain_key_id(current) else "previous"
 
     def status_signature_valid(self, status: ChainStatus) -> Optional[bool]:
         """True or False for a signed status row (checked with any known key), None for an unsigned one."""

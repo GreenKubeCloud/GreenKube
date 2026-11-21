@@ -52,7 +52,8 @@ from typing import Dict, Optional, Set, Tuple
 from prometheus_client import Counter, Gauge
 
 from greenkube.core.observability import REGISTRY as OBSERVABILITY_REGISTRY
-from greenkube.storage.ledger_repository import ChainStatus, LedgerRepository
+from greenkube.storage.ledger_repository import CHAIN_KEY_GRACE, ChainStatus, LedgerRepository
+from greenkube.utils.time import ensure_utc
 from greenkube.verify.ledger.model import entry_id_for
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,8 @@ class ChainVerification:
     detail: Optional[str] = None
     #: Whether the verified head is chained with the key (LED-05).
     head_keyed: bool = False
+    #: Key id of the verified head (None when unkeyed).
+    head_key_id: Optional[str] = None
 
 
 async def verify_chain(
@@ -148,11 +151,20 @@ async def verify_chain(
     prev_hash = after_hash
     verified = after_seq
     keys = repo.chain_keys
+    #: Key rank: 0 for the current key, then previous keys from newest to oldest. A chain only moves to newer keys.
+    rank = {key_id: index for index, key_id in enumerate(repo.chain_key_order)}
     #: Whether an entry walked was chained with the key: later entries must be too.
     keyed_seen = False
+    newest_rank: Optional[int] = None
+    head_key_id: Optional[str] = None
     if after_seq and after_hash is not None:
         anchor = await repo.chain_page(cluster_uid, after_seq - 1, 1)
         keyed_seen = bool(anchor) and anchor[0].chain_key_id is not None
+        if keyed_seen:
+            head_key_id = anchor[0].chain_key_id
+            newest_rank = rank.get(head_key_id or "")
+    since = repo.key_since
+    cutoff = since + CHAIN_KEY_GRACE if since is not None else None
     #: entry id -> (value, quantity, unit) of the entries walked, for the reversal checks.
     seen: Dict[str, Tuple[float, str, str]] = {}
     #: ids reversed (non-drift) by the entries walked.
@@ -173,8 +185,23 @@ async def verify_chain(
                 failure = ("chain_key_missing", f"seq {entry.seq} is chained with a key and LEDGER_CHAIN_KEY is unset")
             elif entry.chain_key_id is not None and entry.chain_key_id not in keys:
                 failure = ("chain_key_mismatch", f"seq {entry.seq} is chained with another key")
+            elif (
+                entry.chain_key_id is not None
+                and newest_rank is not None
+                and rank.get(entry.chain_key_id, len(rank)) > newest_rank
+            ):
+                failure = ("chain_key_order", f"seq {entry.seq} uses an older key after a newer one")
             elif entry.hash != entry.computed_hash(keys.get(entry.chain_key_id or "")):
                 failure = ("hash_mismatch", f"seq {entry.seq} ({entry.entry_id}) was modified")
+            elif cutoff is not None and entry.chain_key_id is None and _entry_time(entry) > cutoff:
+                failure = ("unkeyed_after_key", f"seq {entry.seq} is unkeyed and later than LEDGER_CHAIN_KEY_SINCE")
+            elif (
+                cutoff is not None
+                and entry.chain_key_id is not None
+                and rank.get(entry.chain_key_id) != 0
+                and _entry_time(entry) > cutoff
+            ):
+                failure = ("chain_key_order", f"seq {entry.seq} uses a previous key after LEDGER_CHAIN_KEY_SINCE")
             elif entry.entry_id != entry_id_for(cluster_uid, entry.entry_key):
                 failure = ("identity_mismatch", f"seq {entry.seq} has an entry id that does not match its key")
             elif entry.cluster_uid != cluster_uid:
@@ -194,12 +221,24 @@ async def verify_chain(
                 )
             prev_hash = entry.hash
             keyed_seen = keyed_seen or entry.chain_key_id is not None
+            head_key_id = entry.chain_key_id
+            if entry.chain_key_id is not None:
+                entry_rank = rank.get(entry.chain_key_id)
+                if entry_rank is not None:
+                    newest_rank = entry_rank if newest_rank is None else min(newest_rank, entry_rank)
             seen[entry.entry_id] = (entry.value, entry.quantity, entry.unit)
             verified = entry.seq
             expected_seq += 1
         if len(page) < page_size:
             break
-    return ChainVerification(cluster_uid, True, verified, verified or None, prev_hash, head_keyed=keyed_seen)
+    return ChainVerification(
+        cluster_uid, True, verified, verified or None, prev_hash, head_keyed=keyed_seen, head_key_id=head_key_id
+    )
+
+
+def _entry_time(entry) -> datetime:
+    """The latest instant an entry claims: its period end or its creation, whichever is later."""
+    return max(ensure_utc(entry.period_end), ensure_utc(entry.created_at))
 
 
 async def _reversal_mismatch(
@@ -236,7 +275,7 @@ async def _reversal_mismatch(
 
 
 def _status_failure(
-    repo: LedgerRepository, result: ChainVerification, previous: Optional[ChainStatus]
+    repo: LedgerRepository, result: ChainVerification, previous: Optional[ChainStatus], moment: datetime
 ) -> Optional[ChainVerification]:
     """With a chain key, the stored anchor must be signed and present (LED-05).
 
@@ -254,13 +293,25 @@ def _status_failure(
     def failure(reason: str, detail: str) -> ChainVerification:
         return replace(result, ok=False, failure_seq=None, reason=reason, detail=detail)
 
+    since = repo.key_since
+    in_grace = repo.within_key_grace(moment)
     if previous is None:
+        if in_grace:
+            # An idle cluster before its first keyed append: the anchor is written (signed) by this run.
+            return None
         return failure("status_missing", f"the ledger chain status of cluster {cluster_uid} is missing")
-    valid = repo.status_signature_valid(previous)
-    if valid is False:
+    state = repo.status_signature_state(previous)
+    if state == "forged":
         return failure("status_forged", f"the ledger chain status of cluster {cluster_uid} fails its signature")
-    if valid is None and (previous.head_keyed or result.head_keyed):
-        return failure("status_unsigned", f"the ledger chain status of keyed cluster {cluster_uid} is not signed")
+    if state == "previous" and not in_grace:
+        # Only the current key's signature counts: the writer re-signs the row with it after a rotation (with its
+        # first append), and a row signed with an older, possibly leaked key is a forgery outside the grace period.
+        return failure("status_forged", f"the ledger chain status of cluster {cluster_uid} uses an old key")
+    if state == "unsigned":
+        if since is not None and not in_grace:
+            return failure("status_unsigned", f"the ledger chain status of cluster {cluster_uid} is not signed")
+        if since is None and (previous.head_keyed or result.head_keyed):
+            return failure("status_unsigned", f"the ledger chain status of keyed cluster {cluster_uid} is not signed")
     return None
 
 
@@ -329,7 +380,7 @@ async def verify_ledger(
         else:
             result = await verify_chain(repo, cluster_uid)
         if result.ok:
-            result = _status_failure(repo, result, previous) or result
+            result = _status_failure(repo, result, previous, moment) or result
         if result.ok:
             result = await _tail_lost(repo, result, previous) or result
         if result.ok and not incremental:
@@ -374,7 +425,7 @@ async def verify_ledger(
                 head_keyed=result.head_keyed if result.ok else bool(previous and previous.head_keyed),
             ),
             # Only a trusted anchor is signed: never a forged, unsigned or missing one carried by a failure.
-            sign=result.ok or (previous is not None and repo.status_signature_valid(previous) is True),
+            sign=result.ok or (previous is not None and repo.status_signature_state(previous) == "current"),
         )
         results[cluster_uid] = result
     CHAIN_VERIFIED_ENTRIES.set(total)
