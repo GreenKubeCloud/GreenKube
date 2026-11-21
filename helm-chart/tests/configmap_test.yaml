@@ -343,21 +343,16 @@ tests:
           path: data.GITOPS_POLICY_JSON
           pattern: '"minSamples":20'
 
-  - it: reads the source precedence from sources.priority (N3)
+  - it: renders no source precedence nor consensus policy, even when the removed values are set (B.3)
     set:
       sources.priority: greenkube,vpa
-    asserts:
-      - equal:
-          path: data.RECOMMENDATION_SOURCE_PRIORITY
-          value: greenkube,vpa
-
-  - it: maps config.recommendations.sourcePriority of 0.3.x
-    set:
       config.recommendations.sourcePriority: karpenter,greenkube
+      config.recommendations.consensusPolicy: median
     asserts:
-      - equal:
+      - notExists:
           path: data.RECOMMENDATION_SOURCE_PRIORITY
-          value: karpenter,greenkube
+      - notExists:
+          path: data.RECOMMENDATION_CONSENSUS_POLICY
 
   # --------------------------------------------------------------------------
   # Recommendation engine config
@@ -399,20 +394,6 @@ tests:
       - equal:
           path: data.RECOMMENDATION_TARGET_MAX_STALENESS_HOURS
           value: "2"
-
-  - it: should default the consensus policy to safest
-    asserts:
-      - equal:
-          path: data.RECOMMENDATION_CONSENSUS_POLICY
-          value: "safest"
-
-  - it: should render a configured consensus policy
-    set:
-      config.recommendations.consensusPolicy: median
-    asserts:
-      - equal:
-          path: data.RECOMMENDATION_CONSENSUS_POLICY
-          value: "median"
 
   - it: should let the increase cap and the warm-up be configured, including a disabled warm-up
     set:

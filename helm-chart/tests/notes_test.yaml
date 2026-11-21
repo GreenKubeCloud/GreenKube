@@ -134,6 +134,27 @@ tests:
       - notMatchRegexRaw:
           pattern: DEPRECATED VALUES
 
+  - it: warns about the values removed with the connectors and the consensus policies (B.3)
+    set:
+      sources.priority: vpa,greenkube
+      sources.krr.job.enabled: true
+      sources.polaris.job.enabled: true
+      sources.settings.kubecost.url: http://kubecost
+      config.recommendations.consensusPolicy: median
+    asserts:
+      - matchRegexRaw:
+          pattern: DEPRECATED VALUES
+      - matchRegexRaw:
+          pattern: sources.priority is removed and ignored
+      - matchRegexRaw:
+          pattern: "sources.krr is removed and ignored: the chart no longer runs KRR"
+      - matchRegexRaw:
+          pattern: sources.polaris is removed and ignored
+      - matchRegexRaw:
+          pattern: sources.settings.kubecost is ignored
+      - matchRegexRaw:
+          pattern: config.recommendations.consensusPolicy is removed and ignored
+
   - it: reports every mapped 0.3.x value (F17)
     set:
       profile: production

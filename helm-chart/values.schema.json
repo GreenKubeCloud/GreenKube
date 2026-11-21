@@ -43,7 +43,8 @@
       "items": {"type": "string", "minLength": 1, "pattern": "^\\S+$"}
     },
     "hostname": {"type": "string", "pattern": "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$", "maxLength": 253},
-    "deprecated": {"description": "0.3.x value, accepted and mapped for one minor release (docs/upgrading.md)."}
+    "deprecated": {"description": "0.3.x value, accepted and mapped for one minor release (docs/upgrading.md)."},
+    "removed": {"deprecated": true, "description": "Removed value: accepted and ignored for one release, with a NOTES warning (docs/upgrading.md)."}
   },
   "properties": {
     "tmp": {"type": "object", "properties": {"sizeLimit": {"$ref": "#/definitions/quantity"}}},
@@ -368,7 +369,8 @@
                 "minSamples": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "integer", "minimum": 1}]}
               }
             },
-            "sourcePriority": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": "string"}]},
+            "sourcePriority": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "string"}]},
+            "consensusPolicy": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "string"}]},
             "vpaEnabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": ["boolean", "string"]}]},
             "karpenterEnabled": {"allOf": [{"$ref": "#/definitions/deprecated"}, {"type": ["boolean", "string"]}]}
           }
@@ -380,7 +382,7 @@
       "properties": {
         "pluginsEnabled": {"type": "boolean"},
         "settings": {"type": "object"},
-        "priority": {"type": "string"},
+        "priority": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "string"}]},
         "toolFloors": {
           "type": "object",
           "additionalProperties": {
@@ -408,36 +410,8 @@
           },
           "additionalProperties": false
         },
-        "polaris": {
-          "type": "object",
-          "properties": {
-            "job": {
-              "type": "object",
-              "properties": {
-                "enabled": {"type": "boolean"},
-                "schedule": {"type": "string", "minLength": 1},
-                "image": {
-                  "type": "object",
-                  "properties": {
-                    "repository": {"type": "string", "minLength": 1},
-                    "tag": {"type": "string"},
-                    "digest": {"type": "string"}
-                  }
-                },
-                "extraArgs": {"type": "array", "items": {"type": "string"}},
-                "complete": {"type": "boolean"},
-                "apiKeySecret": {
-                  "type": "object",
-                  "properties": {"name": {"type": "string"}, "key": {"type": "string"}}
-                },
-                "activeDeadlineSeconds": {"type": "integer", "minimum": 60},
-                "resources": {"type": "object"},
-                "rbac": {"type": "object", "properties": {"create": {"type": "boolean"}}},
-                "serviceAccountName": {"type": "string"}
-              }
-            }
-          }
-        }
+        "krr": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "object"}]},
+        "polaris": {"allOf": [{"$ref": "#/definitions/removed"}, {"type": "object"}]}
       }
     },
     "impact": {

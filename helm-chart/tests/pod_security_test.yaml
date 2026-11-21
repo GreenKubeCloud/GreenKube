@@ -9,7 +9,6 @@ templates:
   - templates/components.yaml
   - templates/renderer.yaml
   - templates/credentials-bootstrap.yaml
-  - templates/krr-cronjob.yaml
   - templates/tests/test-connection.yaml
 
 tests:
@@ -165,35 +164,6 @@ tests:
           value: false
       - equal:
           path: spec.template.spec.containers[0].securityContext.capabilities.drop
-          value: [ALL]
-
-  - it: runs the optional KRR CronJob as a restricted pod
-    templates:
-      - templates/krr-cronjob.yaml
-    documentSelector:
-      path: kind
-      value: CronJob
-    set:
-      sources.krr.job.enabled: true
-      sources.krr.job.apiKeySecret.name: gk-krr
-    asserts:
-      - equal:
-          path: spec.jobTemplate.spec.template.spec.securityContext.runAsNonRoot
-          value: true
-      - equal:
-          path: spec.jobTemplate.spec.template.spec.securityContext.seccompProfile.type
-          value: RuntimeDefault
-      - equal:
-          path: spec.jobTemplate.spec.template.spec.initContainers[0].securityContext.allowPrivilegeEscalation
-          value: false
-      - equal:
-          path: spec.jobTemplate.spec.template.spec.initContainers[0].securityContext.capabilities.drop
-          value: [ALL]
-      - equal:
-          path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
-          value: false
-      - equal:
-          path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.capabilities.drop
           value: [ALL]
 
   - it: runs the Helm test pod as a restricted pod

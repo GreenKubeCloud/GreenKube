@@ -78,8 +78,8 @@ tests:
 
   - interval: 5m
     input_series:
-      # The kubecost source fails at every hourly scan.
-      - series: 'greenkube_optimization_analyzer_failures_total{job="c",instance="leader:9102",source="kubecost"}'
+      # The krr source fails at every hourly scan.
+      - series: 'greenkube_optimization_analyzer_failures_total{job="c",instance="leader:9102",source="krr"}'
         values: '0+1x36'
     alert_rule_test:
       - eval_time: 30m
@@ -90,10 +90,10 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
-              source: kubecost
+              source: krr
             exp_annotations:
               summary: A GreenKube recommendation source keeps failing
-              description: Recommendation source kubecost failed during scans for more than an hour; its signals are missing from consensus. See the Sources page (/sources).
+              description: Recommendation source krr failed during scans for more than an hour; its signals are missing from consensus. See the Sources page (/sources).
 
   - interval: 5m
     input_series:

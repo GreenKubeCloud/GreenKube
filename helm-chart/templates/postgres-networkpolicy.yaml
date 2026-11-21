@@ -4,7 +4,7 @@ Ingress isolation of the bundled PostgreSQL (security hardening, on by default).
 Only GreenKube's own database clients in the release namespace reach port 5432:
 the api, controller and worker (and backup or copy Jobs that carry the
 greenkube.cloud/postgres-client: "true" label, or a backup component label).
-The renderer sandbox, the KRR/Polaris jobs and every other pod of the cluster
+The renderer sandbox and every other pod of the cluster
 are refused. Ingress only: PostgreSQL itself makes no outbound connection, and
 an egress rule would need the cluster DNS layout. Clusters whose CNI does not
 enforce NetworkPolicy ignore it (see docs/security-model.md).
