@@ -334,8 +334,11 @@ def collected_steps_from_rows(rows: Sequence[Any], step_seconds: float) -> Dict[
 
     Each distinct row timestamp covers the longest row at that time (one step
     for a raw row, its ``duration_seconds`` for an hourly row read for older
-    hours), capped at the hour. Empty for rollup baseline rows, whose
-    timestamps are not sample times (the usage snapshot gives their collection).
+    hours). A row that crosses an hour boundary (a sample not aligned on the
+    step grid) covers each hour for the part of it inside that hour, so the
+    next hour is not counted as a gap. Each hour is capped at 3600 seconds.
+    Empty for rollup baseline rows, whose timestamps are not sample times (the
+    usage snapshot gives their collection).
     """
     if step_seconds <= 0:
         return {}
@@ -348,8 +351,13 @@ def collected_steps_from_rows(rows: Sequence[Any], step_seconds: float) -> Dict[
             continue
         duration = getattr(row, "duration_seconds", None)
         seconds = float(duration) if isinstance(duration, (int, float)) and duration > 0 else step_seconds
-        hour = covered.setdefault(stamp.replace(minute=0, second=0, microsecond=0), {})
-        hour[stamp] = max(hour.get(stamp, 0.0), seconds)
+        start, end = stamp, stamp + timedelta(seconds=seconds)
+        bucket = stamp.replace(minute=0, second=0, microsecond=0)
+        while bucket < end:
+            part = (min(bucket + timedelta(hours=1), end) - max(bucket, start)).total_seconds()
+            hour = covered.setdefault(bucket, {})
+            hour[stamp] = max(hour.get(stamp, 0.0), part)
+            bucket += timedelta(hours=1)
     return {hour: min(sum(values.values()), 3600.0) / step_seconds for hour, values in sorted(covered.items())}
 
 

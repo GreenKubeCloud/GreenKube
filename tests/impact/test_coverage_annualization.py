@@ -229,3 +229,18 @@ class TestFirstObservedFromSummaries:
         assert first("Deployment", "web", "unknown") == now - timedelta(hours=10)
         assert first("Namespace", "apps") == now - timedelta(hours=20)
         assert first("Deployment", "missing") is None
+
+
+@pytest.mark.parametrize("minute", [0, 1, 4, 30, 59])
+def test_samples_off_the_step_grid_leave_no_gap_at_the_hour(minute):
+    """A 5-minute sample at 21:59 also covers 22:00-22:04: the next hour is not a collection gap.
+
+    Before the fix the whole sample was credited to its start hour, so a scan at HH:01-HH:04
+    saw 1-4 uncollected minutes and the projection of a short-lived workload rose by up to 3.5 %.
+    """
+    now = datetime(2026, 11, 21, 23, minute, tzinfo=timezone.utc)
+    for hours in (2.0, 1 / 6):
+        rows = _rows(now, hours)
+        projector = ImpactProjector(Config(), rows=rows, analysis_window_seconds=LOOKBACK, window_end=now)
+        delta = _deletion(projector, rows)
+        assert delta.assumptions["coverage_hours"] == pytest.approx(hours)
