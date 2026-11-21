@@ -16,7 +16,7 @@ import weakref
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from math import log2
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 from prometheus_client.core import CounterMetricFamily
@@ -36,6 +36,7 @@ from greenkube.models.savings import (
     SavingsCounterTotal,
 )
 from greenkube.storage.base_gitops_repository import GitOpsRepository
+from greenkube.utils.date_utils import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,67 @@ CLUSTER_NAMESPACE_COUNT = Gauge(
     "Total number of unique namespaces in latest collection",
     CLUSTER_LABELS,
     registry=REGISTRY,
+)
+
+# Node idle share (unreserved capacity, ``__idle__`` rows) of the latest collection, and the
+# cluster totals = allocated (greenkube_cluster_*_total) + idle (WP-05.3, NRG-02). Absent when
+# the idle history does not cover the snapshot. Never add an idle gauge to a with_idle gauge.
+_IDLE_NOTE = "Absent when the idle history does not cover the latest collection."
+CLUSTER_IDLE_CO2 = Gauge(
+    "greenkube_cluster_idle_co2e_grams",
+    "GHG Scope 2 CO2e of the node idle share (unreserved capacity, no pod) in grams, latest collection. "
+    "Not included in greenkube_cluster_co2e_grams_total. " + _IDLE_NOTE,
+    CLUSTER_LABELS,
+    registry=REGISTRY,
+)
+CLUSTER_IDLE_EMBODIED_CO2 = Gauge(
+    "greenkube_cluster_idle_embodied_co2e_grams",
+    "GHG Scope 3 (Cat. 1) CO2e of the node idle share in grams, latest collection. " + _IDLE_NOTE,
+    CLUSTER_LABELS,
+    registry=REGISTRY,
+)
+CLUSTER_IDLE_COST = Gauge(
+    "greenkube_cluster_idle_cost_dollars",
+    "Cost of the node idle share in dollars, latest collection. " + _IDLE_NOTE,
+    CLUSTER_LABELS,
+    registry=REGISTRY,
+)
+CLUSTER_IDLE_ENERGY = Gauge(
+    "greenkube_cluster_idle_energy_joules",
+    "Energy of the node idle share in Joules, latest collection. " + _IDLE_NOTE,
+    CLUSTER_LABELS,
+    registry=REGISTRY,
+)
+CLUSTER_WITH_IDLE_CO2 = Gauge(
+    "greenkube_cluster_with_idle_co2e_grams",
+    "Cluster total GHG Scope 2 CO2e in grams: allocated to pods plus the node idle share. " + _IDLE_NOTE,
+    CLUSTER_LABELS,
+    registry=REGISTRY,
+)
+CLUSTER_WITH_IDLE_EMBODIED_CO2 = Gauge(
+    "greenkube_cluster_with_idle_embodied_co2e_grams",
+    "Cluster total GHG Scope 3 (Cat. 1) CO2e in grams: allocated plus the node idle share. " + _IDLE_NOTE,
+    CLUSTER_LABELS,
+    registry=REGISTRY,
+)
+CLUSTER_WITH_IDLE_COST = Gauge(
+    "greenkube_cluster_with_idle_cost_dollars",
+    "Cluster total cost in dollars: allocated to pods plus the node idle share. " + _IDLE_NOTE,
+    CLUSTER_LABELS,
+    registry=REGISTRY,
+)
+CLUSTER_WITH_IDLE_ENERGY = Gauge(
+    "greenkube_cluster_with_idle_energy_joules",
+    "Cluster total energy in Joules: allocated to pods plus the node idle share. " + _IDLE_NOTE,
+    CLUSTER_LABELS,
+    registry=REGISTRY,
+)
+#: (idle gauge, cluster-total gauge, CombinedMetric / NodeIdleMetric attribute) per measure.
+_IDLE_GAUGES = (
+    (CLUSTER_IDLE_CO2, CLUSTER_WITH_IDLE_CO2, "co2e_grams"),
+    (CLUSTER_IDLE_EMBODIED_CO2, CLUSTER_WITH_IDLE_EMBODIED_CO2, "embodied_co2e_grams"),
+    (CLUSTER_IDLE_COST, CLUSTER_WITH_IDLE_COST, "total_cost"),
+    (CLUSTER_IDLE_ENERGY, CLUSTER_WITH_IDLE_ENERGY, "joules"),
 )
 
 # ---------------------------------------------------------------------------
@@ -1233,6 +1295,41 @@ def update_realized_savings_from_stats(stats_rows: List[dict]) -> None:
     logger.debug("Updated implemented recommendation counts: %d applied.", sum(implemented_by_type.values()))
 
 
+def update_idle_metrics(
+    latest_metrics: Sequence[CombinedMetric],
+    idle_rows: Sequence[Any],
+    idle_since: Optional[datetime],
+) -> None:
+    """Set the node idle share and cluster-total gauges of the latest collection (WP-05.3, NRG-02).
+
+    The idle share is the latest ``__idle__`` row of each node in ``idle_rows``
+    (as the allocated gauges take the latest row of each pod); the cluster
+    total adds it to the pods of ``latest_metrics``. Both are removed, never
+    zeroed, when no idle row is stored or when a pod row of the snapshot is
+    older than the first idle row (``idle_since``): the idle share would then
+    cover part of the snapshot only, the rule of ``/metrics/summary``.
+    """
+    cluster = _get_cluster_name()
+    for idle_gauge, total_gauge, _ in _IDLE_GAUGES:
+        _clear_gauge(idle_gauge)
+        _clear_gauge(total_gauge)
+    latest_idle: dict[str, Any] = {}
+    for row in idle_rows:
+        current = latest_idle.get(row.node)
+        if current is None or ensure_utc(row.timestamp) > ensure_utc(current.timestamp):
+            latest_idle[row.node] = row
+    if not latest_idle or idle_since is None:
+        return
+    pod_times = [ensure_utc(m.timestamp) for m in latest_metrics if m.timestamp is not None]
+    if pod_times and min(pod_times) < ensure_utc(idle_since):
+        return
+    for idle_gauge, total_gauge, attribute in _IDLE_GAUGES:
+        idle = sum(float(getattr(row, attribute) or 0.0) for row in latest_idle.values())
+        allocated = sum(float(getattr(m, attribute) or 0.0) for m in latest_metrics)
+        idle_gauge.labels(cluster=cluster).set(idle)
+        total_gauge.labels(cluster=cluster).set(allocated + idle)
+
+
 def get_metrics_output() -> bytes:
     """Generates the Prometheus text exposition format output.
 
@@ -1310,6 +1407,14 @@ async def refresh_metrics_from_db(
                     latest[key] = m
             latest_metrics = list(latest.values())
         update_cluster_metrics(latest_metrics)
+        try:
+            # Node idle share of the same window, and the cluster totals (WP-05.3, NRG-02).
+            idle_rows = await combined_repo.read_idle_metrics(start, now)
+            idle_since = await combined_repo.idle_data_since() if idle_rows else None
+            update_idle_metrics(latest_metrics, idle_rows, idle_since)
+        except Exception as exc:
+            update_idle_metrics([], [], None)
+            logger.warning("refresh_metrics_from_db: failed to refresh the node idle share: %s", exc)
     except Exception as exc:
         logger.warning("refresh_metrics_from_db: failed to refresh cluster metrics: %s", exc)
 
