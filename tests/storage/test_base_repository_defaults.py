@@ -74,7 +74,10 @@ async def test_read_combined_metrics_smart_uses_raw_hourly_and_mixed_paths():
     hourly = [_metric("hourly-api", "prod", now - timedelta(days=2), 5.0)]
     repo = DummyCombinedMetricsRepository(raw_metrics=raw, hourly_metrics=hourly)
 
-    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+    with patch(
+        "greenkube.core.config.get_config",
+        return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24, metrics_compression_age=timedelta(hours=24)),
+    ):
         recent = await repo.read_combined_metrics_smart(now - timedelta(hours=2), now, namespace="prod")
         old = await repo.read_combined_metrics_smart(
             hour - timedelta(days=3), hour - timedelta(days=2), namespace="prod"
@@ -173,7 +176,10 @@ async def test_read_combined_metrics_page_returns_total_and_page():
     metrics = [_metric(f"pod-{i}", "prod", future, float(i)) for i in range(5)]
     repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
 
-    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+    with patch(
+        "greenkube.core.config.get_config",
+        return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24, metrics_compression_age=timedelta(hours=24)),
+    ):
         total, page = await repo.read_combined_metrics_page(
             future - timedelta(hours=1), future + timedelta(hours=1), offset=1, limit=2
         )
@@ -195,7 +201,10 @@ async def test_read_combined_metrics_page_with_namespace_filter():
     ]
     repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
 
-    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+    with patch(
+        "greenkube.core.config.get_config",
+        return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24, metrics_compression_age=timedelta(hours=24)),
+    ):
         total, page = await repo.read_combined_metrics_page(
             future - timedelta(hours=1), future + timedelta(hours=1), namespace="prod", offset=0, limit=10
         )
@@ -210,7 +219,10 @@ async def test_read_combined_metrics_page_offset_beyond_total_returns_empty_page
     future = now + timedelta(days=5)
     repo = DummyCombinedMetricsRepository(raw_metrics=[_metric("pod-a", "prod", future, 1.0)])
 
-    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+    with patch(
+        "greenkube.core.config.get_config",
+        return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24, metrics_compression_age=timedelta(hours=24)),
+    ):
         total, page = await repo.read_combined_metrics_page(
             future - timedelta(hours=1), future + timedelta(hours=1), offset=99, limit=10
         )
@@ -275,7 +287,10 @@ async def test_aggregate_grouped_row_count_no_granularity_counts_distinct_pods()
     ]
     repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
 
-    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+    with patch(
+        "greenkube.core.config.get_config",
+        return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24, metrics_compression_age=timedelta(hours=24)),
+    ):
         count = await repo.aggregate_grouped_row_count(
             future - timedelta(hours=1), future + timedelta(hours=1), group_by="pod"
         )
@@ -296,7 +311,10 @@ async def test_aggregate_grouped_row_count_daily_granularity_counts_pod_day_comb
     ]
     repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
 
-    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+    with patch(
+        "greenkube.core.config.get_config",
+        return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24, metrics_compression_age=timedelta(hours=24)),
+    ):
         count = await repo.aggregate_grouped_row_count(
             day1 - timedelta(hours=1), day2 + timedelta(hours=1), granularity="daily", group_by="pod"
         )
@@ -315,7 +333,10 @@ async def test_aggregate_grouped_row_count_namespace_grouping():
     ]
     repo = DummyCombinedMetricsRepository(raw_metrics=metrics)
 
-    with patch("greenkube.core.config.get_config", return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24)):
+    with patch(
+        "greenkube.core.config.get_config",
+        return_value=SimpleNamespace(METRICS_COMPRESSION_AGE_HOURS=24, metrics_compression_age=timedelta(hours=24)),
+    ):
         count = await repo.aggregate_grouped_row_count(
             future - timedelta(hours=1), future + timedelta(hours=1), group_by="namespace"
         )
