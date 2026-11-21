@@ -151,7 +151,7 @@ _PULL_REQUEST_STATUSES = frozenset({"pending", "open", "merged", "closed", "erro
 _PLAN_IN_FLIGHT_STATUSES = frozenset({PlanStatus.APPLYING, PlanStatus.PR_OPEN})
 _PLAN_ADVANCED_STATUSES = frozenset({PlanStatus.SYNCED, PlanStatus.APPLIED, PlanStatus.SYNC_FAILED})
 _PLAN_TERMINAL_FAILURE_STATUSES = frozenset(
-    {PlanStatus.FAILED, PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED}
+    {PlanStatus.FAILED, PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED, PlanStatus.CANCELLED}
 )
 _ACTION_PRE_MERGE_STATUSES = frozenset(
     {ActionStatus.NONE, ActionStatus.GROUPED, ActionStatus.PLAN_READY, ActionStatus.PR_OPEN, ActionStatus.FAILED}

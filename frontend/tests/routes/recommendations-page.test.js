@@ -595,7 +595,10 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		}
 	});
 
-	it('cancels an eligible plan and allows a fresh preview', async () => {
+	it.each([
+		['cancelled', { status: 'cancelled', status_reason: 'cancelled_by_user' }],
+		['stale (older servers)', { status: 'stale' }]
+	])('cancels an eligible plan (%s) and allows a fresh preview', async (_label, cancelled) => {
 		const freshPlan = {
 			...validatedPlan,
 			plan_id: 'pln-102',
@@ -605,7 +608,7 @@ describe('RecommendationsPage GitOps plan flow', () => {
 		api.createAutomationPlan
 			.mockResolvedValueOnce(validatedPlan)
 			.mockResolvedValueOnce(freshPlan);
-		api.cancelAutomationPlan.mockResolvedValueOnce({ ...validatedPlan, status: 'stale' });
+		api.cancelAutomationPlan.mockResolvedValueOnce({ ...validatedPlan, ...cancelled });
 
 		render(RecommendationsPage);
 		await fireEvent.click(await screen.findByRole('button', { name: 'Open PR' }));

@@ -80,7 +80,14 @@ _EXPIREABLE_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED, PlanSt
 _BUSY_STATUSES = frozenset({PlanStatus.APPLYING, PlanStatus.PR_OPEN, PlanStatus.MERGED, PlanStatus.SYNCED})
 _EXPIRY_BATCH_SIZE = 500
 _REPLANABLE_STATUSES = frozenset(
-    {PlanStatus.CLOSED, PlanStatus.FAILED, PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED}
+    {
+        PlanStatus.CLOSED,
+        PlanStatus.FAILED,
+        PlanStatus.STALE,
+        PlanStatus.SUPERSEDED,
+        PlanStatus.REJECTED,
+        PlanStatus.CANCELLED,
+    }
 )
 # Unapproved previews a newer request for the same workload replaces instead of 409 (D6, BUG-48).
 SUPERSEDABLE_PREVIEW_STATUSES = frozenset({PlanStatus.DRAFT, PlanStatus.VALIDATED})
@@ -653,6 +660,7 @@ class AutomationPlanService:
                 PlanStatus.STALE,
                 PlanStatus.REJECTED,
                 PlanStatus.SUPERSEDED,
+                PlanStatus.CANCELLED,
                 PlanStatus.SYNC_FAILED,
             }:
                 raise AutomationPlanError(
@@ -709,6 +717,7 @@ class AutomationPlanService:
             PlanStatus.STALE,
             PlanStatus.REJECTED,
             PlanStatus.SUPERSEDED,
+            PlanStatus.CANCELLED,
             PlanStatus.SYNC_FAILED,
         }:
             raise AutomationPlanError(
@@ -901,6 +910,24 @@ class AutomationPlanService:
     async def prune_retained_history(self, *, cutoff: datetime) -> dict[str, int]:
         return await self.repository.prune_automation_history(cutoff=cutoff)
 
+    async def cancel_by_user(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel a plan that has not started applying: it becomes CANCELLED, reason ``cancelled_by_user`` (F-10).
+
+        A plan already cancelled is returned unchanged; any status other than
+        draft, validated or approved raises ``PLAN_STALE``.
+        """
+        plan = await self.repository.get_plan(plan_id)
+        if plan is None:
+            return None
+        if plan.status is PlanStatus.CANCELLED:
+            return plan
+        if plan.status not in _STALEABLE_STATUSES:
+            raise AutomationPlanError(
+                AutomationErrorCode.PLAN_STALE,
+                f"plan cannot be cancelled from status {plan.status.value}",
+            )
+        return await self._transition(plan, PlanStatus.CANCELLED, actor=actor, reason_code="cancelled_by_user")
+
     async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
         """Cancel an unapproved preview: a DRAFT/VALIDATED plan becomes SUPERSEDED (D6)."""
         plan = await self.repository.get_plan(plan_id)
@@ -1075,7 +1102,7 @@ class AutomationPlanService:
         )
         if updated is None:
             raise AutomationPlanError(AutomationErrorCode.PLAN_STALE, "plan changed during state transition")
-        if status in {PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED}:
+        if status in {PlanStatus.STALE, PlanStatus.SUPERSEDED, PlanStatus.REJECTED, PlanStatus.CANCELLED}:
             await self._clear_unplanned_recommendations(plan, actor=actor)
         return updated
 

@@ -519,7 +519,7 @@ def _leader_fence_scope(should_run: Callable[[], bool] | None):
 
 
 async def _run_initial_controller_task(
-    callback: Callable[..., Awaitable[None]],
+    callback: Callable[..., Awaitable[object]],
     should_run: Callable[[], bool] | None,
     *args,
     **kwargs,
@@ -528,8 +528,47 @@ async def _run_initial_controller_task(
         logger.info("Skipping remaining initial controller work while this process is not the Lease holder.")
         return False
     with _leader_fence_scope(should_run):
-        await callback(*args, **kwargs)
-    return True
+        result = await callback(*args, **kwargs)
+    # A loop tick skipped because the Lease was lost after ``should_run()`` did no work:
+    # the deferred initial work retries it once this process leads again.
+    return result is not _INITIAL_TICK_SKIPPED
+
+
+_INITIAL_TICK_SKIPPED = object()
+
+
+def _initial_loop_tick(registry, name: str) -> Callable[[], Awaitable[object]]:
+    """One tick of loop ``name`` as an initial task; a skipped tick returns ``_INITIAL_TICK_SKIPPED``."""
+
+    async def run_initial_tick() -> object:
+        if await registry.run_once(name) == "skipped":
+            logger.info("Initial pass of controller loop %s skipped: this process lost the Lease.", name)
+            return _INITIAL_TICK_SKIPPED
+        return None
+
+    run_initial_tick.__name__ = f"initial_{name.replace('-', '_')}_tick"
+    return run_initial_tick
+
+
+def _initial_tasks_as_loop_ticks(registry, initial_tasks):
+    """Run each initial task that is a registered loop's job as one tick of that loop.
+
+    The initial pass then counts in the loop status and telemetry (``runs``,
+    ``last_success_at``), so ``metrics-compression`` no longer shows ``runs: 0``
+    after its startup pass (F-10). A tick skipped for a lost Lease does not count
+    as done. Tasks with arguments, or with no matching loop, run as before.
+    """
+    loop_by_job = {}
+    for name in registry.names:
+        loop_by_job.setdefault(registry.spec(name).func, name)
+    converted = []
+    for callback, args, kwargs in initial_tasks:
+        name = None if args or kwargs else loop_by_job.get(callback)
+        if name is None:
+            converted.append((callback, args, kwargs))
+        else:
+            converted.append((_initial_loop_tick(registry, name), (), {}))
+    return tuple(converted)
 
 
 async def _run_deferred_initial_controller_work(
@@ -1029,6 +1068,7 @@ async def _async_start(last: Optional[str], force: bool = False):
             (refresh_dashboard_summary, (), {}),
             (initial_recommendation_scan, (), {}),
         )
+        initial_tasks = _initial_tasks_as_loop_ticks(registry, initial_tasks)
         if should_run is None:
             logger.info("Running initial controller work...")
             try:

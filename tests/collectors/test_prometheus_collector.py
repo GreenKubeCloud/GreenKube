@@ -313,3 +313,48 @@ async def test_collect_pod_storage_returns_empty_on_prometheus_error(collector):
     collector._query_prometheus = AsyncMock(side_effect=RuntimeError("prometheus down"))
 
     assert await collector.collect_pod_storage() == {}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_instant_query_without_url_discovers_before_first_request(collector, caplog):
+    """F-06: without PROMETHEUS_URL, discovery runs before the first instant query.
+
+    No relative URL is requested and no false ERROR is logged.
+    """
+    collector.base_url = None
+    discovered_url = "http://discovered-prometheus:9090"
+
+    async def discover(client):
+        collector.base_url = discovered_url
+        return True
+
+    collector._discover_and_update_url = AsyncMock(side_effect=discover)
+    route = respx.get(f"{discovered_url}/api/v1/query").mock(return_value=Response(200, json=MOCK_EMPTY_RESPONSE))
+
+    with caplog.at_level("DEBUG", logger="greenkube.collectors.prometheus_collector"):
+        client = httpx.AsyncClient()
+        try:
+            result = await collector._query_prometheus(client, "up")
+        finally:
+            await client.aclose()
+
+    assert result == []
+    assert route.called
+    collector._discover_and_update_url.assert_awaited_once()
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert not [r for r in caplog.records if "missing an 'http://'" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_instant_query_without_url_and_no_discovery_reports_clear_error(collector, caplog):
+    """F-06: when discovery finds nothing, the error names the cause, no relative URL is tried."""
+    collector.base_url = None
+    collector._discover_and_update_url = AsyncMock(return_value=False)
+    client = AsyncMock()
+
+    with caplog.at_level("ERROR", logger="greenkube.collectors.prometheus_collector"):
+        assert await collector._query_prometheus(client, "up") == []
+
+    client.get.assert_not_called()
+    assert any("not configured and could not be discovered" in r.getMessage() for r in caplog.records)

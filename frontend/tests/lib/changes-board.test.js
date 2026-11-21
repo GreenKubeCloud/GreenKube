@@ -54,7 +54,8 @@ describe('boardStage', () => {
 		['synced', 'synced'],
 		['applied', 'applied'],
 		['closed', 'outcome'],
-		['superseded', 'outcome']
+		['superseded', 'outcome'],
+		['cancelled', 'outcome']
 	])('maps plan status %s to %s', (status, stage) => {
 		expect(boardStage({ plan: { status } })).toBe(stage);
 	});

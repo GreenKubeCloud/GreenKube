@@ -23,6 +23,7 @@ BRANCH_CLEANUP_PLAN_STATUSES = (
     "ambiguous",
     "rejected",
     "superseded",
+    "cancelled",
 )
 
 

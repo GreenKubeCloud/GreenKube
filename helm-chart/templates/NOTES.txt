@@ -104,12 +104,23 @@ Welcome to
 {{- end }}
 {{- end }}
 
+{{- $gitProviders := (.Values.automation | default dict).providers | default list }}
+{{- if $gitProviders }}
+
+{{ if ne $mode "api_key" }}4{{ else }}3{{ end }}. Git delivery uses the providers listed in automation.providers. Each one reads
+   its own Secret in namespace {{ .Release.Namespace }}; create it if it does not exist yet:
+{{- range $gitProviders }}
+     {{ .id }} ({{ .type }}): Secret {{ .secretName }}, key {{ .secretKey | default "token" }}
+{{- end }}
+{{- else }}
+
 {{ if ne $mode "api_key" }}4{{ else }}3{{ end }}. Connect Git (optional): GitOps discovery is already running. To let
    GreenKube open pull requests, create one Secret; delivery activates within
    one to two minutes, with no upgrade and no restart:
      kubectl -n {{ .Release.Namespace }} create secret generic {{ include "greenkube.gitCredentialsSecretName" . }} \
        --from-literal=token=<token with write access to your GitOps repositories> \
        --from-literal=host=<the Git host of that token, e.g. github.com>
+{{- end }}
 {{- if $v.pauseDelivery }}
    automation.policy.pauseDelivery is true: no pull request is opened until you set it to false.
 {{- end }}

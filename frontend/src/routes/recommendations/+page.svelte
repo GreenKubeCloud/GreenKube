@@ -760,7 +760,7 @@
 				!preview.rollbackOfPlanId &&
 				(
 					planApprovalBlocked ||
-					['stale', 'failed', 'closed', 'superseded', 'rejected'].includes(preview.status) ||
+					['stale', 'failed', 'closed', 'superseded', 'rejected', 'cancelled'].includes(preview.status) ||
 					(preview.status === 'validated' && preview.expiresAt && !preview.expiryValid)
 				)
 		);
@@ -1069,7 +1069,8 @@
 			if (prModal !== modal) return;
 			prPlan = result?.plan ?? result;
 			planApproval = null;
-			planApprovalBlocked = String(prPlan?.status ?? '').toLowerCase() === 'stale';
+			// "cancelled" since migration 0220; older servers return "stale".
+			planApprovalBlocked = ['stale', 'cancelled'].includes(String(prPlan?.status ?? '').toLowerCase());
 			planFeedback = planApprovalBlocked
 				? 'Plan cancelled. Preview a new plan before approving.'
 				: 'Plan status updated.';
@@ -1149,7 +1150,8 @@
 			needs_mapping: 'Chart mapping required',
 			ambiguous: 'Workload binding is ambiguous',
 			rejected: 'Plan rejected',
-			superseded: 'Plan superseded'
+			superseded: 'Plan superseded',
+			cancelled: 'Plan cancelled'
 		};
 		const normalized = String(status ?? '').toLowerCase();
 		return labels[normalized] ?? (normalized || 'Unknown');

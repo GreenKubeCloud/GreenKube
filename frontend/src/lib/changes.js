@@ -168,7 +168,8 @@ const PLAN_STAGE = {
 	needs_mapping: 'outcome',
 	ambiguous: 'outcome',
 	rejected: 'outcome',
-	superseded: 'outcome'
+	superseded: 'outcome',
+	cancelled: 'outcome'
 };
 
 /** Words for plan and pull-request statuses that end a row without a change. */
@@ -180,6 +181,7 @@ const CLOSED_LABELS = {
 	ambiguous: 'Ambiguous source',
 	rejected: 'Plan rejected',
 	superseded: 'Plan superseded',
+	cancelled: 'Plan cancelled',
 	error: 'Pull request failed'
 };
 

@@ -44,6 +44,7 @@ _TERMINAL_PLAN_STATUSES = frozenset(
         PlanStatus.AMBIGUOUS,
         PlanStatus.REJECTED,
         PlanStatus.SUPERSEDED,
+        PlanStatus.CANCELLED,
     }
 )
 _ACTIVE_OPERATION_STATUSES = frozenset(

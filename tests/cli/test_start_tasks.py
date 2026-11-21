@@ -375,6 +375,13 @@ class _CapturingRegistry:
     def start(self):
         self.started = True
 
+    def spec(self, name):
+        return self.specs[name]
+
+    async def run_once(self, name):
+        await self.specs[name].func()
+        return "success"
+
 
 def _controller_config(**overrides):
     values = dict(
@@ -752,3 +759,43 @@ async def test_failed_migration_stops_the_metrics_listener(monkeypatch):
             await start_module._async_start(last=None)
 
     assert events == ["metrics-started", "metrics-stopped:endpoint"]
+
+
+@pytest.mark.asyncio
+async def test_initial_pass_of_a_registered_loop_counts_as_a_run():
+    """F-10: the initial metrics-compression pass shows in the loop status (``runs: 1``)."""
+    from greenkube.core.loops import LoopRegistry, LoopSpec
+
+    registry = LoopRegistry(role="controller")
+    compress = AsyncMock()
+    collect = AsyncMock()
+    registry.register(LoopSpec("metrics-compression", compress, 3600))
+
+    initial = start_module._initial_tasks_as_loop_ticks(registry, ((collect, (), {"last": "1h"}), (compress, (), {})))
+    for callback, args, kwargs in initial:
+        assert await start_module._run_initial_controller_task(callback, None, *args, **kwargs)
+
+    compress.assert_awaited_once()
+    collect.assert_awaited_once_with(last="1h")
+    status = registry.status("metrics-compression")
+    assert status.runs == 1
+    assert status.last_outcome == "success"
+    assert status.last_success_at is not None
+
+
+@pytest.mark.asyncio
+async def test_initial_tick_skipped_after_lease_loss_does_not_count_as_done(caplog):
+    """A startup tick skipped because the Lease was lost after ``should_run()`` is not complete work."""
+    from greenkube.core.loops import LoopRegistry, LoopSpec
+
+    registry = LoopRegistry(role="controller", leader=lambda: False)
+    compress = AsyncMock()
+    registry.register(LoopSpec("metrics-compression", compress, 3600))
+    ((callback, args, kwargs),) = start_module._initial_tasks_as_loop_ticks(registry, ((compress, (), {}),))
+
+    with caplog.at_level("INFO", logger="greenkube.cli.start"):
+        done = await start_module._run_initial_controller_task(callback, lambda: True, *args, **kwargs)
+
+    assert done is False
+    compress.assert_not_awaited()
+    assert any("metrics-compression" in record.getMessage() for record in caplog.records)

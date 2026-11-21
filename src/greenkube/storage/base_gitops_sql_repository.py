@@ -1958,6 +1958,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             PlanStatus.STALE.value,
             PlanStatus.SUPERSEDED.value,
             PlanStatus.SYNC_FAILED.value,
+            PlanStatus.CANCELLED.value,
         )
         updated_before = "updated_at < ?" if self._postgres else "julianday(updated_at) < julianday(?)"
         processed_before = "processed_at < ?" if self._postgres else "julianday(processed_at) < julianday(?)"
@@ -2085,7 +2086,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
     ) -> Plan | None:
         actor = _validated_audit_actor(actor)
         conditions = ["plan_id = ?"]
-        params: list[Any] = [status.value, plan_id]
+        params: list[Any] = [status.value, reason_code, plan_id]
         expected = tuple(dict.fromkeys(expected_statuses or ()))
         if expected_statuses is not None:
             if not expected:
@@ -2119,7 +2120,7 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
             previous = await self._fetchrow(
                 connection,
                 f"""
-                SELECT status, digest, source_id, provider_id
+                SELECT status, status_reason, digest, source_id, provider_id
                 FROM automation_plans
                 WHERE plan_id = ?{row_lock}
                 """,
@@ -2134,11 +2135,14 @@ class BaseSQLGitOpsRepository(GitOpsRepository):
                 return None
             if expected_digest is not None and previous["digest"] != expected_digest:
                 return None
+            if reason_code is None and previous_status == status.value:
+                # A same-status write keeps the reason of the change that set the status.
+                params[1] = previous["status_reason"]
             updated = await self._execute(
                 connection,
                 f"""
                 UPDATE automation_plans
-                SET status = ?, updated_at = {self._now_expression}
+                SET status = ?, status_reason = ?, updated_at = {self._now_expression}
                 WHERE {" AND ".join(conditions)}
                 """,
                 params,
