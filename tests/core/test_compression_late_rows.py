@@ -357,3 +357,33 @@ async def test_moving_a_row_between_compressed_hours_marks_both_hours(metrics_db
     marked = await _fetch(metrics_db, "SELECT hour_bucket FROM metrics_dirty_hours ORDER BY hour_bucket")
     hours = [row[0] if isinstance(row[0], str) else to_iso_z(row[0]) for row in marked]
     assert hours == [to_iso_z(T0 + timedelta(hours=1)), to_iso_z(T0 + timedelta(hours=3))]
+
+
+async def test_a_catch_up_commits_one_hour_per_transaction(metrics_db, monkeypatch):
+    """Writers wait for one compressed hour at most, never for a whole catch-up chunk (review)."""
+    await _repository(metrics_db).write_combined_metrics([_sample(i) for i in range(12 * 30)])
+    compressor = _compressor(metrics_db)
+    chunks: list[tuple[datetime, datetime]] = []
+    original = compressor._compress_chunk
+
+    async def recording(table, start, end, now):
+        if table.raw == "combined_metrics":
+            chunks.append((start, end))
+        return await original(table, start, end, now)
+
+    monkeypatch.setattr(compressor, "_compress_chunk", recording)
+    await compressor.run(now=T0 + timedelta(hours=30))
+    assert len(chunks) == 6
+    assert all(end - start == timedelta(hours=1) for start, end in chunks)
+    assert await compressor.get_watermark("combined_metrics") == T0 + timedelta(hours=6)
+
+
+def test_the_short_age_warning_uses_the_effective_age(caplog):
+    """A short METRICS_COMPRESSION_AGE_HOURS raised by a 24 h backfill compresses after 24 h: no warning."""
+    MetricsCompressor._short_age_warned = False
+    cfg = Config(METRICS_COMPRESSION_AGE_HOURS=6, COLLECTION_MAX_BACKFILL="24h")
+    compressor = MetricsCompressor(object(), cfg, collection_watermark_provider=None)
+    with caplog.at_level("WARNING"):
+        compressor._warn_if_compression_precedes_recompute()
+    assert "carbon-intensity recompute window" not in caplog.text
+    MetricsCompressor._short_age_warned = False

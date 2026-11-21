@@ -248,7 +248,8 @@ OPENCOST_AUTH_FAILED = Gauge(
 )
 METRICS_COMPRESSION_LAG = Gauge(
     "greenkube_metrics_compression_lag_seconds",
-    "Seconds between the hour the compressor may reach (now - METRICS_COMPRESSION_AGE_HOURS) and the "
+    "Seconds between the hour the compressor may reach (now - the effective compression age, the longer of "
+    "METRICS_COMPRESSION_AGE_HOURS and COLLECTION_MAX_BACKFILL) and the "
     "compression watermark of each metric table (ROL-01).",
     ["table"],
     registry=REGISTRY,

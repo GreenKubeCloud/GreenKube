@@ -544,15 +544,15 @@ async def test_short_compression_age_warns_once_about_the_carbon_recompute(db, c
     from greenkube.core.config import Config
 
     monkeypatch.setattr(MetricsCompressor, "_short_age_warned", False)
-    cfg = Config()
-    cfg.METRICS_COMPRESSION_AGE_HOURS = 6
+    # The effective age is the longer of the age and the backfill: both short here.
+    cfg = Config(METRICS_COMPRESSION_AGE_HOURS=6, COLLECTION_MAX_BACKFILL="1h")
     compressor = MetricsCompressor(db_manager=db, config=cfg, collection_watermark_provider=None)
 
     with caplog.at_level(logging.WARNING, logger="greenkube.core.metrics_compressor"):
         await compressor.run()
         await compressor.run()
 
-    warnings = [record for record in caplog.records if "METRICS_COMPRESSION_AGE_HOURS" in record.getMessage()]
+    warnings = [record for record in caplog.records if "carbon-intensity recompute window" in record.getMessage()]
     assert len(warnings) == 1
 
 

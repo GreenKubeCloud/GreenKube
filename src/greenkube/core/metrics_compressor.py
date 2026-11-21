@@ -49,8 +49,10 @@ logger = logging.getLogger(__name__)
 
 #: Compression lag above which health reports the compressor as degraded (ROL-01).
 COMPRESSION_LAG_DEGRADED_SECONDS = 2 * 3600
-#: Upper bound of hours aggregated in one transaction.
-MAX_HOURS_PER_TRANSACTION = 24
+#: Hours aggregated in one transaction. One: the chunk holds the watermark row locked,
+#: so raw writers of the table wait for one hour's aggregate at most, never for a whole
+#: catch-up (a run still compresses every hour it may reach, one commit per hour).
+MAX_HOURS_PER_TRANSACTION = 1
 #: Raw rows are refreshed by the carbon-intensity recompute for this many hours
 #: (``CARBON_RECOMPUTE_WINDOW_HOURS`` in ``cli/start.py``). Compressed hours are
 #: never re-read, so a shorter compression age freezes their hourly carbon
@@ -382,7 +384,7 @@ class MetricsCompressor:
         """Return the compression watermark and lag of each metrics table and export the lag gauge.
 
         The lag is how far the watermark trails the last hour the compressor may
-        reach (``floor_hour(now - METRICS_COMPRESSION_AGE_HOURS)``). Readers never
+        reach (``floor_hour(now - Config.metrics_compression_age)``, the effective age). Readers never
         lose rows when it grows (they split at the watermark), but raw retention
         and query cost do: a lag above :data:`COMPRESSION_LAG_DEGRADED_SECONDS`
         reports ``degraded``.
@@ -414,6 +416,7 @@ class MetricsCompressor:
     def _warn_if_compression_precedes_recompute(self) -> None:
         age = self._config.METRICS_COMPRESSION_AGE_HOURS
         effective = self._config.metrics_compression_age
+        effective_hours = effective.total_seconds() / 3600
         if effective > timedelta(hours=age) and not MetricsCompressor._backfill_age_warned:
             MetricsCompressor._backfill_age_warned = True
             logger.warning(
@@ -421,16 +424,16 @@ class MetricsCompressor:
                 "compressed only once they leave the backfill horizon (effective age %.0fh).",
                 self._config.COLLECTION_MAX_BACKFILL,
                 age,
-                effective.total_seconds() / 3600,
+                effective_hours,
             )
-        if age >= CARBON_RECOMPUTE_HORIZON_HOURS or MetricsCompressor._short_age_warned:
+        if effective_hours >= CARBON_RECOMPUTE_HORIZON_HOURS or MetricsCompressor._short_age_warned:
             return
         MetricsCompressor._short_age_warned = True
         logger.warning(
-            "METRICS_COMPRESSION_AGE_HOURS=%d is below the %dh carbon-intensity recompute window: "
+            "The effective compression age (%.0fh) is below the %dh carbon-intensity recompute window: "
             "hours compressed before their intensity is consolidated keep their provisional or "
             "default carbon figures. Use %d or more.",
-            age,
+            effective_hours,
             CARBON_RECOMPUTE_HORIZON_HOURS,
             CARBON_RECOMPUTE_HORIZON_HOURS,
         )

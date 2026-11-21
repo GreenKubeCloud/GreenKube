@@ -382,7 +382,9 @@ class CompressionStatusResponse(BaseModel):
         ..., description="`ok`, or `degraded` when a compression watermark trails its reachable hour by over 2 h."
     )
     lag_seconds: Optional[float] = Field(
-        None, description="Largest lag of the metric tables behind now - METRICS_COMPRESSION_AGE_HOURS."
+        None,
+        description="Largest lag of the metric tables behind now - the effective compression age (the longer of "
+        "METRICS_COMPRESSION_AGE_HOURS and COLLECTION_MAX_BACKFILL).",
     )
     watermarks: dict[str, Optional[datetime]] = Field(
         default_factory=dict, description="Compression watermark per raw metric table (exclusive end)."
