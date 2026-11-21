@@ -34,7 +34,7 @@ vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 | `session` (default) | Local accounts, scrypt-hashed passwords, server-side sessions in an `HttpOnly; SameSite=Strict` cookie | Scoped API keys | Password guessing: lockout per username **and** client IP plus a per-IP budget; 12-character minimum |
 | `oidc` | OpenID Connect, authorization code + PKCE, ID token verified against the JWKS | Scoped API keys | IdP misconfiguration: groups map to roles explicitly; `defaultRole: none` refuses unmapped users |
 | `proxy` | Identity headers from an authentication proxy | Scoped API keys | Header spoofing: identity headers are accepted only from a TCP peer in `TRUSTED_PROXY_IPS` (required, enforced at startup and by the chart) |
-| `api_key` | No accounts: the browser signs in with an API key, kept in an `HttpOnly; SameSite=Strict` cookie and re-checked on every request | The bootstrap key (its only administrator) and scoped keys | A single non-expiring admin credential: use only for headless installations |
+| `api_key` | No accounts: the browser signs in with an API key (HTTPS or localhost only) and gets a signed, expiring `HttpOnly; SameSite=Strict` cookie that never contains the key; the key is re-checked on every request | The bootstrap key (its only administrator) and scoped keys | A single non-expiring admin credential: use only for headless installations |
 
 Every browser mode ends in the same session: cookie-authenticated mutations need a same-origin `Origin`/`Referer`
 and the session's `X-CSRF-Token`. HTTPS responses carry `Strict-Transport-Security`, and the chart makes the cookie

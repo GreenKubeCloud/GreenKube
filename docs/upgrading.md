@@ -253,7 +253,9 @@ deprecated bootstrap key `GREENKUBE_API_KEY`, which stays an admin key (`auth.le
 
 A 0.3.1 install in `config.apiAuthMode: api_key` has no accounts and no `<release>-initial-admin` Secret. Its
 sign-in page asks for an API key: enter `GREENKUBE_API_KEY` from the Secret `<release>` (or a scoped `gk_` key) to
-keep browser access ([Browser sign-in with an API key](authentication.md#browser-sign-in-with-an-api-key)). To give
+keep browser access ([Browser sign-in with an API key](authentication.md#browser-sign-in-with-an-api-key)). This
+needs HTTPS (an Ingress with TLS) or `kubectl port-forward` to `localhost`: plain HTTP to a remote host is refused.
+To give
 people their own accounts and roles instead, move to `config.apiAuthMode: session`: the upgrade creates the
 `<release>-initial-admin` Secret for the first sign-in, and the existing key keeps working for scripts
 (`auth.legacyApiKey: admin`).
