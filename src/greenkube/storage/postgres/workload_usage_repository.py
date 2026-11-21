@@ -288,7 +288,10 @@ class PostgresWorkloadUsageRepository(WorkloadUsageRepository):
         summaries = await self._fetch(q.summary_sql(_ph, namespace, scope), params)
         profiles = await self._fetch(q.hour_profile_sql(_ph, namespace, scope), params)
         nodes = await self._fetch(q.node_sql(_ph, namespace, scope), params)
-        collection = await self._fetch(q.collection_sql(_ph, namespace, scope), params)
+        # IMP-04: collection is cluster-wide (all live namespaces), even for a namespace-scoped read.
+        collection = await self._fetch(
+            q.collection_sql(_ph, None, scope), q.scope_params(ensure_utc(start), ensure_utc(end), None, scope)
+        )
         return q.build_snapshot(summaries, profiles, nodes, _decode, collection)
 
     async def read_baseline_rows(

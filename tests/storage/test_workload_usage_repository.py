@@ -288,6 +288,10 @@ async def test_namespace_filter_is_applied_in_sql(db):
     snapshot = await repository.read_usage_snapshot(start, start + timedelta(hours=2), namespace="tools")
 
     assert set(snapshot.summaries) == {("tools", "Pod", "debug-shell")}
+    # IMP-04: the collection of each hour stays cluster-wide, so a lone CronJob keeps its duty cycle.
+    unscoped = await repository.read_usage_snapshot(start, start + timedelta(hours=2))
+    assert snapshot.collected_steps_by_hour == unscoped.collected_steps_by_hour
+    assert len(snapshot.collected_steps_by_hour) == 2
 
 
 async def test_baseline_rows_keep_current_requests_on_the_newest_rows(db):

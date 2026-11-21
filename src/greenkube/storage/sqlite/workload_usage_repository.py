@@ -337,7 +337,8 @@ class SQLiteWorkloadUsageRepository(WorkloadUsageRepository):
                 (q.summary_sql(_ph, namespace, scope), params),
                 (q.hour_profile_sql(_ph, namespace, scope), params),
                 (q.node_sql(_ph, namespace, scope), params),
-                (q.collection_sql(_ph, namespace, scope), params),
+                # IMP-04: collection is cluster-wide (all live namespaces), even for a namespace-scoped read.
+                (q.collection_sql(_ph, None, scope), q.scope_params(_encode(start), _encode(end), None, scope)),
             ]
         )
         return q.build_snapshot(summaries, profiles, nodes, _decode, collection)
