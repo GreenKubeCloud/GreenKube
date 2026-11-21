@@ -862,3 +862,48 @@ async def test_risk_profile_counts_the_replicas_of_a_rolled_up_statefulset(db):
     profile = build_risk_profile(single, context)
     assert profile.replicas == 1
     assert "singleton_workload" in assess(single, None, Config(), profile).risk_factors
+
+
+@pytest.mark.parametrize("new_node", ["node-a", "node-b"], ids=["same_node", "rescheduled"])
+async def test_a_singleton_replaced_during_its_last_hour_stays_a_singleton(db, new_node):
+    """Review of F-08: a rollout in the last hour (two pod names in it) must not hide singleton_workload."""
+    from greenkube.core.optimization.context import OptimizationContext
+    from greenkube.core.optimization.enrich import build_risk_profile
+    from greenkube.core.optimization.risks import assess
+    from greenkube.models.metrics import Recommendation, RecommendationType
+
+    start = _base_hour()
+    rows: list[CombinedMetric] = []
+    for hour in range(3):
+        for step in range(12):
+            ts = start + timedelta(hours=hour, minutes=5 * step)
+            # The pod is replaced halfway through the last hour (GreenKube's own merged PR does this).
+            replaced = hour == 2 and step >= 6
+            pod, node = ("api-5f6d7c8b9-new01", new_node) if replaced else ("api-7d9f8b6c5d-old01", "node-a")
+            for container in (None, "api"):
+                rows.append(_row(ts, pod_name=pod, node=node, container_name=container))
+    repository, _ = await _rolled(db, rows, start, hours=3)
+    window = (start, start + timedelta(hours=3))
+    snapshot = await repository.read_usage_snapshot(*window)
+    pods, containers = await repository.read_baseline_rows(*window, snapshot=snapshot)
+    context = OptimizationContext(
+        config=Config(), metrics=list(pods), container_metrics=list(containers), usage=snapshot
+    )
+    rec = Recommendation(
+        pod_name="api",
+        container_name="api",
+        namespace="shop",
+        type=RecommendationType.RIGHTSIZING_CPU,
+        scope="workload",
+        owner_kind="Deployment",
+        owner_name="api",
+        description="reduce cpu",
+        current_cpu_request_millicores=500,
+        recommended_cpu_request_millicores=200,
+    )
+
+    profile = build_risk_profile(rec, context)
+
+    assert snapshot.summaries[("shop", "Deployment", "api")][""].replicas_latest == 1
+    assert profile.replicas == 1
+    assert "singleton_workload" in assess(rec, None, Config(), profile).risk_factors

@@ -105,6 +105,10 @@ class WorkloadUsageHour:
     #: Seconds from ``hour_bucket`` to the row's latest sample: among the node rows of
     #: one hour, the newest one holds the current request (None for rows before 0076).
     latest_sample_offset_seconds: Optional[float] = None
+    #: Pods seen at the row's latest sample (within half a step): the replicas of that
+    #: moment, which a rollout inside the hour does not double (migration 0210). None
+    #: for rows rolled before it (``pod_count`` is read instead).
+    latest_pod_count: Optional[int] = None
     #: Restarts in the hour, summed over the pods of the row: each pod's count
     #: compared with its own previous count (a reset or a new pod adds its count).
     #: None when no row carries a restart count, and for rows before migration 0130.

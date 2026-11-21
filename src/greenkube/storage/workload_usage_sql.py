@@ -197,6 +197,8 @@ def _window_filter(
 
 def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: Optional[Sequence[str]] = None) -> str:
     """One row per target container over the window (see the module docstring)."""
+    from greenkube.core.workload_usage import latest_step_tolerance_seconds
+
     partition = f"PARTITION BY {_KEY}"
     ranks = []
     picks = []
@@ -245,6 +247,8 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
                 SUM(sample_count) AS sample_count,
                 MAX(step_count) AS step_count,
                 SUM(pod_count) AS pod_count,
+                SUM(CASE WHEN hour_offset - row_offset <= {latest_step_tolerance_seconds()}
+                    THEN COALESCE(latest_pod_count, pod_count) ELSE 0 END) AS latest_pod_count,
                 SUM(duration_seconds) AS duration_seconds,
                 SUM(cpu_sample_count) AS cpu_n,
                 SUM(COALESCE(cpu_usage_avg, 0) * cpu_sample_count) AS cpu_sum,
@@ -290,7 +294,7 @@ def summary_sql(ph: Callable[[int], str], namespace: Optional[str], namespaces: 
             SUM(cpu_n) AS cpu_count, SUM(cpu_sum) AS cpu_total, SUM(cpu_sq_sum) AS cpu_sq_total,
             SUM(mem_n) AS mem_count, SUM(mem_sum) AS mem_total,
             {", ".join(picks)},
-            MAX(CASE WHEN hour_bucket = last_hour THEN pod_count END) AS replicas_latest,
+            MAX(CASE WHEN hour_bucket = last_hour THEN latest_pod_count END) AS replicas_latest,
             MAX(CASE WHEN hour_bucket = last_hour THEN cpu_request END) AS latest_cpu_request,
             MAX(CASE WHEN hour_bucket = last_hour THEN memory_request END) AS latest_memory_request,
             MAX(CASE WHEN hour_bucket = last_hour THEN cpu_limit END) AS latest_cpu_limit,
@@ -599,4 +603,5 @@ def hour_from_values(values: Mapping[str, Any], decode_time: Callable[[Any], Opt
         data[column] = _i(data[column])
     data["latest_sample_offset_seconds"] = _f(data["latest_sample_offset_seconds"])
     data["restart_increase"] = _i(data["restart_increase"])
+    data["latest_pod_count"] = _i(data.get("latest_pod_count"))
     return WorkloadUsageHour(**data)
