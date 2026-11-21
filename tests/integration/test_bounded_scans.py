@@ -38,7 +38,7 @@ async def db(request, tmp_path, monkeypatch):
     dsn = None
     # Fixtures cover two days: the one-week decrease gate is tested elsewhere.
     monkeypatch.setenv("RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS", "0")
-    # Likewise for the observed-idle span of zombie deletions (test_deletion_safety.py).
+    # Likewise for the deletion unused period (test_deletion_safety.py).
     monkeypatch.setenv("DELETION_MIN_UNUSED_DAYS", "0")
     if backend == "postgres":
         dsn = os.getenv("GREENKUBE_TEST_POSTGRES_DSN")
@@ -100,7 +100,7 @@ def _repo(manager: DatabaseManager):
 
 
 def _rows(start: datetime, hours: int) -> list[CombinedMetric]:
-    """``api``: 2 replicas, oversized CPU and memory; ``hot``: CPU above its request; ``idle-ns``: a zombie."""
+    """``api``: 2 replicas, oversized CPU and memory; ``hot``: CPU above its request; ``idle-ns``: an idle workload."""
     rows: list[CombinedMetric] = []
     for step in range(hours * 12):
         ts = start + timedelta(minutes=5 * step)
@@ -235,8 +235,6 @@ async def test_scan_never_materializes_raw_rows(db):
     hot = by_key[(RecommendationType.RIGHTSIZING_CPU, "shop", "hot", "db")]
     assert hot.recommended_cpu_request_millicores is not None and hot.recommended_cpu_request_millicores > 200
     assert hot.potential_savings_cost is not None and hot.potential_savings_cost < 0
-    assert (RecommendationType.ZOMBIE_POD, "idle-ns", "forgotten", None) in by_key
-    assert not any(rec.type == RecommendationType.UNDERUTILIZED_NODE for rec in recs)
 
 
 async def test_rollup_and_row_paths_agree(db):

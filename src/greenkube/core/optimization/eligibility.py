@@ -55,21 +55,9 @@ ACTION_DELETE_RESOURCE = "delete_resource"
 SUPPORTED_ACTION_KINDS: Dict[str, str] = {
     "RIGHTSIZING_CPU": ACTION_CONTAINER_RESOURCES,
     "RIGHTSIZING_MEMORY": ACTION_CONTAINER_RESOURCES,
-    # Orphaned LoadBalancers and PersistentVolumes become reviewed deletion PRs (H6);
-    # zombie workloads and idle namespaces stay manual (deletion_requires_review).
+    # Orphaned LoadBalancers and PersistentVolumes become reviewed deletion PRs (H6).
     "ORPHANED_LOAD_BALANCER": ACTION_DELETE_RESOURCE,
     "ORPHANED_PERSISTENT_VOLUME": ACTION_DELETE_RESOURCE,
-}
-
-#: Action kinds planned for the other types (roadmap H), named in the blocker.
-PLANNED_ACTION_KINDS: Dict[str, Tuple[str, str]] = {
-    "AUTOSCALING_CANDIDATE": ("hpa", "H3"),
-    "OFF_PEAK_SCALING": ("schedule", "H4"),
-    "ZOMBIE_POD": ("deletion", "H6"),
-    "IDLE_NAMESPACE": ("deletion", "H6"),
-    "OVERPROVISIONED_NODE": ("node_pool", "H7"),
-    "UNDERUTILIZED_NODE": ("node_pool", "H7"),
-    "CARBON_AWARE_SCHEDULING": ("advisory", "E4"),
 }
 
 DELIVERY_DIRECT = "direct"
@@ -701,15 +689,8 @@ def assess_eligibility(record: Any, ctx: EligibilityContext) -> Dict[str, Any]:
             blockers.append(_entry(action_code, *(worded or (None, None))))
         # A person always reviews a deletion: the PR is offered, never auto-approved.
         warnings.append(_entry("deletion_reviewed_in_pr"))
-    elif action_kind is None and rec_type in DELETION_TYPES:
-        # Deletions stay manual (no deletion PR is automated in this release, roadmap H6).
-        blockers.append(_entry("deletion_requires_review"))
     elif action_kind is None:
-        planned = PLANNED_ACTION_KINDS.get(rec_type)
-        message = CODES["action_kind_unsupported"][0]
-        if planned:
-            message = f"{message} The {planned[0]} action kind is planned (roadmap {planned[1]})."
-        blockers.append(_entry("action_kind_unsupported", message))
+        blockers.append(_entry("action_kind_unsupported"))
     else:
         recommendation_ids, action_code = validate_action(record)
         if action_code:

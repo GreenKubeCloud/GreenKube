@@ -99,20 +99,9 @@ class TestRecommendationsPersistence:
     ):
         """A scan persists generated recommendations via upsert and reconciles the active set."""
         from greenkube.core.optimization.engine import OptimizationEngine
+        from tests.api.test_recommendations import _hot_rows  # pyrefly: ignore[missing-import]
 
-        zombie_metric = CombinedMetric(
-            pod_name="zombie-pod",
-            namespace="default",
-            total_cost=0.05,
-            co2e_grams=0.0,
-            joules=100.0,
-            cpu_usage_millicores=0,
-            cpu_request=100,
-            memory_request=128 * 1024 * 1024,
-            timestamp=datetime(2026, 2, 8, 12, 0, 0, tzinfo=timezone.utc),
-            duration_seconds=300,
-        )
-        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=[zombie_metric])
+        mock_combined_metrics_repo.read_combined_metrics = AsyncMock(return_value=_hot_rows("hot", "default"))
 
         data = await OptimizationEngine().refresh(mock_combined_metrics_repo, mock_node_repo, mock_reco_repo)
 

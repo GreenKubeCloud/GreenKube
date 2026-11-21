@@ -6,7 +6,7 @@
   history and error isolation, while its internals stay untouched.
 * :class:`RecommendationSourceAdapter` wraps a v1
   :class:`~greenkube.core.optimization.providers.base.RecommendationSource`
-  connector (VPA, the Karpenter NodePool heuristic, test fakes).
+  connector (VPA, test fakes).
 
 Both keep emitting the v1 recommendations unchanged (``SourceBatch.recommendations``)
 and add their v2 signals, so the current recommendation output is identical.
@@ -41,14 +41,8 @@ if TYPE_CHECKING:
 #: Source id of each built-in analyzer (by class name). Unknown analyzers get
 #: ``greenkube.<snake_case name without "Analyzer">``.
 NATIVE_SOURCE_IDS: Dict[str, str] = {
-    "ZombieAnalyzer": "greenkube.zombie",
     "CpuRightsizingAnalyzer": "greenkube.rightsizing_cpu",
     "MemoryRightsizingAnalyzer": "greenkube.rightsizing_memory",
-    "AutoscalingAnalyzer": "greenkube.autoscaling",
-    "OffPeakAnalyzer": "greenkube.off_peak",
-    "IdleNamespaceAnalyzer": "greenkube.idle_namespace",
-    "CarbonAwareAnalyzer": "greenkube.carbon_aware",
-    "NodesAnalyzer": "greenkube.nodes",
     "OrphanedPVAnalyzer": "greenkube.orphaned_pv",
     "OrphanedLBAnalyzer": "greenkube.orphaned_lb",
 }
@@ -57,15 +51,8 @@ NATIVE_SOURCE_IDS: Dict[str, str] = {
 _ANALYZER_CAPABILITIES: Dict[str, Capability] = {
     "cpu_rightsizing": Capability.CONTAINER_REQUESTS,
     "memory_rightsizing": Capability.CONTAINER_REQUESTS,
-    "autoscaling": Capability.HORIZONTAL_AUTOSCALING,
-    "off_peak": Capability.SCHEDULE,
-    "carbon_aware": Capability.PLACEMENT,
-    "zombie_cleanup": Capability.CLEANUP,
-    "namespace_cleanup": Capability.CLEANUP,
     "storage_cleanup": Capability.CLEANUP,
     "lb_cleanup": Capability.CLEANUP,
-    "node_optimization": Capability.NODE_POOL,
-    "node_pool": Capability.NODE_POOL,
 }
 
 
@@ -204,7 +191,7 @@ class RecommendationSourceAdapter(Source):
     tier: ClassVar[SourceTier] = SourceTier.CUSTOM
     #: Algorithm reported on the signals (``vpa-recommender``...); defaults to the source id.
     algorithm_name: ClassVar[Optional[str]] = None
-    #: ``native`` for GreenKube heuristics wrapped as connectors (NodePool).
+    #: ``native`` for GreenKube heuristics wrapped as connectors.
     signal_origin: ClassVar[SignalOrigin] = SignalOrigin.ADAPTER
 
     def __init__(

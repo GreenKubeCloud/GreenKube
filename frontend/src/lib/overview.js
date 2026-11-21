@@ -51,12 +51,10 @@ export function currencyOf(recommendations = []) {
 export const OPPORTUNITY_LABEL = 'Projected (not additive across overlapping recommendations)';
 
 /**
- * The de-duplicated opportunity the server computed once (`opportunity` of
+ * The opportunity the server computed once (`opportunity` of
  * `GET /recommendations/savings`, IMP-07), or null when the server sent none.
- * Overlapping recommendations (a namespace deletion and the rightsizing of its
- * workloads, an off-peak schedule and a rightsizing of one workload, a node
- * removal and its pods) are counted once and request increases apart, so the
- * dashboard and the recommendations page show the same figure.
+ * Request increases are counted apart, and the dashboard and the
+ * recommendations page show the same figure.
  */
 export function serverOpportunity(savings) {
 	const value = savings?.opportunity;

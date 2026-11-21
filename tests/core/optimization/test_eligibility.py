@@ -32,6 +32,7 @@ from greenkube.gitops.contracts import (
 )
 from greenkube.models.evidence import RecommendationEvidence
 from greenkube.models.metrics import (
+    RETIRED_RECOMMENDATION_TYPES,
     PullRequestRecord,
     PullRequestStatus,
     RecommendationRecord,
@@ -174,28 +175,13 @@ class TestEligibility:
             assert blocker["message"] and blocker["fix"], blocker
         assert set(_codes(result)) >= {"not_active", "automation_disabled", "policy_risk_exceeded"}
 
-    def test_unsupported_action_kind_names_the_planned_kind(self):
-        offpeak = _record(type=RecommendationType.OFF_PEAK_SCALING, action=None, scope="workload")
-        result = assess_eligibility(offpeak, _ctx())
-        assert _codes(result) == ["action_kind_unsupported"]
-        assert "schedule" in result["blockers"][0]["message"] and "H4" in result["blockers"][0]["message"]
-        assert result["delivery_modes"] == ["manual"]
-
-    @pytest.mark.parametrize(
-        "rec_type",
-        [
-            RecommendationType.ZOMBIE_POD,
-            RecommendationType.IDLE_NAMESPACE,
-        ],
-    )
-    def test_deletions_always_require_review(self, rec_type):
-        """Zombie and idle-namespace deletions stay manual: blocked with an explanation and a fix (H6)."""
-        record = _record(type=rec_type, action=None, scope="cluster")
+    @pytest.mark.parametrize("rec_type", sorted(RETIRED_RECOMMENDATION_TYPES, key=lambda item: item.value))
+    def test_a_stored_record_of_a_retired_type_can_never_open_a_pull_request(self, rec_type):
+        record = _record(type=rec_type, action=None, scope="workload")
         result = assess_eligibility(record, _ctx())
         assert result["can_open_pr"] is False
-        assert _codes(result) == ["deletion_requires_review"]
-        blocker = result["blockers"][0]
-        assert "unused" in blocker["message"] and "greenkube.io/ignore" in blocker["fix"]
+        assert _codes(result) == ["action_kind_unsupported"]
+        assert result["blockers"][0]["message"] and result["blockers"][0]["fix"]
         assert result["delivery_modes"] == ["manual"]
 
     def test_missing_action_and_unsafe_targets(self):

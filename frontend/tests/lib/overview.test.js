@@ -120,11 +120,17 @@ describe('opportunityOf', () => {
 	});
 });
 
-describe('de-duplicated opportunity (IMP-07)', () => {
-	// Audit fixture: IDLE_NAMESPACE ns1 (100) + RIGHTSIZING_CPU ns1 (20, 30) + a memory increase in ns2 (-5)
-	// + RIGHTSIZING_CPU ns2 (10). The server answers 110 and a reliability cost of 5.
+describe('server opportunity (IMP-07)', () => {
+	// Fixture: ORPHANED_LOAD_BALANCER ns1 (100) + RIGHTSIZING_CPU ns1 (20, 30) + a memory increase in ns2 (-5)
+	// + RIGHTSIZING_CPU ns2 (10). The server, which read a newer active set, answers 110 and a reliability
+	// cost of 5: the pages show its figure, never a sum of the list they render.
 	const recs = [
-		{ type: 'IDLE_NAMESPACE', namespace: 'ns1', potential_savings_cost: 100, potential_savings_co2e_grams: 1000 },
+		{
+			type: 'ORPHANED_LOAD_BALANCER',
+			namespace: 'ns1',
+			potential_savings_cost: 100,
+			potential_savings_co2e_grams: 1000
+		},
 		{ type: 'RIGHTSIZING_CPU', namespace: 'ns1', potential_savings_cost: 20, potential_savings_co2e_grams: 200 },
 		{ type: 'RIGHTSIZING_CPU', namespace: 'ns1', potential_savings_cost: 30, potential_savings_co2e_grams: 300 },
 		{ type: 'RIGHTSIZING_MEMORY', namespace: 'ns2', potential_savings_cost: -5, value: { lane: 'reliability' } },
@@ -152,7 +158,7 @@ describe('de-duplicated opportunity (IMP-07)', () => {
 		expect(dashboard.reliabilityCost).toBe(5);
 		expect(page.reliabilityCost).toBe(5);
 		expect(dashboard.label).toBe(OPPORTUNITY_LABEL);
-		// Without the server figure the client sum adds the overlapping namespace and workloads.
+		// Without the server figure the client sums the list.
 		expect(opportunityOf(recs).cost).toBe(160);
 	});
 

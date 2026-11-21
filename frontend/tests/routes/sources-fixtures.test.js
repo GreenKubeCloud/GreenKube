@@ -45,8 +45,8 @@ describe('/sources on the API contract fixtures', () => {
 		expect(vpa).toHaveTextContent('enabled explicitly but unavailable: VPA CRD not installed');
 		expect(screen.getByTestId('source-greenkube.orphaned_lb')).toHaveTextContent('RuntimeError');
 		expect(screen.getByTestId('source-greenkube.rightsizing_cpu')).toHaveTextContent('Degraded');
-		expect(screen.getByTestId('source-greenkube.zombie')).toHaveTextContent('Not run yet');
-		expect(screen.getByTestId('source-greenkube.carbon_aware')).toHaveTextContent('Disabled');
+		expect(screen.getByTestId('source-greenkube.rightsizing_memory')).toHaveTextContent('Not run yet');
+		expect(screen.getByTestId('source-greenkube.orphaned_pv')).toHaveTextContent('Disabled');
 		expect(screen.getByTestId('source-uninstalled')).toHaveTextContent('Unregistered');
 		expect(screen.getByTestId('source-problems')).toHaveTextContent("No module named 'acme_sdk'");
 	});

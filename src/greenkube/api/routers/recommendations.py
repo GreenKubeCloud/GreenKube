@@ -205,7 +205,7 @@ async def list_active_recommendations(
     response: Response,
     namespace: Optional[str] = Depends(validate_namespace),
     refresh: bool = Query(False, description=_REFRESH_DESCRIPTION, deprecated=True),
-    source: Optional[str] = Query(None, description="Filter by recommendation source (greenkube, vpa, karpenter)."),
+    source: Optional[str] = Query(None, description="Filter by recommendation source (greenkube, vpa, ...)."),
     risk_level: Optional[str] = Query(None, description="Filter by risk level (low, medium, high)."),
     capability: Optional[str] = Query(None, description="Filter by optimization capability."),
     profile: Optional[str] = Query(None, description=_PROFILE_DESCRIPTION),

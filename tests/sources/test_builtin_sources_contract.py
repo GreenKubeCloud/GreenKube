@@ -1,8 +1,7 @@
-"""The three ported built-in sources honour the Source SDK contract (roadmap E5).
+"""The ported built-in sources honour the Source SDK contract (roadmap E5).
 
 * native analyzers through the analyzer adapter (``greenkube.rightsizing_cpu`` and every other analyzer);
-* ``vpa``, the VPA connector through the v1 adapter;
-* ``greenkube.nodepool``, the NodePool heuristic over Karpenter objects.
+* ``vpa``, the VPA connector through the v1 adapter.
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from greenkube.collectors.karpenter_collector import NodePoolInfo
 from greenkube.collectors.vpa_collector import VPARecommendation
 from greenkube.core.config import Config
 from greenkube.core.optimization.analyzers import (
@@ -20,10 +18,8 @@ from greenkube.core.optimization.analyzers import (
     MemoryRightsizingAnalyzer,
 )
 from greenkube.core.optimization.context import OptimizationContext
-from greenkube.core.optimization.providers.karpenter import KarpenterSource, NodePoolSignalSource
 from greenkube.core.optimization.providers.vpa import VpaSignalSource, VpaSource
 from greenkube.models.metrics import CombinedMetric
-from greenkube.models.node import NodeInfo
 from greenkube.models.workload_usage import UsageSnapshot, UsageStats, WorkloadUsageSummary
 from greenkube.signals.adapters import analyzer_source_class
 from greenkube.signals.model import Capability, SignalOrigin
@@ -159,58 +155,3 @@ class TestVpaContract(SourceContract):
             assert signal.raw["vpa"] == "prod/api-vpa"
             assert signal.provenance.origin == SignalOrigin.ADAPTER
             assert signal.target.key() == "contract-cluster/apps.Deployment/prod/api/api"
-
-
-def _nodepool_context() -> OptimizationContext:
-    now = datetime.now(timezone.utc)
-    metrics = [
-        CombinedMetric(
-            restart_count=0,
-            pod_name=f"pod-{node}",
-            namespace="default",
-            node=node,
-            cpu_request=200,
-            total_cost=1.0,
-            timestamp=now,
-        )
-        for node in ("n1", "n2")
-    ]
-    nodes = [NodeInfo(name=node, cpu_capacity_cores=4.0, cloud_provider="aws") for node in ("n1", "n2")]
-    return OptimizationContext(
-        config=Config(),
-        metrics=metrics,
-        node_infos=nodes,
-        analysis_window_seconds=86400,
-        window_start=now - timedelta(days=1),
-        window_end=now,
-    )
-
-
-class _FakeKarpenterCollector:
-    async def collect(self):
-        return [NodePoolInfo(name="default", node_names=["n1", "n2"], consolidation_policy="WhenUnderutilized")]
-
-
-class TestNodePoolContract(SourceContract):
-    def make_source(self):
-        connector = KarpenterSource(Config(), collector=_FakeKarpenterCollector())
-        return NodePoolSignalSource(SourceSettings(), deps(), connector=connector)
-
-    def make_context(self):
-        return collect_context(_nodepool_context())
-
-    async def test_is_a_native_heuristic_with_a_compatible_v1_source(self):
-        source = self.make_source()
-        batch = await source.collect(self.make_context())
-
-        assert type(source).id == "greenkube.nodepool"
-        assert type(source).tier == SourceTier.NATIVE
-        # The consolidation signal; NodePool policy advice (G5) comes as signal-only advisories.
-        [signal] = [s for s in batch.signals if s.kind == "OVERPROVISIONED_NODE"]
-        assert signal.provenance.origin == SignalOrigin.NATIVE
-        assert signal.target.kind == "NodePool" and signal.target.name == "default"
-        assert signal.target.key() == "contract-cluster/karpenter.sh.NodePool/_/default"
-        # v1 consumers keep seeing the historical source name and capability.
-        [rec] = batch.recommendations
-        assert rec.source == "karpenter"
-        assert rec.capability is not None and rec.capability.value == "node_pool"

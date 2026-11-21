@@ -44,6 +44,20 @@ logger = logging.getLogger(__name__)
 #: Maximum length of a problem message kept for the API.
 _MESSAGE_LIMIT = 300
 
+#: Built-in source ids removed in 0.4 (roadmap B): their SOURCES_CONFIG entries are ignored for one release.
+REMOVED_SOURCE_IDS = frozenset(
+    {
+        "greenkube.zombie",
+        "greenkube.autoscaling",
+        "greenkube.off_peak",
+        "greenkube.idle_namespace",
+        "greenkube.carbon_aware",
+        "greenkube.nodes",
+        "greenkube.nodepool",
+        "karpenter",
+    }
+)
+
 
 def parse_sources_config(value: Any) -> Dict[str, Dict[str, Any]]:
     """Parse ``SOURCES_CONFIG``: a JSON object of objects keyed by source id."""
@@ -201,6 +215,16 @@ class SourceRegistry:
             enabled = settings.enabled or defaults.get(descriptor.id) or cls.default_enabled
             configured.append(ConfiguredSource(descriptor=descriptor, enabled=EnabledMode(enabled), settings=settings))
         for unknown in sorted(set(settings_by_id) - set(self._descriptors)):
+            if unknown in REMOVED_SOURCE_IDS:
+                # Accepted and ignored for one release (roadmap B.0).
+                self.problems.append(
+                    RegistryProblem(
+                        code="removed_source",
+                        message=f"SOURCES_CONFIG names '{unknown}', which was removed in 0.4: its settings are ignored",
+                        source_id=unknown,
+                    )
+                )
+                continue
             self.problems.append(
                 RegistryProblem(
                     code="unknown_source",

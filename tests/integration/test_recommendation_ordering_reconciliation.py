@@ -19,7 +19,6 @@ from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
 from greenkube.models.metrics import (
     RecommendationRecord,
-    RecommendationSource,
     RecommendationStatus,
     RecommendationType,
 )
@@ -88,7 +87,7 @@ def _record(name, *, priority="medium", ranking=None, cost=None, source="greenku
         priority=priority,
         ranking_score=ranking,
         potential_savings_cost=cost,
-        source=RecommendationSource(source),
+        source=source,
         sources=sources if sources is not None else [source],
         status=RecommendationStatus.ACTIVE,
     )
@@ -144,7 +143,7 @@ async def test_reconcile_never_stales_recommendations_of_incomplete_sources(back
             _record("vpa-only", source="vpa", sources=["vpa"]),
             _record("vpa-and-native", source="vpa", sources=["vpa", "greenkube"]),
             _record("native-only", source="greenkube", sources=["greenkube"]),
-            _record("karpenter-only", source="karpenter", sources=["karpenter"]),
+            _record("krr-only", source="krr", sources=["krr"]),
             _record("still-emitted", source="greenkube", sources=["greenkube"]),
         ]
     )

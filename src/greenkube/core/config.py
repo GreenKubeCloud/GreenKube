@@ -114,6 +114,14 @@ ACCELERATED_MIN_POST_WINDOW_DAYS = 1 / 48
 #: Clamped window settings already reported (name, configured value): warn once per process.
 _CLAMP_WARNED: set[tuple[str, float]] = set()
 
+#: Settings removed in 0.4 (roadmap B.0): accepted and ignored for one release, and named in
+#: one warning at start when set. Each maps to what replaced it, or why it went.
+REMOVED_SETTINGS: dict[str, str] = {
+    "RECOMMENDATION_KARPENTER_ENABLED": "the Karpenter NodePool recommendation source was removed",
+}
+#: Removed settings already reported: warn once per process.
+_REMOVED_WARNED: set[str] = set()
+
 
 #: Resource keys accepted in ``SIGNAL_TOOL_FLOORS`` and the consensus resource each sets.
 _FLOOR_RESOURCES = {"cpu": "cpu_request_m", "memory": "memory_request_bytes"}
@@ -487,6 +495,8 @@ class Config(BaseSettings):
     RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS: float = 7.0
     # Limits policy of native rightsizing: keep | remove_cpu | memory_equals_request.
     RECOMMENDATION_LIMITS_POLICY: str = "keep"
+    # Inputs of the sustainability score only (the native advisory analyzers that also read
+    # them were removed in 0.4).
     ZOMBIE_COST_THRESHOLD: float = 0.01
     ZOMBIE_ENERGY_THRESHOLD: float = 1000.0
     AUTOSCALING_CV_THRESHOLD: float = 0.7
@@ -508,8 +518,7 @@ class Config(BaseSettings):
     # estimate the annual cost savings of deleting orphaned LoadBalancer Services.
     LOAD_BALANCER_COST_PER_MONTH: float = 18.0
     # Days a resource must look unused continuously (LoadBalancer, PersistentVolume)
-    # or be observed idle (zombie workload, idle namespace) before its deletion is
-    # recommended. Never below 0.
+    # before its deletion is recommended. Never below 0.
     DELETION_MIN_UNUSED_DAYS: float = 7.0
 
     # --- Impact Model (docs/methodology/impact-model.md) ---
@@ -547,11 +556,10 @@ class Config(BaseSettings):
     # Phase 6 enables the source by default; it degrades gracefully when the VPA
     # CRD is not installed.
     RECOMMENDATION_VPA_ENABLED: bool = True
-    # Karpenter NodePool consolidation recommendations. Enabled by default and
-    # skipped gracefully when the Karpenter CRDs are absent.
-    RECOMMENDATION_KARPENTER_ENABLED: bool = True
+    # Removed in 0.4 (REMOVED_SETTINGS): accepted and ignored for one release.
+    RECOMMENDATION_KARPENTER_ENABLED: Optional[Any] = None
     # Source precedence for capability arbitration, highest priority first.
-    RECOMMENDATION_SOURCE_PRIORITY: str = "vpa,karpenter,greenkube"
+    RECOMMENDATION_SOURCE_PRIORITY: str = "vpa,greenkube"
     # How the proposals of several sources on one target are combined (roadmap
     # E6): safest (least aggressive), median, weighted (track-record weighted
     # median) or priority (RECOMMENDATION_SOURCE_PRIORITY wins).
@@ -573,7 +581,7 @@ class Config(BaseSettings):
     # registered under the `greenkube.sources` Python entry points.
     SOURCES_PLUGINS_ENABLED: bool = True
     # Per-source settings as a JSON object keyed by source id, e.g.
-    # {"vpa": {"enabled": "auto"}, "greenkube.carbon_aware": {"enabled": false}}.
+    # {"vpa": {"enabled": "auto"}, "greenkube.orphaned_lb": {"enabled": false}}.
     # "enabled" is true, false or auto and overrides the RECOMMENDATION_*_ENABLED flags.
     SOURCES_CONFIG: str = ""
 
@@ -1134,6 +1142,18 @@ class Config(BaseSettings):
     # ------------------------------------------------------------------ #
     # Model validators (cross-field & computed fields)                    #
     # ------------------------------------------------------------------ #
+
+    @model_validator(mode="after")
+    def _warn_removed_settings(self) -> "Config":
+        """Name the removed settings this configuration still sets, once per process (B.0)."""
+        names = sorted(set(REMOVED_SETTINGS) & self.model_fields_set - _REMOVED_WARNED)
+        if names:
+            _REMOVED_WARNED.update(names)
+            logging.getLogger(__name__).warning(
+                "Removed settings are set and ignored (they stop being accepted in the next release): %s.",
+                "; ".join(f"{name} ({REMOVED_SETTINGS[name]})" for name in names),
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_compression_age(self) -> "Config":

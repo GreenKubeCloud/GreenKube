@@ -123,17 +123,33 @@ class PodMetric(BaseModel):
 class RecommendationType(str, Enum):
     """Enumeration of possible recommendation types."""
 
-    ZOMBIE_POD = "ZOMBIE_POD"
     RIGHTSIZING_CPU = "RIGHTSIZING_CPU"
     RIGHTSIZING_MEMORY = "RIGHTSIZING_MEMORY"
+    ORPHANED_PERSISTENT_VOLUME = "ORPHANED_PERSISTENT_VOLUME"
+    ORPHANED_LOAD_BALANCER = "ORPHANED_LOAD_BALANCER"
+    # Retired in 0.4 with the native advisory analyzers: nothing produces them. They stay
+    # so stored rows (stale, reason type_removed, migration 0300) still load.
+    ZOMBIE_POD = "ZOMBIE_POD"
     AUTOSCALING_CANDIDATE = "AUTOSCALING_CANDIDATE"
     OFF_PEAK_SCALING = "OFF_PEAK_SCALING"
     IDLE_NAMESPACE = "IDLE_NAMESPACE"
     CARBON_AWARE_SCHEDULING = "CARBON_AWARE_SCHEDULING"
     OVERPROVISIONED_NODE = "OVERPROVISIONED_NODE"
     UNDERUTILIZED_NODE = "UNDERUTILIZED_NODE"
-    ORPHANED_PERSISTENT_VOLUME = "ORPHANED_PERSISTENT_VOLUME"
-    ORPHANED_LOAD_BALANCER = "ORPHANED_LOAD_BALANCER"
+
+
+#: Types no analyzer or source produces any more (retired with reason ``type_removed``).
+RETIRED_RECOMMENDATION_TYPES: frozenset["RecommendationType"] = frozenset(
+    {
+        RecommendationType.ZOMBIE_POD,
+        RecommendationType.AUTOSCALING_CANDIDATE,
+        RecommendationType.OFF_PEAK_SCALING,
+        RecommendationType.IDLE_NAMESPACE,
+        RecommendationType.CARBON_AWARE_SCHEDULING,
+        RecommendationType.OVERPROVISIONED_NODE,
+        RecommendationType.UNDERUTILIZED_NODE,
+    }
+)
 
 
 class RecommendationSource(str, Enum):
@@ -141,7 +157,6 @@ class RecommendationSource(str, Enum):
 
     GREENKUBE = "greenkube"
     VPA = "vpa"
-    KARPENTER = "karpenter"
 
 
 #: Source ids a recommendation may carry besides the built-in ones (``krr``, ``acme.krr``, ``push:ci``).
@@ -176,30 +191,32 @@ class RecommendationCapability(str, Enum):
 
     CPU_RIGHTSIZING = "cpu_rightsizing"
     MEMORY_RIGHTSIZING = "memory_rightsizing"
+    STORAGE_CLEANUP = "storage_cleanup"
+    LB_CLEANUP = "lb_cleanup"
+    # Capabilities of the types retired in 0.4: stored rows still load.
     AUTOSCALING = "autoscaling"
     OFF_PEAK = "off_peak"
     CARBON_AWARE = "carbon_aware"
     ZOMBIE_CLEANUP = "zombie_cleanup"
     NAMESPACE_CLEANUP = "namespace_cleanup"
     NODE_OPTIMIZATION = "node_optimization"
-    STORAGE_CLEANUP = "storage_cleanup"
-    LB_CLEANUP = "lb_cleanup"
     NODE_POOL = "node_pool"
 
 
 #: Maps each recommendation type to the capability it owns.
 RECOMMENDATION_TYPE_CAPABILITY: dict["RecommendationType", RecommendationCapability] = {
-    RecommendationType.ZOMBIE_POD: RecommendationCapability.ZOMBIE_CLEANUP,
     RecommendationType.RIGHTSIZING_CPU: RecommendationCapability.CPU_RIGHTSIZING,
     RecommendationType.RIGHTSIZING_MEMORY: RecommendationCapability.MEMORY_RIGHTSIZING,
+    RecommendationType.ORPHANED_PERSISTENT_VOLUME: RecommendationCapability.STORAGE_CLEANUP,
+    RecommendationType.ORPHANED_LOAD_BALANCER: RecommendationCapability.LB_CLEANUP,
+    # Retired types (stored rows only).
+    RecommendationType.ZOMBIE_POD: RecommendationCapability.ZOMBIE_CLEANUP,
     RecommendationType.AUTOSCALING_CANDIDATE: RecommendationCapability.AUTOSCALING,
     RecommendationType.OFF_PEAK_SCALING: RecommendationCapability.OFF_PEAK,
     RecommendationType.IDLE_NAMESPACE: RecommendationCapability.NAMESPACE_CLEANUP,
     RecommendationType.CARBON_AWARE_SCHEDULING: RecommendationCapability.CARBON_AWARE,
     RecommendationType.OVERPROVISIONED_NODE: RecommendationCapability.NODE_OPTIMIZATION,
     RecommendationType.UNDERUTILIZED_NODE: RecommendationCapability.NODE_OPTIMIZATION,
-    RecommendationType.ORPHANED_PERSISTENT_VOLUME: RecommendationCapability.STORAGE_CLEANUP,
-    RecommendationType.ORPHANED_LOAD_BALANCER: RecommendationCapability.LB_CLEANUP,
 }
 
 

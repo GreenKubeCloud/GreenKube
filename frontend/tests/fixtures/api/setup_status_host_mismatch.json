@@ -62,7 +62,7 @@
       "docs_url": "https://github.com/GreenKubeCloud/GreenKube/blob/main/docs/sources.md",
       "fix": {
         "snippet": null,
-        "text": "Optional sources (VPA, Karpenter, plugins) activate when they are detected.",
+        "text": "Optional sources (VPA, plugins) activate when they are detected.",
         "ui_action": null
       },
       "id": "recommendation_sources",

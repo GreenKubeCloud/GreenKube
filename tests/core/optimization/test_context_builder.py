@@ -81,17 +81,8 @@ def mock_active_namespaces():
         yield m
 
 
-@pytest.fixture(autouse=True)
-def mock_namespace_info():
-    with patch(
-        "greenkube.core.optimization.context_builder.collect_namespace_info",
-        new=AsyncMock(return_value={}),
-    ) as m:
-        yield m
-
-
 class TestDeletionInputs:
-    """LB/PV candidates get their first-seen time; namespaces feed the deletion safety rules."""
+    """LB/PV candidates get their first-seen time."""
 
     async def test_candidates_get_first_seen_from_the_repository(self, node_repo, mock_side_collectors):
         from greenkube.collectors.lb_collector import OrphanedLoadBalancer
@@ -128,7 +119,6 @@ class TestDeletionInputs:
             "LoadBalancerService",
             "PersistentVolume",
         ]
-        assert context.namespace_info == {}
 
     async def test_incomplete_evaluation_is_not_recorded(self, node_repo, mock_side_collectors):
         _hpa, pv_cls, lb_cls = mock_side_collectors

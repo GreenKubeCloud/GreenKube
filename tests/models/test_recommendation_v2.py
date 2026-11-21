@@ -66,7 +66,7 @@ def _v1_recommendations() -> list[Recommendation]:
             target_node="nodepool/default",
             scope="node",
             description="pool",
-            source=RecommendationSource.KARPENTER,
+            source="karpenter",
         ),
         Recommendation(type=RecommendationType.UNDERUTILIZED_NODE, target_node="node-1", scope="node", description="n"),
         Recommendation(type=RecommendationType.CARBON_AWARE_SCHEDULING, description="carbon", **workload),

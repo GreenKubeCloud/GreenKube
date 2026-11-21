@@ -1,49 +1,32 @@
 # src/greenkube/core/opportunity.py
-"""The projected opportunity of active recommendations, de-duplicated once (IMP-07).
+"""The projected opportunity of active recommendations, computed once (IMP-07).
 
-Active recommendations overlap: a namespace deletion contains the workloads a
-rightsizing or a zombie-pod deletion also targets, an off-peak schedule and a
-rightsizing of one workload remove the same hours, and a node removal releases
-the node-hours its pods' rightsizing also counts. Summing every record
-overstates what can be achieved, so the opportunity is computed here, server
-side, and every page renders this one figure:
+The opportunity is computed here, server side, and every page renders this
+one figure (one stored recommendation per target and capability, so nothing
+overlaps):
 
-- per workload, the CPU and memory requests (and other additive changes of the
-  workload) add up, and the alternatives that remove the workload's hours (an
-  off-peak schedule, a zombie-pod deletion) count as ``max(alternative, sum)``;
-- per namespace, ``max(namespace deletion, sum of its workloads)``;
-- node removals and pod-level savings count the same node-hours:
-  ``max(node removals, pod-level savings)``;
+- the CPU and memory request changes of the workloads add up;
 - asset deletions (orphaned volumes and LoadBalancers) are billed per asset
   and add up;
 - request increases (the reliability lane) are a cost, reported apart and never
   netted into the opportunity.
 
-Each metric (billable cost, allocated cost, CO2e) is de-duplicated on its own.
+Each metric (billable cost, allocated cost, CO2e) is summed on its own.
 """
 
 from __future__ import annotations
 
 import math
-from collections import defaultdict
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Iterable, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
-from greenkube.models.metrics import RecommendationRecord, RecommendationType
+from greenkube.models.metrics import RecommendationRecord
 
 #: Label every page shows next to the opportunity.
 OPPORTUNITY_LABEL = "Projected (not additive across overlapping recommendations)"
 
-_NAMESPACE_TYPES = {RecommendationType.IDLE_NAMESPACE.value}
-_ALTERNATIVE_TYPES = {RecommendationType.OFF_PEAK_SCALING.value, RecommendationType.ZOMBIE_POD.value}
-_NODE_TYPES = {RecommendationType.OVERPROVISIONED_NODE.value, RecommendationType.UNDERUTILIZED_NODE.value}
-_ASSET_TYPES = {
-    RecommendationType.ORPHANED_PERSISTENT_VOLUME.value,
-    RecommendationType.ORPHANED_LOAD_BALANCER.value,
-}
-
-#: Metrics de-duplicated independently: billable cost, allocated cost, CO2e grams.
+#: Metrics summed independently: billable cost, allocated cost, CO2e grams.
 _Metrics = Tuple[float, float, float]
 _ZERO: _Metrics = (0.0, 0.0, 0.0)
 
@@ -62,11 +45,6 @@ class OpportunitySummary(BaseModel):
     reliability_count: int = Field(0, description="Active reliability recommendations (request increases).")
     recommendation_count: int = Field(0, description="Active savings recommendations behind the opportunity.")
     label: str = OPPORTUNITY_LABEL
-
-
-def _type(record: RecommendationRecord) -> str:
-    value = record.type
-    return str(value.value if hasattr(value, "value") else value)
 
 
 def _finite(value: Any) -> float:
@@ -93,21 +71,13 @@ def _add(left: _Metrics, right: _Metrics) -> _Metrics:
     return (left[0] + right[0], left[1] + right[1], left[2] + right[2])
 
 
-def _max(left: _Metrics, right: _Metrics) -> _Metrics:
-    return (max(left[0], right[0]), max(left[1], right[1]), max(left[2], right[2]))
-
-
 def _positive(metrics: _Metrics) -> _Metrics:
     return (max(metrics[0], 0.0), max(metrics[1], 0.0), max(metrics[2], 0.0))
 
 
 def opportunity_of(records: Iterable[RecommendationRecord]) -> OpportunitySummary:
     """De-duplicated projected opportunity of ``records`` (the active recommendations)."""
-    namespace_level: Dict[str, _Metrics] = defaultdict(lambda: _ZERO)
-    additive: Dict[Tuple[str, str, str], _Metrics] = defaultdict(lambda: _ZERO)
-    alternatives: Dict[Tuple[str, str, str], _Metrics] = defaultdict(lambda: _ZERO)
-    nodes = _ZERO
-    assets = _ZERO
+    total = _ZERO
     reliability = 0.0
     reliability_count = 0
     count = 0
@@ -119,28 +89,7 @@ def opportunity_of(records: Iterable[RecommendationRecord]) -> OpportunitySummar
             reliability_count += 1
             continue
         count += 1
-        metrics = _positive(metrics)
-        kind = _type(record)
-        namespace = record.namespace or ""
-        if kind in _ASSET_TYPES:
-            assets = _add(assets, metrics)
-        elif kind in _NODE_TYPES:
-            nodes = _add(nodes, metrics)
-        elif kind in _NAMESPACE_TYPES:
-            namespace_level[namespace] = _max(namespace_level[namespace], metrics)
-        else:
-            workload = (namespace, record.owner_kind or "Pod", record.owner_name or record.pod_name or "")
-            if kind in _ALTERNATIVE_TYPES:
-                alternatives[workload] = _max(alternatives[workload], metrics)
-            else:
-                additive[workload] = _add(additive[workload], metrics)
-    workloads: Dict[str, _Metrics] = defaultdict(lambda: _ZERO)
-    for key in set(additive) | set(alternatives):
-        workloads[key[0]] = _add(workloads[key[0]], _max(additive.get(key, _ZERO), alternatives.get(key, _ZERO)))
-    pods = _ZERO
-    for namespace in set(workloads) | set(namespace_level):
-        pods = _add(pods, _max(workloads.get(namespace, _ZERO), namespace_level.get(namespace, _ZERO)))
-    total = _add(assets, _max(pods, nodes))
+        total = _add(total, _positive(metrics))
     return OpportunitySummary(
         cost_annual=total[0],
         allocated_cost_annual=total[1],

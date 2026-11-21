@@ -37,12 +37,13 @@ from greenkube.signals.model import (
 TYPE_CAPABILITY: Dict[str, Capability] = {
     RecommendationType.RIGHTSIZING_CPU.value: Capability.CONTAINER_REQUESTS,
     RecommendationType.RIGHTSIZING_MEMORY.value: Capability.CONTAINER_REQUESTS,
+    RecommendationType.ORPHANED_PERSISTENT_VOLUME.value: Capability.CLEANUP,
+    RecommendationType.ORPHANED_LOAD_BALANCER.value: Capability.CLEANUP,
+    # Types retired in 0.4 (no producer): stored rows keep their v2 identity (fingerprint_v4).
     RecommendationType.AUTOSCALING_CANDIDATE.value: Capability.HORIZONTAL_AUTOSCALING,
     RecommendationType.OFF_PEAK_SCALING.value: Capability.SCHEDULE,
     RecommendationType.ZOMBIE_POD.value: Capability.CLEANUP,
     RecommendationType.IDLE_NAMESPACE.value: Capability.CLEANUP,
-    RecommendationType.ORPHANED_PERSISTENT_VOLUME.value: Capability.CLEANUP,
-    RecommendationType.ORPHANED_LOAD_BALANCER.value: Capability.CLEANUP,
     RecommendationType.CARBON_AWARE_SCHEDULING.value: Capability.PLACEMENT,
     RecommendationType.OVERPROVISIONED_NODE.value: Capability.NODE_POOL,
     RecommendationType.UNDERUTILIZED_NODE.value: Capability.NODE_POOL,

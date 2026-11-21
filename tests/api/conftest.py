@@ -89,18 +89,8 @@ def mock_k8s_namespaces():
 
 
 @pytest.fixture(autouse=True)
-def mock_namespace_info():
-    """Namespace metadata for the deletion safety rules: unreadable (no K8s API calls in tests)."""
-    with patch(
-        "greenkube.core.optimization.context_builder.collect_namespace_info",
-        new=AsyncMock(return_value=None),
-    ) as mock:
-        yield mock
-
-
-@pytest.fixture(autouse=True)
 def no_deletion_observation_minimum(monkeypatch):
-    """API fixtures span minutes: drop the observed-idle minimum of zombie deletions
+    """API fixtures span minutes: drop the unused-period minimum of deletions
     (DELETION_MIN_UNUSED_DAYS), which tests/core/optimization/test_deletion_safety.py covers."""
     from greenkube.core.config import get_config
 

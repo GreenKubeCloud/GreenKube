@@ -20,7 +20,6 @@ from greenkube.collectors.deletion_candidates import (
     LOAD_BALANCER_KIND,
     PERSISTENT_VOLUME_KIND,
     attach_first_seen,
-    collect_namespace_info,
 )
 from greenkube.collectors.hpa_collector import HPACollector
 from greenkube.collectors.lb_collector import LoadBalancerCollector, enrich_orphaned_lb_costs
@@ -474,5 +473,4 @@ class ContextBuilder:
             "hpa_targets": hpa_targets,
             "persistent_volumes": orphaned_volumes,
             "load_balancers": orphaned_load_balancers,
-            "namespace_info": await collect_namespace_info(),
         }

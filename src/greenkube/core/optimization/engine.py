@@ -7,7 +7,7 @@ controller's scheduled ``recommendation_scan`` job (see
 that persists; API requests only enqueue runs.
 
 Sources are Source SDK sources (:mod:`greenkube.signals`, roadmap E5): one per
-native analyzer, VPA, the NodePool heuristic and third-party plugins. v1
+native analyzer, VPA and third-party plugins. v1
 ``RecommendationSource`` connectors passed by callers are wrapped by the SDK
 adapter. Every source runs in isolation (E8) through the
 :class:`~greenkube.signals.runtime.SourceRunner`: a source that raises, times
@@ -44,7 +44,13 @@ from greenkube.core.optimization.registry import build_signal_sources, cluster_u
 from greenkube.core.optimization.targeting import is_static_pod_kind
 from greenkube.core.optimization.track_record import TrackRecordBook, load_track_record
 from greenkube.core.recommendation_reconciliation import RecommendationDiff, compute_diff, supporting_sources
-from greenkube.models.metrics import Recommendation, RecommendationPatchV2, RecommendationRecord, RecommendationType
+from greenkube.models.metrics import (
+    RETIRED_RECOMMENDATION_TYPES,
+    Recommendation,
+    RecommendationPatchV2,
+    RecommendationRecord,
+    RecommendationType,
+)
 from greenkube.models.optimization_run import (
     OptimizationRun,
     OptimizationRunCompletion,
@@ -448,7 +454,7 @@ class OptimizationEngine:
         previous = await self._active_snapshot(reco_repo, namespace)
         # Static (mirror) pods never get advice, whatever the source (F-04, REC-09); the records
         # stored before this rule are retired with a reason, never deleted.
-        recommendations = _without_static_pods(recommendations)
+        recommendations = _without_retired_types(_without_static_pods(recommendations))
         await self._retire_withheld_decreases(
             reco_repo, [record for record in previous if is_static_pod_kind(record.owner_kind)], reason="static_pod"
         )
@@ -734,6 +740,14 @@ def _without_static_pods(recommendations: List[Recommendation]) -> List[Recommen
             "Dropped %d recommendation(s) of static (mirror) pods: their manifests live on the node, not in Git.",
             len(recommendations) - len(kept),
         )
+    return kept
+
+
+def _without_retired_types(recommendations: List[Recommendation]) -> List[Recommendation]:
+    """Drops the recommendations of retired types (a plugin may still emit them): never stored again."""
+    kept = [rec for rec in recommendations if rec.type not in RETIRED_RECOMMENDATION_TYPES]
+    if len(kept) != len(recommendations):
+        logger.info("Dropped %d recommendation(s) of retired types.", len(recommendations) - len(kept))
     return kept
 
 

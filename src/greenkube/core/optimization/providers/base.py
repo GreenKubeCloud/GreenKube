@@ -13,13 +13,13 @@ if TYPE_CHECKING:
 class RecommendationSource(ABC):
     """A source of optimization recommendations.
 
-    Implementations are connectors (native analyzers, VPA, Karpenter, ...)
+    Implementations are connectors (native analyzers, VPA, ...)
     that translate an external signal into engine recommendations. Sources
     must be resilient: raising from ``collect`` only skips that source, but
     graceful degradation with a warning is preferred.
     """
 
-    #: Stable source identifier (e.g. ``greenkube``, ``vpa``, ``karpenter``).
+    #: Stable source identifier (e.g. ``greenkube``, ``vpa``).
     name: str = "unknown"
 
     #: Arbitration priority when multiple sources own the same capability.

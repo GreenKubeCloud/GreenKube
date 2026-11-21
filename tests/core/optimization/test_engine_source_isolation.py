@@ -148,12 +148,12 @@ class TestBug22FailedSourceDoesNotBlockOthers:
 
     async def test_unavailable_source_keeps_its_previous_recommendations(self, sqlite_db):
         repo = SQLiteRecommendationRepository(sqlite_db)
-        await _seed(repo, _rec("karpenter-pool", source="karpenter"))
-        engine = _engine([FakeSource("karpenter", available=False), FakeSource("greenkube", [])])
+        await _seed(repo, _rec("vpa-advice", source="vpa"))
+        engine = _engine([FakeSource("vpa", available=False), FakeSource("greenkube", [])])
 
         await engine.refresh(AsyncMock(), AsyncMock(), repo)
 
-        assert set(await _active(repo)) == {"karpenter-pool"}
+        assert set(await _active(repo)) == {"vpa-advice"}
 
     async def test_completed_sources_still_resolve_their_recommendations(self, sqlite_db):
         repo = SQLiteRecommendationRepository(sqlite_db)
@@ -254,7 +254,7 @@ class TestRunOutcome:
     async def test_all_attempted_sources_failing_fails_the_run(self, sqlite_db):
         runs = SQLiteOptimizationRunRepository(sqlite_db)
         engine = _engine(
-            [FakeSource("vpa", error=RuntimeError("down")), FakeSource("karpenter", available=False)],
+            [FakeSource("vpa", error=RuntimeError("down")), FakeSource("greenkube", available=False)],
             run_repository=runs,
         )
 

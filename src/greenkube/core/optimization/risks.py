@@ -17,8 +17,8 @@ cannot know, from a :class:`WorkloadRiskProfile`:
 * the ``greenkube.io/criticality`` label.
 
 A suspected JVM also halves the confidence of a memory decrease
-(:data:`JVM_MEMORY_DECREASE_CONFIDENCE`). Deletions (zombie pods, idle
-namespaces, orphaned volumes and load balancers) cannot be undone by a revert,
+(:data:`JVM_MEMORY_DECREASE_CONFIDENCE`). Deletions (orphaned volumes
+and load balancers) cannot be undone by a revert,
 so they are never low risk and always carry ``irreversible_deletion``.
 
 Unknown profile facts (``None``) never change the risk level, with one
@@ -247,9 +247,6 @@ def _base_confidence(rec: Recommendation, evidence: Optional[RecommendationEvide
     if rec.source == RecommendationSource.VPA:
         score += 0.1
         factors["source_authority"] = 0.1
-    elif rec.source == RecommendationSource.KARPENTER:
-        score += 0.05
-        factors["source_authority"] = 0.05
 
     return max(0.0, min(1.0, score)), factors
 
@@ -413,40 +410,9 @@ def assess(
         assessment.effort = EffortLevel.LOW
         assessment.reversible = True
         assessment.requires_restart = True
-    elif rec.type == RecommendationType.AUTOSCALING_CANDIDATE:
-        assessment.risk_level, assessment.risk_factors = RiskLevel.LOW, ["additive_autoscaling"]
-        assessment.effort = EffortLevel.MEDIUM
-        assessment.reversible = True
-    elif rec.type == RecommendationType.OFF_PEAK_SCALING:
-        assessment.risk_level, assessment.risk_factors = RiskLevel.MEDIUM, ["availability_window"]
-        assessment.effort = EffortLevel.MEDIUM
-        assessment.reversible = True
-    elif rec.type == RecommendationType.CARBON_AWARE_SCHEDULING:
-        assessment.risk_level, assessment.risk_factors = RiskLevel.LOW, ["scheduling_only"]
-        assessment.effort = EffortLevel.MEDIUM
-        assessment.reversible = True
-    elif rec.type == RecommendationType.ZOMBIE_POD:
-        # Deletions cannot be reverted from Git: a deleted pod, namespace, volume or
-        # load balancer address is gone (its data, its IP), so never low risk.
-        assessment.risk_level, assessment.risk_factors = RiskLevel.MEDIUM, ["no_observed_usage", IRREVERSIBLE_DELETION]
-        assessment.effort = EffortLevel.LOW
-        assessment.reversible = False
-    elif rec.type == RecommendationType.IDLE_NAMESPACE:
-        assessment.risk_level, assessment.risk_factors = (
-            RiskLevel.HIGH,
-            [
-                "namespace_decommission",
-                IRREVERSIBLE_DELETION,
-            ],
-        )
-        assessment.effort = EffortLevel.MEDIUM
-        assessment.reversible = False
-    elif rec.type in (RecommendationType.OVERPROVISIONED_NODE, RecommendationType.UNDERUTILIZED_NODE):
-        assessment.risk_level, assessment.risk_factors = RiskLevel.HIGH, ["blast_radius_multi_workload"]
-        assessment.effort = EffortLevel.HIGH
-        assessment.reversible = True
-        assessment.requires_restart = True
     elif rec.type == RecommendationType.ORPHANED_PERSISTENT_VOLUME:
+        # Deletions cannot be reverted from Git: a deleted volume or load balancer
+        # address is gone (its data, its IP), so never low risk.
         # Deleting a volume deletes its data (reclaim policy Delete) or strands it.
         assessment.risk_level, assessment.risk_factors = RiskLevel.HIGH, ["no_bound_consumer", IRREVERSIBLE_DELETION]
         assessment.effort = EffortLevel.LOW

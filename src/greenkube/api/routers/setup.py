@@ -294,7 +294,7 @@ def _source_check(sources: Optional[List[Dict[str, Any]]], available: bool) -> S
             title,
             "ok",
             f"{len(healthy)} source(s) produced signals.",
-            "Optional sources (VPA, Karpenter, plugins) activate when they are detected.",
+            "Optional sources (VPA, plugins) activate when they are detected.",
             docs,
         )
     return _check(

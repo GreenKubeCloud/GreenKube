@@ -2,7 +2,7 @@
 """Consolidation of every source's output into one recommendation per target (roadmap E6).
 
 The engine passes the signals of every source, each with the v1 recommendation
-of built-in sources (native analyzers, VPA, the NodePool heuristic). Signals
+of built-in sources (native analyzers, VPA). Signals
 are grouped by target, capability and finding kind and combined by the
 :mod:`consensus engine <greenkube.signals.consensus>` (policy
 ``RECOMMENDATION_CONSENSUS_POLICY``); no source's proposal is discarded
@@ -136,7 +136,7 @@ def entries_for_recommendations(
 def entries_for_reports(reports: Sequence["SourceReport"], cluster_uid: str = "default") -> List[SignalEntry]:
     """Signal entries of one scan's source reports.
 
-    A built-in source (VPA, native analyzers, the NodePool heuristic) reports
+    A built-in source (VPA, native analyzers) reports
     v1 recommendations and their signals: each recommendation is paired with
     its signal (same v1 fingerprint) so the consensus keeps the source's
     algorithm and engine family (``vpa-recommender``). The container-resources
@@ -178,7 +178,7 @@ def entries_for_reports(reports: Sequence["SourceReport"], cluster_uid: str = "d
 
 
 #: Capabilities whose built-in signals vote even without a v1 recommendation (per-VPA-object
-#: container advice). Advisory signals of other capabilities (NodePool policy, G5) stay signals.
+#: container advice). Advisory signals of other capabilities stay signals.
 _PER_OBJECT_CAPABILITIES = frozenset({Capability.CONTAINER_REQUESTS, Capability.CONTAINER_LIMITS})
 
 

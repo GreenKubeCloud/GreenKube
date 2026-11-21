@@ -69,7 +69,7 @@ class Capability(StrEnum):
     HORIZONTAL_AUTOSCALING = "horizontal_autoscaling"
     #: Off-peak / sleep windows.
     SCHEDULE = "schedule"
-    #: Orphaned PV/LB, zombie workloads, idle namespaces.
+    #: Orphaned PersistentVolumes and LoadBalancers.
     CLEANUP = "cleanup"
     NODE_POOL = "node_pool"
     #: Carbon-aware placement.
@@ -256,7 +256,7 @@ class SignalProvenance(_Frozen):
     """Where a signal comes from and how it maps back to the v1 recommendation API.
 
     ``legacy_source`` is the v1 ``Recommendation.source`` value the signal maps
-    to (``greenkube``, ``vpa``, ``karpenter``); None for sources that only emit
+    to (``greenkube``, ``vpa``); None for sources that only emit
     signals. ``legacy_fields`` holds the v1 fields that cannot be derived from
     the target and the proposal (transitional, dropped with the v1 API).
     ``legacy_fingerprint`` is the identity of the v1 recommendation the signal

@@ -1,9 +1,7 @@
-"""The projected opportunity is de-duplicated across overlapping recommendations, once, server side (IMP-07).
+"""The projected opportunity is computed once, server side (IMP-07).
 
-A namespace deletion contains the rightsizing of its workloads, an off-peak
-schedule and a rightsizing of one workload overlap, a node removal counts the
-node-hours its pods' rightsizing also counts, and request increases are a cost
-reported apart: summing every record overstates what can be achieved.
+Request changes and asset deletions add up; request increases are a cost
+reported apart, never netted into the opportunity.
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ def _rec(rec_id, kind, namespace, value, *, owner=None, current=None, recommende
 
 def _fixture() -> list[RecommendationRecord]:
     return [
-        _rec(1, RecommendationType.IDLE_NAMESPACE, "ns1", 100.0),
+        _rec(1, RecommendationType.ORPHANED_LOAD_BALANCER, "ns1", 100.0),
         _rec(2, RecommendationType.RIGHTSIZING_CPU, "ns1", 20.0, owner="a", current=1000, recommended=500),
         _rec(3, RecommendationType.RIGHTSIZING_CPU, "ns1", 30.0, owner="b", current=1000, recommended=500),
         _rec(4, RecommendationType.RIGHTSIZING_MEMORY, "ns2", -5.0, owner="c", current=1, recommended=2),
@@ -45,34 +43,14 @@ def _fixture() -> list[RecommendationRecord]:
     ]
 
 
-def test_the_audit_fixture_gives_one_de_duplicated_opportunity():
+def test_savings_add_up_and_increases_are_reported_apart():
     summary = opportunity_of(_fixture())
-    assert summary.cost_annual == pytest.approx(110.0)
-    assert summary.co2e_grams_annual == pytest.approx(1100.0)
+    assert summary.cost_annual == pytest.approx(160.0)
+    assert summary.co2e_grams_annual == pytest.approx(1600.0)
     assert summary.reliability_cost_annual == pytest.approx(5.0)
     assert summary.reliability_count == 1
     assert summary.recommendation_count == 4
     assert summary.label == OPPORTUNITY_LABEL
-
-
-def test_an_off_peak_schedule_and_a_rightsizing_of_one_workload_count_once():
-    records = [
-        _rec(1, RecommendationType.OFF_PEAK_SCALING, "ns", 40.0, owner="api"),
-        _rec(2, RecommendationType.RIGHTSIZING_CPU, "ns", 25.0, owner="api", current=1000, recommended=500),
-        _rec(3, RecommendationType.RIGHTSIZING_MEMORY, "ns", 20.0, owner="api", current=2, recommended=1),
-    ]
-    # CPU and memory of one container add up (45); the schedule overlaps them: max(40, 45).
-    assert opportunity_of(records).cost_annual == pytest.approx(45.0)
-
-
-def test_a_node_removal_is_not_added_to_the_pod_savings_it_overlaps():
-    records = [
-        _rec(1, RecommendationType.OVERPROVISIONED_NODE, "", 60.0),
-        _rec(2, RecommendationType.RIGHTSIZING_CPU, "ns", 25.0, owner="api", current=1000, recommended=500),
-        _rec(3, RecommendationType.ORPHANED_LOAD_BALANCER, "ns", 7.0),
-    ]
-    # Assets are billed per asset and add up; node and pod savings are the same node-hours: max(60, 25).
-    assert opportunity_of(records).cost_annual == pytest.approx(67.0)
 
 
 def test_the_reliability_cost_is_the_allocated_cost_on_fixed_nodes():
@@ -87,5 +65,5 @@ def test_the_reliability_cost_is_the_allocated_cost_on_fixed_nodes():
 def test_the_savings_report_serves_the_opportunity_to_every_page():
     report = assemble_savings_report([], [], active=_fixture())
     assert report.opportunity is not None
-    assert report.opportunity.cost_annual == pytest.approx(110.0)
+    assert report.opportunity.cost_annual == pytest.approx(160.0)
     assert report.opportunity.reliability_cost_annual == pytest.approx(5.0)

@@ -177,7 +177,7 @@ class SourceBatch:
     complete: bool = True
     diagnostics: List[Diagnostic] = field(default_factory=list)
     #: v1 recommendations, honoured only for built-in adapters (native analyzers,
-    #: VPA, NodePool) and v1 connectors passed by GreenKube itself: they feed the
+    #: VPA) and v1 connectors passed by GreenKube itself: they feed the
     #: current recommendation pipeline unchanged. The runner drops them for every
     #: other source (see :func:`accepts_v1_recommendations`): third-party advice
     #: reaches pull requests only through signals and consensus (E6), never
@@ -197,8 +197,8 @@ class Source(ABC):
     limits: ClassVar[SourceLimits] = SourceLimits()
     default_enabled: ClassVar[EnabledMode] = EnabledMode.AUTO
     #: v1 ``Recommendation.source`` value this source's recommendations carry,
-    #: for built-in sources that feed the v1 pipeline (``greenkube``, ``vpa``,
-    #: ``karpenter``). Plugins must leave it None: the registry rejects them otherwise.
+    #: for built-in sources that feed the v1 pipeline (``greenkube``, ``vpa``).
+    #: Plugins must leave it None: the registry rejects them otherwise.
     legacy_source: ClassVar[Optional[str]] = None
     #: One-line description shown by ``GET /api/v1/sources``.
     description: ClassVar[str] = ""
