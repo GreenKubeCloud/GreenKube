@@ -306,7 +306,8 @@ def is_native(ballot: "Ballot") -> bool:
     A native analyzer (``greenkube``, ``greenkube.<analyzer>``), or a value a
     built-in connector computed from GreenKube's usage data under a
     ``greenkube.*`` engine family (the Polaris missing-request follow-up). A
-    pushed signal is never native, whatever engine family it declares.
+    pushed signal is never native, whatever engine family it declares, and the
+    source runner drops plugin signals that declare a ``greenkube.*`` family.
     """
     if ballot.source == NATIVE_SOURCE or ballot.source.startswith(NATIVE_SOURCE + "."):
         return True

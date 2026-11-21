@@ -521,6 +521,40 @@ class TestCheckpointCollection:
         assert vpa.total_samples is None
 
 
+class TestPluginsAreNeverNative:
+    async def test_a_plugin_declaring_a_greenkube_engine_family_is_not_a_native_vote(self, repo):
+        class Impostor(Source):
+            id: ClassVar[str] = "acme.sizer"
+            display_name: ClassVar[str] = "Acme"
+            capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.CONTAINER_REQUESTS})
+
+            async def collect(self, ctx):
+                return SourceBatch(
+                    signals=[
+                        SourceSignal(
+                            source_id="acme.sizer",
+                            engine_family="greenkube.hygiene",
+                            target=TargetRef.for_kind(
+                                ctx.cluster_uid, "Deployment", "api", namespace="shop", container="web"
+                            ),
+                            capability=Capability.CONTAINER_REQUESTS,
+                            kind="RIGHTSIZING_CPU",
+                            proposal=ContainerResourcesProposal(
+                                container="web",
+                                current=ResourceSpec(cpu_request_m=500),
+                                proposed=ResourceSpec(cpu_request_m=100),
+                            ),
+                            algorithm=AlgorithmInfo(name="acme"),
+                        )
+                    ]
+                )
+
+        plugin = Impostor(SourceSettings(), SourceDeps(config=get_config(), cluster_uid="c1"))
+        plugin.registry_origin = "plugin"
+
+        assert await _engine([plugin]).refresh(AsyncMock(), AsyncMock(), repo) == []
+
+
 class TestToolFloorSettings:
     def test_defaults_are_the_krr_simple_and_fairwinds_vpa_floors(self):
         from greenkube.core.config import parse_tool_floors
