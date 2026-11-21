@@ -15,6 +15,7 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
+import greenkube.core.metrics_compressor as compressor_module
 from greenkube.core.config import Config, config
 from greenkube.core.db import DatabaseManager
 from greenkube.core.metrics_compressor import MetricsCompressor
@@ -160,3 +161,44 @@ async def test_a_write_committed_during_the_first_compression_is_not_lost(pg):
     hourly, raw = await _hour_vs_raw(writer, hour)
     assert raw == pytest.approx(62.0)
     assert hourly == pytest.approx(raw)
+
+
+@pytest.mark.parametrize("statement_timeout_ms", ["1500", "0"], ids=["statement-timeout", "no-statement-timeout"])
+async def test_a_writer_left_open_delays_compression_by_one_cycle_and_never_hangs_it(
+    pg, monkeypatch, statement_timeout_ms
+):
+    """A raw writer that never commits (a stuck client) holds the watermark row FOR SHARE.
+
+    The compressor's lock wait is bounded by ``DB_STATEMENT_TIMEOUT_MS``, and by its own
+    ``lock_timeout`` when the statement timeout is disabled (0): the cycle reports the failure
+    and returns, and the next cycle compresses the hour with the writer's committed row.
+    """
+    _, writer = pg
+    monkeypatch.setenv("DB_STATEMENT_TIMEOUT_MS", statement_timeout_ms)
+    monkeypatch.setattr(compressor_module, "COMPRESSOR_LOCK_TIMEOUT_MS", 1500)
+    config.reload()
+    manager = DatabaseManager(Config())
+    await manager.connect()
+    try:
+        repo = PostgresCombinedMetricsRepository(manager)
+        await repo.write_combined_metrics([_sample(i) for i in range(12 * 30)])
+        compressor = _compressor(manager)
+        hour = T0 + timedelta(hours=2)
+        transaction = writer.transaction()
+        await transaction.start()
+        await writer.execute(
+            "UPDATE combined_metrics SET total_cost = 51 WHERE pod_name = 'p' AND timestamp = $1",
+            hour + timedelta(minutes=5),
+        )
+        stats = await asyncio.wait_for(compressor.run(now=T0 + timedelta(hours=27)), timeout=20)
+        assert stats["hours_compressed"] == 0
+        assert await compressor.get_watermark("combined_metrics") is None
+        await transaction.commit()
+
+        stats = await asyncio.wait_for(compressor.run(now=T0 + timedelta(hours=27)), timeout=20)
+        assert stats["hours_compressed"] > 0
+        hourly, raw = await _hour_vs_raw(writer, hour)
+        assert raw == pytest.approx(62.0)
+        assert hourly == pytest.approx(raw)
+    finally:
+        await manager.close()

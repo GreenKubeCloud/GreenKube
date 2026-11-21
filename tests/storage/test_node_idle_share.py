@@ -25,10 +25,37 @@ from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.postgres.repository import PostgresCombinedMetricsRepository
 from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 
-NOW = datetime.now(timezone.utc)
+# "Now" is pinned (the ``clock`` fixture) so a window boundary never depends on the time of
+# day the suite runs at: just after midnight UTC, just after an hour boundary and late in an hour.
+CLOCK_TIMES = {
+    "after-midnight": datetime(2026, 10, 10, 0, 0, 30, tzinfo=timezone.utc),
+    "after-hour": datetime(2026, 10, 10, 13, 0, 20, tzinfo=timezone.utc),
+    "mid-hour": datetime(2026, 10, 10, 13, 31, 0, tzinfo=timezone.utc),
+    "late-hour": datetime(2026, 10, 10, 13, 58, 40, tzinfo=timezone.utc),
+}
+NOW = CLOCK_TIMES["mid-hour"]
 HOUR = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=30)
 POD_JOULES = 150.0 * 300  # per 5-minute step
 IDLE_JOULES = 450.0 * 300
+
+
+@pytest.fixture(autouse=True, params=list(CLOCK_TIMES), ids=list(CLOCK_TIMES))
+def clock(request, monkeypatch) -> datetime:
+    """Pin "now" of the dashboard time ranges and the seeded hour to one of :data:`CLOCK_TIMES`."""
+    import greenkube.utils.time as time_module
+
+    now = CLOCK_TIMES[request.param]
+    module = __import__(__name__, fromlist=["NOW"])
+    monkeypatch.setattr(module, "NOW", now)
+    monkeypatch.setattr(module, "HOUR", now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=30))
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return now if tz is None else now.astimezone(tz)
+
+    monkeypatch.setattr(time_module, "datetime", FrozenDateTime)
+    return now
 
 
 @pytest.fixture(params=["sqlite", "postgres"], ids=["sqlite", "postgres"])
@@ -186,7 +213,9 @@ async def test_an_idle_history_shorter_than_the_window_leaves_the_cluster_totals
     assert summary.idle_energy_joules is None
     assert summary.cluster_total_energy_joules is None
 
-    # A window that starts once idle rows exist keeps the idle share.
-    covered = await metrics_summary(namespace=None, last="30h", repo=repo)
+    # A window that starts once idle rows exist (in the first minute of the idle hour, so it
+    # holds its later steps whatever the minute of "now") keeps the idle share.
+    minutes = int((NOW - HOUR).total_seconds() // 60)
+    covered = await metrics_summary(namespace=None, last=f"{minutes}min", repo=repo)
     assert covered.idle_energy_joules is not None and covered.idle_energy_joules > 0
     assert covered.cluster_total_energy_joules is not None
