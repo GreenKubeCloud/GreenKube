@@ -5,8 +5,9 @@ ballot (VPA, KRR, a pushed or plugin signal) may bring the consolidated value
 below GreenKube's OOM-driven increase. Before the fix the analyzer's
 ``oom_kills`` trigger only reached the recommendation as reason text: under the
 former ``priority``, ``median`` or ``weighted`` policies, VPA 450 Mi or KRR
-500 Mi replaced a native 600 Mi increase. Since B.3 the native value decides,
-so the floor is recorded and holds by construction.
+500 Mi replaced a native 600 Mi increase. Since B.3 the native value decides;
+the floor still raises a native representative that chose less (a decrease of
+the same engine family) and is recorded in every case.
 """
 
 from __future__ import annotations
@@ -414,3 +415,43 @@ class TestFloorFollowUps:
 
         assert rec.consensus is not None and rec.consensus["floor"]["applied"] is False
         assert "floor" not in rec.reason
+
+
+class TestFloorRaisesTheValue:
+    """The floor is not only recorded: it raises a consensus that chose less (review of B.3).
+
+    Two native ballots of one engine family (``greenkube``) are one vote: the
+    family's representative is the one with a v1 recommendation, here a 300 Mi
+    decrease. The OOM-driven 600 Mi increase of the same family has no payload,
+    so only the floor brings the value back to 600 Mi.
+    """
+
+    @staticmethod
+    def _ballots():
+        decrease = _memory(300 * MIB, current=400 * MIB)
+        return [
+            *ballots_for_signal(
+                _signal("greenkube", 300 * MIB),
+                source="greenkube",
+                payload=decrease,
+                payload_kind="RIGHTSIZING_MEMORY",
+            ),
+            *ballots_for_signal(_signal("greenkube", 600 * MIB), source="greenkube", floor_reason="oom_kills"),
+            *ballots_for_signal(_signal("vpa", 450 * MIB), source="vpa"),
+        ]
+
+    @pytest.mark.parametrize("screened", [False, True])
+    def test_the_oom_floor_raises_the_native_representative(self, screened):
+        from greenkube.core.optimization.dedup import materialize
+        from greenkube.signals.consensus import VoteScreen
+
+        [outcome] = consolidate(self._ballots(), screen=VoteScreen() if screened else None)
+
+        floor = outcome.consensus.floor
+        assert floor is not None and floor.applied is True
+        assert floor.policy_value == 300 * MIB
+        assert outcome.consensus.value == 600 * MIB
+        assert outcome.chosen.floor_reason == "oom_kills"
+        rec = materialize(outcome)
+        assert rec is not None and rec.recommended_memory_request_bytes == 600 * MIB
+        assert "oom_kills floor" in (rec.reason or "")
