@@ -88,3 +88,36 @@ async def test_the_interim_verifier_marks_the_records_it_decides():
     verifier._transition = transition  # type: ignore[method-assign]
     await verifier.apply_stored_measurement(record, stored, {}, [], measured_cost=1.0, measured_co2e=1.0)
     assert captured["measurement_method"] == INTERIM_METHOD
+
+
+def _with_baseline(record: RecommendationRecord, baseline: dict) -> RecommendationRecord:
+    return record.model_copy(
+        update={"baseline": RecommendationRecord(type=record.type, description="x", baseline=baseline).baseline}
+    )
+
+
+def test_a_pre_branch_interim_record_without_the_marker_is_still_interim():
+    """Before MEA-16 every measurement without a change id came from the interim verifier."""
+    legacy = _with_baseline(_verified(3, 400.0, interim=False), {"latest_measurement_id": "m-old"})
+    measured = _with_baseline(
+        _verified(4, 1000.0, interim=False), {"latest_measurement_id": "m-new", "change_id": "change-4"}
+    )
+    assert interim_recommendation_ids([legacy, measured]) == [3]
+    report = assemble_savings_report([legacy, measured], [], interim=[])
+    assert report.run_rate_annual.cost == pytest.approx(1000.0)
+    assert report.interim_run_rate_annual is not None
+    assert report.interim_run_rate_annual.cost == pytest.approx(400.0)
+
+
+def test_the_accrued_book_of_realized_to_date_leaves_interim_amounts_out():
+    records = [_verified(1, 1000.0, interim=False), _verified(2, 300.0, interim=True)]
+    report = assemble_savings_report(
+        records,
+        [_measured(50.0), _measured(20.0)],
+        accrued_only=[_measured(40.0), _measured(15.0)],
+        interim=[_measured(20.0)],
+        interim_accrued_only=[_measured(15.0)],
+    )
+    assert report.realized_to_date.accrued_only_cost == pytest.approx(40.0)
+    assert report.interim_realized_to_date is not None
+    assert report.interim_realized_to_date.accrued_only_cost == pytest.approx(15.0)

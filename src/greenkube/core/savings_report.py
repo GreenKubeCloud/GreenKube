@@ -45,9 +45,18 @@ def _status(record: RecommendationRecord) -> str:
 
 
 def is_interim(record: RecommendationRecord) -> bool:
-    """Whether the record's latest decision came from the interim verifier (MEA-16)."""
+    """Whether the record's latest decision came from the interim verifier (MEA-16).
+
+    Records decided since MEA-16 carry ``baseline.measurement_method``. Before
+    it, every measurement without a change id came from the interim verifier:
+    a record with a ``latest_measurement_id`` and no ``change_id`` is interim too.
+    """
     baseline = record.baseline
-    return baseline is not None and baseline.get("measurement_method") == INTERIM_METHOD
+    if baseline is None:
+        return False
+    if baseline.get("measurement_method") == INTERIM_METHOD:
+        return True
+    return bool(baseline.get("latest_measurement_id")) and not baseline.get("change_id")
 
 
 def interim_recommendation_ids(records: Iterable[RecommendationRecord]) -> List[int]:
@@ -191,6 +200,7 @@ def assemble_savings_report(
     cost_of_fix: Optional[List[SavingsAccrualTotal]] = None,
     interim: Optional[List[SavingsAccrualTotal]] = None,
     active: Optional[List[RecommendationRecord]] = None,
+    interim_accrued_only: Optional[List[SavingsAccrualTotal]] = None,
 ) -> SavingsReport:
     """Build the report from applied recommendations and ledger totals.
 
@@ -218,13 +228,18 @@ def assemble_savings_report(
     realized = _accrued_block(breakdown, METHOD_MEASURED, start, end, **blocks)  # type: ignore[arg-type]
     interim_block: Optional[SavingsBlock] = None
     if interim is not None:
-        interim_block = _accrued_block(interim, METHOD_MEASURED, start, end, source=source)
-        realized = realized.model_copy(
-            update={
-                "cost": realized.cost - interim_block.cost,
-                "co2e_grams": realized.co2e_grams - interim_block.co2e_grams,
-            }
+        interim_block = _accrued_block(
+            interim, METHOD_MEASURED, start, end, source=source, accrued_only=interim_accrued_only
         )
+        update = {
+            "cost": realized.cost - interim_block.cost,
+            "co2e_grams": realized.co2e_grams - interim_block.co2e_grams,
+        }
+        if realized.accrued_only_cost is not None and interim_block.accrued_only_cost is not None:
+            update["accrued_only_cost"] = realized.accrued_only_cost - interim_block.accrued_only_cost
+        if realized.accrued_only_co2e_grams is not None and interim_block.accrued_only_co2e_grams is not None:
+            update["accrued_only_co2e_grams"] = realized.accrued_only_co2e_grams - interim_block.accrued_only_co2e_grams
+        realized = realized.model_copy(update=update)
     projected_to_date = _accrued_block(breakdown, METHOD_PROJECTED, start, end, **blocks)  # type: ignore[arg-type]
     unverified_block: Optional[SavingsBlock] = None
     if projected_unverified is not None:

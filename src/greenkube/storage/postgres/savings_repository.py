@@ -3,7 +3,7 @@
 
 import logging
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from ...models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord, normalize_savings_method
 from ...utils.date_utils import ensure_utc
@@ -183,6 +183,7 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         namespace: Optional[str] = None,
+        recommendation_ids: Optional[Sequence[int]] = None,
     ) -> List[SavingsAccrualTotal]:
         params: list = [cluster_name]
         share = "1.0"
@@ -204,6 +205,12 @@ class PostgresSavingsLedgerRepository(SavingsLedgerRepository):
         elif namespace is not None:
             params.append(namespace)
             filters += f" AND namespace = ${len(params)}"
+        if recommendation_ids is not None:
+            ids = [int(value) for value in recommendation_ids]
+            if not ids:
+                return []
+            params.append(ids)
+            filters += f" AND recommendation_id = ANY(${len(params)}::bigint[])"
 
         async with self._db.connection_scope() as conn:
             rows = await conn.fetch(

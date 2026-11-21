@@ -3,7 +3,7 @@
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from ...models.savings import SavingsAccrualTotal, SavingsCounterTotal, SavingsLedgerRecord, normalize_savings_method
 from ...utils.date_utils import ensure_utc, to_iso_z
@@ -201,6 +201,7 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         namespace: Optional[str] = None,
+        recommendation_ids: Optional[Sequence[int]] = None,
     ) -> List[SavingsAccrualTotal]:
         params: dict = {"cluster": cluster_name}
         share = "1.0"
@@ -214,6 +215,15 @@ class SQLiteSavingsLedgerRepository(SavingsLedgerRepository):
         elif namespace is not None:
             params["namespace"] = namespace
             filters += " AND namespace = :namespace"
+        if recommendation_ids is not None:
+            ids = [int(value) for value in recommendation_ids]
+            if not ids:
+                return []
+            names = []
+            for index, value in enumerate(ids):
+                params[f"rec{index}"] = value
+                names.append(f":rec{index}")
+            filters += f" AND recommendation_id IN ({', '.join(names)})"
 
         async with self._db.connection_scope() as conn:
             cursor = await conn.execute(

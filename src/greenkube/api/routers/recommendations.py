@@ -376,6 +376,7 @@ async def get_savings_summary(
     unverified = None
     fixes = None
     interim = None
+    interim_accrued = None
     source = "ledger_v2"
     try:
         cluster_name = _get_savings_cluster_name()
@@ -406,9 +407,25 @@ async def get_savings_summary(
                 if interim_ids
                 else []
             )
+            interim_accrued = (
+                await ledger_repo.accrual_breakdown(
+                    identity[0], start, end, namespace=namespace, recommendation_ids=interim_ids, books=("accrued",)
+                )
+                if interim_ids
+                else []
+            )
         else:
             source = "ledger_v1"
             breakdown = await savings_repo.get_accrual_breakdown(cluster_name, start, end, namespace=namespace)
+            # MEA-16: interim verdicts are reported apart in the v1 fallback too.
+            interim_ids = interim_recommendation_ids(applied)
+            interim = (
+                await savings_repo.get_accrual_breakdown(
+                    cluster_name, start, end, namespace=namespace, recommendation_ids=interim_ids
+                )
+                if interim_ids
+                else []
+            )
         legacy = await savings_repo.has_legacy_compressed_rows(cluster_name, start, end, namespace=namespace)
     except Exception as exc:
         logger.error("Could not read the savings ledger: %s", exc)
@@ -426,6 +443,7 @@ async def get_savings_summary(
         cost_of_fix=fixes,
         interim=interim,
         active=active,
+        interim_accrued_only=interim_accrued,
     )
 
 
