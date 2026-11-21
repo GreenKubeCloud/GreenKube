@@ -86,7 +86,7 @@ async def _hour_vs_raw(writer: asyncpg.Connection, hour: datetime) -> tuple[floa
         hour,
         hour + timedelta(hours=1),
     )
-    return float(hourly), float(raw)
+    return float(hourly or 0.0), float(raw or 0.0)
 
 
 async def _while_open(writer: asyncpg.Connection, statement: str, *args, action) -> None:
