@@ -16,6 +16,7 @@ AUTH_FAILURES = Counter(
 FAILURE_REASONS = (
     "bad_credentials",
     "rate_limited",
+    "key_rate_limited",
     "invalid_session",
     "invalid_api_key",
     "csrf",

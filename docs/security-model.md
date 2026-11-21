@@ -34,7 +34,7 @@ vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 | `session` (default) | Local accounts, scrypt-hashed passwords, server-side sessions in an `HttpOnly; SameSite=Strict` cookie | Scoped API keys | Password guessing: lockout per username **and** client IP plus a per-IP budget; 12-character minimum |
 | `oidc` | OpenID Connect, authorization code + PKCE, ID token verified against the JWKS | Scoped API keys | IdP misconfiguration: groups map to roles explicitly; `defaultRole: none` refuses unmapped users |
 | `proxy` | Identity headers from an authentication proxy | Scoped API keys | Header spoofing: identity headers are accepted only from a TCP peer in `TRUSTED_PROXY_IPS` (required, enforced at startup and by the chart) |
-| `api_key` | No accounts: the browser signs in with an API key (HTTPS or localhost only) and gets a signed, expiring `HttpOnly; SameSite=Strict` cookie that never contains the key; the key is re-checked on every request | The bootstrap key (its only administrator) and scoped keys | A single non-expiring admin credential: use only for headless installations |
+| `api_key` | No accounts: the browser signs in with an API key (HTTPS or localhost only) and gets a signed, expiring `HttpOnly; SameSite=Strict` cookie that never contains the key; the key is re-checked on every request | The bootstrap key (its only administrator) and scoped keys | A single non-expiring admin credential: use only for headless installations; failed keys are throttled per client IP |
 
 Every browser mode ends in the same session: cookie-authenticated mutations need a same-origin `Origin`/`Referer`
 and the session's `X-CSRF-Token`. HTTPS responses carry `Strict-Transport-Security`, and the chart makes the cookie
@@ -157,8 +157,15 @@ spec:
   every credential. GreenKube cannot defend against them; RBAC on the namespace is your boundary.
 - **Distributed password guessing.** The sign-in lockout is per username and client address, so guessing spread over
   many addresses is bounded per address only. Use SSO or keep the sign-in page off the public internet.
+- **Online key guessing.** Failed `Authorization: Bearer` keys and API-key cookies are throttled per client address
+  (four times `AUTH_LOGIN_RATE_LIMIT`, 20 a minute by default, then `429` with `Retry-After`), with Prometheus scrapes
+  in a separate bucket; the controller and worker metrics listeners throttle per TCP peer and refuse the bootstrap
+  key once a scrape token is configured. Guessing spread over many addresses is bounded per address only: generated keys are 256-bit,
+  but an operator-chosen bootstrap key should be long and random.
 - **Shared client address.** Without `config.trustedProxyIps`, every client behind an Ingress shares one address:
-  one client can exhaust the API rate limit and the per-IP sign-in budget for a window.
+  one client can exhaust the API rate limit, the per-IP sign-in budget and the per-IP failed-key budget for a window.
+  While an address is over its failed-key budget, a correct key from that same address waits too, for as long as
+  the failing client keeps failing.
 - **Per-replica limits.** Rate limits and lockouts are kept in each API process; with N replicas the effective budget
   is N times larger.
 - **The bootstrap key stays an admin key on upgraded installs** until `auth.legacyApiKey` is changed.
