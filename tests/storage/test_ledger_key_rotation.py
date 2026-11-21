@@ -284,12 +284,11 @@ async def test_accept_head_rebuilds_boundaries_after_an_old_writer_broke_the_ord
     broken = (await verify_ledger(rotated, checkpoints={}, full=True))[CLUSTER_UID]
     assert not broken.ok and broken.reason == "chain_key_order"
 
-    assert (await accept_head(rotated, CLUSTER_UID, "old pod wrote after the rotation")).ok
+    assert (await accept_head(rotated, CLUSTER_UID, "old pod wrote after the rotation", rebuild_boundaries=True)).ok
     audit = (await rotated.head_acceptances(CLUSTER_UID))[-1]
-    assert audit["key_boundaries"] == [[chain_key_id(K1), 1]]
+    # The K2 boundary moves past the old writer's entries; it is never removed.
+    assert audit["key_boundaries"] == [[chain_key_id(K1), 1], [chain_key_id(K2), 4]]
     assert "rebuilt" in audit["reason"]
-    # The chain ends on K1 again: record the rotation once more, then the new key continues.
-    assert (await rotate_key(rotated, CLUSTER_UID, "rotation, again")).ok
     await rotated.append(CLUSTER_UID, CLUSTER, [_draft("b0")])
     assert (await verify_ledger(rotated, checkpoints={}, full=True))[CLUSTER_UID].ok
 
@@ -365,3 +364,124 @@ async def test_rotate_key_writes_the_status_and_its_audit_together(ledger: Ledge
     assert before is not None and after is not None and after.signature == before.signature
     assert after.key_boundaries == before.key_boundaries
     assert await rotated.head_acceptances(CLUSTER_UID) == []
+
+
+async def _keyless_rewrite_with_fixed_totals(db: LedgerDb, repo: LedgerRepository) -> None:
+    """Forgery (a): every entry re-chained without the key, values unchanged so the totals still match."""
+    entries = await repo.list_entries(CLUSTER_UID, limit=100, ascending=True)
+    await _disable_triggers(db)
+    prev = None
+    for entry in entries:
+        forged = replace(entry, prev_hash=prev, chain_key_id=None)
+        forged = replace(forged, hash=chain_hash(prev, forged.canonical()))
+        prev_sql = "NULL" if prev is None else f"'{prev}'"
+        await db.execute(
+            f"UPDATE savings_ledger_entries SET prev_hash = {prev_sql}, hash = '{forged.hash}', chain_key_id = NULL "
+            f"WHERE entry_id = '{entry.entry_id}'"
+        )
+        prev = forged.hash
+
+
+async def _rekey_tail_with(db: LedgerDb, repo: LedgerRepository, key: bytes, from_index: int) -> None:
+    """Forgery (b): entries from ``from_index`` on re-chained with ``key`` (values unchanged)."""
+    entries = await repo.list_entries(CLUSTER_UID, limit=100, ascending=True)
+    await _disable_triggers(db)
+    prev = entries[from_index - 1].hash
+    for entry in entries[from_index:]:
+        forged = replace(entry, prev_hash=prev, chain_key_id=chain_key_id(key))
+        forged = replace(forged, hash=keyed_chain_hash(key, prev, forged.canonical()))
+        await db.execute(
+            f"UPDATE savings_ledger_entries SET prev_hash = '{prev}', hash = '{forged.hash}', "
+            f"chain_key_id = '{forged.chain_key_id}' WHERE entry_id = '{entry.entry_id}'"
+        )
+        prev = forged.hash
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+@pytest.mark.parametrize("rebuild", [False, True], ids=["plain", "rebuild-flag"])
+async def test_accept_head_refuses_a_keyless_rewrite(ledger: LedgerDb, rebuild: bool):  # noqa: F811
+    from greenkube.verify.ledger.verification import accept_head
+
+    rotated = await _rotated_chain(ledger)
+    before = await rotated.get_chain_status(CLUSTER_UID)
+    await _keyless_rewrite_with_fixed_totals(ledger, rotated)
+    result = await accept_head(rotated, CLUSTER_UID, "forgery a", rebuild_boundaries=rebuild)
+    assert not result.ok
+    after = await rotated.get_chain_status(CLUSTER_UID)
+    assert after is not None and before is not None and after.key_boundaries == before.key_boundaries
+    with pytest.raises(LedgerChainKeyError):
+        await rotated.append(CLUSTER_UID, CLUSTER, [_draft("re-anchor")])
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+@pytest.mark.parametrize("rebuild", [False, True], ids=["plain", "rebuild-flag"])
+async def test_accept_head_refuses_a_leaked_old_key_after_the_boundary(ledger: LedgerDb, rebuild: bool):  # noqa: F811
+    from greenkube.verify.ledger.verification import accept_head
+
+    rotated = await _rotated_chain(ledger)  # K1 at 1-3, K2 from 4 (entries 4-6)
+    await _rekey_tail_with(ledger, rotated, K1, 5)  # seq 6 re-keyed with K1: K1, K2, K1
+    result = await accept_head(rotated, CLUSTER_UID, "forgery b", rebuild_boundaries=rebuild)
+    assert not result.ok
+    status = await rotated.get_chain_status(CLUSTER_UID)
+    assert status is not None and status.key_boundaries == ((chain_key_id(K1), 1), (chain_key_id(K2), 4))
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_the_old_writer_extension_is_rebuilt_only_with_the_flag(ledger: LedgerDb):  # noqa: F811
+    from greenkube.verify.ledger.verification import accept_head
+
+    await LedgerRepository(ledger.manager, chain_key=K1).append(CLUSTER_UID, CLUSTER, [_draft("a0")])
+    rotated = LedgerRepository(ledger.manager, chain_key=K2, previous_keys=[K1])
+    assert (await rotate_key(rotated, CLUSTER_UID, "rotation")).ok  # K2 from seq 2
+    await _insert_forged(ledger, rotated, K1, ["late-a", "late-b"])  # an old writer extends K1 to seq 3
+    refused = await accept_head(rotated, CLUSTER_UID, "without the flag")
+    assert not refused.ok and "--rebuild-boundaries" in (refused.detail or "")
+
+    assert (await accept_head(rotated, CLUSTER_UID, "old writer", rebuild_boundaries=True)).ok
+    status = await rotated.get_chain_status(CLUSTER_UID)
+    assert status is not None and status.key_boundaries == ((chain_key_id(K1), 1), (chain_key_id(K2), 4))
+    audit = (await rotated.head_acceptances(CLUSTER_UID))[-1]
+    assert "rebuilt" in audit["reason"] and audit["key_boundaries"] == [[chain_key_id(K1), 1], [chain_key_id(K2), 4]]
+    await rotated.append(CLUSTER_UID, CLUSTER, [_draft("b0")])
+    assert (await verify_ledger(rotated, checkpoints={}, full=True))[CLUSTER_UID].ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_rebuild_without_a_trusted_row_is_refused(ledger: LedgerDb):  # noqa: F811
+    from greenkube.verify.ledger.verification import accept_head
+
+    keyed = LedgerRepository(ledger.manager, chain_key=K1)
+    await keyed.append(CLUSTER_UID, CLUSTER, [_draft("a0"), _draft("a1")])
+    await ledger.execute("DELETE FROM ledger_chain_status")
+    with pytest.raises(ValueError, match="trusted"):
+        await accept_head(keyed, CLUSTER_UID, "no row", rebuild_boundaries=True)
+    refused = await accept_head(keyed, CLUSTER_UID, "no row")
+    assert not refused.ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_verifier_that_read_the_row_before_an_accept_does_not_overwrite_it(ledger: LedgerDb):  # noqa: F811
+    from greenkube.verify.ledger.verification import accept_head
+
+    await LedgerRepository(ledger.manager, chain_key=K1).append(CLUSTER_UID, CLUSTER, [_draft("a0")])
+    rotated = LedgerRepository(ledger.manager, chain_key=K2, previous_keys=[K1])
+    assert (await rotate_key(rotated, CLUSTER_UID, "rotation")).ok
+    stale = await rotated.get_chain_status(CLUSTER_UID)
+    await _insert_forged(ledger, rotated, K1, ["late-a", "late-b"])
+    assert (await accept_head(rotated, CLUSTER_UID, "old writer", rebuild_boundaries=True)).ok
+    rotated_row = await rotated.get_chain_status(CLUSTER_UID)
+
+    async def stale_read(cluster_uid):  # the verifier read the row before the rotation committed
+        return stale
+
+    verifier = LedgerRepository(ledger.manager, chain_key=K2, previous_keys=[K1])
+    verifier.get_chain_status = stale_read  # type: ignore[method-assign]
+    await verify_ledger(verifier, checkpoints={}, full=True)
+    after = await rotated.get_chain_status(CLUSTER_UID)
+    assert after is not None and rotated_row is not None
+    assert (after.signature, after.key_boundaries) == (rotated_row.signature, rotated_row.key_boundaries)

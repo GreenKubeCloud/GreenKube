@@ -359,6 +359,13 @@ async def _advance_sequences(target, schema: str, tables: Sequence[str]) -> None
 def ledger_accept_head_command(
     cluster_uid: Annotated[str, typer.Option("--cluster-uid", help="Cluster uid of the ledger chain to accept.")],
     reason: Annotated[str, typer.Option("--reason", help="Why the current head is accepted (logged).")],
+    rebuild_boundaries: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild-boundaries",
+            help="Move the recorded key boundaries later to match the entries (never weaker); audited.",
+        ),
+    ] = False,
 ) -> None:
     """Accept the current savings ledger head after a restore or failover lost entries (LED-05).
 
@@ -373,7 +380,14 @@ def ledger_accept_head_command(
         manager = get_db_manager()
         await manager.connect()
         try:
-            return await accept_head(get_ledger_repository(manager), cluster_uid, reason)
+            repo = get_ledger_repository(manager)
+            before = await repo.get_chain_status(cluster_uid)
+            outcome = await accept_head(repo, cluster_uid, reason, rebuild_boundaries=rebuild_boundaries)
+            after = await repo.get_chain_status(cluster_uid)
+            if rebuild_boundaries:
+                typer.echo(f"Key boundaries before: {list(before.key_boundaries) if before else []}")
+                typer.echo(f"Key boundaries after:  {list(after.key_boundaries) if after else []}")
+            return outcome
         finally:
             await manager.close()
 
@@ -382,7 +396,10 @@ def ledger_accept_head_command(
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
     if not result.ok:
-        typer.echo(f"Refused: the chain fails verification at seq {result.failure_seq}: {result.reason}", err=True)
+        typer.echo(
+            f"Refused: the chain fails verification at seq {result.failure_seq}: {result.reason} ({result.detail})",
+            err=True,
+        )
         raise typer.Exit(code=1)
     typer.echo(f"Accepted head seq {result.head_seq} of cluster {cluster_uid}.")
 

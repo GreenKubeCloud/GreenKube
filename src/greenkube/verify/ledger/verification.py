@@ -448,47 +448,128 @@ async def verify_ledger(
             ),
             # Only a trusted anchor is signed: never a forged, unsigned or missing one carried by a failure.
             sign=result.ok or (previous is not None and repo.status_signature_state(previous) == "current"),
+            # Compare-and-swap on the row read before the walk: a rotation or acceptance committed meanwhile wins.
+            expect_signature=previous.signature if previous is not None else None,
         )
         results[cluster_uid] = result
     CHAIN_VERIFIED_ENTRIES.set(total)
     return results
 
 
+def _constrained_rebuild(
+    recorded: ChainStatus, walked: ChainVerification, current_id: Optional[str]
+) -> Tuple[Optional[Tuple[Tuple[str, int], ...]], str]:
+    """Move the recorded key boundaries later to match the entries, never weaken them (LED-05).
+
+    Allowed only when the entries follow the recorded boundaries in all but
+    position: the first keyed entry is at the recorded ``first_keyed_seq`` (no
+    unkeyed entry at or after it), each key is one contiguous run in the
+    recorded order (a final run in the current key may be new), and every key
+    starts at or after its recorded seq. Returns the rebuilt boundaries, or
+    None and the reason for the refusal.
+    """
+    order = [key_id for key_id, _ in recorded.key_boundaries]
+    recorded_from = dict(recorded.key_boundaries)
+    runs = list(walked.key_boundaries)
+    if not runs:
+        return None, "no keyed entry remains although the status row records key boundaries"
+    if recorded.first_keyed_seq is not None and walked.first_keyed_seq != recorded.first_keyed_seq:
+        return None, (
+            f"the first keyed entry is seq {walked.first_keyed_seq}, the status row records {recorded.first_keyed_seq}"
+        )
+    seen: List[str] = []
+    last_index = -1
+    for position, (key_id, from_seq) in enumerate(runs):
+        if key_id in seen:
+            return None, f"key {key_id} appears in more than one run"
+        seen.append(key_id)
+        if key_id in recorded_from:
+            index = order.index(key_id)
+            if index < last_index:
+                return None, f"key {key_id} follows a newer key"
+            if from_seq < recorded_from[key_id]:
+                return None, f"key {key_id} starts at seq {from_seq}, before its recorded seq {recorded_from[key_id]}"
+            last_index = index
+        elif not (position == len(runs) - 1 and key_id == current_id):
+            return None, f"key {key_id} is not recorded in the status row"
+    rebuilt: List[Tuple[str, int]] = [(key_id, from_seq) for key_id, from_seq in runs]
+    # Recorded keys that hold no entry yet keep their boundary, moved past the head when an old writer extended
+    # the previous run.
+    next_seq = (walked.head_seq or 0) + 1
+    for key_id in order[last_index + 1 :]:
+        if key_id not in seen:
+            rebuilt.append((key_id, max(recorded_from[key_id], next_seq)))
+    return tuple(rebuilt), ""
+
+
 async def accept_head(
-    repo: LedgerRepository, cluster_uid: str, reason: str, *, now: Optional[datetime] = None
+    repo: LedgerRepository,
+    cluster_uid: str,
+    reason: str,
+    *,
+    now: Optional[datetime] = None,
+    rebuild_boundaries: bool = False,
 ) -> ChainVerification:
     """Accept the cluster's current chain head as the new anchor, after an investigated incident (LED-05).
 
     Used after a backup restore or a failover that lost the last entries:
     the stored anchor is then ahead of the chain and every verification fails
-    with ``truncated`` or ``head_rewritten``. The chain itself must still pass
-    the structural checks (links, hashes, keys, reversals); otherwise nothing is
-    accepted. The acceptance is logged with the operator's reason and the head
-    it replaces; no ledger entry is written or changed.
+    with ``truncated`` or ``head_rewritten``. The chain must pass the
+    structural checks and the key boundaries of the trusted status row (signed
+    with a key this process holds); they are kept. When the entries no longer
+    follow them (an old writer after a rotation), ``rebuild_boundaries`` moves
+    the recorded boundaries later to match, never weakening them (see
+    :func:`_constrained_rebuild`); without a trusted row nothing can constrain
+    a rebuild, so it is refused. The acceptance and any rebuild are audited.
+
+    Raises:
+        ValueError: without a reason, or ``rebuild_boundaries`` without a trusted row.
     """
     if not reason.strip():
         raise ValueError("a reason is required to accept a new ledger head")
     moment = now or datetime.now(timezone.utc)
     previous = await repo.get_chain_status(cluster_uid)
-    # The recorded boundaries are kept when the row is signed with a key this process holds; otherwise, or when
-    # the entries no longer follow them (an old writer after a rotation), they are rebuilt from the entries' own
-    # keys as consecutive runs, provided every keyed entry verifies with a configured key. The rebuilt boundaries
-    # are recorded in the audit row.
-    kept = previous if previous is not None and repo.status_signature_valid(previous) is True else None
-    if kept is not None and not kept.key_boundaries:
-        kept = None
-    result = await verify_chain(repo, cluster_uid, boundaries=kept)
-    rebuilt = False
-    if not result.ok and kept is not None and result.reason in ("chain_key_order", "unkeyed_after_key"):
-        kept = None
-        result = await verify_chain(repo, cluster_uid)
-        rebuilt = True
-    elif kept is None:
-        rebuilt = bool(result.ok and result.key_boundaries)
+    trusted = previous if previous is not None and repo.status_signature_valid(previous) is True else None
+    recorded = trusted if trusted is not None and trusted.key_boundaries else None
+    if rebuild_boundaries and recorded is None:
+        raise ValueError(
+            f"no trusted status row with key boundaries for cluster {cluster_uid}: nothing constrains a rebuild"
+        )
+    result = await verify_chain(repo, cluster_uid, boundaries=recorded)
+    rebuilt: Optional[Tuple[Tuple[str, int], ...]] = None
+    if not result.ok and recorded is not None and result.reason in ("chain_key_order", "unkeyed_after_key"):
+        if not rebuild_boundaries:
+            return replace(
+                result,
+                detail=f"{result.detail}; the entries do not follow the recorded key boundaries: investigate, then "
+                "rerun with --rebuild-boundaries to move the boundaries later (never weaker)",
+            )
+        walked = await verify_chain(repo, cluster_uid)
+        if not walked.ok:
+            return walked
+        current = repo.chain_key
+        rebuilt, refusal = _constrained_rebuild(recorded, walked, chain_key_id(current) if current else None)
+        if rebuilt is None:
+            return replace(
+                walked,
+                ok=False,
+                failure_seq=None,
+                reason="boundary_rebuild_refused",
+                detail=f"the key boundaries cannot be rebuilt: {refusal}",
+            )
+        result = walked
     if not result.ok:
         return result
-    boundaries = kept.key_boundaries if kept is not None else result.key_boundaries
-    first_keyed = kept.first_keyed_seq if kept is not None else result.first_keyed_seq
+    if recorded is None and result.head_keyed:
+        return replace(
+            result,
+            ok=False,
+            failure_seq=None,
+            reason="status_untrusted",
+            detail="the chain holds keyed entries but no status row signed with a known key records its boundaries",
+        )
+    boundaries = rebuilt if rebuilt is not None else (recorded.key_boundaries if recorded is not None else ())
+    first_keyed = recorded.first_keyed_seq if recorded is not None else None
     status = ChainStatus(
         cluster_uid=cluster_uid,
         verified_at=moment,
@@ -502,8 +583,9 @@ async def accept_head(
         key_boundaries=tuple(boundaries),
     )
     audit = reason.strip()
-    if rebuilt:
-        audit += f" [key boundaries rebuilt from the entries: {list(boundaries)}]"
+    if rebuild_boundaries:
+        before = list(recorded.key_boundaries) if recorded is not None else []
+        audit += f" [rebuild requested: key boundaries {before} rebuilt as {list(boundaries)}]"
     await repo.commit_status(
         status,
         expect_head=(result.head_seq or 0, result.head_hash),
@@ -557,7 +639,9 @@ async def rotate_key(
     result = await verify_chain(repo, cluster_uid, boundaries=kept if kept and kept.key_boundaries else None)
     if result.ok:
         # The head the old row anchored must still be there (a lost tail is accepted first, with accept-head).
-        result = await _tail_lost(repo, result, previous) or result
+        lost = await _tail_lost(repo, result, previous)
+        if lost is not None:
+            result = replace(lost, detail=f"{lost.detail}; run `greenkube db ledger-accept-head` first")
     if not result.ok:
         return result
     if not result.head_keyed:

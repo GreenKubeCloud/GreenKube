@@ -252,6 +252,10 @@ def configured_chain_key() -> Optional[bytes]:
     return raw.encode("utf-8") if raw else None
 
 
+#: Sentinel: :meth:`LedgerRepository.record_chain_status` without a compare-and-swap.
+_ANY_SIGNATURE = object()
+
+
 def _boundaries(raw: Any) -> Tuple[Tuple[str, int], ...]:
     """Parse the stored ``key_boundaries`` JSON (``[[key_id, from_seq], ...]``)."""
     if not raw:
@@ -1592,10 +1596,31 @@ class LedgerRepository:
             ],
         )
 
-    async def record_chain_status(self, status: ChainStatus, *, sign: bool = True) -> None:
-        """Store the cluster's verification status, signed with the chain key when there is one and ``sign``."""
-        async with self.db_manager.transaction() as conn:
+    async def record_chain_status(
+        self, status: ChainStatus, *, sign: bool = True, expect_signature: Any = _ANY_SIGNATURE
+    ) -> bool:
+        """Store the cluster's verification status, signed with the chain key when there is one and ``sign``.
+
+        With ``expect_signature`` the write is a compare-and-swap under the
+        append lock: it is skipped (returns False) when the stored row's
+        signature changed since it was read, so a verifier never overwrites a
+        rotation or an acceptance committed meanwhile.
+        """
+        async with self._transaction() as conn:
+            if expect_signature is not _ANY_SIGNATURE:
+                if self.postgres:
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"ledger:{status.cluster_uid}"
+                    )
+                stored = await self._status_in(conn, status.cluster_uid)
+                if (stored.signature if stored is not None else None) != expect_signature:
+                    logger.info(
+                        "Ledger chain status of cluster %s changed while it was verified: not overwritten.",
+                        status.cluster_uid,
+                    )
+                    return False
             await self._upsert_status(conn, status, sign)
+        return True
 
     async def record_head_acceptance(
         self,
