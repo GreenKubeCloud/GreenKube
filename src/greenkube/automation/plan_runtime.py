@@ -729,6 +729,10 @@ class RuntimePlanService:
             == (source.cluster, source.namespace, source.workload_kind, source.workload_name)
         )
 
+    async def cancel_by_user(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        """Cancel a plan before it applies (POST /automation/plans/{id}/cancel); it becomes CANCELLED."""
+        return await self._plan_service.cancel_by_user(plan_id, actor=actor)
+
     async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
         """Cancel an unapproved preview (DELETE /automation/plans/{id}); it becomes SUPERSEDED."""
         return await self._plan_service.cancel_plan(plan_id, actor=actor)

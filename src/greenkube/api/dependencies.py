@@ -621,6 +621,8 @@ class AutomationPlanApiService(PlanPreparationService, Protocol):
         reason_code: str | None = None,
     ) -> Plan | None: ...
 
+    async def cancel_by_user(self, plan_id: str, *, actor: str = "system") -> Plan | None: ...
+
 
 async def get_automation_plan_service(request: Request) -> AutomationPlanApiService | None:
     """Return the injected plan API composition, or ``None`` until it is configured.

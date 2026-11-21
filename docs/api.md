@@ -131,7 +131,7 @@ Recommendation GET endpoints never run analyzers and never write. Scans run in t
 | `GET` | `/automation/plans/{plan_id}` | Read a secret-safe plan preview, including source and rendered diffs. |
 | `POST` | `/automation/plans/{plan_id}/rollback-preview` | Create a validated inverse preview from a synced plan whose linked recommendations remain in `rollback_review`. |
 | `POST` | `/automation/plans/{plan_id}/approve` | Approve the exact `sha256:` digest returned by preview and enqueue the plan. |
-| `POST` | `/automation/plans/{plan_id}/cancel` | Mark a draft, validated, or approved plan stale before application. |
+| `POST` | `/automation/plans/{plan_id}/cancel` | Cancel a draft, validated, or approved plan before application: it becomes `cancelled` with `status_reason` `cancelled_by_user`. A plan already `cancelled` or `stale` is returned unchanged; any other status: `409`. |
 | `POST` | `/automation/plans/{plan_id}/abandon` | `approve` scope (operator or admin). Fail a plan stuck in `applying`: cancels its operation, closes its pending pull-request records and releases its recommendations; audited with the caller and the optional `{"reason": "..."}` (at most 500 characters). `409 plan_stale` for another status, while a worker holds a live lease, when a pull request was already recorded, or when the plan branch holds an open pull request that was never recorded. See [A plan stuck in `applying`](automation.md#a-plan-stuck-in-applying). |
 | `DELETE` | `/automation/plans/{plan_id}` | Cancel an unapproved preview: a draft or validated plan becomes `superseded` (`204`). Unknown plan: `404`. Any other status: `409`. |
 

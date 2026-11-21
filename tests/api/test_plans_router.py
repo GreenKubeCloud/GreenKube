@@ -183,7 +183,7 @@ class _MemoryPlanRepository(AutomationPlanRepository):
         plan = self.plans.get(plan_id)
         if plan is None:
             return None
-        updated = plan.model_copy(update={"status": status})
+        updated = plan.model_copy(update={"status": status, "status_reason": reason_code})
         self.plans[plan_id] = updated
         return updated
 
@@ -315,6 +315,9 @@ class _AutomationPlanApiService:
 
     async def cancel_plan(self, plan_id: str, *, actor: str = "system") -> Plan | None:
         return await self.plans.cancel_plan(plan_id, actor=actor)
+
+    async def cancel_by_user(self, plan_id: str, *, actor: str = "system") -> Plan | None:
+        return await self.plans.cancel_by_user(plan_id, actor=actor)
 
 
 @pytest.fixture
@@ -773,17 +776,25 @@ def test_approve_rejects_extra_request_overrides(plan_api):
     assert queue.keys == []
 
 
-def test_cancel_marks_non_applying_plan_stale_and_conflicts_for_applying_plan(plan_api):
+def test_cancel_marks_non_applying_plan_cancelled_and_conflicts_for_applying_plan(plan_api):
+    """F-10: a user cancel ends in ``cancelled`` with reason ``cancelled_by_user``, also on GET."""
     client, _, repository, _, _ = plan_api
 
     cancelled = client.post("/api/v1/automation/plans/plan-1/cancel")
+    cancelled_again = client.post("/api/v1/automation/plans/plan-1/cancel")
+    read_back = client.get("/api/v1/automation/plans/plan-1")
     repository.plans["applying-plan"] = _plan(status=PlanStatus.APPLYING).model_copy(
         update={"plan_id": "applying-plan"}
     )
     applying = client.post("/api/v1/automation/plans/applying-plan/cancel")
 
     assert cancelled.status_code == 200
-    assert cancelled.json()["status"] == "stale"
+    assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["status_reason"] == "cancelled_by_user"
+    assert cancelled_again.status_code == 200
+    assert cancelled_again.json()["status"] == "cancelled"
+    assert read_back.json()["status"] == "cancelled"
+    assert read_back.json()["status_reason"] == "cancelled_by_user"
     assert applying.status_code == 409
     assert applying.json()["code"] == "plan_stale"
 

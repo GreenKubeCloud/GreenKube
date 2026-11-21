@@ -272,7 +272,7 @@ async def cancel_automation_plan(
     http_request: Request,
     service: AutomationPlanApiService | None = Depends(get_automation_plan_service),
 ) -> AutomationPlanResponse | JSONResponse:
-    """Invalidate a plan before it starts applying."""
+    """Cancel a plan before it starts applying: it becomes ``cancelled``, reason ``cancelled_by_user``."""
     if service is None:
         return _service_unavailable(
             "plan_service_unavailable", "Server-side automation plan service is not configured."
@@ -280,16 +280,12 @@ async def cancel_automation_plan(
     plan = await service.read_plan(plan_id)
     if plan is None:
         return _error_response(404, "plan_not_found", "Automation plan not found.")
-    if plan.status is PlanStatus.STALE:
+    if plan.status in {PlanStatus.STALE, PlanStatus.CANCELLED}:
         return _plan_response(plan)
     if plan.status not in _CANCELLABLE_STATUSES:
         return _error_response(409, AutomationErrorCode.PLAN_STALE.value, "Only non-applying plans can be cancelled.")
     try:
-        cancelled = await service.mark_stale(
-            plan_id,
-            actor=get_authenticated_actor(http_request),
-            reason_code="cancelled_by_user",
-        )
+        cancelled = await service.cancel_by_user(plan_id, actor=get_authenticated_actor(http_request))
     except AutomationPlanError as error:
         return _domain_error_response(error)
     if cancelled is None:
@@ -395,6 +391,7 @@ def _plan_response(plan: Plan, operation: Operation | None = None) -> Automation
         plan_id=plan.plan_id,
         recommendation_ids=plan.recommendation_ids,
         status=plan.status,
+        status_reason=plan.status_reason,
         digest=plan.digest,
         policy_result=plan.policy_result,
         operation_id=operation.operation_id if operation is not None else None,

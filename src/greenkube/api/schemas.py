@@ -242,6 +242,8 @@ class AutomationPlanResponse(GitOpsResponseModel):
     plan_id: str
     recommendation_ids: List[int]
     status: PlanStatus
+    #: Reason code of the last status change (``cancelled_by_user``, ``plan_expired``...), F-10.
+    status_reason: Optional[str] = None
     digest: Optional[str] = None
     policy_result: Dict[str, Any] = Field(default_factory=dict)
     operation_id: Optional[str] = None

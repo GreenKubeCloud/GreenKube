@@ -1945,3 +1945,30 @@ async def test_provider_backoff_is_stored_with_the_record_and_released_by_a_new_
         None,
         None,
     )
+
+
+@pytest.mark.asyncio
+async def test_user_cancel_is_stored_as_cancelled_with_its_reason(gitops_store):
+    """F-10: a cancelled plan keeps the ``cancelled`` status and its reason in both dialects."""
+    repository, manager, backend = gitops_store
+    await _insert_recommendations(manager, backend)
+    await repository.save_provider_config(
+        GitOpsProviderConfig(id="provider-github", provider_type="github", status="ready")
+    )
+    plan = _plan(_source())
+    await repository.save_plan(plan)
+
+    cancelled = await repository.set_plan_status(
+        plan.plan_id,
+        PlanStatus.CANCELLED,
+        expected_statuses=(PlanStatus.VALIDATED,),
+        expected_digest=plan.digest,
+        reason_code="cancelled_by_user",
+    )
+
+    assert cancelled is not None
+    reread = await repository.get_plan(plan.plan_id)
+    assert reread is not None
+    assert reread.status is PlanStatus.CANCELLED
+    assert reread.status_reason == "cancelled_by_user"
+    assert [item.plan_id for item in await repository.list_plans(status=PlanStatus.CANCELLED)] == [plan.plan_id]

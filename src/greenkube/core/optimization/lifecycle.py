@@ -187,7 +187,7 @@ def _event_time(event: RecommendationEvent) -> datetime:
 
 
 #: Plan statuses that end a plan without delivering it: its approval decided nothing.
-_ABANDONED_PLAN_STATUSES = frozenset({"closed", "stale", "failed", "rejected", "superseded"})
+_ABANDONED_PLAN_STATUSES = frozenset({"closed", "stale", "failed", "rejected", "superseded", "cancelled"})
 
 
 def _abandoned_plan_ids(events: Iterable[RecommendationEvent]) -> set[str]:

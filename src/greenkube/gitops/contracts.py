@@ -114,6 +114,8 @@ class PlanStatus(StrEnum):
     AMBIGUOUS = "ambiguous"
     REJECTED = "rejected"
     SUPERSEDED = "superseded"
+    # Cancelled by a user (POST /automation/plans/{id}/cancel), reason ``cancelled_by_user`` (F-10).
+    CANCELLED = "cancelled"
 
 
 class OperationStatus(StrEnum):
@@ -786,6 +788,9 @@ class Plan(ContractModel):
     # operator ("patch") or a CI job ("ci") applies the patch and reports the PR back.
     # None for plans not approved yet, and for plans approved before delivery modes.
     delivery_mode: Literal["direct", "patch", "ci"] | None = None
+    # Reason code of the last status change (``cancelled_by_user``, ``plan_expired``, ...);
+    # None for plans whose status has not changed since 0220 (F-10).
+    status_reason: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime | None = None
 

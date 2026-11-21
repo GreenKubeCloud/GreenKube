@@ -760,7 +760,7 @@
 				!preview.rollbackOfPlanId &&
 				(
 					planApprovalBlocked ||
-					['stale', 'failed', 'closed', 'superseded', 'rejected'].includes(preview.status) ||
+					['stale', 'failed', 'closed', 'superseded', 'rejected', 'cancelled'].includes(preview.status) ||
 					(preview.status === 'validated' && preview.expiresAt && !preview.expiryValid)
 				)
 		);
@@ -1149,7 +1149,8 @@
 			needs_mapping: 'Chart mapping required',
 			ambiguous: 'Workload binding is ambiguous',
 			rejected: 'Plan rejected',
-			superseded: 'Plan superseded'
+			superseded: 'Plan superseded',
+			cancelled: 'Plan cancelled'
 		};
 		const normalized = String(status ?? '').toLowerCase();
 		return labels[normalized] ?? (normalized || 'Unknown');

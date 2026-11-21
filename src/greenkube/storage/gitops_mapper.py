@@ -227,6 +227,7 @@ def row_to_automation_plan_record(
         pre_apply_baseline=baseline,
         committed_on_revision=_get(row, "committed_on_revision") or None,
         delivery_mode=_delivery_mode(_get(row, "delivery_mode")),
+        status_reason=_get(row, "status_reason") or None,
         created_at=datetime_value(_get(row, "created_at")) or datetime.now(timezone.utc),
         expires_at=datetime_value(_get(row, "expires_at")),
     )
