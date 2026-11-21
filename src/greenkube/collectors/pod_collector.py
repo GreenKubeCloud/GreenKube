@@ -10,7 +10,7 @@ from typing import Iterator, List, Optional
 from greenkube.collectors.base_collector import BaseCollector
 from greenkube.collectors.k8s_errors import KubernetesListError, list_all_pages
 from greenkube.core.config import config as global_config
-from greenkube.core.k8s_client import get_core_v1_api
+from greenkube.core.k8s_client import get_apps_v1_api, get_batch_v1_api, get_core_v1_api
 from greenkube.core.optimization.targeting import MIRROR_POD_ANNOTATION, STATIC_POD_OWNER_KIND
 from greenkube.models.metrics import PodMetric
 
@@ -77,6 +77,49 @@ def _container_metric(
     )
 
 
+#: ``(namespace, name) -> (controller kind, controller name)`` of ReplicaSets or Jobs; ``None`` when no controller.
+OwnerMap = dict[tuple[str, str], Optional[tuple[str, str]]]
+
+
+def _controller_of(obj) -> Optional[tuple[str, str]]:
+    """The controller ownerReference ``(kind, name)`` of a Kubernetes object, or ``None``."""
+    for ref in getattr(obj.metadata, "owner_references", None) or []:
+        if getattr(ref, "controller", False) and ref.kind and ref.name:
+            return str(ref.kind), str(ref.name)
+    return None
+
+
+def resolve_workload_owner(
+    namespace: str,
+    owner_kind: Optional[str],
+    owner_name: Optional[str],
+    replica_sets: Optional[OwnerMap],
+    jobs: Optional[OwnerMap],
+) -> tuple[Optional[str], Optional[str]]:
+    """The workload that owns a pod, following the controller chain (COL-16).
+
+    A ReplicaSet resolves to its controller (Deployment, Argo Rollout, ...) or
+    stays a ReplicaSet when it has none; a Job created by a CronJob resolves to
+    the CronJob, so every run of it is one workload.  When the ReplicaSet list
+    is unavailable (``replica_sets`` is ``None``) or does not hold the
+    ReplicaSet, the name rule ``<deployment>-<pod-template-hash>`` is kept so
+    Deployment workloads stay stable; the caller logs that degradation.
+    """
+    if owner_kind == "ReplicaSet" and owner_name:
+        if replica_sets is not None and (namespace, owner_name) in replica_sets:
+            controller = replica_sets[(namespace, owner_name)]
+            return controller if controller is not None else (owner_kind, owner_name)
+        parts = owner_name.rsplit("-", 1)
+        if len(parts) == 2:
+            return "Deployment", parts[0]
+        return owner_kind, owner_name
+    if owner_kind == "Job" and owner_name and jobs is not None:
+        controller = jobs.get((namespace, owner_name))
+        if controller is not None and controller[0] == "CronJob":
+            return controller
+    return owner_kind, owner_name
+
+
 class PodCollector(BaseCollector):
     """
     Connects to the K8s API to find the resource requests
@@ -98,6 +141,28 @@ class PodCollector(BaseCollector):
             logger.warning("PodCollector could not initialize Kubernetes client.")
 
         return self._api
+
+    async def _owner_map(self, kind: str) -> Optional[OwnerMap]:
+        """ReplicaSet or Job controllers of the cluster, or ``None`` when they cannot be listed (COL-16)."""
+        try:
+            if kind == "ReplicaSet":
+                api = await get_apps_v1_api()
+                call = getattr(api, "list_replica_set_for_all_namespaces", None) if api else None
+            else:
+                api = await get_batch_v1_api()
+                call = getattr(api, "list_job_for_all_namespaces", None) if api else None
+            if call is None:
+                return None
+            items = await list_all_pages(call, watch=False, _request_timeout=global_config.K8S_REQUEST_TIMEOUT or None)
+        except Exception as error:  # missing RBAC, API error: owners fall back, visibly
+            logger.warning(
+                "%s owners unavailable (%s): pod owners use the %s.",
+                kind,
+                error,
+                "name rule <deployment>-<hash>" if kind == "ReplicaSet" else "Job itself",
+            )
+            return None
+        return {(str(item.metadata.namespace), str(item.metadata.name)): _controller_of(item) for item in items}
 
     async def collect(self, include_init_containers: bool = False, *, raise_on_error: bool = False) -> List[PodMetric]:
         """
@@ -128,6 +193,15 @@ class PodCollector(BaseCollector):
                 _request_timeout=global_config.K8S_REQUEST_TIMEOUT or None,
             )
 
+            owner_kinds = {
+                ref.kind
+                for pod in pods
+                for ref in (getattr(pod.metadata, "owner_references", None) or [])
+                if getattr(ref, "controller", False)
+            }
+            replica_sets = await self._owner_map("ReplicaSet") if "ReplicaSet" in owner_kinds else {}
+            jobs = await self._owner_map("Job") if "Job" in owner_kinds else {}
+
             for pod in pods:
                 pod_name = pod.metadata.name
                 namespace = pod.metadata.namespace
@@ -145,14 +219,10 @@ class PodCollector(BaseCollector):
                             owner_kind = ref.kind
                             owner_name = ref.name
                             break
-                    # If we have a ReplicaSet owner, try to get its parent Deployment name
-                    # by stripping the ReplicaSet hash suffix (e.g., "nginx-abc123" -> "nginx")
-                    if owner_kind == "ReplicaSet" and owner_name:
-                        # ReplicaSet names follow the pattern <deployment-name>-<hash>
-                        parts = owner_name.rsplit("-", 1)
-                        if len(parts) == 2:
-                            owner_kind = "Deployment"
-                            owner_name = parts[0]
+                    # The workload is the end of the controller chain (COL-16).
+                    owner_kind, owner_name = resolve_workload_owner(
+                        namespace, owner_kind, owner_name, replica_sets, jobs
+                    )
 
                 annotations = getattr(pod.metadata, "annotations", None) or {}
                 if owner_kind is None and isinstance(annotations, dict) and MIRROR_POD_ANNOTATION in annotations:

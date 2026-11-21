@@ -135,9 +135,11 @@ rules:
   verbs:
   - get
   - list
+  # Jobs: a pod owned by a Job created by a CronJob is attributed to the CronJob (COL-16).
 - apiGroups: ["batch"]
   resources:
   - cronjobs
+  - jobs
   verbs:
   - get
   - list

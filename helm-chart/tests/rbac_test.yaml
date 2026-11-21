@@ -253,7 +253,7 @@ tests:
           path: rules
           content:
             apiGroups: ["batch"]
-            resources: ["cronjobs"]
+            resources: ["cronjobs", "jobs"]
             verbs: ["get", "list"]
       - contains:
           path: rules
