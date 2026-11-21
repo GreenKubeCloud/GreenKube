@@ -152,7 +152,7 @@ async def test_sqlite_migration_cost_is_linear(tmp_path):
     """Review 2: 20 pods x 2000 rows (BestEffort and repairable) cost seconds, not minutes."""
     db_file = str(tmp_path / "large.db")
     await _sqlite_at_previous_version(db_file)
-    rows = []
+    rows: list[tuple[str, str, str | None, str | None, int, int, str | None]] = []
     for pod in range(20):
         for step in range(2000):
             hour, minute = divmod(step * 5, 60)
