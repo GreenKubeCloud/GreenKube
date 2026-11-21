@@ -933,6 +933,7 @@ def collection_limit_provider(db_manager: Any, config: Config | None = None) -> 
     cfg = config or get_config()
 
     async def provider() -> Optional[datetime]:
+        from ..collectors.promql import parse_duration_seconds
         from ..storage.base_collection_watermark_repository import create_collection_watermark_repository
         from ..storage.base_collection_window_repository import (
             COST_STATUS_PENDING,
@@ -940,7 +941,6 @@ def collection_limit_provider(db_manager: Any, config: Config | None = None) -> 
             create_collection_window_repository,
         )
         from ..storage.installation_repository import create_installation_repository
-        from ..utils.date_utils import parse_duration
         from .cluster_identity import cached_installation_identity
         from .collection import METRICS_WATERMARK_SOURCE, collection_cluster_key
 
@@ -956,7 +956,11 @@ def collection_limit_provider(db_manager: Any, config: Config | None = None) -> 
         if watermark is None:
             return datetime(1970, 1, 1, tzinfo=timezone.utc)
         limit = watermark.last_complete_end
-        horizon = limit - parse_duration(str(getattr(cfg, "COLLECTION_MAX_BACKFILL", "24h") or "24h"))
+        # Same parser as the collection job: '3600s' is valid and '30m' is 30 minutes, not months.
+        backfill = parse_duration_seconds(
+            getattr(cfg, "COLLECTION_MAX_BACKFILL", "24h") or "24h", field_name="COLLECTION_MAX_BACKFILL"
+        )
+        horizon = limit - timedelta(seconds=backfill)
         records = await create_collection_window_repository(db_manager, db_manager.db_type).list_overlapping(
             cluster_uid, METRICS_WATERMARK_SOURCE, horizon, limit
         )

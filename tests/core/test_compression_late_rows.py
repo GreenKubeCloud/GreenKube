@@ -273,10 +273,87 @@ def test_the_collection_watermark_provider_is_mandatory():
         MetricsCompressor(object(), Config())  # type: ignore[call-arg]
 
 
-def test_backfill_longer_than_the_compression_age_is_rejected():
-    """Acceptance 4."""
-    with pytest.raises(ValueError, match="COLLECTION_MAX_BACKFILL"):
-        Config(COLLECTION_MAX_BACKFILL="72h", METRICS_COMPRESSION_AGE_HOURS=24)
+def test_a_backfill_longer_than_the_compression_age_raises_the_effective_age():
+    """Acceptance 4, relaxed on review: the effective compression age is max(age, backfill), never a refusal."""
+    cfg = Config(COLLECTION_MAX_BACKFILL="72h", METRICS_COMPRESSION_AGE_HOURS=24)
+    assert cfg.metrics_compression_age == timedelta(hours=72)
+    assert Config(COLLECTION_MAX_BACKFILL="30m", METRICS_COMPRESSION_AGE_HOURS=6).metrics_compression_age == timedelta(
+        hours=6
+    )
     with pytest.raises(ValueError, match="METRICS_COMPRESSION_AGE_HOURS"):
         Config(METRICS_COMPRESSION_AGE_HOURS=0, COLLECTION_MAX_BACKFILL="10m")
-    assert Config(COLLECTION_MAX_BACKFILL="24h", METRICS_COMPRESSION_AGE_HOURS=24)
+
+
+async def test_compression_waits_for_the_backfill_horizon(metrics_db):
+    """An hour inside the backfill horizon is never compressed, even past METRICS_COMPRESSION_AGE_HOURS."""
+    await _repository(metrics_db).write_combined_metrics([_sample(i) for i in range(12 * 30)])
+    cfg = Config(COLLECTION_MAX_BACKFILL="72h", METRICS_COMPRESSION_AGE_HOURS=24)
+    compressor = _compressor(metrics_db, cfg)
+    await compressor.run(now=T0 + timedelta(hours=48))
+    assert await compressor.get_watermark("combined_metrics") is None
+    await compressor.run(now=T0 + timedelta(hours=80))
+    assert await compressor.get_watermark("combined_metrics") == T0 + timedelta(hours=8)
+
+
+@pytest.mark.parametrize("backfill", ["3600s", "30m"])
+async def test_the_scheduled_limit_reads_every_backfill_format(metrics_db, backfill):
+    """A failed step older than the backfill horizon no longer holds compression back ('30m' is not 30 months)."""
+    from greenkube.core.collection import METRICS_WATERMARK_SOURCE, collection_cluster_key
+    from greenkube.core.metrics_compressor import collection_limit_provider
+    from greenkube.storage.base_collection_watermark_repository import create_collection_watermark_repository
+    from greenkube.storage.base_collection_window_repository import (
+        STATUS_FAILED,
+        CollectionWindowRecord,
+        create_collection_window_repository,
+    )
+
+    cfg = Config(COLLECTION_MAX_BACKFILL=backfill)
+    cluster = collection_cluster_key(cfg)
+    await create_collection_watermark_repository(metrics_db, metrics_db.db_type).advance(
+        cluster, METRICS_WATERMARK_SOURCE, T0 + timedelta(hours=12)
+    )
+    old_failure = CollectionWindowRecord(
+        cluster_uid=cluster,
+        source=METRICS_WATERMARK_SOURCE,
+        window_start=T0 + timedelta(hours=10),
+        window_end=T0 + timedelta(hours=10, minutes=5),
+        status=STATUS_FAILED,
+        expected_steps=1,
+    )
+    await create_collection_window_repository(metrics_db, metrics_db.db_type).record([old_failure])
+    assert await collection_limit_provider(metrics_db, cfg)() == T0 + timedelta(hours=12)
+
+
+async def test_a_legacy_first_hour_without_watermark_keeps_its_aggregate(metrics_db):
+    """An install upgraded without a watermark row: late rows never rebuild its partly pruned first hour."""
+    repo = _repository(metrics_db)
+    await repo.write_combined_metrics([_sample(i) for i in range(12 * 30)])
+    compressor = _compressor(metrics_db)
+    await compressor.run(now=T0 + timedelta(hours=29))
+    # The state of an install compressed by the legacy compressor: no watermark row, and the
+    # first raw hour partly pruned at a non-aligned cutoff while its aggregate is complete.
+    await _execute(metrics_db, "DELETE FROM metrics_compression_watermarks")
+    await _execute(metrics_db, "DELETE FROM combined_metrics WHERE timestamp < $1", T0 + timedelta(minutes=40))
+    await _execute(metrics_db, "DELETE FROM metrics_dirty_hours")
+    await compressor.run(now=T0 + timedelta(hours=29))
+    assert await compressor.get_watermark("combined_metrics") == T0 + timedelta(hours=5)
+
+    await repo.write_combined_metrics([_sample(2, value=50.0)])
+    await compressor.run(now=T0 + timedelta(hours=29, minutes=30))
+    assert await _hour_total(metrics_db, "combined_metrics_hourly", T0) == (12, pytest.approx(12.0))
+
+
+async def test_moving_a_row_between_compressed_hours_marks_both_hours(metrics_db):
+    """An UPDATE that changes a raw row's timestamp marks its old hour as well as its new one."""
+    repo = _repository(metrics_db)
+    await repo.write_combined_metrics([_sample(i) for i in range(12 * 30)])
+    await _compressor(metrics_db).run(now=T0 + timedelta(hours=29))
+    await _execute(
+        metrics_db,
+        "UPDATE combined_metrics SET timestamp = $1 WHERE timestamp = $2",
+        T0 + timedelta(hours=3, minutes=2),
+        T0 + timedelta(hours=1, minutes=5),
+    )
+    marked = await _fetch(metrics_db, "SELECT hour_bucket FROM metrics_dirty_hours ORDER BY hour_bucket")
+    hours = [row[0] if isinstance(row[0], str) else to_iso_z(row[0]) for row in marked]
+    assert hours == [to_iso_z(T0 + timedelta(hours=1)), to_iso_z(T0 + timedelta(hours=3))]
