@@ -141,7 +141,7 @@ The API is always deployed (it serves the UI). The 0.3.x keys `config.api.enable
 | `config.db.sslMode` | `disable` | PostgreSQL SSL mode (`disable`, `require`, `verify-full`, ...). |
 | `config.db.poolMinSize` | `1` | PostgreSQL connection-pool minimum. |
 | `config.db.poolMaxSize` | `10` | PostgreSQL connection-pool maximum. |
-| `config.db.statementTimeoutMs` | `30000` | Per-statement PostgreSQL timeout. |
+| `config.db.statementTimeoutMs` | `30000` | Per-statement PostgreSQL timeout (lock waits included). `0` disables it; the compressor still bounds its own lock waits to 30 s and retries on the next cycle. |
 
 The chart always uses PostgreSQL (bundled, or external with `postgres.enabled: false`). Only the controller
 migrates the schema, under a PostgreSQL advisory lock (`DB_RUN_MIGRATIONS`); the API and the workers wait for it.

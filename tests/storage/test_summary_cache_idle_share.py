@@ -27,10 +27,37 @@ from greenkube.storage.sqlite.repository import SQLiteCombinedMetricsRepository
 from greenkube.storage.sqlite.summary_repository import SQLiteSummaryRepository
 from greenkube.storage.sqlite.timeseries_cache_repository import SQLiteTimeseriesCacheRepository
 
-NOW = datetime.now(timezone.utc)
+# "Now" of the refresher is pinned (the ``clock`` fixture) so the cached windows never depend on
+# the time of day the suite runs at: just after midnight UTC, just after an hour boundary, mid-hour.
+CLOCK_TIMES = {
+    "after-midnight": datetime(2026, 10, 10, 0, 0, 30, tzinfo=timezone.utc),
+    "after-hour": datetime(2026, 10, 10, 13, 0, 20, tzinfo=timezone.utc),
+    "mid-hour": datetime(2026, 10, 10, 13, 31, 0, tzinfo=timezone.utc),
+    "late-hour": datetime(2026, 10, 10, 13, 58, 40, tzinfo=timezone.utc),
+}
+NOW = CLOCK_TIMES["mid-hour"]
 START = NOW.replace(minute=0, second=0, microsecond=0) - timedelta(hours=3)
 POD_JOULES = 150.0 * 300
 IDLE_JOULES = 450.0 * 300
+
+
+@pytest.fixture(autouse=True, params=list(CLOCK_TIMES), ids=list(CLOCK_TIMES))
+def clock(request, monkeypatch) -> datetime:
+    """Pin "now" of the summary refresher and the seeded hours to one of :data:`CLOCK_TIMES`."""
+    import greenkube.core.summary_refresher as refresher_module
+
+    now = CLOCK_TIMES[request.param]
+    module = __import__(__name__, fromlist=["NOW"])
+    monkeypatch.setattr(module, "NOW", now)
+    monkeypatch.setattr(module, "START", now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=3))
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return now if tz is None else now.astimezone(tz)
+
+    monkeypatch.setattr(refresher_module, "datetime", FrozenDateTime)
+    return now
 
 
 @pytest.fixture(params=["sqlite", "postgres"], ids=["sqlite", "postgres"])

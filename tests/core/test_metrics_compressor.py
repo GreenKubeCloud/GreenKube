@@ -498,8 +498,12 @@ class TestPostgresCompressionBranches:
         conn.fetch = AsyncMock(return_value=[])  # no dirty hour
         conn.transaction = MagicMock(return_value=AsyncMock())
         # combined_metrics, container_metrics, then node_idle_metrics (ROL-07): each sets
-        # raw_pruned_until and deletes below the same cutoff.
-        conn.execute = AsyncMock(side_effect=["UPDATE 1", "DELETE 4", "UPDATE 1", "DELETE 2", "UPDATE 1", "DELETE 1"])
+        # raw_pruned_until and deletes below the same cutoff, after bounding its lock wait.
+        conn.execute = AsyncMock(
+            side_effect=["SET", "UPDATE 1", "DELETE 4"]
+            + ["SET", "UPDATE 1", "DELETE 2"]
+            + ["SET", "UPDATE 1", "DELETE 1"]
+        )
         compressor = MetricsCompressor(FakePostgresDb(conn), config=cfg, collection_watermark_provider=None)
 
         assert await compressor._prune_raw(now) == 7

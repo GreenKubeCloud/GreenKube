@@ -53,6 +53,11 @@ COMPRESSION_LAG_DEGRADED_SECONDS = 2 * 3600
 #: so raw writers of the table wait for one hour's aggregate at most, never for a whole
 #: catch-up (a run still compresses every hour it may reach, one commit per hour).
 MAX_HOURS_PER_TRANSACTION = 1
+#: Longest wait of a PostgreSQL compressor transaction for a row lock (the watermark row held
+#: FOR SHARE by an open raw writer). The default ``DB_STATEMENT_TIMEOUT_MS`` bounds it too, but
+#: a disabled statement timeout (0) made a writer that never commits block the compressor,
+#: and a pool connection, forever. On timeout the step fails, rolls back and the next cycle retries.
+COMPRESSOR_LOCK_TIMEOUT_MS = 30000
 #: Raw rows are refreshed by the carbon-intensity recompute for this many hours
 #: (``CARBON_RECOMPUTE_WINDOW_HOURS`` in ``cli/start.py``). Compressed hours are
 #: never re-read, so a shorter compression age freezes their hourly carbon
@@ -67,6 +72,11 @@ def floor_hour(value: datetime) -> datetime:
     """Return the UTC hour that contains ``value``."""
     value = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
     return value.replace(minute=0, second=0, microsecond=0)
+
+
+async def _bound_lock_wait(conn: Any) -> None:
+    """Bound the row-lock waits of the current PostgreSQL transaction to :data:`COMPRESSOR_LOCK_TIMEOUT_MS`."""
+    await conn.execute(f"SET LOCAL lock_timeout = {int(COMPRESSOR_LOCK_TIMEOUT_MS)}")
 
 
 def _source_aggregate(column: str) -> str:
@@ -532,6 +542,7 @@ class MetricsCompressor:
         if backend == "postgres":
             async with self._db.connection_scope() as conn:
                 async with conn.transaction():
+                    await _bound_lock_wait(conn)
                     # The watermark row first: it is locked until commit, so a raw writer
                     # whose trigger read it FOR SHARE has committed before the aggregate
                     # reads the hour, and a later writer sees the new watermark and marks
@@ -730,6 +741,7 @@ class MetricsCompressor:
         if backend == "postgres":
             async with self._db.connection_scope() as conn:
                 async with conn.transaction():
+                    await _bound_lock_wait(conn)
                     # Wait for raw writers of this table (their trigger holds the watermark row
                     # FOR SHARE and the dirty mark row-locked) so the aggregate sees their rows.
                     await conn.execute(
@@ -851,6 +863,7 @@ class MetricsCompressor:
         async with self._db.connection_scope() as conn:
             if backend == "postgres":
                 async with conn.transaction():
+                    await _bound_lock_wait(conn)
                     await conn.execute(
                         "UPDATE metrics_compression_watermarks SET raw_pruned_until = $2 "
                         "WHERE table_name = $1 AND (raw_pruned_until IS NULL OR raw_pruned_until < $2)",
