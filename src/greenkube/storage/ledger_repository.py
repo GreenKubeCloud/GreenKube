@@ -21,6 +21,8 @@ Queries are written once with ``?`` placeholders and translated for PostgreSQL.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -127,6 +129,10 @@ class ChainStatus:
     head_seq: Optional[int]
     head_hash: Optional[str]
     failure: Optional[str]
+    #: Whether the anchored head is chained with a key (LED-05).
+    head_keyed: bool = False
+    #: ``<key id>:<HMAC>`` of the anchor with LEDGER_CHAIN_KEY, or None (no key, or a row stored before 0294).
+    signature: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -396,6 +402,51 @@ class LedgerRepository:
         )
         return (int(rows[0]["seq"]), rows[0]["hash"]) if rows else (0, None)
 
+    async def _ensure_status(self, conn, cluster_uid: str, moment: datetime) -> None:
+        """Create a signed, empty anchor when a keyed chain has no status row yet (LED-05).
+
+        A keyed chain then always has a status row, so a deleted one is
+        detected by the next verification (``status_missing``).
+        """
+        rows = await self._fetch(
+            conn,
+            "SELECT verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature "
+            "FROM ledger_chain_status WHERE cluster_uid = ?",
+            [cluster_uid],
+        )
+        if rows:
+            row = rows[0]
+            if row["signature"] is None and not row["head_keyed"]:
+                # A status row stored before the key (upgrade): its anchor is signed as it is, once.
+                verified_at = parse_time(row["verified_at"]) or moment
+                await self._upsert_status(
+                    conn,
+                    ChainStatus(
+                        cluster_uid=cluster_uid,
+                        verified_at=verified_at,
+                        ok=bool(row["ok"]),
+                        entries=int(row["entries"]),
+                        head_seq=int(row["head_seq"]) if row["head_seq"] is not None else None,
+                        head_hash=row["head_hash"],
+                        failure=row["failure"],
+                        head_keyed=False,
+                    ),
+                )
+            return
+        await self._upsert_status(
+            conn,
+            ChainStatus(
+                cluster_uid=cluster_uid,
+                verified_at=moment,
+                ok=True,
+                entries=0,
+                head_seq=None,
+                head_hash=None,
+                failure=None,
+                head_keyed=True,
+            ),
+        )
+
     async def _check_writer_key(self, conn, cluster_uid: str, chain_key: Optional[bytes]) -> None:
         """Fail closed when the head is keyed and this process lacks that key or a rotation from it (LED-05).
 
@@ -470,6 +521,8 @@ class LedgerRepository:
                 prev_hash = entry.hash
                 inserted.append(entry)
             await self._add_totals(conn, cluster_uid, inserted)
+            if inserted and chain_key:
+                await self._ensure_status(conn, cluster_uid, moment)
             for source_table, position in (watermarks or {}).items():
                 await self._execute(
                     conn,
@@ -1268,29 +1321,67 @@ class LedgerRepository:
     # Chain status
     # ------------------------------------------------------------------
 
-    async def record_chain_status(self, status: ChainStatus) -> None:
+    @staticmethod
+    def _status_message(cluster_uid: str, head_seq: Optional[int], head_hash: Optional[str], keyed: bool) -> bytes:
+        return f"ledger-status|{cluster_uid}|{head_seq}|{head_hash}|{int(bool(keyed))}".encode("utf-8")
+
+    def sign_status(self, cluster_uid: str, head_seq: Optional[int], head_hash: Optional[str], keyed: bool):
+        """``<key id>:<HMAC>`` of an anchor with the current chain key, or None without a key (LED-05)."""
+        key = self.chain_key
+        if not key:
+            return None
+        digest = hmac.new(key, self._status_message(cluster_uid, head_seq, head_hash, keyed), hashlib.sha256)
+        return f"{chain_key_id(key)}:{digest.hexdigest()}"
+
+    def status_signature_valid(self, status: ChainStatus) -> Optional[bool]:
+        """True or False for a signed status row (checked with any known key), None for an unsigned one."""
+        if not status.signature:
+            return None
+        key_id, _, digest = status.signature.partition(":")
+        key = self.chain_keys.get(key_id)
+        if key is None:
+            return False
+        expected = hmac.new(
+            key,
+            self._status_message(status.cluster_uid, status.head_seq, status.head_hash, status.head_keyed),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(expected, digest)
+
+    async def _upsert_status(self, conn, status: ChainStatus, sign: bool = True) -> None:
         ok: Any = bool(status.ok) if self.postgres else int(bool(status.ok))
+        keyed: Any = bool(status.head_keyed) if self.postgres else int(bool(status.head_keyed))
+        signature = (
+            self.sign_status(status.cluster_uid, status.head_seq, status.head_hash, status.head_keyed) if sign else None
+        )
+        await self._execute(
+            conn,
+            "INSERT INTO ledger_chain_status (cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, "
+            "head_keyed, signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cluster_uid) DO UPDATE SET "
+            "verified_at = excluded.verified_at, ok = excluded.ok, entries = excluded.entries, "
+            "head_seq = excluded.head_seq, head_hash = excluded.head_hash, failure = excluded.failure, "
+            "head_keyed = excluded.head_keyed, signature = excluded.signature",
+            [
+                status.cluster_uid,
+                self._ts(status.verified_at),
+                ok,
+                int(status.entries),
+                status.head_seq,
+                status.head_hash,
+                status.failure,
+                keyed,
+                signature,
+            ],
+        )
+
+    async def record_chain_status(self, status: ChainStatus, *, sign: bool = True) -> None:
+        """Store the cluster's verification status, signed with the chain key when there is one and ``sign``."""
         async with self.db_manager.transaction() as conn:
-            await self._execute(
-                conn,
-                "INSERT INTO ledger_chain_status (cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cluster_uid) DO UPDATE SET "
-                "verified_at = excluded.verified_at, ok = excluded.ok, entries = excluded.entries, "
-                "head_seq = excluded.head_seq, head_hash = excluded.head_hash, failure = excluded.failure",
-                [
-                    status.cluster_uid,
-                    self._ts(status.verified_at),
-                    ok,
-                    int(status.entries),
-                    status.head_seq,
-                    status.head_hash,
-                    status.failure,
-                ],
-            )
+            await self._upsert_status(conn, status, sign)
 
     async def get_chain_status(self, cluster_uid: str) -> Optional[ChainStatus]:
         rows = await self._select(
-            "SELECT cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure "
+            "SELECT cluster_uid, verified_at, ok, entries, head_seq, head_hash, failure, head_keyed, signature "
             "FROM ledger_chain_status WHERE cluster_uid = ?",
             [cluster_uid],
         )
@@ -1307,6 +1398,8 @@ class LedgerRepository:
             head_seq=int(row["head_seq"]) if row["head_seq"] is not None else None,
             head_hash=row["head_hash"],
             failure=row["failure"],
+            head_keyed=bool(row["head_keyed"]),
+            signature=row["signature"],
         )
 
 

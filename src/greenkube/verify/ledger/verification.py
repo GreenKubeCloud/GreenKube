@@ -235,6 +235,35 @@ async def _reversal_mismatch(
     return None
 
 
+def _status_failure(
+    repo: LedgerRepository, result: ChainVerification, previous: Optional[ChainStatus]
+) -> Optional[ChainVerification]:
+    """With a chain key, the stored anchor must be signed and present (LED-05).
+
+    A signed row whose HMAC does not match was edited (``status_forged``). A
+    missing row fails once the chain exists (``status_missing``): a keyed
+    chain gets a signed row with its first append, and the reset is
+    ``greenkube db ledger-accept-head``. An unsigned row (stored before
+    migration 0294 or without a key) is accepted only while the chain holds no
+    keyed entry; it is signed by this verification.
+    """
+    if not repo.chain_key or not result.entries:
+        return None
+    cluster_uid = result.cluster_uid
+
+    def failure(reason: str, detail: str) -> ChainVerification:
+        return replace(result, ok=False, failure_seq=None, reason=reason, detail=detail)
+
+    if previous is None:
+        return failure("status_missing", f"the ledger chain status of cluster {cluster_uid} is missing")
+    valid = repo.status_signature_valid(previous)
+    if valid is False:
+        return failure("status_forged", f"the ledger chain status of cluster {cluster_uid} fails its signature")
+    if valid is None and (previous.head_keyed or result.head_keyed):
+        return failure("status_unsigned", f"the ledger chain status of keyed cluster {cluster_uid} is not signed")
+    return None
+
+
 async def _tail_lost(
     repo: LedgerRepository, result: ChainVerification, previous: Optional[ChainStatus]
 ) -> Optional[ChainVerification]:
@@ -300,6 +329,8 @@ async def verify_ledger(
         else:
             result = await verify_chain(repo, cluster_uid)
         if result.ok:
+            result = _status_failure(repo, result, previous) or result
+        if result.ok:
             result = await _tail_lost(repo, result, previous) or result
         if result.ok and not incremental:
             # The totals users read are not chained: the full pass re-derives them from the entries (LED-09).
@@ -340,7 +371,10 @@ async def verify_ledger(
                 head_seq=anchor_seq,
                 head_hash=anchor_hash,
                 failure=None if result.ok else f"{result.reason}: {result.detail}",
-            )
+                head_keyed=result.head_keyed if result.ok else bool(previous and previous.head_keyed),
+            ),
+            # Only a trusted anchor is signed: never a forged, unsigned or missing one carried by a failure.
+            sign=result.ok or (previous is not None and repo.status_signature_valid(previous) is True),
         )
         results[cluster_uid] = result
     CHAIN_VERIFIED_ENTRIES.set(total)
@@ -375,6 +409,7 @@ async def accept_head(
             head_seq=result.head_seq,
             head_hash=result.head_hash,
             failure=None,
+            head_keyed=result.head_keyed,
         )
     )
     _CHECKPOINTS.pop(cluster_uid, None)

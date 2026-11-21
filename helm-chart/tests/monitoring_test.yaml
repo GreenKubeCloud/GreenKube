@@ -106,6 +106,15 @@ tests:
       - equal:
           path: spec.groups[3].rules[4].expr
           value: max by (cluster_name) (greenkube_accrual_watermark_ahead_seconds) > 0
+      - equal:
+          path: spec.groups[3].rules[5].alert
+          value: GreenKubeLedgerChainKeyDropped
+      - equal:
+          path: spec.groups[3].rules[5].expr
+          value: max_over_time(greenkube_ledger_chain_head_keyed[30d]) == 1 and greenkube_ledger_chain_head_keyed == 0
+      - equal:
+          path: spec.groups[3].rules[5].labels.severity
+          value: critical
 
   - it: should leave the controller loop alerts out when disabled
     set:

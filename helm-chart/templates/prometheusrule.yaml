@@ -241,6 +241,13 @@ spec:
           annotations:
             summary: The GreenKube savings accrual watermark is in the future
             description: {{ `The accrual watermark of cluster {{ $labels.cluster_name }} is {{ $value }} s ahead of the current hour: an earlier run used a wrong clock and may have booked future hours. Recommendations keep accruing from their own cursors.` | quote }}
+        - alert: GreenKubeLedgerChainKeyDropped
+          expr: max_over_time(greenkube_ledger_chain_head_keyed[30d]) == 1 and greenkube_ledger_chain_head_keyed == 0
+          labels:
+            severity: critical
+          annotations:
+            summary: The GreenKube savings ledger head is no longer chained with the key
+            description: {{ `The verified head of the savings ledger of cluster {{ $labels.cluster_uid }} was keyed (HMAC) during the last 30 days and is not any more: the chain may have been rewritten without LEDGER_CHAIN_KEY (LED-05). Compare with the published head history and investigate before accepting a head.` | quote }}
     {{- end }}
     {{- $ops := .Values.monitoring.prometheusRule.operations | default dict }}
     {{- if ne (toString $ops.enabled) "false" }}

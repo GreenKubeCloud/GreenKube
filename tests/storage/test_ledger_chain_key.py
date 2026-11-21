@@ -156,8 +156,10 @@ async def test_keyed_head_is_published(ledger: LedgerDb):  # noqa: F811
     from greenkube.verify.ledger.verification import CHAIN_HEAD_KEYED
 
     repo = LedgerRepository(ledger.manager, chain_key=KEY)
-    await LedgerRepository(ledger.manager, chain_key=b"").append(CLUSTER_UID, CLUSTER, [_draft("k0")])
-    await verify_ledger(repo, checkpoints={})
+    legacy = LedgerRepository(ledger.manager, chain_key=b"")
+    await legacy.append(CLUSTER_UID, CLUSTER, [_draft("k0")])
+    await verify_ledger(legacy, checkpoints={})  # the release before the key wrote an unsigned status row
+    assert (await verify_ledger(repo, checkpoints={}))[CLUSTER_UID].ok
     assert CHAIN_HEAD_KEYED.labels(cluster_uid=CLUSTER_UID)._value.get() == 0
     await repo.append(CLUSTER_UID, CLUSTER, [_draft("k1")])
     checkpoints: dict = {}
@@ -248,3 +250,45 @@ async def test_a_deliberate_rotation_keeps_the_previous_key_for_verification(led
     without_previous = LedgerRepository(ledger.manager, chain_key=new)
     result = (await verify_ledger(without_previous, checkpoints={}, full=True))[CLUSTER_UID]
     assert not result.ok and result.reason == "chain_key_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_full_unkeyed_rewrite_with_the_status_row_deleted_fails(ledger: LedgerDb):  # noqa: F811
+    """With a key configured, the status row is signed and a missing one fails once the chain exists."""
+    repo = LedgerRepository(ledger.manager, chain_key=KEY)
+    await repo.append(CLUSTER_UID, CLUSTER, [_draft(f"k{i}", 0.005) for i in range(6)])
+    assert (await verify_ledger(repo, checkpoints={}))[CLUSTER_UID].ok
+    entries = await repo.list_entries(CLUSTER_UID, limit=100, ascending=True)
+    await _disable_triggers(ledger)
+    await _rewrite(ledger, entries, downgrade_from=1)
+    await ledger.execute("DELETE FROM ledger_chain_status")
+    result = (await verify_ledger(repo, checkpoints={}, full=True))[CLUSTER_UID]
+    assert not result.ok and result.reason == "status_missing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_an_edited_status_row_fails_its_signature(ledger: LedgerDb):  # noqa: F811
+    repo = LedgerRepository(ledger.manager, chain_key=KEY)
+    await repo.append(CLUSTER_UID, CLUSTER, [_draft(f"k{i}") for i in range(3)])
+    assert (await verify_ledger(repo, checkpoints={}))[CLUSTER_UID].ok
+    await ledger.execute("UPDATE ledger_chain_status SET head_seq = 2")
+    result = (await verify_ledger(repo, checkpoints={}))[CLUSTER_UID]
+    assert not result.ok and result.reason == "status_forged"
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_an_unsigned_legacy_status_row_is_accepted_and_signed_on_upgrade(ledger: LedgerDb):  # noqa: F811
+    legacy = LedgerRepository(ledger.manager, chain_key=b"")
+    await legacy.append(CLUSTER_UID, CLUSTER, [_draft(f"old{i}") for i in range(3)])
+    assert (await verify_ledger(legacy, checkpoints={}))[CLUSTER_UID].ok
+    unsigned = await legacy.get_chain_status(CLUSTER_UID)
+    assert unsigned is not None and unsigned.signature is None
+    keyed = LedgerRepository(ledger.manager, chain_key=KEY)
+    assert (await verify_ledger(keyed, checkpoints={}))[CLUSTER_UID].ok
+    signed = await keyed.get_chain_status(CLUSTER_UID)
+    assert signed is not None and signed.signature is not None
+    await keyed.append(CLUSTER_UID, CLUSTER, [_draft("new")])
+    assert (await verify_ledger(keyed, checkpoints={}))[CLUSTER_UID].ok
