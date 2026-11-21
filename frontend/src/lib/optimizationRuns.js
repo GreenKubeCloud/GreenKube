@@ -10,7 +10,7 @@
  * optional list endpoint GET /optimization/runs?limit=N. Its absence is
  * cached separately and never disables requesting scans.
  */
-import { getOptimizationRun, listOptimizationRuns, requestOptimizationRun } from '$lib/api.js';
+import { getOptimizationRun, listOptimizationRuns, requestOptimizationRun } from '#lib/api.js';
 
 export const RUN_PENDING_STATUSES = Object.freeze(['queued', 'running']);
 export const RUN_TERMINAL_STATUSES = Object.freeze(['succeeded', 'failed']);

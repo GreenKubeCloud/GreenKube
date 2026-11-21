@@ -13,7 +13,7 @@ import {
 	serverOpportunity,
 	targetName,
 	warmUpOf
-} from '$lib/overview.js';
+} from '#lib/overview.js';
 
 const HOUR = 3_600_000;
 

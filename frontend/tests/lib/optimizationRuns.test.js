@@ -3,7 +3,7 @@
  * polling with backoff, timeout and abort.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as api from '$lib/api.js';
+import * as api from '#lib/api.js';
 import {
 	findPendingOptimizationRun,
 	isRunPending,
@@ -15,9 +15,9 @@ import {
 	sleep,
 	startOptimizationScan,
 	waitForOptimizationRun
-} from '$lib/optimizationRuns.js';
+} from '#lib/optimizationRuns.js';
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	getOptimizationRun: vi.fn(),
 	listOptimizationRuns: vi.fn(),
 	requestOptimizationRun: vi.fn()

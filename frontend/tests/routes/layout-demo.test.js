@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import Layout from '../../src/routes/+layout.svelte';
-import { clearCsrfToken } from '$lib/api.js';
-import { currentUser, demoMode } from '$lib/stores.js';
+import { clearCsrfToken } from '#lib/api.js';
+import { currentUser, demoMode } from '#lib/stores.js';
 import { createMemoryStorage, installStorage } from '../helpers/storage.js';
 
 const ANONYMOUS = { authenticated: false, kind: 'anonymous', name: 'anonymous', actor: 'anonymous', scopes: ['read', 'write'] };

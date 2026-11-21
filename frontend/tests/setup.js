@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest';
 import { beforeEach } from 'vitest';
-import { currentUser } from '$lib/stores.js';
+import { currentUser } from '#lib/stores.js';
 
 /**
  * Pages render only for a signed-in principal (the layout waits for /auth/me),

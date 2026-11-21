@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import LoginForm from '../../src/lib/components/LoginForm.svelte';
 import AccountPage from '../../src/routes/settings/account/+page.svelte';
-import { currentUser } from '$lib/stores.js';
+import { currentUser } from '#lib/stores.js';
 
 function ok(body, status = 200) {
 	return { ok: true, status, json: () => Promise.resolve(body) };

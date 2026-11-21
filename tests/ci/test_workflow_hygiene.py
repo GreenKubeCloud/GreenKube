@@ -1,5 +1,6 @@
 """CI hygiene guards (roadmap O6, BUG-62)."""
 
+import json
 import os
 import subprocess
 import tomllib
@@ -29,11 +30,59 @@ def test_ci_does_not_write_to_the_repository():
     assert workflow["permissions"] == {"contents": "read"}
 
 
-def test_ci_python_job_has_time_for_the_full_suite():
-    job = _workflow("ci.yml")["jobs"]["lint-and-test"]
+def test_ci_python_tests_run_in_shards_with_time_to_finish():
+    jobs = _workflow("ci.yml")["jobs"]
+    test = jobs["test"]
 
-    assert job["timeout-minutes"] >= 20
-    assert "uv run pytest --cov=greenkube" in _run_scripts(job)
+    assert test["timeout-minutes"] >= 30
+    assert test["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.test-shards.outputs.shards) }}"
+    assert ".github/scripts/test-shard.sh --list" in _run_scripts(jobs["test-shards"])
+    scripts = _run_scripts(test)
+    assert "uv run pytest --cov=greenkube" in scripts
+    assert ".github/scripts/check-postgres-ran.sh pytest.log" in scripts
+    # Lint, Gitleaks and Pyrefly run once, not in every shard.
+    assert "ruff" not in scripts
+    assert "uv run pyrefly check" in _run_scripts(jobs["lint"])
+
+
+def test_ci_coverage_gate_combines_every_shard():
+    jobs = _workflow("ci.yml")["jobs"]
+    gate = jobs["coverage"]
+
+    assert gate["needs"] == "test"
+    scripts = _run_scripts(gate)
+    assert "uv run coverage combine" in scripts
+    assert "uv run coverage report" in scripts
+    # The gate runs for every Python version of the test matrix.
+    versions = " ".join(jobs["test"]["strategy"]["matrix"]["python-version"])
+    assert f"for version in {versions}; do" in scripts
+
+
+def _shard(*args: str) -> list[str]:
+    script = PROJECT_ROOT / ".github" / "scripts" / "test-shard.sh"
+    result = subprocess.run(["bash", str(script), *args], cwd=PROJECT_ROOT, check=True, capture_output=True, text=True)
+    return result.stdout.split()
+
+
+def test_every_test_directory_runs_in_exactly_one_shard():
+    shards = json.loads(_shard("--list")[0])
+    assert shards[-1] == "rest"
+    named = {shard: _shard(shard) for shard in shards[:-1]}
+    assigned = [path for paths in named.values() for path in paths]
+    assert len(assigned) == len(set(assigned))
+
+    rest = _shard("rest")
+    assert rest[0] == "tests"
+    assert sorted(arg.removeprefix("--ignore=") for arg in rest[1:]) == sorted(assigned)
+
+    test_dirs = {
+        f"tests/{path.name}"
+        for path in (PROJECT_ROOT / "tests").iterdir()
+        if path.is_dir() and any(path.rglob("test_*.py"))
+    }
+    # The named shards list existing test directories; "rest" runs the others.
+    assert set(assigned) <= test_dirs
+    assert test_dirs - set(assigned), "the rest shard should run at least one directory"
 
 
 def test_coverage_gate_is_80_percent():

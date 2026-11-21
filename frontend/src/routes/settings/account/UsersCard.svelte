@@ -6,9 +6,9 @@
 	 * the last active admin.
 	 */
 	import { onMount } from 'svelte';
-	import { createUser, listUsers, updateUser } from '$lib/api.js';
-	import Card from '$lib/components/Card.svelte';
-	import DataState from '$lib/components/DataState.svelte';
+	import { createUser, listUsers, updateUser } from '#lib/api.js';
+	import Card from '#lib/components/Card.svelte';
+	import DataState from '#lib/components/DataState.svelte';
 
 	export let currentUserName = '';
 

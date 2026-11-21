@@ -1,9 +1,9 @@
 <script>
-	import { formatCO2, formatDate } from '$lib/utils/format.js';
-	import { formatMoney } from '$lib/utils/decision.js';
-	import { measurementRows } from '$lib/changes.js';
-	import StatusPill from '$lib/components/StatusPill.svelte';
-	import { outcomeLabel, realizationText } from '$lib/savingsVocabulary.js';
+	import { formatCO2, formatDate } from '#lib/utils/format.js';
+	import { formatMoney } from '#lib/utils/decision.js';
+	import { measurementRows } from '#lib/changes.js';
+	import StatusPill from '#lib/components/StatusPill.svelte';
+	import { outcomeLabel, realizationText } from '#lib/savingsVocabulary.js';
 
 	/** One decided measurement from GET /api/v2/changes/{id}/measurements. */
 	export let measurement;

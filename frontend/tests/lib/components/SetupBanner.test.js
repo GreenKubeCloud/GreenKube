@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
-import SetupBanner from '$lib/components/SetupBanner.svelte';
+import SetupBanner from '#lib/components/SetupBanner.svelte';
 
 describe('SetupBanner', () => {
 	it('renders nothing while the status is unknown or complete', () => {

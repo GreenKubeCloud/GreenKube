@@ -1,10 +1,10 @@
 <script>
 	import { onMount } from 'svelte';
-	import { getNodes } from '$lib/api.js';
-	import { formatCPU, formatBytes, formatNumber } from '$lib/utils/format.js';
-	import DataState from '$lib/components/DataState.svelte';
-	import Card from '$lib/components/Card.svelte';
-	import { gpuPowerBadge } from '$lib/nodeGpu.js';
+	import { getNodes } from '#lib/api.js';
+	import { formatCPU, formatBytes, formatNumber } from '#lib/utils/format.js';
+	import DataState from '#lib/components/DataState.svelte';
+	import Card from '#lib/components/Card.svelte';
+	import { gpuPowerBadge } from '#lib/nodeGpu.js';
 
 	let nodes = [];
 	let loading = true;

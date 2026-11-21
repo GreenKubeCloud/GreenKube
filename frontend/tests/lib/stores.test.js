@@ -13,7 +13,7 @@ import {
 	sidebarCollapsed,
 	servicesHealth,
 	healthPopupDismissed
-} from '$lib/stores.js';
+} from '#lib/stores.js';
 
 
 describe('selectedNamespace', () => {
@@ -117,13 +117,13 @@ describe('healthPopupDismissed session persistence (K9)', () => {
 		const storage = createMemoryStorage();
 		restore.push(installStorage('sessionStorage', storage));
 		vi.resetModules();
-		const first = await import('$lib/stores.js');
+		const first = await import('#lib/stores.js');
 
 		first.healthPopupDismissed.set(true);
 		expect(storage.getItem(first.HEALTH_POPUP_DISMISSED_KEY)).toBe('true');
 
 		vi.resetModules();
-		const reloaded = await import('$lib/stores.js');
+		const reloaded = await import('#lib/stores.js');
 		expect(get(reloaded.healthPopupDismissed)).toBe(true);
 
 		reloaded.healthPopupDismissed.update(() => false);
@@ -133,7 +133,7 @@ describe('healthPopupDismissed session persistence (K9)', () => {
 	it('falls back to memory when sessionStorage is unavailable', async () => {
 		restore.push(installBlockedStorage('sessionStorage'));
 		vi.resetModules();
-		const stores = await import('$lib/stores.js');
+		const stores = await import('#lib/stores.js');
 
 		expect(get(stores.healthPopupDismissed)).toBe(false);
 		expect(() => stores.healthPopupDismissed.set(true)).not.toThrow();

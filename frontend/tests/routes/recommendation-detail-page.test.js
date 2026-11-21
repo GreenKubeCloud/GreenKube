@@ -6,11 +6,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import DetailPage from '../../src/routes/recommendations/[id]/+page.svelte';
 import { load } from '../../src/routes/recommendations/[id]/+page.js';
-import * as api from '$lib/api.js';
+import * as api from '#lib/api.js';
 // GET /api/v2/recommendations/12 generated from the FastAPI app (tests/api/test_ui_contract_fixtures.py).
 import V2_DETAIL from '../fixtures/api/recommendation_v2_detail.json';
 
-vi.mock('$lib/api.js', () => {
+vi.mock('#lib/api.js', () => {
 	class ApiError extends Error {
 		constructor(message, status) {
 			super(message);

@@ -1,7 +1,7 @@
 /**
  * ECharts theme and option builders for GreenKube.
  */
-import { currencySymbol } from '$lib/utils/format.js';
+import { currencySymbol } from '#lib/utils/format.js';
 
 const COLORS = {
 	green: '#22c55e',

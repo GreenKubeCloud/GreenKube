@@ -4,10 +4,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
 import RecommendationsPage from '../../src/routes/recommendations/+page.svelte';
-import * as api from '$lib/api.js';
-import { resetOptimizationRunsSupport } from '$lib/optimizationRuns.js';
+import * as api from '#lib/api.js';
+import { resetOptimizationRunsSupport } from '#lib/optimizationRuns.js';
 
-vi.mock('$lib/api.js', async (importOriginal) => {
+vi.mock('#lib/api.js', async (importOriginal) => {
 	const original = await importOriginal();
 	const mocked = {};
 	for (const [name, value] of Object.entries(original)) {

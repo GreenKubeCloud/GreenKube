@@ -4,10 +4,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import AutomationPage from '../../src/routes/automation/+page.svelte';
-import * as api from '$lib/api.js';
-import { currentUser } from '$lib/stores.js';
+import * as api from '#lib/api.js';
+import { currentUser } from '#lib/stores.js';
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	getGitOpsStatus: vi.fn(),
 	getGitOpsCoverage: vi.fn(),
 	getGitOpsBindings: vi.fn(),

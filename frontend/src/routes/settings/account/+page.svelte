@@ -1,13 +1,13 @@
 <script>
 	/** Account: role, password change, active sessions with revoke, sign out (K11); users and roles for admins (F16). */
 	import { onMount } from 'svelte';
-	import { listSessions, revokeSession, logout } from '$lib/api.js';
-	import { currentUser, hasScope } from '$lib/stores.js';
+	import { listSessions, revokeSession, logout } from '#lib/api.js';
+	import { currentUser, hasScope } from '#lib/stores.js';
 	import UsersCard from './UsersCard.svelte';
-	import Card from '$lib/components/Card.svelte';
-	import DataState from '$lib/components/DataState.svelte';
-	import PasswordChangeForm from '$lib/components/PasswordChangeForm.svelte';
-	import { formatDate } from '$lib/utils/format.js';
+	import Card from '#lib/components/Card.svelte';
+	import DataState from '#lib/components/DataState.svelte';
+	import PasswordChangeForm from '#lib/components/PasswordChangeForm.svelte';
+	import { formatDate } from '#lib/utils/format.js';
 
 	let sessions = [];
 	let loading = true;

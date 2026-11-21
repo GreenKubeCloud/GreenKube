@@ -13,43 +13,20 @@ permissions:
   contents: read
 
 jobs:
-  lint-and-test:
-    name: Lint, Gitleaks & Tests
+  lint:
+    name: Lint, Gitleaks & Types
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.13", "3.14"]
-    services:
-      postgres:
-        image: postgres:18.0-alpine3.22
-        env:
-          POSTGRES_DB: greenkube_test
-          POSTGRES_USER: greenkube
-          POSTGRES_PASSWORD: greenkube_password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U greenkube -d greenkube_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      GREENKUBE_TEST_POSTGRES_DSN: postgresql://greenkube:greenkube_password@localhost:5432/greenkube_test
-      # pg_dump/pg_restore matching the server, for the backup restore test.
-      GREENKUBE_TEST_PG_CLIENT: docker run --rm -i --network host postgres:18.0-alpine3.22
-
+    timeout-minutes: 15
     steps:
       - name: Check out code (full history for Gitleaks)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.13"
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
@@ -74,17 +51,146 @@ jobs:
       - name: Type-check with Pyrefly
         run: uv run pyrefly check
 
-      - name: Run tests with pytest (coverage gate from pyproject.toml)
-        # shell: bash runs with -o pipefail, so a failing pytest (or coverage
-        # gate) fails this step even though its output is piped through tee.
+  # The test shards come from .github/scripts/test-shard.sh: its "rest" shard
+  # runs every tests/ directory the named shards do not list, so each test
+  # directory runs in exactly one shard.
+  test-shards:
+    name: Plan test shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.list.outputs.shards }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: List the shards
+        id: list
+        run: echo "shards=$(.github/scripts/test-shard.sh --list)" >> "${GITHUB_OUTPUT}"
+
+  test:
+    name: Tests (${{ matrix.python-version }}, ${{ matrix.shard }})
+    needs: test-shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+        shard: ${{ fromJSON(needs.test-shards.outputs.shards) }}
+    services:
+      postgres:
+        image: postgres:18.0-alpine3.22
+        env:
+          POSTGRES_DB: greenkube_test
+          POSTGRES_USER: greenkube
+          POSTGRES_PASSWORD: greenkube_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U greenkube -d greenkube_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GREENKUBE_TEST_POSTGRES_DSN: postgresql://greenkube:greenkube_password@localhost:5432/greenkube_test
+      # pg_dump/pg_restore matching the server, for the backup restore test.
+      GREENKUBE_TEST_PG_CLIENT: docker run --rm -i --network host postgres:18.0-alpine3.22
+      # One coverage data file per shard, combined by the coverage job.
+      COVERAGE_FILE: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          enable-cache: true
+
+      - name: Install dependencies from the lockfile
+        run: uv sync --locked --group test
+
+      - name: Run the ${{ matrix.shard }} test shard with coverage
+        # shell: bash runs with -o pipefail, so a failing pytest fails this
+        # step even though its output is piped through tee. A shard covers
+        # part of the code only: the coverage gate runs in the coverage job.
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
           set -o pipefail
-          uv run pytest --cov=greenkube --cov-report=term-missing --tb=short --no-header --color=no -rs | tee pytest.log
+          mapfile -t paths < <(.github/scripts/test-shard.sh "${SHARD}")
+          uv run pytest --cov=greenkube --cov-report= --cov-fail-under=0 \
+            --tb=short --no-header --color=no -rs "${paths[@]}" | tee pytest.log
 
       # The PostgreSQL service above must reach every live-PostgreSQL test (O8).
       - name: Check that the PostgreSQL tests ran
         run: .github/scripts/check-postgres-ran.sh pytest.log
+
+      - name: Upload the coverage data
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: ${{ env.COVERAGE_FILE }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  # Coverage gate (fail_under in pyproject.toml) on the combined shards, for
+  # each Python version.
+  coverage:
+    name: Coverage gate
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          enable-cache: true
+
+      - name: Install dependencies from the lockfile
+        run: uv sync --locked --group test
+
+      - name: Download the coverage data of every shard
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: coverage-*
+          path: coverage-data
+          merge-multiple: true
+
+      - name: Combine the shards and enforce the coverage gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          shards="$(.github/scripts/test-shard.sh --list | tr -d '[]"' | tr ',' ' ')"
+          status=0
+          for version in 3.13 3.14; do
+            files=()
+            for shard in ${shards}; do
+              file="coverage-data/.coverage.${version}.${shard}"
+              if [[ ! -f "${file}" ]]; then
+                echo "::error::Missing coverage data ${file}" >&2
+                exit 1
+              fi
+              files+=("${file}")
+            done
+            echo "== Python ${version}"
+            COVERAGE_FILE=".coverage.${version}" uv run coverage combine --keep "${files[@]}"
+            COVERAGE_FILE=".coverage.${version}" uv run coverage report --skip-covered || status=$?
+          done
+          exit "${status}"
 
   frontend-test:
     name: Frontend Tests

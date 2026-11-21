@@ -6,12 +6,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import SourcesPage from '../../src/routes/sources/+page.svelte';
-import * as api from '$lib/api.js';
-import { sortSources, sourceStatus } from '$lib/sources.js';
+import * as api from '#lib/api.js';
+import { sortSources, sourceStatus } from '#lib/sources.js';
 import SOURCES_FIXTURE from '../fixtures/api/sources_list.json';
 import RUNS_FIXTURE from '../fixtures/api/source_runs.json';
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	listSources: vi.fn(),
 	listSourceRuns: vi.fn(),
 	getSourceTrackRecord: vi.fn()

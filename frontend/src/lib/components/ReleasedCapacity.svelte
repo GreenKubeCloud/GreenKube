@@ -3,8 +3,8 @@
 	 * Released capacity block (WP-08.1): reserved capacity in its own units,
 	 * labelled projected or measured, never money and never a saving.
 	 */
-	import StatusPill from '$lib/components/StatusPill.svelte';
-	import { releasedCapacityOf } from '$lib/releasedCapacity.js';
+	import StatusPill from '#lib/components/StatusPill.svelte';
+	import { releasedCapacityOf } from '#lib/releasedCapacity.js';
 
 	export let capacity = null;
 	export let testid = 'released-capacity';

@@ -1,9 +1,9 @@
 <script>
 	/** One change on the board (K4): plan, pull request, change and recommendation links. */
-	import StatusPill from '$lib/components/StatusPill.svelte';
-	import { formatRelativeTime } from '$lib/utils/format.js';
+	import StatusPill from '#lib/components/StatusPill.svelte';
+	import { formatRelativeTime } from '#lib/utils/format.js';
 
-	/** @type {ReturnType<typeof import('$lib/changes.js').buildChangeBoard>[number]} */
+	/** @type {ReturnType<typeof import('#lib/changes.js').buildChangeBoard>[number]} */
 	export let row;
 
 	$: title = row.workload ?? (row.planId ? `Plan ${row.planId}` : `Change ${row.changeId}`);

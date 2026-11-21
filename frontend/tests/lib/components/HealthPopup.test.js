@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
-import HealthPopup from '$lib/components/HealthPopup.svelte';
+import HealthPopup from '#lib/components/HealthPopup.svelte';
 
 const healthyServices = {
 	prometheus: { name: 'prometheus', status: 'healthy', inactive: false },

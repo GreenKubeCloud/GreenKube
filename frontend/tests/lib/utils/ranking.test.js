@@ -9,7 +9,7 @@ import {
 	rankingFactorValue,
 	sortedRankingFactors,
 	topRankingFactor
-} from '$lib/utils/ranking.js';
+} from '#lib/utils/ranking.js';
 
 const factors = {
 	carbon: 0.12,

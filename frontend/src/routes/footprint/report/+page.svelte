@@ -1,15 +1,15 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
-	import { getNamespaces, getReportSummary, getReportYears, downloadReport } from '$lib/api.js';
+	import { getNamespaces, getReportSummary, getReportYears, downloadReport } from '#lib/api.js';
 	import {
 		reportTimeRanges as timeRanges,
 		aggregationLevels,
 		groupByOptions,
 		buildReportRequestParams
-	} from '$lib/reportOptions.js';
-	import { formatCO2, formatCost, formatEnergy } from '$lib/utils/format.js';
-	import Card from '$lib/components/Card.svelte';
-	import DataState from '$lib/components/DataState.svelte';
+	} from '#lib/reportOptions.js';
+	import { formatCO2, formatCost, formatEnergy } from '#lib/utils/format.js';
+	import Card from '#lib/components/Card.svelte';
+	import DataState from '#lib/components/DataState.svelte';
 
 	// ── Filter state ──────────────────────────────────────────────────────────
 	let namespace = '';

@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, waitFor } from '@testing-library/svelte';
 import DashboardPage from '../../src/routes/+page.svelte';
-import * as api from '$lib/api.js';
+import * as api from '#lib/api.js';
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	getDashboardSummary: vi.fn(),
 	getDashboardTimeseries: vi.fn(),
 	getMetricsSummary: vi.fn(),

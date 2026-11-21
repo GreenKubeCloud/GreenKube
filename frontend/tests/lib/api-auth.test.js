@@ -6,7 +6,7 @@
  * Uses the real jsdom window so window events and storage are real.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as api from '$lib/api.js';
+import * as api from '#lib/api.js';
 import { createMemoryStorage, installStorage } from '../helpers/storage.js';
 
 const {

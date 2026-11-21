@@ -5,9 +5,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
-import SavingsHero from '$lib/components/SavingsHero.svelte';
-import MeasurementTable from '$lib/components/MeasurementTable.svelte';
-import { buildSavingsOverview } from '$lib/overview.js';
+import SavingsHero from '#lib/components/SavingsHero.svelte';
+import MeasurementTable from '#lib/components/MeasurementTable.svelte';
+import { buildSavingsOverview } from '#lib/overview.js';
 import {
 	outcomeLabel,
 	realizationFactorOf,
@@ -15,8 +15,8 @@ import {
 	savingPhrase,
 	savingsFigures,
 	visibleDiagnostics
-} from '$lib/savingsVocabulary.js';
-import { stateLabel } from '$lib/changes.js';
+} from '#lib/savingsVocabulary.js';
+import { stateLabel } from '#lib/changes.js';
 
 const current = {
 	realized_to_date: { method: 'measured', basis: 'accrued', cost: 120, co2e_grams: 4000 },
@@ -182,7 +182,7 @@ describe('visibleDiagnostics', () => {
 
 describe('appliedCostFigure (MEA-14)', () => {
 	it('a verified reliability fix reads as a confirmed fix and its cost, never a saving of 0', async () => {
-		const { appliedCostFigure } = await import('$lib/savingsVocabulary.js');
+		const { appliedCostFigure } = await import('#lib/savingsVocabulary.js');
 		const fix = {
 			type: 'RIGHTSIZING_MEMORY',
 			status: 'verified',

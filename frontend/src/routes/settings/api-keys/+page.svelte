@@ -1,10 +1,10 @@
 <script>
 	/** Scoped API keys for machines: create (shown once), list, revoke (F15, K11). */
 	import { onMount } from 'svelte';
-	import { createApiKey, listApiKeys, revokeApiKey } from '$lib/api.js';
-	import Card from '$lib/components/Card.svelte';
-	import DataState from '$lib/components/DataState.svelte';
-	import { formatDate } from '$lib/utils/format.js';
+	import { createApiKey, listApiKeys, revokeApiKey } from '#lib/api.js';
+	import Card from '#lib/components/Card.svelte';
+	import DataState from '#lib/components/DataState.svelte';
+	import { formatDate } from '#lib/utils/format.js';
 
 	const SCOPES = [
 		{ value: 'read', label: 'read', help: 'Read every API resource.' },

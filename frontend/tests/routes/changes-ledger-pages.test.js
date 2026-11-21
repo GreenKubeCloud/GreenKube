@@ -8,10 +8,10 @@ import ChangePage from '../../src/routes/changes/[plan_id]/+page.svelte';
 import { load as loadChange } from '../../src/routes/changes/[plan_id]/+page.js';
 import LedgerPage from '../../src/routes/ledger/+page.svelte';
 import { load as loadLedger } from '../../src/routes/ledger/+page.js';
-import * as api from '$lib/api.js';
-import { demoMode } from '$lib/stores.js';
+import * as api from '#lib/api.js';
+import { demoMode } from '#lib/stores.js';
 
-vi.mock('$lib/api.js', () => {
+vi.mock('#lib/api.js', () => {
 	class ApiError extends Error {
 		constructor(message, status) {
 			super(message);

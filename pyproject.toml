@@ -157,6 +157,14 @@ omit = [
     "*/greenkube/data/*",
 ]
 
+[tool.coverage.paths]
+# CI combines the coverage data of its test shards: map an installed copy of
+# the package onto the source tree.
+source = [
+    "src/greenkube",
+    "*/site-packages/greenkube",
+]
+
 [tool.coverage.report]
 # Fail if total coverage drops below this percentage (enforced by pytest-cov in CI)
 fail_under = 80

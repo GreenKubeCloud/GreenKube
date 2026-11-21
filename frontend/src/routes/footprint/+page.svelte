@@ -5,7 +5,7 @@
 	 * bundled Grafana dashboard is the deep-analysis surface.
 	 */
 	import { onDestroy } from 'svelte';
-	import { currentUser, hasScope, selectedNamespace, selectedTimeRange } from '$lib/stores.js';
+	import { currentUser, hasScope, selectedNamespace, selectedTimeRange } from '#lib/stores.js';
 	import {
 		getMetricsSummary,
 		getTimeseries,
@@ -14,15 +14,15 @@
 		getDashboardSummary,
 		getDashboardTimeseries,
 		refreshDashboardSummary
-	} from '$lib/api.js';
-	import { formatCO2, formatCost, formatEnergy, formatNumber, formatRelativeTime } from '$lib/utils/format.js';
-	import { buildTimeseriesOption, buildMultiSeriesOption, buildNamespaceDonutOption, buildTopPodsOption } from '$lib/charts.js';
-	import { NOT_AVAILABLE, idleShareNote, idleShareRows, windowStart } from '$lib/idleShare.js';
-	import StatCard from '$lib/components/StatCard.svelte';
-	import DataState from '$lib/components/DataState.svelte';
-	import Filters from '$lib/components/Filters.svelte';
-	import Chart from '$lib/components/Chart.svelte';
-	import Card from '$lib/components/Card.svelte';
+	} from '#lib/api.js';
+	import { formatCO2, formatCost, formatEnergy, formatNumber, formatRelativeTime } from '#lib/utils/format.js';
+	import { buildTimeseriesOption, buildMultiSeriesOption, buildNamespaceDonutOption, buildTopPodsOption } from '#lib/charts.js';
+	import { NOT_AVAILABLE, idleShareNote, idleShareRows, windowStart } from '#lib/idleShare.js';
+	import StatCard from '#lib/components/StatCard.svelte';
+	import DataState from '#lib/components/DataState.svelte';
+	import Filters from '#lib/components/Filters.svelte';
+	import Chart from '#lib/components/Chart.svelte';
+	import Card from '#lib/components/Card.svelte';
 
 	// Slugs served by the pre-computed summary / timeseries cache tables
 	const PRECOMPUTED_SLUGS = new Set(['24h', '7d', '30d', '1y', 'ytd']);

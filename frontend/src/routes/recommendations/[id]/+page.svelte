@@ -6,12 +6,12 @@
 		getRecommendationEvents,
 		getRecommendationPullRequests,
 		getRecommendationV2
-	} from '$lib/api.js';
-	import { formatCO2, formatDate } from '$lib/utils/format.js';
-	import { describeExpectedValue, eligibilityOf, formatMoney, oomHistoryWarningOf } from '$lib/utils/decision.js';
-	import OomHistoryWarning from '$lib/components/OomHistoryWarning.svelte';
-	import { groupConsecutiveEvents } from '$lib/utils/lifecycle.js';
-	import { etaFrom, targetName } from '$lib/overview.js';
+	} from '#lib/api.js';
+	import { formatCO2, formatDate } from '#lib/utils/format.js';
+	import { describeExpectedValue, eligibilityOf, formatMoney, oomHistoryWarningOf } from '#lib/utils/decision.js';
+	import OomHistoryWarning from '#lib/components/OomHistoryWarning.svelte';
+	import { groupConsecutiveEvents } from '#lib/utils/lifecycle.js';
+	import { etaFrom, targetName } from '#lib/overview.js';
 	import {
 		consensusOf,
 		eventLabel,
@@ -25,10 +25,10 @@
 		safeHttpUrl,
 		uncountedReason,
 		valueOf
-	} from '$lib/recommendationDetail.js';
-	import StatusPill from '$lib/components/StatusPill.svelte';
-	import ReleasedCapacity from '$lib/components/ReleasedCapacity.svelte';
-	import ManualApplyPanel from '$lib/components/ManualApplyPanel.svelte';
+	} from '#lib/recommendationDetail.js';
+	import StatusPill from '#lib/components/StatusPill.svelte';
+	import ReleasedCapacity from '#lib/components/ReleasedCapacity.svelte';
+	import ManualApplyPanel from '#lib/components/ManualApplyPanel.svelte';
 
 	/** @type {{id: string}} */
 	export let data;

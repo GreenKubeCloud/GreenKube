@@ -3,11 +3,11 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/svelte';
-import { downloadReport } from '$lib/api.js';
+import { downloadReport } from '#lib/api.js';
 import ReportPage from '../../src/routes/footprint/report/+page.svelte';
 
 
-vi.mock('$lib/api.js', () => ({
+vi.mock('#lib/api.js', () => ({
 	getNamespaces: vi.fn(() => Promise.resolve(['default', 'prod'])),
 	getReportYears: vi.fn(() => Promise.resolve([2026, 2025])),
 	getReportSummary: vi.fn(() => Promise.resolve({

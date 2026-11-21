@@ -10,7 +10,7 @@ import {
 	buildMultiSeriesOption,
 	buildNamespaceDonutOption,
 	buildTopPodsOption
-} from '$lib/charts.js';
+} from '#lib/charts.js';
 
 
 // ---------------------------------------------------------------------------

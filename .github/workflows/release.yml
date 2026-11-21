@@ -31,7 +31,9 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The whole suite in one process (ci.yml runs it in shards) takes over
+    # 20 minutes on a hosted runner.
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:18.0-alpine3.22

@@ -11,7 +11,7 @@ import {
 	getRecommendationPullRequests,
 	listChanges,
 	listDeliveringRecommendations
-} from '$lib/api.js';
+} from '#lib/api.js';
 
 /** Measurement states with a label; status words are always shown as text. */
 export const CHANGE_STATES = {

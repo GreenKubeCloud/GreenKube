@@ -1,11 +1,11 @@
 <script>
 	import { onMount } from 'svelte';
-	import { getConfig, getVersion, getHealth, getServicesHealth } from '$lib/api.js';
-	import { servicesHealth, currentUser, hasScope } from '$lib/stores.js';
-	import { allHelmSnippets, HELM_UPGRADE_COMMAND } from '$lib/configSnippets.js';
-	import DataState from '$lib/components/DataState.svelte';
-	import Card from '$lib/components/Card.svelte';
-	import HealthBadge from '$lib/components/HealthBadge.svelte';
+	import { getConfig, getVersion, getHealth, getServicesHealth } from '#lib/api.js';
+	import { servicesHealth, currentUser, hasScope } from '#lib/stores.js';
+	import { allHelmSnippets, HELM_UPGRADE_COMMAND } from '#lib/configSnippets.js';
+	import DataState from '#lib/components/DataState.svelte';
+	import Card from '#lib/components/Card.svelte';
+	import HealthBadge from '#lib/components/HealthBadge.svelte';
 
 	let config = null;
 	let version = null;
