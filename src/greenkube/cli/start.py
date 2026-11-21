@@ -530,6 +530,27 @@ async def _run_initial_controller_task(
     return True
 
 
+def _initial_tasks_as_loop_ticks(registry, initial_tasks):
+    """Run each initial task that is a registered loop's job as one tick of that loop.
+
+    The initial pass then counts in the loop status and telemetry (``runs``,
+    ``last_success_at``), so ``metrics-compression`` no longer shows ``runs: 0``
+    after its startup pass (F-10). Tasks with arguments, or with no matching
+    loop, run as before.
+    """
+    loop_by_job = {}
+    for name in registry.names:
+        loop_by_job.setdefault(registry.spec(name).func, name)
+    converted = []
+    for callback, args, kwargs in initial_tasks:
+        name = None if args or kwargs else loop_by_job.get(callback)
+        if name is None:
+            converted.append((callback, args, kwargs))
+        else:
+            converted.append((registry.run_once, (name,), {}))
+    return tuple(converted)
+
+
 async def _run_deferred_initial_controller_work(
     initial_tasks,
     should_run,
@@ -1027,6 +1048,7 @@ async def _async_start(last: Optional[str], force: bool = False):
             (refresh_dashboard_summary, (), {}),
             (initial_recommendation_scan, (), {}),
         )
+        initial_tasks = _initial_tasks_as_loop_ticks(registry, initial_tasks)
         if should_run is None:
             logger.info("Running initial controller work...")
             try:

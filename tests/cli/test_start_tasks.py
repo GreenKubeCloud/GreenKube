@@ -375,6 +375,13 @@ class _CapturingRegistry:
     def start(self):
         self.started = True
 
+    def spec(self, name):
+        return self.specs[name]
+
+    async def run_once(self, name):
+        await self.specs[name].func()
+        return "success"
+
 
 def _controller_config(**overrides):
     values = dict(
@@ -752,3 +759,25 @@ async def test_failed_migration_stops_the_metrics_listener(monkeypatch):
             await start_module._async_start(last=None)
 
     assert events == ["metrics-started", "metrics-stopped:endpoint"]
+
+
+@pytest.mark.asyncio
+async def test_initial_pass_of_a_registered_loop_counts_as_a_run():
+    """F-10: the initial metrics-compression pass shows in the loop status (``runs: 1``)."""
+    from greenkube.core.loops import LoopRegistry, LoopSpec
+
+    registry = LoopRegistry(role="controller")
+    compress = AsyncMock()
+    collect = AsyncMock()
+    registry.register(LoopSpec("metrics-compression", compress, 3600))
+
+    initial = start_module._initial_tasks_as_loop_ticks(registry, ((collect, (), {"last": "1h"}), (compress, (), {})))
+    for callback, args, kwargs in initial:
+        assert await start_module._run_initial_controller_task(callback, None, *args, **kwargs)
+
+    compress.assert_awaited_once()
+    collect.assert_awaited_once_with(last="1h")
+    status = registry.status("metrics-compression")
+    assert status.runs == 1
+    assert status.last_outcome == "success"
+    assert status.last_success_at is not None
