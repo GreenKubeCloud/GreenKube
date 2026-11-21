@@ -21,6 +21,7 @@ from greenkube.impact.pricing import (
     CustomRates,
     PricingCatalog,
     UnitPriceResolver,
+    cost_split_share,
     observed_rates_from_rows,
     row_hours,
 )
@@ -194,13 +195,9 @@ def _cost_split_coverage(metric: Any, hours: float) -> Tuple[Optional[float], Op
     when the split covers the whole row, so such samples keep the per-sample
     pricing rules unchanged.
     """
-    split_seconds = getattr(metric, "cost_split_duration_seconds", None)
-    duration = getattr(metric, "duration_seconds", None)
-    if not isinstance(split_seconds, (int, float)) or isinstance(split_seconds, bool):
+    share = cost_split_share(metric)
+    if share is None:
         return None, None
-    if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0:
-        return None, None
-    share = min(max(float(split_seconds) / float(duration), 0.0), 1.0)
     unsplit_total = getattr(metric, "cost_unsplit_total", None)
     unsplit = float(unsplit_total) if isinstance(unsplit_total, (int, float)) and unsplit_total > 0 else 0.0
     if share >= 1.0 or share <= 0.0:

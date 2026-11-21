@@ -827,13 +827,8 @@ def _unit_prices(rows: list[BaselineMetric]) -> tuple[float, float]:
     return cpu_cost / cpu_hours, ram_cost / ram_hours
 
 
-async def test_baseline_mixing_split_and_unsplit_hours_keeps_the_split_unit_prices(db):
-    """F-03: hours re-aggregated from 0.3.x rows carry only ``total_cost``.
-
-    A lookback that mixes them with split hours must give the unit prices of
-    the split hours alone (within 1 %), not dilute the CPU and RAM cost over
-    every hour of the window.
-    """
+async def _mixed_split_baselines(db) -> tuple[list[BaselineMetric], list[BaselineMetric]]:
+    """Pod baselines of one split hour alone, and of that hour plus an unsplit (0.3.x) hour the day before."""
     start = _base_hour() - timedelta(days=1)
     rows = []
     for day in range(2):
@@ -851,6 +846,17 @@ async def test_baseline_mixing_split_and_unsplit_hours_keeps_the_split_unit_pric
     mixed_window = (start, start + timedelta(days=1, hours=1))
     snapshot = await repository.read_usage_snapshot(*mixed_window)
     mixed_pods, _ = await repository.read_baseline_rows(*mixed_window, snapshot=snapshot)
+    return split_pods, mixed_pods
+
+
+async def test_baseline_mixing_split_and_unsplit_hours_keeps_the_split_unit_prices(db):
+    """F-03: hours re-aggregated from 0.3.x rows carry only ``total_cost``.
+
+    A lookback that mixes them with split hours must give the unit prices of
+    the split hours alone (within 1 %), not dilute the CPU and RAM cost over
+    every hour of the window.
+    """
+    split_pods, mixed_pods = await _mixed_split_baselines(db)
 
     split_cpu, split_ram = _unit_prices(split_pods)
     mixed_cpu, mixed_ram = _unit_prices(mixed_pods)
@@ -859,3 +865,26 @@ async def test_baseline_mixing_split_and_unsplit_hours_keeps_the_split_unit_pric
     assert split_ram == pytest.approx(0.072, rel=1e-3)
     assert mixed_cpu == pytest.approx(split_cpu, rel=0.01)
     assert mixed_ram == pytest.approx(split_ram, rel=0.01)
+
+
+async def test_node_observed_prices_from_mixed_baselines_keep_the_split_prices(db):
+    """F-03, tier 1: per-node observed prices divide the split cost by the split hours only."""
+    from greenkube.impact.projector import ImpactProjector
+    from greenkube.models.node import NodeInfo
+
+    split_pods, mixed_pods = await _mixed_split_baselines(db)
+    nodes = [NodeInfo(name="node-a", cpu_capacity_cores=4, memory_capacity_bytes=16 * 1024 * MIB)]
+
+    def _projector(rows):
+        return ImpactProjector(Config(), node_infos=nodes, rows=rows)
+
+    split, mixed = _projector(split_pods), _projector(mixed_pods)
+    split_prices = split.pool.nodes["node-a"].prices
+    mixed_prices = mixed.pool.nodes["node-a"].prices
+    assert split_prices.source.value == "opencost"
+    assert split_prices.cpu_core_hour == pytest.approx(0.144, rel=1e-3)
+    assert mixed_prices.cpu_core_hour == pytest.approx(split_prices.cpu_core_hour, rel=0.01)
+    assert mixed_prices.ram_gib_hour == pytest.approx(split_prices.ram_gib_hour, rel=0.01)
+    split_hourly, mixed_hourly = split.node_hourly_price("node-a"), mixed.node_hourly_price("node-a")
+    assert split_hourly is not None and mixed_hourly is not None
+    assert mixed_hourly == pytest.approx(split_hourly, rel=0.01)

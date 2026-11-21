@@ -384,11 +384,35 @@ class UnitPriceResolver:
         return self.custom_rates.unit_prices()
 
 
+def cost_split_share(row: Any) -> Optional[float]:
+    """Share of an aggregated row's duration whose cost carries a CPU/RAM split (F-03).
+
+    None when the row does not say (raw rows, or no duration): its split, when
+    present, covers the whole row.
+    """
+    split_seconds = getattr(row, "cost_split_duration_seconds", None)
+    duration = getattr(row, "duration_seconds", None)
+    if not isinstance(split_seconds, (int, float)) or isinstance(split_seconds, bool):
+        return None
+    if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0:
+        return None
+    return min(max(float(split_seconds) / float(duration), 0.0), 1.0)
+
+
+def cost_split_hours(row: Any, hours: float) -> float:
+    """Hours of a row covered by its CPU/RAM cost split: all of ``hours`` unless the row says otherwise."""
+    share = cost_split_share(row)
+    return hours if share is None else hours * share
+
+
 def observed_rates_from_rows(rows: Iterable[Any], default_hours: float) -> Dict[str, ObservedRates]:
     """Builds per-node observed rates from metric rows carrying ``cost_cpu``/``cost_ram``.
 
     Rows without these optional fields (every row before roadmap A4/A11) are
     skipped, so the resolver falls through to the catalog and custom rates.
+    An aggregated row whose split covers only part of its hours (hours
+    re-aggregated from 0.3.x rows carry a total only, F-03) counts the
+    reserved quantities of the split hours only.
     """
     observed: Dict[str, ObservedRates] = {}
     for row in rows:
@@ -397,7 +421,9 @@ def observed_rates_from_rows(rows: Iterable[Any], default_hours: float) -> Dict[
         node = getattr(row, "node", None)
         if node is None or (cost_cpu is None and cost_ram is None):
             continue
-        hours = row_hours(row, default_hours)
+        hours = cost_split_hours(row, row_hours(row, default_hours))
+        if hours <= 0:
+            continue
         cpu_reserved = max(float(getattr(row, "cpu_request", 0) or 0), float(row.cpu_usage_millicores or 0)) / 1000.0
         mem_reserved = (
             max(float(getattr(row, "memory_request", 0) or 0), float(row.memory_usage_bytes or 0)) / BYTES_PER_GIB
