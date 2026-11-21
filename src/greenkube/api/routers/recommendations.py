@@ -32,7 +32,7 @@ import io
 import json
 import logging
 from datetime import datetime, timezone
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
@@ -160,8 +160,12 @@ async def _decide(
     gitops_repo: GitOpsRepository,
     pr_repo: PullRequestRepository,
     service: Optional[AutomationPlanApiService],
+    lookup_pool: Sequence[RecommendationRecord] = (),
 ) -> List[RecommendationRecord]:
-    """Attaches the live expected value and eligibility, ordered by expected value."""
+    """Attaches the live expected value and eligibility, ordered by expected value.
+
+    ``lookup_pool`` is the unfiltered list ``records`` was cut from (siblings of an action).
+    """
     return await decide_records(
         records,
         config=get_config(),
@@ -170,6 +174,7 @@ async def _decide(
         pr_repo=pr_repo,
         automation_configured=service is not None,
         request=decision,
+        lookup_pool=lookup_pool,
     )
 
 
@@ -230,7 +235,7 @@ async def list_active_recommendations(
 
     records = await reco_repo.get_active_recommendations(namespace=namespace, include_pr_open=True)
     filtered = _filter_records(records, source, risk_level, capability)
-    return await _decide(filtered, decision, reco_repo, gitops_repo, pr_repo, service)
+    return await _decide(filtered, decision, reco_repo, gitops_repo, pr_repo, service, lookup_pool=records)
 
 
 @router.get("/recommendations/top", response_model=List[TopRecommendation])

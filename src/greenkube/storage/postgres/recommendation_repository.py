@@ -9,7 +9,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Collection, Dict, List, Mapping, Optional
+from typing import Collection, Dict, List, Mapping, Optional, Sequence
 
 from ...core.recommendation_ranking import normalize_savings_metric
 from ...core.recommendation_realization import (
@@ -883,6 +883,17 @@ class PostgresRecommendationRepository(RecommendationRepository):
         async with self.db_manager.connection_scope() as conn:
             row = await conn.fetchrow("SELECT * FROM recommendation_history WHERE id = $1", rec_id)
             return row_to_record(row) if row else None
+
+    async def get_recommendations_by_ids(self, rec_ids: Sequence[int]) -> List[RecommendationRecord]:
+        """Returns the recommendations with these database IDs in one query (unknown IDs are skipped)."""
+        ids = [int(rec_id) for rec_id in dict.fromkeys(rec_ids)]
+        if not ids:
+            return []
+        async with self.db_manager.connection_scope() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM recommendation_history WHERE id = ANY($1::bigint[]) ORDER BY id", ids
+            )
+            return [row_to_record(row) for row in rows]
 
     async def apply_recommendation(
         self,

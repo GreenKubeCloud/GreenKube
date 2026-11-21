@@ -9,7 +9,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Collection, Dict, List, Mapping, Optional
+from typing import Collection, Dict, List, Mapping, Optional, Sequence
 
 import aiosqlite
 
@@ -968,6 +968,19 @@ class SQLiteRecommendationRepository(RecommendationRepository):
             cursor = await conn.execute("SELECT * FROM recommendation_history WHERE id = ?", (rec_id,))
             row = await cursor.fetchone()
             return row_to_record(row) if row else None
+
+    async def get_recommendations_by_ids(self, rec_ids: Sequence[int]) -> List[RecommendationRecord]:
+        """Returns the recommendations with these database IDs in one query (unknown IDs are skipped)."""
+        ids = [int(rec_id) for rec_id in dict.fromkeys(rec_ids)]
+        if not ids:
+            return []
+        placeholders = ", ".join("?" for _ in ids)
+        async with self.db_manager.connection_scope() as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                f"SELECT * FROM recommendation_history WHERE id IN ({placeholders}) ORDER BY id", tuple(ids)
+            )
+            return [row_to_record(row) for row in await cursor.fetchall()]
 
     async def apply_recommendation(
         self,

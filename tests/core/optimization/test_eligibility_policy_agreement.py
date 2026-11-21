@@ -207,3 +207,42 @@ async def test_eligibility_and_plan_creation_agree(case, monkeypatch):
         assert eligibility["can_open_pr"] is plan.allowed, (
             f"{case}: recommendation {record.id} eligibility {eligibility['blockers']} vs plan {plan.rejections}"
         )
+
+
+class _CountingRecommendations(_Recommendations):
+    """Counts the reads eligibility makes to find the siblings of each action."""
+
+    def __init__(self, records: List[RecommendationRecord]):
+        super().__init__(records)
+        self.queries = 0
+
+    async def get_recommendation_by_id(self, rec_id: int):
+        self.queries += 1
+        return await super().get_recommendation_by_id(rec_id)
+
+    async def get_recommendations_by_ids(self, rec_ids):
+        self.queries += 1
+        return [self.by_id[rec_id] for rec_id in rec_ids if rec_id in self.by_id]
+
+    async def get_recommendations_by_statuses(self, statuses):
+        self.queries += 1
+        return []
+
+
+async def test_siblings_of_a_filtered_list_cost_at_most_two_queries(monkeypatch):
+    """GET /recommendations/active?risk_level=low: 50 shown records whose siblings were filtered out."""
+    monkeypatch.setenv("GITOPS_POLICY_JSON", POLICY_JSON)
+    set_history_start(None, read_at=time.monotonic())
+    shown: List[RecommendationRecord] = []
+    hidden: List[RecommendationRecord] = []
+    for index in range(50):
+        cpu_id, memory_id = 1000 + 2 * index, 1001 + 2 * index
+        shown.append(_cpu([cpu_id, memory_id], id=cpu_id))
+        hidden.append(_memory([cpu_id, memory_id], id=memory_id, risk_level=RiskLevel.MEDIUM))
+    repo = _CountingRecommendations([*shown, *hidden])
+
+    await decide_records(
+        shown, config=Config(CLUSTER_NAME="default"), reco_repo=repo, gitops_repo=_GitOps(), automation_configured=True
+    )
+
+    assert repo.queries <= 2

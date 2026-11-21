@@ -440,3 +440,18 @@ class TestPlanPins:
         assert await repo.pin_plan_revisions("plan-1", {rec_id: 2}) == {rec_id: 1}
         assert await repo.get_plan_pins("plan-1") == {rec_id: 1}
         assert await repo.get_plan_pins("plan-unknown") == {}
+
+
+async def test_recommendations_are_fetched_by_ids_in_one_query(db):
+    """Review of F-07: eligibility reads the siblings of an action with one batched query."""
+    repo = _repo(db)
+    await repo.upsert_recommendations(
+        [_cpu(300), _cpu(200, fingerprint="fp-b", owner_name="b"), _cpu(100, fingerprint="fp-c", owner_name="c")]
+    )
+    stored = {record.owner_name: record for record in await repo.get_active_recommendations()}
+    wanted = [_id(stored["api"]), _id(stored["c"]), 999_999]
+
+    found = await repo.get_recommendations_by_ids(wanted)
+
+    assert sorted(record.owner_name for record in found) == ["api", "c"]
+    assert await repo.get_recommendations_by_ids([]) == []

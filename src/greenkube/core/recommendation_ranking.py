@@ -197,28 +197,38 @@ class DecisionRequest:
     carbon_price: Optional[float] = None
 
 
-async def _action_records_by_id(records: Sequence[Any], reco_repo: Any) -> Dict[int, Any]:
+async def _action_records_by_id(records: Sequence[Any], reco_repo: Any, pool: Sequence[Any] = ()) -> Dict[int, Any]:
     """The records and every other recommendation their typed actions group, by id (F-07).
 
     Plan creation evaluates the policy over all the recommendations of an action;
-    eligibility reads the same ones. A sibling that cannot be read stays missing
-    (eligibility then blocks, as plan creation would refuse).
+    eligibility reads the same ones. Siblings are looked up in ``pool`` (the
+    unfiltered list a filtered response was cut from), then read in one batched
+    query. A sibling that cannot be read stays missing (eligibility then blocks,
+    as plan creation would refuse).
     """
     from greenkube.core.optimization.eligibility import validate_action
 
-    by_id: Dict[int, Any] = {record.id: record for record in records if isinstance(getattr(record, "id", None), int)}
-    wanted = {item for record in records for item in (validate_action(record)[0] or []) if item not in by_id}
-    getter = getattr(reco_repo, "get_recommendation_by_id", None)
-    for rec_id in sorted(wanted):
-        if not callable(getter):
-            break
-        try:
-            found = await cast(Any, getter)(rec_id)
-        except Exception as exc:
-            logger.warning("Could not read recommendation %s for eligibility: %s", rec_id, exc)
-            continue
-        if found is not None and getattr(found, "id", None) == rec_id:
-            by_id[rec_id] = found
+    known = [*pool, *records]
+    by_id: Dict[int, Any] = {record.id: record for record in known if isinstance(getattr(record, "id", None), int)}
+    wanted = sorted({item for record in records for item in (validate_action(record)[0] or []) if item not in by_id})
+    if not wanted:
+        return by_id
+    batch = getattr(reco_repo, "get_recommendations_by_ids", None)
+    single = getattr(reco_repo, "get_recommendation_by_id", None)
+    try:
+        if callable(batch):
+            found = list(await cast(Any, batch)(wanted))
+        elif callable(single):
+            found = [await cast(Any, single)(rec_id) for rec_id in wanted]
+        else:
+            found = []
+    except Exception as exc:
+        logger.warning("Could not read recommendations %s for eligibility: %s", wanted, exc)
+        found = []
+    for record in found:
+        rec_id = getattr(record, "id", None)
+        if rec_id in wanted:
+            by_id[rec_id] = record
     return by_id
 
 
@@ -232,8 +242,13 @@ async def decide_records(
     automation_configured: bool = False,
     request: DecisionRequest = DecisionRequest(),
     now: Optional[datetime] = None,
+    lookup_pool: Sequence[Any] = (),
 ) -> List[Any]:
     """Attach the live expected value and delivery eligibility to persisted records.
+
+    ``lookup_pool`` holds records already read (the unfiltered list a filtered
+    response was cut from): the siblings of a typed action are looked up there
+    before one batched read.
 
     Records are re-scored with the measured source track record (I3) under the
     requested profile and carbon price (I2), using the delivery mode and the
@@ -277,7 +292,7 @@ async def decide_records(
         resource_bindings=resource_bindings,
         open_pr_recommendation_ids=open_prs,
         step_seconds=parse_query_step_seconds(str(getattr(config, "PROMETHEUS_QUERY_RANGE_STEP", "") or "5m")),
-        records_by_id=await _action_records_by_id(records, reco_repo),
+        records_by_id=await _action_records_by_id(records, reco_repo, lookup_pool),
     )
     policy_results = await elig.evaluate_policies(records, ctx, gitops_repo)
     if policy_results:
