@@ -503,13 +503,10 @@ class MetricsCompressor:
         if backend == "postgres":
             async with self._db.connection_scope() as conn:
                 async with conn.transaction():
-                    status = await conn.execute(sql, start, end)
-                    aggregated = await conn.fetchval(
-                        f"SELECT COALESCE(SUM(sample_count), 0) FROM {table.hourly} "
-                        "WHERE hour_bucket >= $1 AND hour_bucket < $2",
-                        start,
-                        end,
-                    )
+                    # The watermark row first: it is locked until commit, so a raw writer
+                    # whose trigger read it FOR SHARE has committed before the aggregate
+                    # reads the hour, and a later writer sees the new watermark and marks
+                    # the hour dirty (review: no write lost while its hour is compressed).
                     await conn.execute(
                         """
                         INSERT INTO metrics_compression_watermarks
@@ -523,6 +520,13 @@ class MetricsCompressor:
                         end,
                         now,
                         start,
+                    )
+                    status = await conn.execute(sql, start, end)
+                    aggregated = await conn.fetchval(
+                        f"SELECT COALESCE(SUM(sample_count), 0) FROM {table.hourly} "
+                        "WHERE hour_bucket >= $1 AND hour_bucket < $2",
+                        start,
+                        end,
                     )
             return _status_count(status), int(aggregated or 0)
 
@@ -684,8 +688,9 @@ class MetricsCompressor:
     async def _rebuild_hour(self, table: _MetricsTable, hour: datetime) -> None:
         """Replace the hourly rows of ``hour`` by the aggregate of its raw rows, in one transaction.
 
-        The dirty mark is removed first: a raw write committed after the
-        aggregate read marks the hour again for the next run.
+        On PostgreSQL the watermark row is locked FOR UPDATE first, which waits
+        for raw writers still open on this table; the dirty mark is then removed:
+        a raw write committed after the aggregate read marks the hour again.
         """
         end = hour + timedelta(hours=1)
         backend = self._db.db_type
@@ -693,6 +698,11 @@ class MetricsCompressor:
         if backend == "postgres":
             async with self._db.connection_scope() as conn:
                 async with conn.transaction():
+                    # Wait for raw writers of this table (their trigger holds the watermark row
+                    # FOR SHARE and the dirty mark row-locked) so the aggregate sees their rows.
+                    await conn.execute(
+                        "SELECT 1 FROM metrics_compression_watermarks WHERE table_name = $1 FOR UPDATE", table.raw
+                    )
                     await conn.execute(
                         "DELETE FROM metrics_dirty_hours WHERE table_name = $1 AND hour_bucket = $2", table.raw, hour
                     )

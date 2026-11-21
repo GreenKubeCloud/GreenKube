@@ -14,23 +14,35 @@ CREATE TABLE IF NOT EXISTS metrics_dirty_hours (
 
 ALTER TABLE metrics_compression_watermarks ADD COLUMN IF NOT EXISTS raw_pruned_until TIMESTAMP WITH TIME ZONE;
 
+-- Concurrency: the watermark row is read FOR SHARE, so a compression or a
+-- rebuild of this table (which lock it FOR UPDATE first) waits for the
+-- writer to commit and then sees its rows, or the writer waits for the
+-- compression and then marks the hour it closed. An existing mark is
+-- updated, not skipped, so it is row-locked and a rebuild deleting it waits
+-- for the writer. An UPDATE that moves a row marks its old hour as well.
 CREATE OR REPLACE FUNCTION greenkube_mark_dirty_metric_hour() RETURNS trigger AS $$
 DECLARE
-    ts TIMESTAMP WITH TIME ZONE;
     mark RECORD;
 BEGIN
-    IF TG_OP = 'DELETE' THEN
-        ts := OLD.timestamp;
-    ELSE
-        ts := NEW.timestamp;
-    END IF;
     SELECT compressed_until, raw_pruned_until INTO mark
-    FROM metrics_compression_watermarks WHERE table_name = TG_TABLE_NAME;
-    IF FOUND AND ts < mark.compressed_until
-        AND (TG_OP <> 'DELETE' OR mark.raw_pruned_until IS NULL OR ts >= mark.raw_pruned_until) THEN
+    FROM metrics_compression_watermarks WHERE table_name = TG_TABLE_NAME
+    FOR SHARE;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF TG_OP <> 'DELETE' AND NEW.timestamp < mark.compressed_until THEN
         INSERT INTO metrics_dirty_hours (table_name, hour_bucket)
-        VALUES (TG_TABLE_NAME, date_trunc('hour', ts AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
-        ON CONFLICT DO NOTHING;
+        VALUES (TG_TABLE_NAME, date_trunc('hour', NEW.timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
+        ON CONFLICT (table_name, hour_bucket) DO UPDATE SET hour_bucket = EXCLUDED.hour_bucket;
+    END IF;
+    IF TG_OP <> 'INSERT' AND OLD.timestamp < mark.compressed_until
+        AND (mark.raw_pruned_until IS NULL OR OLD.timestamp >= mark.raw_pruned_until)
+        AND (TG_OP = 'DELETE'
+             OR date_trunc('hour', OLD.timestamp AT TIME ZONE 'UTC')
+                <> date_trunc('hour', NEW.timestamp AT TIME ZONE 'UTC')) THEN
+        INSERT INTO metrics_dirty_hours (table_name, hour_bucket)
+        VALUES (TG_TABLE_NAME, date_trunc('hour', OLD.timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
+        ON CONFLICT (table_name, hour_bucket) DO UPDATE SET hour_bucket = EXCLUDED.hour_bucket;
     END IF;
     RETURN NULL;
 END;
@@ -64,16 +76,19 @@ SET raw_pruned_until = COALESCE(
 )
 WHERE table_name = 'container_metrics';
 
--- One-off repair: every compressed hour still in raw retention is re-aggregated
--- once, which brings rows written after its compression into the hourly table.
+-- One-off repair: every compressed hour whose raw rows are complete is
+-- re-aggregated once, which brings rows written after its compression into
+-- the hourly table. The first raw hour, below raw_pruned_until, is left out.
 INSERT INTO metrics_dirty_hours (table_name, hour_bucket)
 SELECT DISTINCT 'combined_metrics', date_trunc('hour', timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
 FROM combined_metrics
 WHERE timestamp < (SELECT compressed_until FROM metrics_compression_watermarks WHERE table_name = 'combined_metrics')
+  AND timestamp >= (SELECT raw_pruned_until FROM metrics_compression_watermarks WHERE table_name = 'combined_metrics')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO metrics_dirty_hours (table_name, hour_bucket)
 SELECT DISTINCT 'container_metrics', date_trunc('hour', timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
 FROM container_metrics
 WHERE timestamp < (SELECT compressed_until FROM metrics_compression_watermarks WHERE table_name = 'container_metrics')
+  AND timestamp >= (SELECT raw_pruned_until FROM metrics_compression_watermarks WHERE table_name = 'container_metrics')
 ON CONFLICT DO NOTHING;
