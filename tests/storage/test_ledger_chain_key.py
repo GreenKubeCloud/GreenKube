@@ -126,7 +126,26 @@ async def test_upgrade_keeps_entries_written_without_a_key_valid(ledger: LedgerD
 async def test_an_unkeyed_entry_after_a_keyed_one_fails(ledger: LedgerDb):  # noqa: F811
     keyed = LedgerRepository(ledger.manager, chain_key=KEY)
     await keyed.append(CLUSTER_UID, CLUSTER, [_draft("k0")])
-    await LedgerRepository(ledger.manager, chain_key=b"").append(CLUSTER_UID, CLUSTER, [_draft("k1")])
+    # The writer refuses (fail closed), so the forged unkeyed entry is inserted directly.
+    from greenkube.verify.ledger.model import place
+
+    head = (await keyed.list_entries(CLUSTER_UID, limit=1))[0]
+    forged = place(
+        _draft("k1"),
+        cluster_uid=CLUSTER_UID,
+        cluster_name=CLUSTER,
+        seq=2,
+        prev_hash=head.hash,
+        created_at=head.created_at,
+    )
+    async with ledger.manager.connection_scope() as conn:
+        columns = ", ".join(keyed._column_names())
+        marks = ", ".join("?" for _ in keyed._column_names())
+        await keyed._execute(
+            conn, f"INSERT INTO savings_ledger_entries ({columns}) VALUES ({marks})", keyed._params(forged)
+        )
+        if ledger.backend == "sqlite":
+            await conn.commit()
     result = (await verify_ledger(keyed, checkpoints={}))[CLUSTER_UID]
     assert not result.ok and result.reason == "hash_mismatch" and result.failure_seq == 2
 
@@ -192,3 +211,40 @@ async def test_entries_of_every_writer_version_verify(ledger: LedgerDb):  # noqa
         CLUSTER_UID
     ]
     assert result.ok and result.entries == 4
+
+
+def _chain_key_errors() -> float:
+    from greenkube.verify.ledger.projector import LEDGER_WRITE_ERRORS
+
+    return LEDGER_WRITE_ERRORS.labels(reason="chain_key")._value.get()
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+@pytest.mark.parametrize("current", [b"", b"a-regenerated-secret"], ids=["missing", "mismatched"])
+async def test_the_writer_fails_closed_after_keyed_entries_without_their_key(ledger: LedgerDb, current: bytes):  # noqa: F811
+    """A lost or regenerated Secret never appends unkeyed or differently keyed entries after keyed ones."""
+    from greenkube.storage.ledger_repository import LedgerChainKeyError
+
+    await LedgerRepository(ledger.manager, chain_key=KEY).append(CLUSTER_UID, CLUSTER, [_draft("k0")])
+    before = _chain_key_errors()
+    with pytest.raises(LedgerChainKeyError):
+        await LedgerRepository(ledger.manager, chain_key=current).append(CLUSTER_UID, CLUSTER, [_draft("k1")])
+    assert _chain_key_errors() == before + 1
+    assert await ledger.repo.count(CLUSTER_UID) == 1
+    assert (await verify_ledger(LedgerRepository(ledger.manager, chain_key=KEY), checkpoints={}))[CLUSTER_UID].ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_a_deliberate_rotation_keeps_the_previous_key_for_verification(ledger: LedgerDb):  # noqa: F811
+    new = b"the-rotated-chain-key"
+    await LedgerRepository(ledger.manager, chain_key=KEY).append(CLUSTER_UID, CLUSTER, [_draft("k0")])
+    rotated = LedgerRepository(ledger.manager, chain_key=new, previous_keys=[KEY])
+    await rotated.append(CLUSTER_UID, CLUSTER, [_draft("k1")])
+    entries = await rotated.list_entries(CLUSTER_UID, limit=10, ascending=True)
+    assert [entry.chain_key_id for entry in entries] == [chain_key_id(KEY), chain_key_id(new)]
+    assert (await verify_ledger(rotated, checkpoints={}, full=True))[CLUSTER_UID].ok
+    without_previous = LedgerRepository(ledger.manager, chain_key=new)
+    result = (await verify_ledger(without_previous, checkpoints={}, full=True))[CLUSTER_UID]
+    assert not result.ok and result.reason == "chain_key_mismatch"

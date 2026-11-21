@@ -36,6 +36,7 @@ from greenkube.verify.ledger.model import (
     REASON_SUPERSESSION,
     LedgerEntry,
     LedgerEntryDraft,
+    chain_key_id,
     format_time,
     parse_time,
     place,
@@ -207,6 +208,18 @@ class Provenance:
     currency: Optional[str] = None
 
 
+class LedgerChainKeyError(RuntimeError):
+    """The chain's head was written with a key this process does not hold: nothing is appended (LED-05)."""
+
+
+def configured_previous_chain_keys() -> List[bytes]:
+    """Verify-only keys of a deliberate rotation (``LEDGER_CHAIN_PREVIOUS_KEYS``, comma-separated)."""
+    from greenkube.core.config import get_config
+
+    raw = getattr(get_config(), "LEDGER_CHAIN_PREVIOUS_KEYS", None) or ""
+    return [item.strip().encode("utf-8") for item in raw.split(",") if item.strip()]
+
+
 def configured_chain_key() -> Optional[bytes]:
     """The ledger chain key from ``LEDGER_CHAIN_KEY`` (LED-05), or ``None`` when none is configured."""
     from greenkube.core.config import get_config
@@ -224,12 +237,25 @@ class LedgerRepository:
     """Append-only savings ledger entries, their chain and their projections.
 
     ``chain_key`` keys the hash chain (LED-05); by default it is read from
-    ``LEDGER_CHAIN_KEY``. An empty value means no key.
+    ``LEDGER_CHAIN_KEY``. An empty value means no key. ``previous_keys``
+    (default ``LEDGER_CHAIN_PREVIOUS_KEYS``) only verify entries chained
+    before a deliberate rotation, and let the writer continue after them.
     """
 
-    def __init__(self, db_manager, chain_key: Optional[bytes] = None):
+    def __init__(self, db_manager, chain_key: Optional[bytes] = None, previous_keys: Optional[Sequence[bytes]] = None):
         self.db_manager = db_manager
         self._chain_key = chain_key
+        self._previous_keys = list(previous_keys) if previous_keys is not None else None
+
+    @property
+    def chain_keys(self) -> Dict[str, bytes]:
+        """Every key this process can verify with, by public fingerprint: the current one and the previous ones."""
+        previous = self._previous_keys if self._previous_keys is not None else configured_previous_chain_keys()
+        keys = {chain_key_id(key): key for key in previous if key}
+        current = self.chain_key
+        if current:
+            keys[chain_key_id(current)] = current
+        return keys
 
     @property
     def chain_key(self) -> Optional[bytes]:
@@ -305,6 +331,11 @@ class LedgerRepository:
                 data[column] = float(data[column])
         return LedgerEntry(**data)
 
+    @staticmethod
+    def _column_names() -> Tuple[str, ...]:
+        """Columns of ``savings_ledger_entries`` in the order of :meth:`_params`."""
+        return _COLUMNS
+
     def _params(self, entry: LedgerEntry) -> List[Any]:
         values: List[Any] = []
         for column in _COLUMNS:
@@ -365,6 +396,36 @@ class LedgerRepository:
         )
         return (int(rows[0]["seq"]), rows[0]["hash"]) if rows else (0, None)
 
+    async def _check_writer_key(self, conn, cluster_uid: str, chain_key: Optional[bytes]) -> None:
+        """Fail closed when the head is keyed and this process lacks that key or a rotation from it (LED-05).
+
+        Appending unkeyed or differently keyed entries after keyed ones would
+        break the chain for good, so nothing is written: the error is counted
+        (``greenkube_ledger_write_errors_total{reason="chain_key"}``) and logged.
+        """
+        rows = await self._fetch(
+            conn,
+            "SELECT chain_key_id FROM savings_ledger_entries WHERE cluster_uid = ? ORDER BY seq DESC LIMIT 1",
+            [cluster_uid],
+        )
+        head_key_id = rows[0]["chain_key_id"] if rows else None
+        if head_key_id is None:
+            return
+        current_id = chain_key_id(chain_key) if chain_key else None
+        if current_id == head_key_id or (current_id is not None and head_key_id in self.chain_keys):
+            return
+        from greenkube.verify.ledger.projector import LEDGER_WRITE_ERRORS
+
+        LEDGER_WRITE_ERRORS.labels(reason="chain_key").inc()
+        message = (
+            f"The savings ledger head of cluster {cluster_uid} is chained with key {head_key_id}, and "
+            + ("LEDGER_CHAIN_KEY is not set" if current_id is None else f"LEDGER_CHAIN_KEY is key {current_id}")
+            + ": nothing is appended. Restore the Secret's LEDGER_CHAIN_KEY, or for a deliberate rotation list "
+            "the old key in LEDGER_CHAIN_PREVIOUS_KEYS."
+        )
+        logger.error(message)
+        raise LedgerChainKeyError(message)
+
     async def append(
         self,
         cluster_uid: str,
@@ -389,6 +450,7 @@ class LedgerRepository:
             existing = await self._existing_keys(conn, cluster_uid, list(unique))
             seq, prev_hash = await self._head(conn, cluster_uid)
             chain_key = self.chain_key
+            await self._check_writer_key(conn, cluster_uid, chain_key)
             placeholders = ", ".join("?" for _ in _COLUMNS)
             insert = f"INSERT INTO savings_ledger_entries ({_SELECT}) VALUES ({placeholders})"
             for key, draft in unique.items():
@@ -1263,5 +1325,7 @@ __all__ = [
     "V1_RAW_TABLE",
     "V1_TABLES",
     "configured_chain_key",
+    "configured_previous_chain_keys",
+    "LedgerChainKeyError",
     "get_ledger_repository",
 ]

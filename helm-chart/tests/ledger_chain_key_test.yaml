@@ -42,6 +42,16 @@ tests:
           path: data.LEDGER_CHAIN_KEY
           value: c3VwcGxpZWQta2V5
 
+  - it: renders supplied previous chain keys in the values Secret
+    templates:
+      - templates/secret.yaml
+    set:
+      secrets.ledgerChainPreviousKeys: old-key
+    asserts:
+      - equal:
+          path: data.LEDGER_CHAIN_PREVIOUS_KEYS
+          value: b2xkLWtleQ==
+
   - it: projects the ledger chain key into the controller and the API, not the worker
     templates:
       - templates/components.yaml

@@ -53,7 +53,7 @@ from prometheus_client import Counter, Gauge
 
 from greenkube.core.observability import REGISTRY as OBSERVABILITY_REGISTRY
 from greenkube.storage.ledger_repository import ChainStatus, LedgerRepository
-from greenkube.verify.ledger.model import chain_key_id, entry_id_for
+from greenkube.verify.ledger.model import entry_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -147,8 +147,7 @@ async def verify_chain(
     expected_seq = after_seq + 1
     prev_hash = after_hash
     verified = after_seq
-    key = repo.chain_key
-    key_id = chain_key_id(key) if key else None
+    keys = repo.chain_keys
     #: Whether an entry walked was chained with the key: later entries must be too.
     keyed_seen = False
     if after_seq and after_hash is not None:
@@ -170,11 +169,11 @@ async def verify_chain(
                 failure = ("broken_link", f"seq {entry.seq} does not follow the previous entry's hash")
             elif entry.chain_key_id is None and keyed_seen:
                 failure = ("hash_mismatch", f"seq {entry.seq} ({entry.entry_id}) drops the chain key")
-            elif entry.chain_key_id is not None and key_id is None:
+            elif entry.chain_key_id is not None and not keys:
                 failure = ("chain_key_missing", f"seq {entry.seq} is chained with a key and LEDGER_CHAIN_KEY is unset")
-            elif entry.chain_key_id is not None and entry.chain_key_id != key_id:
+            elif entry.chain_key_id is not None and entry.chain_key_id not in keys:
                 failure = ("chain_key_mismatch", f"seq {entry.seq} is chained with another key")
-            elif entry.hash != entry.computed_hash(key):
+            elif entry.hash != entry.computed_hash(keys.get(entry.chain_key_id or "")):
                 failure = ("hash_mismatch", f"seq {entry.seq} ({entry.entry_id}) was modified")
             elif entry.entry_id != entry_id_for(cluster_uid, entry.entry_key):
                 failure = ("identity_mismatch", f"seq {entry.seq} has an entry id that does not match its key")
