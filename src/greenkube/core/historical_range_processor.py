@@ -321,12 +321,19 @@ class HistoricalRangeProcessor:
 
     @staticmethod
     def _series_identity(series: dict) -> tuple[str, str, str, str]:
+        """``(namespace, pod, container, node)`` of a series of the PromQL catalog.
+
+        Only the labels the catalog groups by are read: alternative names
+        (``kubernetes_namespace``, ``pod_name``...) are removed by the ``by``
+        clauses before the parser sees them (COL-21).
+        """
         metric = series.get("metric", {}) or {}
-        namespace = metric.get("namespace") or metric.get("kubernetes_namespace") or metric.get("namespace_name") or ""
-        pod = metric.get("pod") or metric.get("pod_name") or metric.get("kubernetes_pod_name") or ""
-        container = metric.get("container") or metric.get("container_name") or ""
-        node = metric.get("node") or metric.get("kubernetes_node") or ""
-        return namespace, pod, container, node
+        return (
+            metric.get("namespace") or "",
+            metric.get("pod") or "",
+            metric.get("container") or "",
+            metric.get("node") or "",
+        )
 
     @classmethod
     def _pod_series_by_sample(cls, results, chunk: CollectionWindow) -> dict[int, dict[tuple[str, str], float]]:
