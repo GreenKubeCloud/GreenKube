@@ -348,6 +348,50 @@ async def verify_ledger(
     return results
 
 
+async def accept_head(
+    repo: LedgerRepository, cluster_uid: str, reason: str, *, now: Optional[datetime] = None
+) -> ChainVerification:
+    """Accept the cluster's current chain head as the new anchor, after an investigated incident (LED-05).
+
+    Used after a backup restore or a failover that lost the last entries:
+    the stored anchor is then ahead of the chain and every verification fails
+    with ``truncated`` or ``head_rewritten``. The chain itself must still pass
+    the structural checks (links, hashes, keys, reversals); otherwise nothing is
+    accepted. The acceptance is logged with the operator's reason and the head
+    it replaces; no ledger entry is written or changed.
+    """
+    if not reason.strip():
+        raise ValueError("a reason is required to accept a new ledger head")
+    moment = now or datetime.now(timezone.utc)
+    result = await verify_chain(repo, cluster_uid)
+    if not result.ok:
+        return result
+    previous = await repo.get_chain_status(cluster_uid)
+    await repo.record_chain_status(
+        ChainStatus(
+            cluster_uid=cluster_uid,
+            verified_at=moment,
+            ok=True,
+            entries=result.entries,
+            head_seq=result.head_seq,
+            head_hash=result.head_hash,
+            failure=None,
+        )
+    )
+    _CHECKPOINTS.pop(cluster_uid, None)
+    logger.warning(
+        "Savings ledger head of cluster %s accepted by an operator: seq %s (%s) replaces the anchor seq %s (%s). "
+        "Reason: %s",
+        cluster_uid,
+        result.head_seq,
+        result.head_hash,
+        previous.head_seq if previous else None,
+        previous.head_hash if previous else None,
+        reason,
+    )
+    return result
+
+
 async def run_ledger_chain() -> None:
     """Controller loop job: catch the v2 ledger up with the v1 ledger, verify its chains and reconcile (LED-04)."""
     from greenkube.storage.ledger_repository import get_ledger_repository
@@ -374,6 +418,7 @@ async def run_ledger_chain() -> None:
 
 
 __all__ = [
+    "accept_head",
     "CHAIN_OK",
     "CHAIN_VERIFICATION_FAILURES",
     "ChainVerification",

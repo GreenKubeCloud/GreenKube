@@ -147,3 +147,33 @@ async def test_keyed_head_is_published(ledger: LedgerDb):  # noqa: F811
     # An incremental pass with nothing new keeps the keyed state of its anchor.
     await verify_ledger(repo, checkpoints=checkpoints)
     assert CHAIN_HEAD_KEYED.labels(cluster_uid=CLUSTER_UID)._value.get() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.database
+async def test_an_operator_accepts_the_head_after_a_restore_lost_the_tail(ledger: LedgerDb):  # noqa: F811
+    """LED-05: an explicit, logged acceptance replaces deleting the status row; a forged chain is refused."""
+    from greenkube.verify.ledger.verification import accept_head
+
+    repo = LedgerRepository(ledger.manager, chain_key=KEY)
+    await repo.append(CLUSTER_UID, CLUSTER, [_draft(f"k{i}") for i in range(5)])
+    assert (await verify_ledger(repo, checkpoints={}))[CLUSTER_UID].ok
+    await _disable_triggers(ledger)
+    # A restore brings the entries and their totals back together (they commit in one transaction).
+    await ledger.execute("DELETE FROM savings_ledger_entries WHERE seq = 5")
+    await ledger.execute(
+        "UPDATE savings_ledger_totals SET value = value - 1, positive = positive - 1, entries = entries - 1"
+    )
+    assert (await verify_ledger(repo, checkpoints={}))[CLUSTER_UID].reason == "truncated"
+
+    with pytest.raises(ValueError):
+        await accept_head(repo, CLUSTER_UID, "  ")
+    accepted = await accept_head(repo, CLUSTER_UID, "restored from the backup of 03:00")
+    assert accepted.ok and accepted.head_seq == 4
+    assert (await verify_ledger(repo, checkpoints={}))[CLUSTER_UID].ok
+
+    await ledger.execute("UPDATE savings_ledger_entries SET value = value * 2 WHERE seq = 2")
+    refused = await accept_head(repo, CLUSTER_UID, "should not pass")
+    assert not refused.ok and refused.reason == "hash_mismatch"
+    status = await repo.get_chain_status(CLUSTER_UID)
+    assert status is not None and status.head_seq == 4
