@@ -953,7 +953,12 @@ class DriftMonitor:
             logger.warning("Savings ledger v2 pass after a drift reversal failed: %s", exc)
 
     def _reversal(self, record: Any, start: datetime, floor: Optional[datetime]):
-        from greenkube.models.savings import METHOD_MEASURED, SavingsLedgerRecord, floor_to_slot
+        from greenkube.models.savings import (
+            DRIFT_REVERSAL_ROW_KIND,
+            METHOD_MEASURED,
+            SavingsLedgerRecord,
+            floor_to_slot,
+        )
 
         if floor is None:
             return None
@@ -990,6 +995,7 @@ class DriftMonitor:
             measurement_method=METHOD_MEASURED,
             baseline_value=record.potential_savings_co2e_grams,
             actual_value=-co2e,
+            row_kind=DRIFT_REVERSAL_ROW_KIND,
         )
 
 

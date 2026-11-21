@@ -432,7 +432,7 @@ class LedgerRepository:
         found, however late it becomes visible.
         """
         slot = "l.slot_start" if table == V1_RAW_TABLE else "NULL AS slot_start"
-        basis = "l.basis" if table == V1_RAW_TABLE else "NULL AS basis"
+        basis = "l.basis, l.row_kind" if table == V1_RAW_TABLE else "NULL AS basis, NULL AS row_kind"
         where = self._v1_scope(table, unprojected_for)
         params: List[Any] = [cluster_name, int(after_id)]
         if unprojected_for is not None:

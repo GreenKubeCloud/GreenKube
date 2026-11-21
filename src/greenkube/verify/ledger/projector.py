@@ -48,6 +48,7 @@ from prometheus_client import Counter, Gauge
 
 from greenkube.core.observability import REGISTRY as OBSERVABILITY_REGISTRY
 from greenkube.core.savings_attributor import is_non_representative
+from greenkube.models.savings import DRIFT_REVERSAL_ROW_KIND
 from greenkube.storage.ledger_repository import V1_RAW_TABLE, V1_TABLES, LedgerRepository, Provenance
 from greenkube.utils.time import ensure_utc
 from greenkube.verify.ledger.identity import ClusterIdentity, ClusterIdentityResolver, ClusterIdentityUnavailable
@@ -190,8 +191,18 @@ def _floor_slot(moment: datetime) -> datetime:
 
 
 def _is_drift_reversal(table: str, row: dict, method: str) -> bool:
-    """A v1 reversal written by the drift monitor: off the accrual grid, measured, negative."""
-    if table != V1_RAW_TABLE or row.get("slot_start") is not None or method != METHOD_MEASURED_ALLOCATED:
+    """A v1 reversal written by the drift monitor.
+
+    Rows written since migration 0291 say so (``row_kind``), whatever the
+    signs of their quantities (LED-12). Older rows are recognised as before:
+    off the accrual grid, measured, negative.
+    """
+    if table != V1_RAW_TABLE or method != METHOD_MEASURED_ALLOCATED:
+        return False
+    kind = row.get("row_kind")
+    if kind is not None:
+        return kind == DRIFT_REVERSAL_ROW_KIND
+    if row.get("slot_start") is not None:
         return False
     co2e = float(row.get("co2e_saved_grams") or 0.0)
     cost = float(row.get("cost_saved_dollars") or 0.0)
