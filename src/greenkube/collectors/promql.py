@@ -298,6 +298,19 @@ class PromQLCatalog:
         selector = self._ksm_selector(pods, 'owner_is_controller="true"')
         return f"max(kube_pod_owner{selector}) by (namespace,pod,owner_kind,owner_name)"
 
+    def controller_owner(self, kind: str, names: Sequence[str]) -> str:
+        """kube-state-metrics owner of ReplicaSets (``kube_replicaset_owner``) or Jobs (``kube_job_owner``), COL-16.
+
+        Not filtered on ``owner_is_controller``: a ReplicaSet without owner has a
+        ``<none>`` series, which tells a bare ReplicaSet from a missing series.
+        """
+        metric, label = (
+            ("kube_replicaset_owner", "replicaset") if kind == "ReplicaSet" else ("kube_job_owner", "job_name")
+        )
+        pattern = "|".join(sorted({name.replace(".", "[.]") for name in names}))
+        selector = _selector(f'{label}=~"{pattern}"' if pattern else "", *self.extra_matchers)
+        return f"max({metric}{selector}) by (namespace,{label},owner_kind,owner_name,owner_is_controller)"
+
     def scrape_probe(self) -> str:
         """Number of cAdvisor CPU series, pod or not (COL-04).
 

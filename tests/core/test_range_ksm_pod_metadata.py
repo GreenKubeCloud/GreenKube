@@ -94,6 +94,57 @@ async def test_pod_never_seen_live_takes_requests_owner_and_containers_from_kube
     assert app.cpu_limit == 1000
 
 
+@pytest.mark.parametrize(
+    ("pod_owner", "controller_series", "expected"),
+    [
+        # kube_replicaset_owner: an Argo Rollout owns the ReplicaSet (COL-16).
+        (
+            ("ReplicaSet", "web-7d9f8c6b5"),
+            ("kube_replicaset_owner", {"replicaset": "web-7d9f8c6b5", "owner_kind": "Rollout", "owner_name": "web"}),
+            ("Rollout", "web"),
+        ),
+        # A bare ReplicaSet (owner <none>) stays a ReplicaSet.
+        (
+            ("ReplicaSet", "my-rs"),
+            (
+                "kube_replicaset_owner",
+                {
+                    "replicaset": "my-rs",
+                    "owner_kind": "<none>",
+                    "owner_name": "<none>",
+                    "owner_is_controller": "<none>",
+                },
+            ),
+            ("ReplicaSet", "my-rs"),
+        ),
+        # kube_job_owner: every run of a CronJob is the CronJob.
+        (
+            ("Job", "report-28912345"),
+            ("kube_job_owner", {"job_name": "report-28912345", "owner_kind": "CronJob", "owner_name": "report"}),
+            ("CronJob", "report"),
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_kube_state_metrics_owners_follow_the_controller_chain(storage, pod_owner, controller_series, expected):
+    cfg, repo, snapshots = storage
+    prom = _prometheus()
+    prom.series = [raw for raw in prom.series if raw.metric != "kube_pod_owner"]
+    base = {"namespace": "ns", "pod": "p"}
+    prom.add(
+        "kube_pod_owner",
+        {**base, "owner_kind": pod_owner[0], "owner_name": pod_owner[1], "owner_is_controller": "true"},
+        1.0,
+    )
+    metric, labels = controller_series
+    prom.add(metric, {"namespace": "ns", "owner_is_controller": "true", **labels}, 1.0)
+
+    rows = await _build(cfg, repo, snapshots, prom).run_range(BASE, BASE + timedelta(seconds=STEP))
+
+    row = next(row for row in rows if not row.container_name)
+    assert (row.owner_kind, row.owner_name) == expected
+
+
 @pytest.mark.asyncio
 async def test_without_kube_state_metrics_the_pod_stays_missing(storage):
     cfg, repo, snapshots = storage

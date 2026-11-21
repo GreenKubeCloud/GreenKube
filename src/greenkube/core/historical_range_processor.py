@@ -8,7 +8,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from typing import Any, List
+from typing import Any, List, Optional
 
 from .. import __version__
 from ..collectors import dcgm_collector
@@ -21,7 +21,7 @@ from ..collectors.opencost_collector import (
     OpenCostCollector,
     opencost_step_shares,
 )
-from ..collectors.pod_collector import PodCollector
+from ..collectors.pod_collector import PodCollector, resolve_workload_owner
 from ..collectors.prometheus_collector import PrometheusCollector
 from ..collectors.promql import PromQLCatalog
 from ..core import collection_telemetry
@@ -868,18 +868,24 @@ class HistoricalRangeProcessor:
                     values = containers[(namespace, pod, sample_start)][(container, kind)]
                     if suffix is not None:
                         values[f"{resource}_{suffix}"] = value
-        owner_at: dict[tuple[str, str, int], tuple[str, str]] = {}
+        direct_owner_at: dict[tuple[str, str, int], tuple[str, str]] = {}
         for series in series_by_query["owners"]:
             metric = series.get("metric", {}) or {}
             namespace, pod, _container, _node = self._series_identity(series)
             kind, name = metric.get("owner_kind"), metric.get("owner_name")
             if (namespace, pod) not in pods or not kind or not name or kind == "<none>":
                 continue
-            if kind == "ReplicaSet" and "-" in name:
-                kind, name = "Deployment", name.rsplit("-", 1)[0]
             for sample_start, value in self._iter_window_samples(series, chunk):
                 if value >= 1:
-                    owner_at[(namespace, pod, sample_start)] = (kind, name)
+                    direct_owner_at[(namespace, pod, sample_start)] = (kind, name)
+        controllers = await self._ksm_controller_owners(chunk, set(direct_owner_at.values()))
+        owner_at: dict[tuple[str, str, int], tuple[str, str]] = {}
+        for key, (kind, name) in direct_owner_at.items():
+            resolved_kind, resolved_name = resolve_workload_owner(
+                key[0], kind, name, controllers.get("ReplicaSet"), controllers.get("Job")
+            )
+            if resolved_kind and resolved_name:
+                owner_at[key] = (resolved_kind, resolved_name)
         result: dict[tuple[str, str, int], list[PodMetric]] = {}
         for key in set(containers) | set(owner_at):
             namespace, pod, _sample = key
@@ -901,6 +907,49 @@ class HistoricalRangeProcessor:
                 for (container, kind), values in sorted(by_container.items())
             ]
         return result, failed
+
+    async def _ksm_controller_owners(
+        self, chunk: CollectionWindow, owners: set[tuple[str, str]]
+    ) -> dict[str, Optional[dict[tuple[str, str], Optional[tuple[str, str]]]]]:
+        """Controllers of the ReplicaSets and Jobs owning pods, from kube-state-metrics (COL-16).
+
+        Returns ``{"ReplicaSet": map, "Job": map}`` with ``(namespace, name) ->
+        (kind, name)`` or ``None`` (no controller).  A failed query leaves its map
+        ``None``: ReplicaSets then use the name rule and Jobs stay Jobs, with a warning.
+        """
+        result: dict[str, Optional[dict[tuple[str, str], Optional[tuple[str, str]]]]] = {}
+        for kind, label in (("ReplicaSet", "replicaset"), ("Job", "job_name")):
+            names = sorted({name for owner_kind, name in owners if owner_kind == kind})
+            if not names:
+                result[kind] = {}
+                continue
+            mapping: dict[tuple[str, str], Optional[tuple[str, str]]] = {}
+            try:
+                for chunk_names in _name_chunks(names):
+                    for series in (
+                        await self._query_range(chunk, self._promql.controller_owner(kind, chunk_names)) or []
+                    ):
+                        metric = series.get("metric", {}) or {}
+                        namespace, name = metric.get("namespace") or "", metric.get(label) or ""
+                        owner_kind, owner_name = metric.get("owner_kind"), metric.get("owner_name")
+                        if not namespace or not name:
+                            continue
+                        if owner_kind and owner_name and owner_kind != "<none>":
+                            if metric.get("owner_is_controller") == "true":
+                                mapping[(namespace, name)] = (owner_kind, owner_name)
+                        else:
+                            mapping.setdefault((namespace, name), None)
+            except Exception as error:
+                logger.warning(
+                    "kube-state-metrics %s owners unavailable (%s): pod owners use the %s.",
+                    kind,
+                    error,
+                    "name rule <deployment>-<hash>" if kind == "ReplicaSet" else "Job itself",
+                )
+                result[kind] = None
+                continue
+            result[kind] = mapping
+        return result
 
     def _list_failure_budget_spent(self, resource: str, start: datetime, end: datetime, error: Exception) -> bool:
         """Count a failed pod or node list for the window; True once COLLECTION_K8S_LIST_MAX_FAILURES is reached.
