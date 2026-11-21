@@ -189,16 +189,53 @@ class TestFieldScenarios:
 
         assert await engine.refresh(AsyncMock(), AsyncMock(), repo) == []
 
-    async def test_an_insignificant_vpa_change_is_not_a_vote(self, repo):
-        # VPA 490m on a 500m request is a 2 % change: below 5 % it is not a vote.
+    async def test_an_insignificant_vpa_change_is_a_keep_vote(self, repo):
+        # VPA 490m on a 500m request is a 2 % change: below 5 % it votes "keep 500m", like VPA 500m would.
         engine = _engine([FakeConnector("greenkube", [_cpu(400)]), FakeConnector("vpa", [_cpu(490, "vpa")])])
 
-        await engine.refresh(AsyncMock(), AsyncMock(), repo)
+        assert await engine.refresh(AsyncMock(), AsyncMock(), repo) == []
 
-        [record] = await repo.get_active_recommendations()
-        assert record.recommended_cpu_request_millicores == 400
-        ignored = {vote["source_id"]: vote["reason"] for vote in (record.consensus or {})["ignored_votes"]}
-        assert ignored == {"vpa": "below_min_change"}
+    async def test_a_small_change_holds_the_value_like_a_keep_vote(self, repo):
+        # Current 400 Mi, native 200 Mi: VPA 400 Mi holds 400 Mi under safest, so VPA 410 Mi must too.
+        for vpa_value in (400 * MIB, 410 * MIB):
+            engine = _engine(
+                [
+                    FakeConnector("greenkube", [_memory(200 * MIB, current=400 * MIB)]),
+                    FakeConnector("vpa", [_memory(vpa_value, "vpa", current=400 * MIB)]),
+                ]
+            )
+
+            assert await engine.refresh(AsyncMock(), AsyncMock(), repo) == [], vpa_value
+
+    def test_a_small_change_stays_listed_as_ignored(self):
+        from greenkube.signals.consensus import VoteScreen, ballots_for_signal, consolidate
+
+        def signal(source_id: str, proposed: int) -> SourceSignal:
+            return SourceSignal(
+                source_id=source_id,
+                target=TargetRef.for_kind("c1", "Deployment", "api", namespace="shop", container="web"),
+                capability=Capability.CONTAINER_REQUESTS,
+                kind="RIGHTSIZING_MEMORY",
+                proposal=ContainerResourcesProposal(
+                    container="web",
+                    current=ResourceSpec(memory_request_bytes=400 * MIB),
+                    proposed=ResourceSpec(memory_request_bytes=proposed),
+                ),
+                algorithm=AlgorithmInfo(name=source_id),
+            )
+
+        ballots = [
+            *ballots_for_signal(signal("greenkube", 200 * MIB), source="greenkube"),
+            *ballots_for_signal(signal("vpa", 410 * MIB)),
+        ]
+
+        [outcome] = consolidate(ballots, "safest", screen=VoteScreen())
+
+        consensus = outcome.consensus
+        assert [(vote.source_id, vote.reason) for vote in consensus.ignored_votes] == [("vpa", "below_min_change")]
+        # The VPA vote counts at the current request (400 Mi), not at 410 Mi, and holds it.
+        assert consensus.spread["memory_request_bytes"]["vpa"] == 400 * MIB
+        assert consensus.value == 400 * MIB
 
     async def test_a_measured_external_vote_above_the_floor_still_counts(self, repo):
         engine = _engine(
@@ -376,11 +413,14 @@ class TestCheckpointCollection:
         assert vpa.last_sample_start - vpa.first_sample_start == timedelta(minutes=27)
 
     @staticmethod
-    def _api(monkeypatch, checkpoints):
+    def _api(monkeypatch, checkpoints, created=None):
         from greenkube.collectors import vpa_collector
 
+        metadata = {"namespace": "shop", "name": "api"}
+        if created is not None:
+            metadata["creationTimestamp"] = created.strftime("%Y-%m-%dT%H:%M:%SZ")
         vpa_item = {
-            "metadata": {"namespace": "shop", "name": "api"},
+            "metadata": metadata,
             "spec": {"targetRef": {"kind": "Deployment", "name": "api"}, "updatePolicy": {"updateMode": "Off"}},
             "status": {"recommendation": {"containerRecommendations": [{"containerName": "web", "target": {}}]}},
         }
@@ -396,13 +436,40 @@ class TestCheckpointCollection:
         monkeypatch.setattr(vpa_collector, "get_custom_objects_api", AsyncMock(return_value=Api()))
         return vpa_collector.VPACollector()
 
-    async def test_a_vpa_without_a_checkpoint_yet_has_no_samples(self, monkeypatch):
-        collector = self._api(monkeypatch, [])
+    async def test_a_container_without_a_checkpoint_next_to_checkpointed_ones_has_no_samples(self, monkeypatch):
+        sidecar = {
+            "metadata": {"namespace": "shop"},
+            "spec": {"vpaObjectName": "api", "containerName": "sidecar"},
+            "status": {"totalSamplesCount": 3000},
+        }
+        collector = self._api(monkeypatch, [sidecar])
 
         [vpa] = await collector.collect()
 
         assert collector.checkpoints_readable is True
         assert vpa.total_samples == 0
+
+    async def test_a_new_vpa_without_a_checkpoint_has_no_samples(self, monkeypatch):
+        collector = self._api(monkeypatch, [], created=datetime.now(timezone.utc) - timedelta(minutes=20))
+
+        [vpa] = await collector.collect()
+
+        assert vpa.total_samples == 0
+
+    async def test_no_checkpoint_at_all_leaves_maturity_unknown(self, monkeypatch):
+        # The recommender in --storage=prometheus mode writes no checkpoints: never set every VPA aside.
+        collector = self._api(monkeypatch, [], created=datetime.now(timezone.utc) - timedelta(days=30))
+
+        [vpa] = await collector.collect()
+
+        assert vpa.total_samples is None
+
+    async def test_an_old_vpa_without_its_own_checkpoint_in_an_empty_list_is_unknown(self, monkeypatch):
+        collector = self._api(monkeypatch, [])
+
+        [vpa] = await collector.collect()
+
+        assert vpa.total_samples is None
 
     async def test_unreadable_checkpoints_leave_maturity_unknown(self, monkeypatch):
         collector = self._api(monkeypatch, PermissionError("forbidden"))

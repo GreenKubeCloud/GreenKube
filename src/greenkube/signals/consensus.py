@@ -59,7 +59,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -290,6 +290,14 @@ MAX_POD_CONTAINERS = 8
 #: Why an external ballot was set aside.
 IGNORED_TOOL_FLOOR = "tool_floor"
 IGNORED_MIN_CHANGE = "below_min_change"
+IGNORED_MATURITY_UNKNOWN = "maturity_unknown"
+
+
+def maturity_unknown(ballot: "Ballot") -> bool:
+    """Whether the signal says its source's maturity could not be read (``raw.maturity.state``)."""
+    raw = ballot.signal.raw if isinstance(ballot.signal.raw, dict) else {}
+    maturity = raw.get("maturity")
+    return isinstance(maturity, dict) and maturity.get("state") == "unknown"
 
 
 def is_native(ballot: "Ballot") -> bool:
@@ -367,12 +375,27 @@ class VoteScreen:
         minimum = max(self.min_change_ratio * ballot.current, float(self.min_change.get(str(ballot.resource), 0)))
         return delta < minimum
 
-    def reason(self, ballot: "Ballot") -> Optional[str]:
-        """Why an external numeric ballot is set aside, or None when it is a vote."""
+    def reason(self, ballot: "Ballot", policy: Optional["ConsensusPolicy"] = None) -> Optional[str]:
+        """Why an external numeric ballot is not counted as proposed, or None when it is a vote.
+
+        ``maturity_unknown``: a decrease from a source whose maturity could not
+        be read (a VPA without checkpoints) may only hold or raise a value, so
+        it is dropped under every policy but ``safest`` (where a lower value
+        never wins anyway).
+        """
         if is_native(ballot) or not ballot.numeric:
             return None
         if self.on_floor(ballot):
             return IGNORED_TOOL_FLOOR
+        if (
+            policy is not None
+            and policy != ConsensusPolicy.SAFEST
+            and maturity_unknown(ballot)
+            and ballot.value is not None
+            and ballot.current is not None
+            and ballot.value < ballot.current
+        ):
+            return IGNORED_MATURITY_UNKNOWN
         if self.below_min_change(ballot):
             return IGNORED_MIN_CHANGE
         return None
@@ -758,12 +781,15 @@ def consolidate(
     """One consensus per group of ballots.
 
     Pushed-only deletions are dropped (:func:`admissible_ballots`). With a
-    ``screen``, external ballots that are not signals of need are set aside
-    (kept in ``ignored_votes``) and a container-resources group without a
-    native ballot produces no outcome: its signals stay signals.
+    ``screen``, external ballots that are not signals of need are listed in
+    ``ignored_votes``: a tool floor or a decrease of unknown maturity under a
+    policy other than ``safest`` is dropped, a change below the minimum votes
+    "keep the current value". A container-resources group without a native
+    ballot produces no outcome: its signals stay signals.
     """
     outcomes = []
     source_only = 0
+    parsed_policy = parse_policy(policy)
     for members in group_ballots(ballots).values():
         admitted = admissible_ballots(members)
         if not admitted:
@@ -779,18 +805,21 @@ def consolidate(
                 continue
             kept = []
             for ballot in admitted:
-                reason = screen.reason(ballot)
+                reason = screen.reason(ballot, parsed_policy)
                 if reason is None:
                     kept.append(ballot)
-                else:
-                    ignored.append(
-                        IgnoredVote(
-                            source_id=ballot.source_id,
-                            signal_id=ballot.signal.signal_id,
-                            value=ballot.value,
-                            reason=reason,
-                        )
+                    continue
+                ignored.append(
+                    IgnoredVote(
+                        source_id=ballot.source_id,
+                        signal_id=ballot.signal.signal_id,
+                        value=ballot.value,
+                        reason=reason,
                     )
+                )
+                if reason == IGNORED_MIN_CHANGE:
+                    # A small change is a "keep it" vote: it counts at the current value.
+                    kept.append(replace(ballot, value=ballot.current))
             admitted = kept
             if not admitted:
                 continue
