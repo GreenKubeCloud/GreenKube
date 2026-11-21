@@ -1069,7 +1069,8 @@
 			if (prModal !== modal) return;
 			prPlan = result?.plan ?? result;
 			planApproval = null;
-			planApprovalBlocked = String(prPlan?.status ?? '').toLowerCase() === 'stale';
+			// "cancelled" since migration 0220; older servers return "stale".
+			planApprovalBlocked = ['stale', 'cancelled'].includes(String(prPlan?.status ?? '').toLowerCase());
 			planFeedback = planApprovalBlocked
 				? 'Plan cancelled. Preview a new plan before approving.'
 				: 'Plan status updated.';
