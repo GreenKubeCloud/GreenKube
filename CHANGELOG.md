@@ -126,6 +126,11 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - The Footprint page shows the allocated totals, the node idle share and the cluster total side by side for CO₂e, cost and energy, with "not available" and the reason when the idle share is unknown.
 - Each decided change measurement records `untrusted_cost_hours` and `baseline_untrusted_cost_hours`, the workload hours of each window without trusted cost (migration 0251, MEA-05). The API returns them with the measurements and the change detail page shows them. Measurements decided earlier keep `null` and a valid evidence digest.
 - `GET /nodes` returns `gpu_source` for each node (from its latest idle row of the last hour), and the Footprint nodes page shows a "GPU power estimated" or "GPU power not measured" badge, with a notice counting such nodes, when no DCGM exporter sample reached GreenKube (NRG-13).
+- `GET /api/v1/recommendations/savings` returns `opportunity`: the projected opportunity of the active recommendations, de-duplicated across overlapping recommendations (namespace deletion and the rightsizing of its workloads, off-peak schedule and rightsizing of one workload, node removal and its pods), with request increases reported apart in `reliability_cost_annual`. The dashboard and the recommendations page show this one figure, labelled "Projected (not additive across overlapping recommendations)" (IMP-07).
+- `interim_run_rate_annual` and `interim_realized_to_date` in the savings report: savings of recommendations decided by the interim verifier (`CHANGE_MEASUREMENT_ENABLED=false`), reported apart (MEA-16).
+- `value_basis` on every annual block of the savings report (`allocated`, `billable_expected`, `declared` or `mixed`, IMP-06).
+- Projections record `coverage_span_hours`, `collected_hours` and `collection_gap_hours`, and lose confidence when less than 90% of their coverage was collected (IMP-04).
+- The recommendations page shows a verified reliability fix as "Fix confirmed, costs +X/yr" and the reliability fixes' cost to date on the savings tab (MEA-14).
 
 ### Changed
 
@@ -197,6 +202,9 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - **Impact Model 4.0.0:** embodied emissions change for every node. Rows stored before keep the flat 100 kg per node with `embodied_source` NULL; run `greenkube recompute --since <raw retention>` to re-allocate raw rows. Hourly aggregates keep the old values.
 - `/report/export` rows carry a `row_kind` column (always `allocated` without `include_idle`).
 - The controller and worker metrics listeners no longer accept the bootstrap key `GREENKUBE_API_KEY` once a scrape token (`GREENKUBE_METRICS_TOKEN`) is configured. The chart's ServiceMonitors already send the scrape token whenever it exists; a scraper of your own that sends the bootstrap key to these listeners must switch to the scrape token.
+- Change measurement `request_rightsizing` 2.6, deletion 1.2, interim `c0.3`: hour buckets are rated per collected time of the namespace, so a workload present part of each hour (batch, scale-to-zero) counts its absent steps as zero cost instead of being extrapolated to the full hour, and a collected hour without the workload is a zero bucket. Every annualisation uses 8760 hours, the Impact Model constant (was 8766). Decided measurements keep their values (MEA-13).
+- Impact Model 4.0.0 (unreleased, same version): projections are annualized over the hours the collector observed the cluster since the target's first sample, not over the wall-clock span from its first rolled hour, and the minimum coverage is half an hour. Projections of targets whose coverage had collection gaps, and of young targets, are higher (up to 2x after a 50% collection gap). Recommendations are re-projected at the next scan (IMP-04).
+- Ledger writer `ledger/3`: a rightsizing applied more conservatively than recommended accrues the realized share of its allocated projection (IMP-06).
 
 ### Deprecated
 - `refresh=true` on recommendation reads (only queues a run).
@@ -315,6 +323,14 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - PostgreSQL: the compressor transactions (hour compression, dirty-hour rebuild, raw pruning) set `lock_timeout` to 30 s. A raw writer that never commits holds the watermark row `FOR SHARE`. With `config.db.statementTimeoutMs: 0` (statement timeout disabled), it used to block the compression loop and one pool connection forever. Now the step fails, rolls back and is retried on the next cycle. With the default 30 s statement timeout nothing changes.
 - Tests: the lossless compression simulations no longer run the workload usage rollup. It re-rolled 24 hours on each of about 100 simulated runs, so each PostgreSQL case ran for 70-95 s without printing anything and looked like a stall. They now run in about 8 s, and a 45 s `asyncio.wait_for` budget makes them fail instead of hanging.
 - Tests: the idle share and summary cache tests pin "now" (just after midnight UTC, just after an hour boundary, mid-hour, late in an hour). The short idle history test no longer failed in the last minutes of every hour, when its `30h` window held no idle step.
+- Interim-verifier savings are no longer summed with change-measured savings in `run_rate_annual`, `realized_to_date`, `verified_count` and the realization summary (MEA-16).
+- A user-declared saving on `PATCH /apply` is bounded by the allocated projection, so a rightsizing on fixed nodes (billable projection 0) accepts a declaration (IMP-06).
+- The recommendations page no longer sums overlapping recommendations and nets request increases into its "Potential savings" totals (IMP-07).
+- Interim verdicts recorded before the interim marker (a measurement without a change id) are reported apart too, and interim amounts are left out of `realized_to_date.accrued_only_*` and of the `ledger_v1` fallback totals (MEA-16).
+- The collected time of measured hours is cluster-wide, so a CronJob alone in its namespace counts its idle steps as zero instead of being annualized as if it always ran (MEA-13).
+- A declared CO2e is bounded by the billable projection when the allocated projection models none (IMP-06).
+- A target whose first hour has a gap keeps its first rolled hour as first observation; only a first hour that runs to its end is shifted to the first sample (IMP-04).
+- The opportunity's reliability cost and a reliability fix's card use the allocated (or measured) cost, so they are not 0 on fixed nodes (IMP-07, MEA-14).
 
 ### Security
 - Wildcard CORS is never combined with credentials; CORS is same-origin by default.
