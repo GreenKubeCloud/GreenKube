@@ -106,6 +106,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - `WorkloadUsageSummary.replicas_latest`: pods seen at the latest step of the target's last observed hour (a pod a rollout replaced earlier in that hour is not counted), computed by the rollup SQL (SQLite and PostgreSQL) and the reference implementation. Migration 0210 adds `workload_usage_hourly.latest_pod_count` (pods at each node row's latest sample); hours rolled before it read `pod_count`.
 - `WorkloadUsageSummary.cpu_p95_hour_max` / `memory_p95_hour_max`: the highest hourly p95 over the lookback.
 - `get_recommendations_by_ids` on the recommendation repositories: one `WHERE id IN (...)` query (SQLite) / `= ANY(...)` (PostgreSQL).
+- Projections record `assumptions.unsplit_cost_hours_share`, the share of observed hours whose cost had no CPU/RAM split and was apportioned, and the unit price `detail` `observed_components_partly_apportioned`.
 
 ### Changed
 
@@ -250,6 +251,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - F-08: `singleton_workload` was raised on every multi-replica workload scanned from the usage rollup (its baseline rows carry one pseudo pod per target). The replica count now comes from the pods at the latest step of the last observed hour, so a rollout in that hour does not hide a real singleton. Stored risk factors are corrected at the next scan that re-emits the recommendation.
 - The per-replica p95 guard (`replica_p95_exceeds_proposal`) read hourly averages of the rollup's pseudo pod, so a spiky replica no longer flagged a proposal below its peaks; on the rollup path it now uses the container's highest hourly p95.
 - Eligibility reads the siblings of an action from the unfiltered active list and then one batched query, instead of one query per sibling.
+- Projected cost savings were up to several hundred times too low during the 14 days after an upgrade from 0.3.x (F-03). Hours re-aggregated from 0.3.x rows carry only `total_cost`, but the projection baseline divided the CPU and RAM cost of the newer hours by the duration of every hour. Each component is now priced over the hours that carry it, and the total of the other hours is apportioned at the node's CPU/RAM price ratio; hours whose observed total is zero count as zero cost, so projections stay bounded by the observed cost. The per-node observed prices (used for node prices, node removal and samples without an observed cost) had the same bias and are fixed too. Impact Model version 4.0.0: open recommendations are re-projected at the next scan, and stored projections keep the version that made them. Allocation formulas are unchanged, but the version change marks stored metric rows as outdated, so the next `greenkube recompute` rewrites them (same values, new version).
 
 ### Security
 - Wildcard CORS is never combined with credentials; CORS is same-origin by default.
