@@ -16,6 +16,7 @@ from greenkube.gitops.contracts import (
     ResourceTarget,
     WorkloadSource,
     canonical_repository_identity,
+    same_repository,
 )
 from greenkube.gitops.discovery.common import (
     SUPPORTED_WORKLOAD_KINDS,
@@ -1044,7 +1045,7 @@ def _chart_source_snapshot_reason(flux_source: _FluxSource, owner: Mapping[str, 
         return "remote-chart-not-in-snapshot"
     if flux_source.repo_url is None:
         return "chart-source-url-unresolved"
-    if canonical_repository_identity(flux_source.repo_url) != canonical_repository_identity(owner["repo_url"]):
+    if not same_repository(flux_source.repo_url, owner["repo_url"]):
         return "chart-source-not-in-snapshot"
     source_revision = flux_source.revision
     owner_revision = immutable_revision(owner.get("revision"))
@@ -1064,9 +1065,7 @@ def _validate_values_from_snapshot_locations(
         if value_source.get("git_managed") is not True:
             continue
         repo_url = text(value_source.get("repo_url"))
-        if repo_url is None or canonical_repository_identity(repo_url) != canonical_repository_identity(
-            manifest_location["repo_url"]
-        ):
+        if repo_url is None or not same_repository(repo_url, manifest_location["repo_url"]):
             return "values-source-not-in-snapshot"
         if value_source.get("ref") != manifest_location.get("ref"):
             return "values-source-ref-mismatch"

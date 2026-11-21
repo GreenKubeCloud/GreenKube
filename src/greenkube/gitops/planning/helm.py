@@ -36,7 +36,7 @@ from greenkube.gitops.contracts import (
     SetContainerResources,
     ValidationResult,
     WorkloadSource,
-    canonical_repository_identity,
+    same_repository,
 )
 from greenkube.gitops.discovery.common import flux_release_name, text
 from greenkube.gitops.planning.digest import plan_digest
@@ -848,7 +848,9 @@ def _prepare_helm_values_plan(
         chart_path = stack.enter_context(_staged_remote_chart(root, snapshot_files, remote_chart, HelmValuesPlanError))
     else:
         chart_repository = chart_config.get("repo")
-        if chart_repository not in (None, "", source.repo_url):
+        if chart_repository not in (None, "") and (
+            not isinstance(chart_repository, str) or not same_repository(chart_repository, source.repo_url)
+        ):
             raise HelmValuesUnsupportedError("remote or cross-repository Helm charts cannot be planned")
         _reject_inline_helm_values(config)
         chart_path = _canonical_path(source.path, allow_root=True, error=HelmValuesUnsupportedError)
@@ -1338,7 +1340,12 @@ def _validate_argo_values_sources(source: WorkloadSource, base_revision: str) ->
     for item in raw_sources:
         if not isinstance(item, Mapping):
             raise HelmValuesUnsupportedError("Argo values source metadata must be a mapping")
-        if item.get("repo_url") != source.repo_url or item.get("ref") != source.ref:
+        repo_url = item.get("repo_url")
+        if (
+            not isinstance(repo_url, str)
+            or not same_repository(repo_url, source.repo_url)
+            or item.get("ref") != source.ref
+        ):
             raise HelmValuesUnsupportedError("cross-repository or remote Helm values sources are unsupported")
         revision = item.get("source_revision")
         if revision is not None and not _revision_matches_snapshot(revision, base_revision):
@@ -2003,7 +2010,8 @@ def _validate_flux_manifest_owner(source: WorkloadSource, base_revision: str) ->
         raise FluxHelmReleaseUnsupportedError("HelmRelease manifest is not explicitly owned by Git")
     if (
         manifest_source.get("provider_id") != source.provider_id
-        or manifest_source.get("repo_url") != source.repo_url
+        or not isinstance(manifest_repo_url := manifest_source.get("repo_url"), str)
+        or not same_repository(manifest_repo_url, source.repo_url)
         or manifest_source.get("ref") != source.ref
     ):
         raise FluxHelmReleaseUnsupportedError(
@@ -2225,9 +2233,7 @@ def _flux_chart_context(
     if configured_chart.get("source_kind") != "GitRepository":
         raise FluxHelmReleaseUnsupportedError("Flux Helm chart source is not a GitRepository")
     configured_repo_url = configured_chart.get("repo_url")
-    if not isinstance(configured_repo_url, str) or canonical_repository_identity(
-        configured_repo_url
-    ) != canonical_repository_identity(source.repo_url):
+    if not isinstance(configured_repo_url, str) or not same_repository(configured_repo_url, source.repo_url):
         raise FluxHelmReleaseUnsupportedError(
             "chart-source-not-in-snapshot: Flux Git chart belongs to another repository"
         )
@@ -2451,11 +2457,7 @@ def _load_flux_values_from(
 
         repo_url = text(discovered.get("repo_url"))
         ref = text(discovered.get("ref"))
-        if (
-            repo_url is None
-            or canonical_repository_identity(repo_url) != canonical_repository_identity(source.repo_url)
-            or ref != source.ref
-        ):
+        if repo_url is None or not same_repository(repo_url, source.repo_url) or ref != source.ref:
             raise FluxHelmReleaseUnsupportedError(
                 "valuesFrom source is not present in the HelmRelease repository snapshot"
             )
