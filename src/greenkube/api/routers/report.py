@@ -20,6 +20,7 @@ from greenkube.api.dependencies import get_combined_metrics_repository, validate
 from greenkube.api.routers.metrics import idle_history_gap, with_idle_share
 from greenkube.api.schemas import ReportSummaryResponse
 from greenkube.core.aggregator import aggregate_metrics
+from greenkube.models.metrics import CombinedMetric
 from greenkube.storage.base_repository import CombinedMetricsRepository
 from greenkube.utils.date_utils import ensure_utc, time_range_from_last
 
@@ -294,6 +295,10 @@ async def report_export(
     # response has started, an invalid range cannot become a 400 anymore.
     ranges = _get_time_ranges(last, start, end, years)
 
+    # The idle share and cluster totals of each range, computed before the stream starts so a
+    # storage error is still an HTTP error (WP-05.3, NRG-02).
+    idle_rows = [] if namespace else await _export_idle_rows(repo, ranges)
+
     # Stream results in chunks to avoid loading the whole dataset into memory.
     timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"greenkube-report-{timestamp_str}.{fmt}"
@@ -327,7 +332,12 @@ async def report_export(
                         yield b","
                     else:
                         first = False
-                    yield json.dumps(m.model_dump(mode="json"), ensure_ascii=False).encode("utf-8")
+                    yield json.dumps(_allocated_row(m), ensure_ascii=False).encode("utf-8")
+            for row in idle_rows:
+                if not first:
+                    yield b","
+                first = False
+                yield json.dumps(row, ensure_ascii=False).encode("utf-8")
             yield b"]"
 
         return StreamingResponse(
@@ -339,20 +349,24 @@ async def report_export(
     # CSV streaming
     async def _csv_stream():
         header_written = False
-        async for batch in _iter_metrics_chunks():
-            rows = [m.model_dump(mode="json") for m in batch]
-            if not rows:
-                continue
+
+        def _chunk(rows: list[dict]) -> bytes:
+            nonlocal header_written
             output = io.StringIO()
-            headers = list(rows[0].keys())
-            writer = csv.DictWriter(output, fieldnames=headers)
+            writer = csv.DictWriter(output, fieldnames=_EXPORT_COLUMNS)
             if not header_written:
                 writer.writeheader()
                 header_written = True
             for row in rows:
-                sanitized = {k: _sanitize_cell(v) for k, v in row.items()}
-                writer.writerow(sanitized)
-            yield output.getvalue().encode("utf-8")
+                writer.writerow({k: _sanitize_cell(row.get(k)) for k in _EXPORT_COLUMNS})
+            return output.getvalue().encode("utf-8")
+
+        async for batch in _iter_metrics_chunks():
+            rows = [_allocated_row(m) for m in batch]
+            if rows:
+                yield _chunk(rows)
+        if idle_rows:
+            yield _chunk(idle_rows)
 
     return StreamingResponse(
         _csv_stream(),
@@ -364,6 +378,65 @@ async def report_export(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+#: ``row_kind`` of an exported workload row; the idle share and the cluster total follow them.
+ROW_KIND_ALLOCATED = "allocated"
+ROW_KIND_IDLE = "idle"
+ROW_KIND_CLUSTER_TOTAL = "cluster_total"
+#: Pseudo-workload names of the idle and cluster-total rows of an export.
+IDLE_ROW_NAME = "__idle__"
+CLUSTER_TOTAL_ROW_NAME = "__cluster_total__"
+
+#: Export columns: every CombinedMetric field, then ``row_kind``.
+_EXPORT_COLUMNS = [*CombinedMetric.model_fields, "row_kind"]
+
+#: Export column → idle and cluster-total suffix of :func:`with_idle_share`.
+_EXPORT_IDLE_COLUMNS = {
+    "co2e_grams": "co2e_grams",
+    "embodied_co2e_grams": "embodied_co2e_grams",
+    "total_cost": "cost",
+    "joules": "energy_joules",
+}
+
+
+def _allocated_row(metric: CombinedMetric) -> dict:
+    """An exported workload row: the metric's fields, labelled ``row_kind = allocated``."""
+    return {**metric.model_dump(mode="json"), "row_kind": ROW_KIND_ALLOCATED}
+
+
+async def _export_idle_rows(repo: CombinedMetricsRepository, ranges: list[tuple[datetime, datetime]]) -> list[dict]:
+    """One ``idle`` and one ``cluster_total`` row per report range (WP-05.3, NRG-02).
+
+    The values follow the rule of ``/report/summary``: ``None`` (an empty CSV
+    cell, a JSON ``null``) when the range holds no idle row or pod rows older
+    than the first idle row (``idle_data_since``), never zero. ``period`` is
+    the range as ``start/end`` (ISO 8601); the other metric columns are empty.
+    A range without any pod or idle row gets no row.
+    """
+    rows: list[dict] = []
+    for range_start, range_end in ranges:
+        idle = await _idle_share_for_ranges(repo, None, [(range_start, range_end)])
+        agg = await _aggregate_summary_for_ranges(repo, None, [(range_start, range_end)])
+        if not agg["row_count"] and idle.get("idle") is None:
+            continue  # nothing stored in the range: no row of unknown values
+        share = with_idle_share(agg, idle.get("idle"))
+        base = {
+            "namespace": "",
+            "period": f"{range_start.isoformat()}/{range_end.isoformat()}",
+            "timestamp": range_start.isoformat(),
+            "duration_seconds": int((range_end - range_start).total_seconds()),
+        }
+        for kind, name, prefix in (
+            (ROW_KIND_IDLE, IDLE_ROW_NAME, "idle_"),
+            (ROW_KIND_CLUSTER_TOTAL, CLUSTER_TOTAL_ROW_NAME, "cluster_total_"),
+        ):
+            row: dict = {column: None for column in _EXPORT_COLUMNS}
+            row.update(base, pod_name=name, row_kind=kind, estimation_reasons=[])
+            for column, suffix in _EXPORT_IDLE_COLUMNS.items():
+                row[column] = share.get(f"{prefix}{suffix}")
+            rows.append(row)
+    return rows
 
 
 def _granularity_flags(granularity: Optional[str]) -> dict:
