@@ -560,6 +560,7 @@ class LedgerProjector:
                     pr_url=source.pr_url or entry.pr_url,
                     restates_entry_id=entry.restates_entry_id or entry.reverses_entry_id,
                     basis=BASIS_ALLOCATED,
+                    annual_rate=float(annual),
                 )
             )
         return drafts
@@ -959,6 +960,7 @@ def restatement_of(projection: LedgerEntry, *, annual_rate: float, provenance: P
         pr_url=provenance.pr_url or projection.pr_url,
         restates_entry_id=projection.entry_id,
         basis=BASIS_ALLOCATED,
+        annual_rate=float(annual_rate),
     )
     return [reversal, measured]
 
