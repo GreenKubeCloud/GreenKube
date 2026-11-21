@@ -505,6 +505,20 @@ class VpaSignalSource(RecommendationSourceAdapter):
                 return vpa
         return None
 
+    def _raw(self, vpa: Optional[VPARecommendation], rec: Recommendation) -> Dict[str, Any]:
+        """Audit payload; ``maturity.state`` is ``unknown`` when no checkpoint said how mature the VPA is.
+
+        The consensus lets a VPA of unknown maturity hold or raise a value, never
+        push a decrease under a policy other than ``safest`` (roadmap A.5).
+        """
+        if vpa is None:
+            return self.raw_payload(rec) or {}
+        raw = vpa_raw(vpa)
+        unknown = getattr(self.connector, "unknown_maturity_vpas", None) or set()
+        state = "unknown" if f"{vpa.namespace}/{vpa.vpa_name}" in unknown else "mature"
+        raw["maturity"] = {**raw["maturity"], "state": state}
+        return raw
+
     def _signal(self, rec: Recommendation, ctx: CollectContext, fetched_at: Any, *, supports_v1: bool) -> SourceSignal:
         vpa = self._vpa_for(rec)
         signal = signal_from_recommendation(
@@ -516,7 +530,7 @@ class VpaSignalSource(RecommendationSourceAdapter):
             algorithm=AlgorithmInfo(name="vpa-recommender", window=ctx.window),
             observed_window=ctx.window,
             origin=SignalOrigin.ADAPTER,
-            raw=vpa_raw(vpa) if vpa is not None else self.raw_payload(rec),
+            raw=self._raw(vpa, rec),
         )
         update: Dict[str, Any] = {"engine_family": VPA_ENGINE_FAMILY}
         hint = volatility_hint(vpa) if vpa is not None else {}

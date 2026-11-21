@@ -369,6 +369,47 @@ class TestVpaMaturity:
 
         assert recs
 
+    @pytest.mark.parametrize("policy", ["priority", "median", "weighted"])
+    async def test_unknown_maturity_never_pushes_a_decrease(self, policy, monkeypatch):
+        from greenkube.core.optimization.providers.vpa import VpaSignalSource, VpaSource
+        from greenkube.models.metrics import CombinedMetric
+
+        cfg = get_config()
+        monkeypatch.setattr(cfg, "RECOMMENDATION_CONSENSUS_POLICY", policy)
+        # No checkpoint: maturity unknown. VPA proposes 50m where GreenKube measured a need of 400m.
+        vpa = self._vpa()
+        vpa.cpu_target_millicores = 50
+        vpa.memory_target_bytes = None
+
+        class Collector:
+            async def collect(self):
+                return [vpa]
+
+        source = VpaSignalSource(
+            SourceSettings(),
+            SourceDeps(config=cfg, cluster_uid="c1"),
+            connector=VpaSource(cfg, collector=Collector()),
+            namespace_lister=AsyncMock(return_value=None),
+        )
+        metric = CombinedMetric(
+            pod_name="api-1",
+            namespace="shop",
+            container_name="web",
+            owner_kind="Deployment",
+            owner_name="api",
+            cpu_request=500,
+            memory_request=512 * MIB,
+            timestamp=datetime.now(timezone.utc),
+        )
+        context = OptimizationContext(config=cfg, metrics=[metric])
+        engine = OptimizationEngine(config=cfg, sources=[source, FakeConnector("greenkube", [_cpu(400)])])
+
+        [rec] = (await engine.collect(context)).recommendations
+
+        assert rec.recommended_cpu_request_millicores == 400
+        ignored = {vote["source_id"]: vote["reason"] for vote in (rec.consensus or {})["ignored_votes"]}
+        assert ignored == {"vpa": "maturity_unknown"}
+
 
 class TestCheckpointCollection:
     async def test_collector_reads_conditions_and_checkpoints(self, monkeypatch):

@@ -409,7 +409,7 @@ class IgnoredVote(BaseModel):
     source_id: str
     signal_id: str
     value: Optional[int] = None
-    #: ``tool_floor`` or ``below_min_change``.
+    #: ``tool_floor``, ``below_min_change`` (still a "keep" vote at the current value) or ``maturity_unknown``.
     reason: str
 
 
