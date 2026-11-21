@@ -171,14 +171,9 @@ class _MetricsTable:
             ("cpu_usage_avg", cast_int.format(c="cpu_usage_millicores")),
             ("cpu_usage_max", "MAX(cpu_usage_millicores)"),
             ("memory_usage_avg", cast_big.format(c="memory_usage_bytes")),
-            # Container rows keep the step peak of the working set (COL-12); older rows and pod rows
-            # only have the step value.
-            (
-                "memory_usage_max",
-                "MAX(memory_usage_bytes)"
-                if self.pod_scope
-                else "MAX(COALESCE(memory_usage_max_bytes, memory_usage_bytes))",
-            ),
+            # Pod and container rows keep the step peak of the working set (COL-12); older rows only
+            # have the step value.
+            ("memory_usage_max", "MAX(COALESCE(memory_usage_max_bytes, memory_usage_bytes))"),
             ("owner_kind", _mode("owner_kind", backend)),
             ("owner_name", _mode("owner_name", backend)),
             ("duration_seconds", "SUM(COALESCE(duration_seconds, 0))"),

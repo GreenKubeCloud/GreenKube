@@ -153,6 +153,35 @@ async def test_stored_metric_timestamps_are_distinct(database):
 
 
 @pytest.mark.asyncio
+async def test_pod_rows_store_the_memory_peak_and_hourly_rows_keep_it(database):
+    """COL-12 review: the pod step peak is stored and compressed with MAX(peak)."""
+    from greenkube.core.metrics_compressor import TABLES
+
+    backend, manager = database
+    metrics = (
+        SQLiteCombinedMetricsRepository(manager) if backend == "sqlite" else PostgresCombinedMetricsRepository(manager)
+    )
+    rows = [
+        CombinedMetric(
+            pod_name="a",
+            namespace="ns",
+            timestamp=BASE + k * STEP,
+            duration_seconds=300,
+            memory_usage_bytes=240,
+            memory_usage_max_bytes=400 if k == 1 else None,
+        )
+        for k in range(3)
+    ]
+    await metrics.write_combined_metrics(rows)
+
+    stored = sorted(await metrics.read_combined_metrics(BASE, BASE + 3 * STEP), key=lambda r: r.timestamp)
+    assert [r.memory_usage_max_bytes for r in stored] == [None, 400, None]
+
+    spec = next(table for table in TABLES if table.raw == "combined_metrics")
+    assert "MAX(COALESCE(memory_usage_max_bytes, memory_usage_bytes))" in spec.compress_sql(backend)
+
+
+@pytest.mark.asyncio
 async def test_latest_container_usage_sources_reads_the_newest_step(database):
     """COL-05: /health says where container usage comes from (cri-dockerd: Metrics API point samples)."""
     backend, manager = database

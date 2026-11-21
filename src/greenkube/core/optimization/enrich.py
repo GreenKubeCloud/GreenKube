@@ -29,12 +29,18 @@ __all__ = [
 
 
 def _replica_p95_max(series: Sequence[CombinedMetric], attr: str) -> Optional[float]:
-    """Highest per-replica p95 of a usage signal (per-replica headroom, I4)."""
+    """Highest per-replica p95 of a usage signal (per-replica headroom, I4).
+
+    Memory takes each row's step peak when it has one (COL-12 review): the step
+    average hides the spikes a request must hold.
+    """
+    peak_attr = {"memory_usage_bytes": "memory_usage_max_bytes", "cpu_usage_millicores": "cpu_usage_max_millicores"}
     by_pod: Dict[str, List[float]] = defaultdict(list)
     for metric in series:
         value = getattr(metric, attr, None)
         if value is not None:
-            by_pod[metric.pod_name].append(float(value))
+            peak = getattr(metric, peak_attr.get(attr, ""), None)
+            by_pod[metric.pod_name].append(max(float(value), float(peak)) if peak is not None else float(value))
     if not by_pod:
         return None
     return max(percentile(values, 95) for values in by_pod.values())

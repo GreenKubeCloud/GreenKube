@@ -1464,7 +1464,7 @@ class HistoricalRangeProcessor:
             memory_by_sample, container_memory_samples, memory_nodes = self._container_series_by_sample(
                 memory_results, chunk
             )
-            _pod_memory_peaks, container_memory_peak_samples, _peak_nodes = self._container_series_by_sample(
+            memory_peak_by_sample, container_memory_peak_samples, _peak_nodes = self._container_series_by_sample(
                 memory_peak_results, chunk
             )
 
@@ -1636,6 +1636,8 @@ class HistoricalRangeProcessor:
                     unknown_power_nodes.add(node_name)
                 range_cpu_usage_map = cpu_usage_by_sample.get(sample_key, {})
                 range_memory_map = memory_by_sample.get(sample_key, {})
+                # Pod peak: its pod cgroup peak, or the sum of its container peaks (review 1, COL-12).
+                range_memory_peak_map = memory_peak_by_sample.get(sample_key, {})
                 range_net_rx_map = net_rx_by_sample.get(sample_key, {})
                 range_net_tx_map = net_tx_by_sample.get(sample_key, {})
                 range_disk_read_map = disk_read_by_sample.get(sample_key, {})
@@ -1776,6 +1778,11 @@ class HistoricalRangeProcessor:
                             cpu_usage_millicores=range_cpu_usage_map.get(pod_key),
                             memory_usage_bytes=(
                                 int(range_memory_map[pod_key]) if pod_key in range_memory_map else None
+                            ),
+                            memory_usage_max_bytes=(
+                                max(int(range_memory_peak_map[pod_key]), int(range_memory_map[pod_key]))
+                                if pod_key in range_memory_map and pod_key in range_memory_peak_map
+                                else None
                             ),
                             network_receive_bytes=range_net_rx_map.get(pod_key),
                             network_transmit_bytes=range_net_tx_map.get(pod_key),
