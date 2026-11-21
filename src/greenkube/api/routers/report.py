@@ -269,6 +269,11 @@ async def report_export(
     ),
     group_by: str = Query("pod", description="Aggregation grouping: 'pod' or 'namespace'."),
     fmt: str = Query("csv", alias="format", description="Export format: 'csv' or 'json'."),
+    include_idle: bool = Query(
+        False,
+        description="Append, per range, the node idle share (row_kind=idle) and the cluster total "
+        "(row_kind=cluster_total) after the workload rows. Do not sum all rows of such a file.",
+    ),
     repo: CombinedMetricsRepository = Depends(get_combined_metrics_repository),
 ):
     """Generate and stream a report file in CSV or JSON format.
@@ -297,7 +302,7 @@ async def report_export(
 
     # The idle share and cluster totals of each range, computed before the stream starts so a
     # storage error is still an HTTP error (WP-05.3, NRG-02).
-    idle_rows = [] if namespace else await _export_idle_rows(repo, ranges)
+    idle_rows = await _export_idle_rows(repo, ranges) if include_idle and not namespace else []
 
     # Stream results in chunks to avoid loading the whole dataset into memory.
     timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -307,10 +312,11 @@ async def report_export(
     async def _iter_metrics_chunks(chunk_days: int = 7):
         # Convert requested ranges into a sequence of (start, end) windows
         for range_start, range_end in ranges:
-            # iterate in chunks of chunk_days
+            # Half-open chunks [cursor, window_end) of chunk_days, like the repository reads and the
+            # summary aggregates: a sample on a chunk boundary is read exactly once.
             cursor = range_start
             delta = timedelta(days=chunk_days)
-            while cursor <= range_end:
+            while cursor < range_end:
                 window_end = min(range_end, cursor + delta)
                 batch = await repo.read_combined_metrics_smart(
                     start_time=cursor, end_time=window_end, namespace=namespace
@@ -319,7 +325,7 @@ async def report_export(
                     granularity_flags = _granularity_flags(granularity)
                     batch = aggregate_metrics(batch, **granularity_flags, group_by=group_by)
                 yield batch
-                cursor = window_end + timedelta(seconds=1)
+                cursor = window_end
 
     if fmt == "json":
 
