@@ -102,6 +102,10 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - `SIGNAL_MIN_CHANGE_PERCENT`, `SIGNAL_MIN_CHANGE_CPU_MILLICORES`, `SIGNAL_MIN_CHANGE_MEMORY_BYTES` (`sources.minChange`): an external proposal that changes the request by less than 5 % or 10m CPU / 16 MiB votes to keep the current request instead of its own value.
 - `VPA_MIN_SAMPLE_HOURS` (`sources.vpa.minSampleHours`, default 24): the VPA source reads `status.conditions` and the `VerticalPodAutoscalerCheckpoint` sample history (`totalSamplesCount`, `firstSampleStart`, `lastSampleStart`) and ignores a VPA until it is mature (`immature_vpas` diagnostic; `vpa_maturity_unknown` warning when checkpoints cannot be read). The chart ClusterRole now grants `get`/`list` on `verticalpodautoscalercheckpoints`.
 - `consensus.ignored_votes` lists the external proposals set aside (`tool_floor`, `below_min_change`).
+- Source-run diagnostic `static_pods_excluded` (memory rightsizing source): the number of static (mirror) pods left out of the analyzers.
+- `WorkloadUsageSummary.replicas_latest`: pods seen at the latest step of the target's last observed hour (a pod a rollout replaced earlier in that hour is not counted), computed by the rollup SQL (SQLite and PostgreSQL) and the reference implementation. Migration 0210 adds `workload_usage_hourly.latest_pod_count` (pods at each node row's latest sample); hours rolled before it read `pod_count`.
+- `WorkloadUsageSummary.cpu_p95_hour_max` / `memory_p95_hour_max`: the highest hourly p95 over the lookback.
+- `get_recommendations_by_ids` on the recommendation repositories: one `WHERE id IN (...)` query (SQLite) / `= ANY(...)` (PostgreSQL).
 
 ### Changed
 
@@ -167,6 +171,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - **UI wording:** the sidebar tagline is "Kubernetes optimization loop" (the retired "FinGreenOps Platform" claim is gone), the Recommendations subtitle reads "Ranked, evidence-backed changes, ready as pull requests" and the report page no longer says "FinGreenOps".
 - **Savings read as savings:** recommendation cards, the measured-savings tab and the Overview show "saves $232.53/yr" and "saves 69.90 kg CO₂e/yr" instead of "-$232.53" and "-69.90 kg"; a negative value (an increase) reads "costs ... more/yr".
 - Known limitation: a Helm chart read from another Git repository than its values cannot be planned yet. Its workload is `blocked` with the reason `cross-repository-git-chart` (shown in the API and on the Automation page) instead of being offered as actionable.
+- Eligibility evaluates the policy gates that depend only on the recommendations (risk, confidence, change-freeze windows, sample count and coverage) with the same function as plan creation (`evaluate_recommendation_gates`), over every recommendation of the typed action. Blocker messages for a missing risk level or confidence now use the policy evaluator's wording.
 
 ### Deprecated
 - `refresh=true` on recommendation reads (only queues a run).
@@ -240,6 +245,11 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - An external change below the minimum still counts as a "keep the current value" vote, so it holds the request like a proposal equal to it would; a VPA of unknown maturity (no checkpoints, for example `--storage=prometheus`) never pushes a decrease under the `priority`, `median` or `weighted` policies; plugin signals declaring a `greenkube.*` engine family are dropped (`reserved_engine_family`).
 - Tool floors no longer win the `safest` consensus over a measured native value (F-12): seaweedfs-volume measured 42 Mi, VPA and KRR proposed their 100 Mi floor, and 100 Mi was retained; the native value plus headroom is now retained.
 - An external source alone (VPA, Goldilocks, KRR, push), with no native GreenKube proposal for the container, no longer creates an active container-resources recommendation (78 KRR-only recommendations in the field). Its advice stays a signal on the Sources page. Existing source-only records are no longer re-emitted and are reconciled as stale by the next complete scan.
+- F-04 / REC-09: static pods of kubeadm, kind, minikube and k3s control planes (owner kind `Node`, annotation `kubernetes.io/config.mirror`) no longer receive rightsizing, HPA or any other recommendation. No source may store a recommendation whose owner kind is `Node`; recommendations stored by earlier versions are marked `stale` with the reason `static_pod` at the next scan (never deleted). The pod collector attributes a mirror pod without a Node owner to its node.
+- F-07: a recommendation shown with `can_open_pr: true` is no longer refused by plan creation with `policy_evidence_missing` (`sample_count_coverage`) or `policy_risk_exceeded` because of another recommendation of the same action, invalid coverage evidence, or a confidence stored only in the evidence.
+- F-08: `singleton_workload` was raised on every multi-replica workload scanned from the usage rollup (its baseline rows carry one pseudo pod per target). The replica count now comes from the pods at the latest step of the last observed hour, so a rollout in that hour does not hide a real singleton. Stored risk factors are corrected at the next scan that re-emits the recommendation.
+- The per-replica p95 guard (`replica_p95_exceeds_proposal`) read hourly averages of the rollup's pseudo pod, so a spiky replica no longer flagged a proposal below its peaks; on the rollup path it now uses the container's highest hourly p95.
+- Eligibility reads the siblings of an action from the unfiltered active list and then one batched query, instead of one query per sibling.
 
 ### Security
 - Wildcard CORS is never combined with credentials; CORS is same-origin by default.
