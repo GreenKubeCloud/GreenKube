@@ -14,3 +14,8 @@
 - Interim-verifier savings are no longer summed with change-measured savings in `run_rate_annual`, `realized_to_date`, `verified_count` and the realization summary (MEA-16).
 - A user-declared saving on `PATCH /apply` is bounded by the allocated projection, so a rightsizing on fixed nodes (billable projection 0) accepts a declaration (IMP-06).
 - The recommendations page no longer sums overlapping recommendations and nets request increases into its "Potential savings" totals (IMP-07).
+- Interim verdicts recorded before the interim marker (a measurement without a change id) are reported apart too, and interim amounts are left out of `realized_to_date.accrued_only_*` and of the `ledger_v1` fallback totals (MEA-16).
+- The collected time of measured hours is cluster-wide, so a CronJob alone in its namespace counts its idle steps as zero instead of being annualized as if it always ran (MEA-13).
+- A declared CO2e is bounded by the billable projection when the allocated projection models none (IMP-06).
+- A target whose first hour has a gap keeps its first rolled hour as first observation; only a first hour that runs to its end is shifted to the first sample (IMP-04).
+- The opportunity's reliability cost and a reliability fix's card use the allocated (or measured) cost, so they are not 0 on fixed nodes (IMP-07, MEA-14).
