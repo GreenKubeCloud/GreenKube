@@ -9,17 +9,23 @@ concrete implementations.
 
 import dataclasses
 import hashlib
-import hmac
 import logging
 import re
 import secrets
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Optional, Protocol, cast
 
 from fastapi import Depends, HTTPException, Query, Request
 
-from greenkube.auth.http import CSRF_HEADER, from_trusted_proxy, is_same_origin, peer_address
+from greenkube.auth import browser_key
+from greenkube.auth.http import (
+    CSRF_HEADER,
+    cleared_session_cookie_header,
+    from_trusted_proxy,
+    is_same_origin,
+    peer_address,
+)
 from greenkube.auth.metrics import record_auth_failure
 from greenkube.auth.principal import (
     ALL_SCOPES,
@@ -222,11 +228,6 @@ async def resolve_key_principal(token: str, settings: AuthSettings, service: Aut
     return None
 
 
-def browser_key_csrf_token(token: str) -> str:
-    """The CSRF token of a browser signed in with an API key: an HMAC of the key, unguessable without it."""
-    return hmac.new(token.encode("utf-8"), b"greenkube-browser-key-csrf", hashlib.sha256).hexdigest()
-
-
 async def _bearer_principal(request: Request, settings: AuthSettings, service: AuthService | None) -> Principal:
     """Resolve ``Authorization: Bearer``: the deprecated bootstrap key, the scrape token, then a scoped key."""
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
@@ -241,20 +242,55 @@ async def _bearer_principal(request: Request, settings: AuthSettings, service: A
     raise _bearer_unauthorized()
 
 
+def browser_key_principal_for(principal: Principal, signing: bytes, cookie: str) -> Principal:
+    """Mark a key principal as signed in through the browser cookie, with that cookie's CSRF token."""
+    return dataclasses.replace(principal, browser_key=True, csrf_token=browser_key.csrf_token(signing, cookie))
+
+
+async def browser_cookie_kid_principal(
+    kid: str, settings: AuthSettings, service: AuthService | None
+) -> Principal | None:
+    """The current principal of the key a verified cookie names, or ``None`` if it no longer may sign in.
+
+    ``legacy`` needs the bootstrap key still configured and not disabled (its
+    current access applies); a scoped key is fetched again and must be active,
+    so revocation and expiry sign the browser out. Either way, the ``read``
+    scope is required to open the UI.
+    """
+    principal: Principal | None = None
+    if kid == browser_key.LEGACY_KID:
+        if settings.legacy_api_key and settings.legacy_api_key_access != "disabled":
+            principal = _legacy_principal(settings.legacy_api_key, settings.legacy_api_key_access)
+    elif service is not None:
+        key = await service.active_api_key(kid)
+        if key is not None:
+            principal = api_key_principal(key)
+    if principal is None or not principal.has_scope(Scope.READ.value):
+        return None
+    return principal
+
+
 async def _browser_key_principal(
     request: Request, settings: AuthSettings, service: AuthService | None
 ) -> Principal | None:
-    """In ``api_key`` mode, the API key a browser exchanged for its HttpOnly cookie (F-09)."""
+    """In ``api_key`` mode, the signed cookie a browser got from ``/auth/api-key-login`` (F-09).
+
+    A cookie that fails any check is marked for clearing in the 401 response.
+    """
     if settings.mode != "api_key":
         return None
-    token = request.cookies.get(settings.cookie_name)
-    if not token:
+    cookie = request.cookies.get(settings.cookie_name)
+    if not cookie:
         return None
-    principal = await resolve_key_principal(token, settings, service)
+    signing = browser_key.signing_key(settings)
+    now = service.now() if service is not None else datetime.now(UTC)
+    verified = browser_key.verify_cookie(signing, cookie, now=now) if signing else None
+    principal = await browser_cookie_kid_principal(verified.kid, settings, service) if verified else None
     if principal is None:
         record_auth_failure("invalid_api_key")
+        request.state.clear_auth_cookie = True
         return None
-    return dataclasses.replace(principal, browser_key=True, csrf_token=browser_key_csrf_token(token))
+    return browser_key_principal_for(principal, signing or b"", cookie)
 
 
 async def _session_principal(request: Request, settings: AuthSettings, service: AuthService | None) -> Principal | None:
@@ -413,7 +449,10 @@ async def authenticate(request: Request) -> None:
         elif settings.environment == "production" and not settings.machine_credentials_configured and service is None:
             raise HTTPException(status_code=503, detail="API authentication is not configured.")
         else:
-            raise HTTPException(status_code=401, detail=_UNAUTHORIZED, headers={"WWW-Authenticate": "Bearer"})
+            headers = {"WWW-Authenticate": "Bearer"}
+            if getattr(request.state, "clear_auth_cookie", False):
+                headers["Set-Cookie"] = cleared_session_cookie_header(request, settings)
+            raise HTTPException(status_code=401, detail=_UNAUTHORIZED, headers=headers)
 
     _remember(request, principal)
     if auth_public:

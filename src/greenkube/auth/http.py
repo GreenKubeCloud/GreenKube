@@ -126,6 +126,28 @@ def clear_session_cookie(response: Response, request: Request, settings: AuthSet
     )
 
 
+def cleared_session_cookie_header(request: Request, settings: AuthSettings) -> str:
+    """The ``Set-Cookie`` header value that clears the auth cookie, for error responses."""
+    response = Response()
+    clear_session_cookie(response, request, settings)
+    return response.headers["set-cookie"]
+
+
+_LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
+
+
+def is_loopback_host(request: Request) -> bool:
+    """Whether the browser addressed GreenKube by a loopback name or address (``kubectl port-forward``)."""
+    host = request.url.hostname or ""
+    host = host.strip("[]").lower()
+    if host in _LOOPBACK_NAMES or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _origin_of(value: str) -> tuple[str, str] | None:
     try:
         parts = urlsplit(value)

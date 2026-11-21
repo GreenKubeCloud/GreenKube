@@ -10,10 +10,9 @@ administration.
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import secrets
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -21,12 +20,12 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from greenkube.api.dependencies import (
-    browser_key_csrf_token,
+    browser_key_principal_for,
     get_auth_service,
     get_principal,
     resolve_key_principal,
 )
-from greenkube.auth import oidc
+from greenkube.auth import browser_key, oidc
 from greenkube.auth.bootstrap import erase_consumed_initial_password, initial_admin_secret_from_config
 from greenkube.auth.http import (
     clear_session_cookie,
@@ -35,6 +34,7 @@ from greenkube.auth.http import (
     cookie_secure,
     from_trusted_proxy,
     is_https,
+    is_loopback_host,
     is_same_origin,
     set_session_cookie,
 )
@@ -45,7 +45,7 @@ from greenkube.auth.principal import Principal, Scope
 from greenkube.auth.service import AuthError, AuthService, IssuedSession
 from greenkube.auth.settings import AuthSettings
 from greenkube.auth.throttle import LoginThrottle
-from greenkube.auth.tokens import constant_time_equals, sha256_hex
+from greenkube.auth.tokens import constant_time_equals, parse_api_key, sha256_hex
 from greenkube.core.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -287,19 +287,18 @@ async def login(body: LoginRequest, request: Request, response: Response):
     return _issued_me(issued, settings)
 
 
-#: Throttle bucket of API-key sign-ins: there is no username, so every attempt from an IP counts together.
-_API_KEY_LOGIN_SUBJECT = "api-key"
-
-
 @router.post("/api-key-login", response_model=MeResponse)
 async def api_key_login(body: ApiKeyLoginRequest, request: Request, response: Response):
     """Sign a browser in with an API key in ``API_AUTH_MODE=api_key`` (field report F-09).
 
-    The key is checked like a Bearer key and handed back as an HttpOnly,
-    ``SameSite=Strict`` cookie, so the UI never keeps it in JavaScript or browser
-    storage. Every request re-checks the key: revoking it signs the browser out.
-    Mutations need the returned CSRF token. Other modes sign browsers in with
-    ``/auth/login`` or single sign-on and answer 409.
+    The key is checked like a Bearer key and exchanged for a signed, expiring
+    cookie ``v1.<kid>.<exp>.<mac>`` (HttpOnly, ``SameSite=Strict``) that never
+    contains the key. It lasts 12 hours, or ``AUTH_SESSION_REMEMBER_LIFETIME``
+    with "keep me signed in". Every request checks the signature, the expiry
+    and that the key is still active. The signing key derives from the
+    bootstrap key ``GREENKUBE_API_KEY``: without one this answers 409, and
+    rotating it signs every browser out. Over plain HTTP only a loopback host
+    (``kubectl port-forward``) is accepted. Other modes answer 409.
     """
     settings = _settings()
     if settings.mode != "api_key":
@@ -310,33 +309,71 @@ async def api_key_login(body: ApiKeyLoginRequest, request: Request, response: Re
                 "message": "Sign in with a username and password or single sign-on (API_AUTH_MODE is not api_key).",
             },
         )
+    signing = browser_key.signing_key(settings)
+    if signing is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "API_KEY_LOGIN_UNAVAILABLE",
+                "message": "Browser sign-in with an API key needs the bootstrap key GREENKUBE_API_KEY, "
+                "which signs the browser cookie. Configure it or switch to API_AUTH_MODE=session.",
+            },
+        )
     if not is_same_origin(request, settings, require=False):
         record_auth_failure("csrf")
         raise HTTPException(
             status_code=403, detail={"code": "CSRF_REJECTED", "message": "Cross-site sign-in rejected."}
         )
+    https = is_https(request, settings)
+    if not https and not is_loopback_host(request):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "HTTPS_REQUIRED",
+                "message": "Signing in with an API key needs HTTPS (or localhost through kubectl port-forward): "
+                "over plain HTTP the key and the cookie could be read on the network.",
+            },
+        )
+    key = body.key.strip()
+    parsed = parse_api_key(key)
+    subject = browser_key.throttle_subject(key, parsed[0] if parsed else None)
     ip = client_ip(request, settings)
     throttle = _throttle(request, settings)
-    _enforce_throttle(throttle, ip, _API_KEY_LOGIN_SUBJECT)
-    principal = await resolve_key_principal(body.key, settings, get_auth_service(request))
+    _enforce_throttle(throttle, ip, subject)
+    service = get_auth_service(request)
+    principal = await resolve_key_principal(key, settings, service)
+    kid = browser_key.LEGACY_KID if principal is not None and principal.legacy else None
+    if principal is not None and kid is None:
+        kid = principal.api_key_id
     if principal is None:
-        throttle.record_failure(ip, _API_KEY_LOGIN_SUBJECT)
+        throttle.record_failure(ip, subject)
         record_auth_failure("invalid_api_key")
         raise HTTPException(status_code=401, detail={"code": "INVALID_API_KEY", "message": "Invalid API key."})
-    throttle.record_success(ip, _API_KEY_LOGIN_SUBJECT)
+    throttle.record_success(ip, subject)
+    if kid is None or not principal.has_scope(Scope.READ.value):
+        record_auth_failure("forbidden_scope")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "INSUFFICIENT_SCOPE",
+                "message": "This key cannot open the UI: it needs the 'read' scope (scrape tokens never can).",
+            },
+        )
+    now = service.now() if service is not None else datetime.now(UTC)
+    lifetime = settings.remember_lifetime if body.remember else browser_key.DEFAULT_LIFETIME
+    cookie, _expires_at = browser_key.issue_cookie(signing, kid, now=now, lifetime=lifetime)
     response.set_cookie(
         settings.cookie_name,
-        body.key.strip(),
-        max_age=int(settings.remember_lifetime.total_seconds()) if body.remember else None,
+        cookie,
+        max_age=int(lifetime.total_seconds()) if body.remember else None,
         path=cookie_path(request),
-        secure=cookie_secure(request, settings),
+        secure=True if https else cookie_secure(request, settings),
         httponly=True,
         samesite="strict",
     )
     response.headers.update(_NO_STORE)
     logger.info("A browser signed in with API key %s.", principal.actor)
-    principal = dataclasses.replace(principal, browser_key=True, csrf_token=browser_key_csrf_token(body.key.strip()))
-    return _me(principal, settings)
+    return _me(browser_key_principal_for(principal, signing, cookie), settings)
 
 
 @router.post("/logout", status_code=204)
