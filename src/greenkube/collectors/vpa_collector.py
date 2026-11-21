@@ -15,7 +15,7 @@ from minutes of samples.
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from greenkube.core.config import config as global_config
@@ -69,6 +69,17 @@ def _parse_time(value: Any) -> Optional[datetime]:
         return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _created_recently(value: Any) -> bool:
+    """Whether a VPA was created less than ``VPA_MIN_SAMPLE_HOURS`` ago (its history is shorter)."""
+    created = _parse_time(value)
+    if created is None:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    hours = float(getattr(global_config, "VPA_MIN_SAMPLE_HOURS", 24.0) or 0.0)
+    return datetime.now(timezone.utc) - created < timedelta(hours=hours)
 
 
 def _conditions(status: dict) -> Dict[str, str]:
@@ -177,6 +188,7 @@ class VPACollector:
 
         items = (result or {}).get("items", []) or []
         checkpoints = await self._checkpoints(api) if items else {}
+        checkpointed_vpas = {(namespace, vpa_name) for namespace, vpa_name, _container in checkpoints}
         for item in items:
             try:
                 metadata = item.get("metadata") or {}
@@ -219,9 +231,14 @@ class VPACollector:
                             parsed.total_samples = int(samples) if isinstance(samples, (int, float)) else 0
                             parsed.first_sample_start = _parse_time(checkpoint.get("firstSampleStart"))
                             parsed.last_sample_start = _parse_time(checkpoint.get("lastSampleStart"))
-                        elif self.checkpoints_readable:
-                            # Checkpoints are readable but the recommender wrote none for this
-                            # container yet: a brand-new VPA, no sample history to trust.
+                        elif self.checkpoints_readable and (
+                            (parsed.namespace, parsed.vpa_name) in checkpointed_vpas
+                            or _created_recently(metadata.get("creationTimestamp"))
+                        ):
+                            # The recommender checkpoints this VPA's other containers, or the VPA
+                            # is newer than the maturity window: no sample history to trust yet.
+                            # Without either, the recommender may keep no checkpoints at all
+                            # (--storage=prometheus): maturity stays unknown, never "0 samples".
                             parsed.total_samples = 0
                         recommendations.append(parsed)
             except Exception as e:
