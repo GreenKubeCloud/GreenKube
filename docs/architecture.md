@@ -619,10 +619,10 @@ Schema: window_slug, namespace, bucket_ts, co2e_grams, embodied_co2e_grams, tota
 The REST API is started by the separate `greenkube-api` entry point (`greenkube.api.app:main`).
 
 #### **Grafana Integration**
-- **Dashboard:** `dashboards/greenkube-grafana.json`
-- **Data source:** Prometheus scraping `/prometheus/metrics` on the API (dashboard gauges) and on the controller's own listener (port `9102`: recommendation-scan, verification and collection control-loop metrics, recorded where that work runs)
-- **Helm resources:** `ServiceMonitor` (API, controller, and production worker), `NetworkPolicy`, Prometheus RBAC
-- **Panels:** KPIs, time-series (CO₂e, cost, energy), namespace breakdown, top pods, node utilization, grid intensity, recommendations
+- **Dashboard:** `dashboards/greenkube-operations.json` (operations: collection, loops, scans, measurement, ledger health, ledger savings counters)
+- **Data source:** Prometheus scraping `/prometheus/metrics` on the API (collection freshness and ledger savings counters) and on the controller's own listener (port `9102`: collection, loop, recommendation-scan, verification and ledger control-loop metrics, recorded where that work runs)
+- **Helm resources:** `ServiceMonitor` (API, controller, and production worker), `PrometheusRule`, `NetworkPolicy`, Prometheus RBAC
+- **Footprint:** cost and CO₂e per node and namespace are served by the API and the Footprint pages, not as Prometheus series
 
 ## Data Flow
 

@@ -300,6 +300,38 @@ target. `monitoring.serviceMonitor.namespace` now defaults to empty, the release
 After the upgrade, `kubectl get servicemonitors -A -l app.kubernetes.io/name=greenkube` lists them, and the
 Prometheus targets page shows `serviceMonitor/<namespace>/<release>/0` up.
 
+### Prometheus metrics, sustainability score and Grafana dashboard
+
+`/prometheus/metrics` now exports GreenKube's own health and the savings ledger counters only. Per-pod and
+per-namespace footprint series are gone: on a 40-pod test fixture the API endpoint drops from 75 metric families and
+3,066 series (680 with a `pod` label, 2,321 with a `namespace` label) to 7 families and 27 series. Footprint data stays
+in the Footprint pages, `GET /api/v1/report/summary`, `GET /api/v1/report/export` and `GET /api/v1/nodes`.
+No HTTP API route is removed, no setting or Helm value changes, and no data is deleted: the score was never stored.
+
+**Removed series.** Recording rules, alerts or dashboards of your own that read them return no data after the upgrade:
+
+| Removed | Replacement |
+|---|---|
+| `greenkube_sustainability_score`, `greenkube_sustainability_dimension_score` | None: the score had no defined method (audit API-06) |
+| `greenkube_pod_*` (cost, CO₂e, embodied CO₂e, energy, CPU and memory requests, usage and efficiency, network, disk, restart count), `greenkube_pue`, `greenkube_grid_intensity_gco2_kwh` | Footprint pages and `GET /api/v1/report/export`; usage from your Prometheus (cAdvisor, kube-state-metrics) |
+| `greenkube_namespace_*` and `greenkube_cluster_*` footprint totals, `greenkube_cluster_idle_*`, `greenkube_cluster_with_idle_*`, `greenkube_cluster_pod_count`, `greenkube_cluster_namespace_count` | `GET /api/v1/report/summary`, `GET /api/v1/metrics/summary` |
+| `greenkube_node_info`, `greenkube_node_cpu_capacity_millicores`, `greenkube_node_memory_capacity_bytes`, `greenkube_node_cpu_allocated_millicores`, `greenkube_node_memory_allocated_bytes`, `greenkube_node_embodied_emissions_kg` | `GET /api/v1/nodes` (Footprint, nodes); kube-state-metrics |
+| `greenkube_carbon_intensity_score`, `greenkube_carbon_intensity_zone`, `greenkube_zone_grid_intensity_gco2_kwh` | The Footprint report |
+| `greenkube_dashboard_summary_*` | `GET /api/v1/metrics/dashboard-summary` |
+| `greenkube_dashboard_savings_co2e_grams_total`, `greenkube_dashboard_savings_cost_dollars_total`, `greenkube_dashboard_savings_accrued_co2e_grams`, `greenkube_dashboard_savings_accrued_cost_dollars` | `increase()` of `greenkube_*_savings_attributed_*_total` minus `greenkube_*_savings_reversed_*_total` over the window, filtered on `method` |
+| `greenkube_savings_run_rate_annual_co2e_grams`, `greenkube_savings_run_rate_annual_cost_dollars`, `greenkube_cluster_co2e_saved_grams_total`, `greenkube_cluster_cost_saved_dollars_total` | `GET /api/v1/recommendations/savings` |
+| `greenkube_recommendations_total`, `greenkube_recommendations_implemented_total`, `greenkube_recommendations_savings_co2e_grams`, `greenkube_recommendations_savings_cost_dollars`, `greenkube_namespace_recommendation_savings_co2e_grams_total`, `greenkube_namespace_recommendation_savings_cost_dollars_total`, `greenkube_top_recommendations` | `GET /api/v1/recommendations`; scan health from `greenkube_optimization_runs_total` and `greenkube_recommendations_generated_total` |
+| `greenkube_estimated_metrics_ratio` | `greenkube_metric_rows_written_total{source}` (controller) |
+
+Kept: `greenkube_last_collection_timestamp_seconds`, `greenkube_metrics_total`, the four ledger counters
+`greenkube_{co2e,cost}_savings_{attributed,reversed}_*_total`, `greenkube_savings_measured_vs_projected_ratio`, and
+every control-loop family. The chart PrometheusRule reads none of the removed series.
+
+**Grafana.** `dashboards/greenkube-grafana.json` (uid `greenkube-fingreenops`, also published on Grafana.com as
+dashboard 25377) is removed, with its generator `scripts/build_grafana_dashboard.py`. Import
+`dashboards/greenkube-operations.json` (uid `greenkube-operations`) instead and delete the old dashboard from Grafana:
+its panels show "No data" after the upgrade ([Grafana dashboard](prometheus-grafana.md#4-grafana-dashboard)).
+
 ### Checking an upgrade without a cluster
 
 The repository renders the 0.3.1 chart and the current chart with the same values and compares what must

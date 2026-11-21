@@ -74,7 +74,7 @@ The **Setup** page lists what is active and the fix for anything missing. Recomm
 - [Installation](docs/installation.md) and [Upgrading](docs/upgrading.md): external PostgreSQL, Ingress/TLS, high availability, upgrades from 0.3.x.
 - [GitOps automation](docs/automation.md), [Recommendation lifecycle](docs/recommendation.md), [Recommendation sources](docs/sources.md).
 - [Impact model](docs/methodology/impact-model.md) and [Savings measurement](docs/methodology/savings-measurement.md): how cost, CO₂e and released capacity are projected and measured.
-- [Configuration](docs/configuration.md), [API](docs/api.md), [CLI](docs/cli.md), [Architecture](docs/architecture.md), [Prometheus & Grafana](docs/prometheus-grafana.md) (dashboard also on [Grafana.com](https://grafana.com/grafana/dashboards/25377-greenkube-fingreenops-dashboard/)).
+- [Configuration](docs/configuration.md), [API](docs/api.md), [CLI](docs/cli.md), [Architecture](docs/architecture.md), [Prometheus & Grafana](docs/prometheus-grafana.md) (operations dashboard and alerts).
 - [Roadmap](docs/roadmap.md) and [Changelog](CHANGELOG.md): new features land in the *Unreleased* section before each release.
 
 ## Contributing

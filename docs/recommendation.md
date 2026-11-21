@@ -477,28 +477,16 @@ The `/recommendations` page currently provides:
 
 ## Prometheus And Grafana
 
-`/prometheus/metrics` refreshes recommendation gauges from the database on scrape, so API restarts do not empty dashboards. The API does not scan at startup; the controller scans once right after its initial collection.
-
-Key recommendation metrics:
+`/prometheus/metrics` exposes the savings ledger counters, refreshed from the database on scrape (at most once a minute), so API restarts do not empty them. Recommendation lists, projections and per-namespace savings are served by the API (`GET /api/v1/recommendations`, `GET /api/v2/ledger/summary`), not as Prometheus series. The API does not scan at startup; the controller scans once right after its initial collection.
 
 | Metric | Meaning |
 |---|---|
-| `greenkube_recommendations_total` | Active recommendation count by cluster, namespace, type, and priority. Also emits a cluster aggregate with `namespace="__all__"`. |
-| `greenkube_recommendations_savings_co2e_grams` | Projected annual CO2e savings by recommendation type for active records. |
-| `greenkube_recommendations_savings_cost_dollars` | Projected annual cost savings by recommendation type for active records. |
-| `greenkube_namespace_recommendation_savings_co2e_grams_total` | Projected annual CO2e savings by target namespace. |
-| `greenkube_namespace_recommendation_savings_cost_dollars_total` | Projected annual cost savings by target namespace. |
-| `greenkube_top_recommendations` | Ranked active recommendations for Grafana actionable cards. It emits both CO2e and cost values for each rank and selected sort metric. |
-| `greenkube_recommendations_implemented_total` | Applied recommendation count by namespace and type. |
 | `greenkube_co2e_savings_attributed_grams_total` | Counter: CO2e accrued in the ledger, by recommendation type and `method` (`projected`, `measured`, `user_declared`). Never decreases. |
 | `greenkube_cost_savings_attributed_dollars_total` | Counter: cost accrued in the ledger, by recommendation type and `method`. Never decreases. |
 | `greenkube_co2e_savings_reversed_grams_total` / `greenkube_cost_savings_reversed_dollars_total` | Counters of reversals: every superseded accrual (for example after a rollback review) plus negative accruals such as negative declared savings. Net = attributed − reversed. |
-| `greenkube_savings_run_rate_annual_co2e_grams` / `..._cost_dollars` | Current annual savings rate of applied recommendations, by `method`. |
-| `greenkube_dashboard_savings_co2e_grams_total` | Realized (measured) CO2e savings for fixed dashboard windows. Prefer this for Grafana time-window panels. |
-| `greenkube_dashboard_savings_cost_dollars_total` | Realized (measured) cost savings for fixed dashboard windows. Prefer this for Grafana time-window panels. |
-| `greenkube_dashboard_savings_accrued_co2e_grams` / `..._cost_dollars` | Ledger accruals for fixed dashboard windows, by `method`. Never sum methods. |
+| `greenkube_savings_measured_vs_projected_ratio` | Share of net accrued CO2e savings that is measured rather than projected (0–1). |
 
-The Grafana dashboard uses `greenkube_top_recommendations` in the Actionable Recommendations row. Dashboard variables let users choose the ranking metric (`co2` or `cost`) and displayed recommendation count.
+Savings over a window are `increase()` of these counters; never sum methods. The scan metrics (`greenkube_optimization_*`, `greenkube_recommendations_generated_total`) come from the controller ([Prometheus and Grafana](prometheus-grafana.md#optimization-control-loop-metrics)).
 
 ## Realized Savings
 
