@@ -384,13 +384,15 @@
 	// sums (which add overlapping recommendations and net increases) are only a fallback.
 	// The server figure covers every active recommendation: with source/risk filters the page sums the matches.
 	$: opportunity = serverFiltersActive ? null : serverOpportunity(savings);
+	// Fallback (filters on): the matching savings recommendations only, never increases or negatives.
+	$: fallbackRecs = actionableActiveRecs.filter((r) => r?.value?.lane !== 'reliability');
 	$: totalSavingsCO2 =
-		opportunity?.co2eGrams ?? actionableActiveRecs.reduce((s, r) => s + (r.potential_savings_co2e_grams ?? 0), 0);
+		opportunity?.co2eGrams ?? fallbackRecs.reduce((s, r) => s + Math.max(r.potential_savings_co2e_grams ?? 0, 0), 0);
 	// An unknown billable saving (cluster not observed yet) is the allocated value: never summed as projected.
 	$: totalSavingsCost =
 		opportunity?.cost ??
-		actionableActiveRecs.reduce(
-			(s, r) => s + (r.projected_billable_cost_annual === null ? 0 : (r.potential_savings_cost ?? 0)),
+		fallbackRecs.reduce(
+			(s, r) => s + (r.projected_billable_cost_annual === null ? 0 : Math.max(r.potential_savings_cost ?? 0, 0)),
 			0
 		);
 	$: potentialSavingsPeriod = `per year · ${opportunity?.label ?? OPPORTUNITY_LABEL}`;
@@ -2118,7 +2120,7 @@
 														</p>
 													</div>
 												{/if}
-												{#if rec.cost_saved}
+												{#if appliedCostFigure(rec).value}
 													{@const costFigure = appliedCostFigure(rec)}
 													<div>
 														<p class="text-[10px] uppercase text-dark-600">{costFigure.label}</p>

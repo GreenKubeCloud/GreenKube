@@ -102,16 +102,25 @@ function raisesRequest(rec) {
  * The cost figure of an applied recommendation's card. A reliability fix (a
  * request increase, MEA-14) is judged on its OOM-kill rate, not on a saving:
  * once verified it reads "Fix confirmed, costs" with what the fix costs per
- * year (positive), never as a measured saving of 0. Other records keep "Cost
+ * year (positive: the measured cost, else the allocated projection, else the
+ * billable one), never as a measured saving of 0. Other records keep "Cost
  * Measured" once verified, else "Cost Projected".
  * @returns {{label: string, value: number|null, reliability: boolean}}
  */
 export function appliedCostFigure(rec) {
 	const verified = rec?.status === 'verified';
 	if (raisesRequest(rec)) {
-		const projected = finite(rec?.cost_saved);
-		const cost = projected === null ? null : -projected;
-		return { label: verified ? 'Fix confirmed, costs' : 'Fix projected to cost', value: cost, reliability: true };
+		// Measured cost once verified, else the allocated projection (non-zero on fixed nodes, where
+		// the billable one is 0), else the billable projection. Savings are signed: a cost is negative.
+		const measured = verified ? finite(rec?.measured_cost_saved) : null;
+		const allocated = finite(rec?.projected_allocated_cost_annual ?? rec?.impact?.allocated_cost_annual);
+		const billable = finite(rec?.cost_saved);
+		const saving = [measured, allocated, billable].find((value) => value !== null && value !== 0) ?? null;
+		return {
+			label: verified ? 'Fix confirmed, costs' : 'Fix projected to cost',
+			value: saving === null ? null : -saving,
+			reliability: true
+		};
 	}
 	const measured = verified ? finite(rec?.measured_cost_saved) : null;
 	return measured !== null

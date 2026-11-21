@@ -191,7 +191,11 @@ describe('appliedCostFigure (MEA-14)', () => {
 			cost_saved: -40,
 			measured_cost_saved: 0
 		};
+		// The measured cost is not claimed (0): the allocated projection is shown, else the billable one.
 		expect(appliedCostFigure(fix)).toEqual({ label: 'Fix confirmed, costs', value: 40, reliability: true });
+		expect(appliedCostFigure({ ...fix, measured_cost_saved: -55 }).value).toBe(55);
+		// Fixed nodes: billable projection 0, allocated cost 25.
+		expect(appliedCostFigure({ ...fix, cost_saved: 0, impact: { allocated_cost_annual: -25 } }).value).toBe(25);
 		expect(appliedCostFigure({ ...fix, status: 'applied' }).label).toBe('Fix projected to cost');
 		const cut = { ...fix, current_memory_request_bytes: 2, recommended_memory_request_bytes: 1, cost_saved: 30, measured_cost_saved: 25 };
 		expect(appliedCostFigure(cut)).toEqual({ label: 'Cost Measured', value: 25, reliability: false });
