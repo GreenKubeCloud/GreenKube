@@ -396,23 +396,14 @@ Analyzes `CombinedMetric` data to identify optimization opportunities (`src/gree
 **Sources (Source SDK, `src/greenkube/signals/`, [developer guide](sources.md)):** every source implements one contract, `Source` (metadata, `discover()`, `health()`, `collect() -> SourceBatch` of v2 **signals**), and is registered in the `SourceRegistry`: built-ins in code (`core/optimization/registry.py`), third-party packages through the `greenkube.sources` Python entry points. `SOURCES_CONFIG` enables, disables or configures each source by id.
 
 1. **Native analyzers (`greenkube.<analyzer>`)** — one source per analyzer, through the analyzer adapter (`signals/adapters.py`); their v1 recommendations keep `source: greenkube`:
-   - **Zombie Pods** (`greenkube.zombie`): workloads consuming cost with minimal energy.
    - **Rightsizing, two-way** (`greenkube.rightsizing_cpu`, `greenkube.rightsizing_memory`): request decreases for over-provisioned CPU/memory
      (after a week of coverage) and reliability increases when p99 usage nears the
      request, from per-step usage percentiles and configured headroom.
-   - **Autoscaling Candidates** (`greenkube.autoscaling`): high coefficient of variation / spike ratio,
-     skipping workloads already governed by an HPA.
-   - **Off-peak Scaling** (`greenkube.off_peak`): idle windows suggesting scale-to-zero schedules.
-   - **Idle Namespaces** (`greenkube.idle_namespace`): namespaces with minimal activity.
-   - **Carbon-Aware Scheduling** (`greenkube.carbon_aware`): workloads running during high-intensity periods.
-   - **Node optimization** (`greenkube.nodes`): overprovisioned nodes.
    - **Orphaned PV / LoadBalancer cleanup** (`greenkube.orphaned_pv`, `greenkube.orphaned_lb`).
 
 2. **VPA (`vpa`, optional)** — reads recommendation-mode VerticalPodAutoscalers (`updateMode: Off`) and replaces native CPU/memory rightsizing for the same workload, avoiding duplicate advice. Wrapped by the v1 connector adapter.
 
-3. **NodePool consolidation (`greenkube.nodepool`, optional)** — GreenKube's heuristic over Karpenter NodePools and NodeClaims (not Karpenter's own advice) when the CRDs are available. Its v1 recommendations keep `source: karpenter`.
-
-4. **Plugins** — third-party sources installed in the image ([example](../examples/greenkube-source-example)). Their signals are recorded and become recommendations only through the consensus engine, under the plugin's own source id.
+3. **Plugins** — third-party sources installed in the image ([example](../examples/greenkube-source-example)). Their signals are recorded and become recommendations only through the consensus engine, under the plugin's own source id.
 
 **Isolation:** the `SourceRunner` runs each source with its own probe and collection timeouts, a rate limit (`min_interval_seconds`) and a circuit breaker (`failure_threshold` consecutive failures skip the source for `circuit_cooldown_seconds`). It drops signals that break the contract (another source id, an undeclared capability), trims raw payloads, evidence and source estimates to bounded sizes, ignores v1 recommendations from third-party sources (third-party advice reaches recommendations only as signals, through consensus) and records an API-safe error code, never an exception message. A source that fails, times out, is skipped or returns a partial batch is not authoritative: its previous recommendations are kept, never marked stale. Native analyzers count as one v1 source (`greenkube`) in `optimization_runs.source_outcomes`, so one failing analyzer makes `greenkube` incomplete for that run.
 
@@ -705,7 +696,7 @@ The controller's `collect_metrics` job is the only production writer of usage, e
 2. **Analysis:**
    ```
    OptimizationEngine.generate()
-   ├─ Run enabled sources through the SourceRunner (native analyzers, VPA, NodePool, plugins)
+   ├─ Run enabled sources through the SourceRunner (native analyzers, VPA, plugins)
    ├─ Record each source's run and signals (source_runs, source_signals)
    ├─ Combine every source's signals by consensus (policy, agreement, per-source spread)
    ├─ Deduplicate and clamp values to configured minimums
@@ -824,7 +815,6 @@ All configuration flows through `src/greenkube/core/config.py`:
 **Recommendations:**
 - `RECOMMENDATION_LOOKBACK_DAYS` — Default: 14
 - `RIGHTSIZING_CPU_THRESHOLD` — Default: 0.3
-- `ZOMBIE_COST_THRESHOLD` — Default: 0.01
 - `RECOMMENDATION_MAX_METRIC_ROWS` — Default: 750000
 - `RECOMMENDATION_TTL_DAYS` — Default: 14
 - `VERIFICATION_*` — post-apply verification gates

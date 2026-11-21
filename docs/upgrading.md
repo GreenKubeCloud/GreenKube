@@ -110,12 +110,32 @@ An upgrade that reuses a 0.3.x values file keeps working: the chart maps the old
 | `rendererSandbox.*` | `renderer.*`; `rendererSandbox.enabled` is ignored |
 | `automation.policy.minSamples`, `config.recommendations.verification.minSamples` | still honoured for their gate; prefer `config.recommendations.minSamples` |
 | `config.recommendations.sourcePriority` | `sources.priority` |
+| `config.recommendations.karpenterEnabled` | ignored: the Karpenter NodePool source was removed (see below) |
+| `sources.settings` of `greenkube.zombie`, `greenkube.autoscaling`, `greenkube.off_peak`, `greenkube.idle_namespace`, `greenkube.carbon_aware`, `greenkube.nodes`, `greenkube.nodepool` | ignored: these sources were removed (see below) |
 | `config.db.type: postgres`, `config.db.path` | ignored |
 | `config.db.type: sqlite` | the upgrade fails with the migration commands, see below |
 
 Note that `automation.enabled: false` now means *discovery, previews and measurement run, no pull request is
 opened*. To keep the Git tokens out of every pod, also remove `automation.providers` and do not create
 `greenkube-git-credentials`.
+
+### Removed advisory analyzers
+
+The native advisory analyzers (zombie pods, idle namespaces, off-peak scaling, autoscaling candidates,
+carbon-aware scheduling, over- and under-provisioned nodes) and the Karpenter NodePool heuristic are gone: their
+advice could not become a pull request or be measured. Rightsizing and the orphaned LoadBalancer and
+PersistentVolume detection stay. On upgrade:
+
+- migration 0300 marks the open recommendations of the retired types (`ZOMBIE_POD`, `IDLE_NAMESPACE`,
+  `OFF_PEAK_SCALING`, `AUTOSCALING_CANDIDATE`, `CARBON_AWARE_SCHEDULING`, `OVERPROVISIONED_NODE`,
+  `UNDERUTILIZED_NODE`), active or ignored, `stale` with a `stale` event of reason `type_removed`. No row is
+  deleted, applied and measured ones keep their status, and the savings ledger is not touched;
+- `RECOMMENDATION_KARPENTER_ENABLED` is accepted and ignored for this release, with one warning at start;
+  `config.recommendations.karpenterEnabled` is no longer rendered and the notes name it;
+- `sources.settings` entries of the removed sources are ignored and listed as `removed_source` problems by
+  `GET /api/v1/sources`.
+
+The Karpenter, Cluster Autoscaler and HPA reads stay: the realization factor and the rightsizing evidence use them.
 
 ### From a standalone or production install with PostgreSQL
 

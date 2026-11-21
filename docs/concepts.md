@@ -38,9 +38,8 @@ A **source** produces optimization advice as **signals** (one proposal for one t
 
 | Source | What it contributes | How it is enabled |
 |---|---|---|
-| `greenkube.*` (v1 `source: greenkube`) | Native analyzers, one source each: CPU and memory rightsizing, zombie pods, autoscaling candidates, off-peak scaling, idle namespaces, carbon-aware scheduling, node utilization, orphaned PersistentVolumes and LoadBalancers | On by default; each can be disabled in `sources.settings` |
+| `greenkube.*` (v1 `source: greenkube`) | Native analyzers, one source each: CPU and memory rightsizing, orphaned PersistentVolumes and LoadBalancers | On by default; each can be disabled in `sources.settings` |
 | `vpa` | Container targets from VerticalPodAutoscalers in recommendation mode (`updateMode: Off`). This includes the VPAs that Goldilocks creates. | Enabled automatically when the VPA CRD exists |
-| `greenkube.nodepool` (v1 `source: karpenter`) | NodePool consolidation opportunities, computed by GreenKube from live NodePool and NodeClaim state | Enabled automatically when the Karpenter CRDs exist |
 
 Each recommendation records its `source`, a source-specific reference (`source_ref`, for example `namespace/vpa-name`), and the list of every source that reported the same issue (`sources`).
 
@@ -58,7 +57,7 @@ A **recommendation** is one proposed change on one target. It contains:
 
 - **Target**: namespace, workload owner (kind and name), and container when the change is container-specific. Node-level and cluster-level recommendations target a node, a PersistentVolume or a Service instead.
 - **Type and capability**: for example `RIGHTSIZING_CPU` in the `cpu_rightsizing` capability.
-- **Proposal**: the current and proposed values (for example CPU request 500m → 200m), or a schedule for off-peak scaling.
+- **Proposal**: the current and proposed values (for example CPU request 500m → 200m), or the resource to delete.
 - **Evidence**:
   - observation window, sample count and coverage;
   - usage distribution (average, p50, p90, p95, p99, max);
@@ -141,7 +140,7 @@ Merge and close events arrive by signed webhook or by polling.
 
 What can become a pull request today: decreases of container CPU and memory requests on Deployments, StatefulSets and DaemonSets. Other recommendation types are advisory for now.
 
-*(Planned)* Increases, limits, replicas and HPAs, KEDA cron schedules, deletions of orphaned resources, remote Helm charts, Karpenter NodePools; patch-file and CI-driven delivery; a GitHub App.
+*(Planned)* Increases, limits, deletions of orphaned resources, remote Helm charts; patch-file and CI-driven delivery; a GitHub App.
 
 ## Proving the change
 

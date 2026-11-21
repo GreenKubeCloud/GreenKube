@@ -446,9 +446,7 @@ Every other recommendation type remains visible but shows "Manual change require
 ## Deleting orphaned resources
 
 Orphaned `LoadBalancer` Services (`ORPHANED_LOAD_BALANCER`) and `PersistentVolume`s (`ORPHANED_PERSISTENT_VOLUME`)
-can become a deletion pull request (roadmap H6). Zombie workloads and idle namespaces stay manual
-(`deletion_requires_review`): deleting a Namespace manifest removes everything in it, and a zombie's owner may be
-recreated by its own controller.
+can become a deletion pull request (roadmap H6). Auto-approval never approves one (`deletion_requires_review`).
 
 **Evidence first.** A deletion action is only built for a recommendation that passed the deletion evidence model
 (selector-less, owned and gateway/mesh/ingress Services are never reported; EndpointSlices, route references and the

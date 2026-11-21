@@ -1,0 +1,11 @@
+### Removed
+- **Native advisory analyzers** (roadmap B.1): zombie pods, idle namespaces, off-peak scaling, autoscaling candidates, carbon-aware scheduling, over- and under-provisioned nodes, and the Karpenter NodePool heuristic with its NodePool policy signals (sources `greenkube.zombie`, `greenkube.autoscaling`, `greenkube.off_peak`, `greenkube.idle_namespace`, `greenkube.carbon_aware`, `greenkube.nodes`, `greenkube.nodepool`). Their advice could not become a pull request or be measured. Rightsizing and the orphaned LoadBalancer and PersistentVolume detection stay, and so do the Karpenter, Cluster Autoscaler and HPA reads of the realization factor and the risk profile.
+- The recommendation types `ZOMBIE_POD`, `IDLE_NAMESPACE`, `OFF_PEAK_SCALING`, `AUTOSCALING_CANDIDATE`, `CARBON_AWARE_SCHEDULING`, `OVERPROVISIONED_NODE` and `UNDERUTILIZED_NODE` are retired: nothing produces them, a plugin that still emits one is dropped, and stored rows stay readable. Migration 0300 marks their open rows (active or ignored) `stale` with a `stale` event of reason `type_removed`; applied and measured rows and the savings ledger are untouched.
+- `RECOMMENDATION_KARPENTER_ENABLED` is accepted and ignored for this release, with one warning at start. Helm `config.recommendations.karpenterEnabled` is no longer rendered and is listed under DEPRECATED VALUES in the notes, as are `sources.settings` entries of the removed sources; `GET /api/v1/sources` reports such entries as `removed_source` problems. The default source priority is `vpa,greenkube`.
+- The scan no longer lists namespaces (the namespace metadata served only the idle-namespace, zombie and off-peak safety rules).
+- UI: the badges of the retired types, the Karpenter source badge and filter, and the capability filters of the removed analyzers.
+- The demo no longer seeds recommendations of the retired types.
+
+### Changed
+- The projected opportunity (`opportunity` of `GET /recommendations/savings`) sums the request changes and asset deletions: the overlap rules for namespace deletions, off-peak schedules, zombie deletions and node removals had nothing left to apply to.
+- The thresholds `ZOMBIE_*`, `AUTOSCALING_*`, `OFF_PEAK_*`, `IDLE_NAMESPACE_ENERGY_THRESHOLD`, `CARBON_AWARE_THRESHOLD` and `NODE_UTILIZATION_THRESHOLD` now only feed the sustainability score.
