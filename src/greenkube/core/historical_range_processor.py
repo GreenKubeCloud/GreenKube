@@ -82,6 +82,9 @@ logger = logging.getLogger(__name__)
 #: range.9 (COL-11): CPU of a container adds its consecutive instances (cAdvisor ``name``) inside the rate
 #: window instead of keeping the largest; duplicates of one instance still count once.  ``+range.8`` rows
 #: under-count CPU around restarts: re-collect a window inside Prometheus retention to apply it.
+#: COL-12: memory_usage_bytes is the working-set average over the step (avg_over_time), no longer the
+#: instant value at the step boundary, and container rows store the step peak (max_over_time) in
+#: memory_usage_max_bytes.  Older rows keep a NULL peak (rightsizing then uses the step value).
 CALCULATION_VERSION = f"{__version__}+range.9"
 # Day-sized chunks bound the memory of long backfills.
 _CHUNK_SECONDS = 86400
@@ -571,6 +574,10 @@ class HistoricalRangeProcessor:
         becomes container usage (rightsizing reports ``pod_level_usage_only``).
         """
         return await self._query_range(chunk, self._promql.memory_working_set_by_level())
+
+    async def _collect_memory_peak(self, chunk: CollectionWindow):
+        """Largest working-set scrape inside each step, same series as :meth:`_collect_memory` (COL-12)."""
+        return await self._query_range(chunk, self._promql.memory_working_set_peak_by_level())
 
     async def _collect_gpu(self, chunk: CollectionWindow) -> dict[int, list[dcgm_collector.GpuSample]]:
         """DCGM GPU power and utilization per step; empty when DCGM is absent (B5).
@@ -1368,6 +1375,7 @@ class HistoricalRangeProcessor:
                     disk_write_results,
                     restart_results,
                     memory_results,
+                    memory_peak_results,
                     ephemeral_usage_results,
                     pod_node_results,
                     pod_running_results,
@@ -1378,6 +1386,7 @@ class HistoricalRangeProcessor:
                     self._query_range(chunk, promql.pod_disk_write()),
                     self._query_range(chunk, promql.pod_restarts()),
                     self._collect_memory(chunk),
+                    self._collect_memory_peak(chunk),
                     self._query_range(chunk, promql.pod_ephemeral_storage_usage()),
                     self._query_range(chunk, promql.pod_node()),
                     self._query_range(chunk, promql.pod_running()),
@@ -1395,6 +1404,9 @@ class HistoricalRangeProcessor:
             ephemeral_usage_by_sample = self._pod_series_by_sample(ephemeral_usage_results, chunk)
             memory_by_sample, container_memory_samples, memory_nodes = self._container_series_by_sample(
                 memory_results, chunk
+            )
+            _pod_memory_peaks, container_memory_peak_samples, _peak_nodes = self._container_series_by_sample(
+                memory_peak_results, chunk
             )
 
             # Pod -> node placement from kube-state-metrics, for cAdvisor series without `node` (A10).
@@ -1414,7 +1426,7 @@ class HistoricalRangeProcessor:
             for sample_start, by_pod in self._pod_series_by_sample(pod_running_results, chunk).items():
                 running_by_sample[sample_start].update(key for key, value in by_pod.items() if value >= 1)
 
-            del memory_results, ephemeral_usage_results, pod_node_results, pod_running_results
+            del memory_results, memory_peak_results, ephemeral_usage_results, pod_node_results, pod_running_results
 
             # Parse CPU results into per-sample pod and container usage (cores).
             samples: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
@@ -1792,6 +1804,12 @@ class HistoricalRangeProcessor:
                 container_memory_usage = {
                     key: int(round(value)) for key, value in container_memory_samples.get(sample_key, {}).items()
                 }
+                # Peaks only for containers whose average comes from the same Prometheus series (COL-12).
+                container_memory_peak = {
+                    key: int(round(value))
+                    for key, value in container_memory_peak_samples.get(sample_key, {}).items()
+                    if key in container_memory_usage
+                }
                 container_sample_count_map = {}
                 #: Containers filled from the Metrics API carry their own usage source (COL-05).
                 container_usage_source_map: dict[tuple[str, str, str], str] = {}
@@ -1836,6 +1854,7 @@ class HistoricalRangeProcessor:
                     PodResourceMaps(
                         container_cpu_usage_map=container_cpu_usage,
                         container_memory_usage_map=container_memory_usage,
+                        container_memory_peak_map=container_memory_peak,
                         container_sample_count_map=container_sample_count_map,
                         container_usage_source_map=container_usage_source_map,
                     )

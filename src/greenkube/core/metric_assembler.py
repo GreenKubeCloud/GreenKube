@@ -101,6 +101,15 @@ def provenance_estimation_reasons(intensity_source: Optional[str], power_source:
 METRICS_API_POINT_SAMPLE = "metrics_api_point_sample"
 
 
+def _memory_peak(resource_maps: PodResourceMaps, container_key: tuple) -> int | None:
+    """Step peak of a container's working set, never below its stored average (COL-12)."""
+    peak = resource_maps.container_memory_peak_map.get(container_key)
+    if peak is None:
+        return None
+    average = resource_maps.container_memory_usage_map.get(container_key)
+    return max(peak, average) if average is not None else peak
+
+
 def _container_usage_source(resource_maps: PodResourceMaps, container_key: tuple, aggregate: CombinedMetric) -> str:
     """Usage source of a container row: its own when it differs from the pod row's (COL-05)."""
     source = resource_maps.container_usage_source_map.get(container_key)
@@ -322,7 +331,7 @@ class MetricAssembler:
                             "cpu_usage_millicores": resource_maps.container_cpu_usage_map.get(container_key),
                             "cpu_usage_max_millicores": None,
                             "memory_usage_bytes": resource_maps.container_memory_usage_map.get(container_key),
-                            "memory_usage_max_bytes": None,
+                            "memory_usage_max_bytes": _memory_peak(resource_maps, container_key),
                             "network_receive_bytes": None,
                             "network_transmit_bytes": None,
                             "disk_read_bytes": None,

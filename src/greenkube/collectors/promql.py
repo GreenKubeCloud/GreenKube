@@ -163,9 +163,29 @@ class PromQLCatalog:
         return self._cpu_rate_per_container(POD_LEVEL_OR_CONTAINER_FILTER)
 
     def memory_working_set_by_level(self) -> str:
-        """Working-set bytes of every container and every pod cgroup, chosen per pod by the caller (COL-09)."""
+        """Average working-set bytes over the step of every container and pod cgroup (COL-09, COL-12).
+
+        The step average, not the instant value at the step boundary, is the
+        memory a row holds for allocation; the caller chooses per pod between
+        its containers and its pod cgroup.
+        """
         selector = _selector(POD_LEVEL_OR_CONTAINER_FILTER, *self.extra_matchers)
-        return f"max(container_memory_working_set_bytes{selector}) by (namespace,pod,container,node)"
+        return (
+            f"max(avg_over_time(container_memory_working_set_bytes{selector}[{self.step}])) "
+            "by (namespace,pod,container,node)"
+        )
+
+    def memory_working_set_peak_by_level(self) -> str:
+        """Largest working-set scrape inside the step of every container and pod cgroup (COL-12).
+
+        Stored as ``memory_usage_max_bytes`` on container rows: rightsizing and
+        risk checks size memory on the peaks between two evaluation points.
+        """
+        selector = _selector(POD_LEVEL_OR_CONTAINER_FILTER, *self.extra_matchers)
+        return (
+            f"max(max_over_time(container_memory_working_set_bytes{selector}[{self.step}])) "
+            "by (namespace,pod,container,node)"
+        )
 
     def container_cpu_counter_max(self) -> str:
         """Largest CPU counter value of each container within the step (COL-03 step 3).

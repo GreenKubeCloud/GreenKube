@@ -38,6 +38,10 @@ class FakePrometheus:
     series: list[RawSeries] = field(default_factory=list)
     queries: list[tuple[str, float, float, str | None]] = field(default_factory=list)
     fail_queries_containing: tuple[str, ...] = ()
+    #: When set, ``avg_over_time``/``max_over_time`` of a ``[Ns]`` range read the raw
+    #: values at this scrape interval over ``(t - N, t]`` instead of the value at ``t``
+    #: (COL-12, COL-21).  Off by default: older tests give instant values.
+    window_scrape_seconds: float | None = None
 
     def add(self, metric: str, labels: dict[str, str], value: Value) -> None:
         self.series.append(RawSeries(metric, dict(labels), value))
@@ -72,9 +76,12 @@ class FakePrometheus:
 
         grouped: dict[tuple, dict[float, float]] = defaultdict(dict)
         group_labels: dict[tuple, dict[str, str]] = {}
+        over_time = _OVER_TIME_RE.search(query) if self.window_scrape_seconds else None
         for raw in self.series:
             if raw.metric != metric_name or not _matches(raw.labels, matchers):
                 continue
+            if over_time is not None:
+                raw = self._windowed(raw, over_time.group(1), float(over_time.group(2)))
             if keep_labels:
                 key: tuple = tuple(sorted(raw.labels.items()))
                 group_labels[key] = dict(raw.labels)
@@ -104,6 +111,20 @@ class FakePrometheus:
                 }
             )
         return results
+
+    def _windowed(self, raw: RawSeries, function: str, window: float) -> RawSeries:
+        """``function_over_time(raw[window])`` sampled every ``window_scrape_seconds``."""
+        scrape = float(self.window_scrape_seconds or window)
+        points = max(int(round(window / scrape)), 1)
+
+        def value(ts: float):
+            samples = [raw.at(ts - window + scrape * (k + 1)) for k in range(points)]
+            samples = [sample for sample in samples if sample is not None]
+            if not samples:
+                return None
+            return max(samples) if function == "max" else sum(samples) / len(samples)
+
+        return RawSeries(raw.metric, raw.labels, value)
 
     def _evaluate(self, expr: str, timestamps: list[float]) -> dict[tuple, tuple[dict[str, str], dict[float, float]]]:
         """Evaluate ``a or b`` and nested ``sum|max(inner) by (labels)`` (COL-11, COL-21).
@@ -158,6 +179,7 @@ class FakePrometheus:
         raise AssertionError(f"Unsupported query: {query}")
 
 
+_OVER_TIME_RE = re.compile(r"(avg|max)_over_time\([^\[]*\[(\d+)s\]\)")
 _AGG_RE = re.compile(r"(sum|max)\((.*)\)\s*by\s*\(([^)]*)\)", re.S)
 
 
