@@ -633,10 +633,10 @@ def _bounded_increase(recommendation: Recommendation) -> bool:
 
     The wave-3a increase bounds (pod-bounded usage, the
     ``RIGHTSIZING_MAX_INCREASE_FACTOR`` cap, warm-up exclusion) are applied by the
-    native rightsizing analyzer only. A value chosen from another source (VPA,
-    Goldilocks, a pushed signal) under the SAFEST consensus may exceed them, so it
-    stays advisory: the consensus must have chosen GreenKube's value, backed by
-    usage samples.
+    native rightsizing analyzer only. A value from another source (VPA,
+    Goldilocks, a pushed signal, a record stored before the native consensus of
+    B.3) may exceed them, so it stays advisory: the consensus must have chosen
+    GreenKube's value, backed by usage samples.
     """
     from greenkube.core.optimization.eligibility import has_native_evidence
 

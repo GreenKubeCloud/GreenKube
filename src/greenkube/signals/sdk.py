@@ -1,7 +1,7 @@
 """Source SDK (roadmap E5).
 
 A **source** turns something it observes (GreenKube's own usage data, VPA
-objects, a KRR report, a Kubecost API...) into :class:`SourceSignal` objects.
+objects, a KRR report, a pushed batch...) into :class:`SourceSignal` objects.
 Built-in sources and third-party plugins implement the same contract:
 
 * class metadata: ``id``, ``display_name``, ``tier``, ``capabilities``,

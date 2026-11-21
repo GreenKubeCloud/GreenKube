@@ -389,7 +389,7 @@ class Recommendation(BaseModel):
         RecommendationSource.GREENKUBE,
         description=(
             "Source whose proposal the consensus chose: a built-in source (greenkube, vpa, karpenter) or the "
-            "source id of a signal-only source (krr, kubecost, push:<client>)."
+            "source id of a signal-only source (krr, push:<client>)."
         ),
     )
     source_ref: Optional[str] = Field(None, description="Connector-specific reference (e.g. '<namespace>/<vpa-name>').")

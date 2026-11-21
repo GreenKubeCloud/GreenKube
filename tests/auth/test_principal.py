@@ -18,7 +18,8 @@ from greenkube.auth.tokens import csrf_token_for, new_api_key, parse_api_key
         ("GET", "/api/v1/automation/plans/abc/patch", "read"),
         ("POST", "/api/v1/signals", "signals:write"),
         ("POST", "/api/v1/sources/krr/reports", "signals:report"),
-        ("POST", "/api/v1/sources/polaris/reports", "signals:report"),
+        # The Polaris report upload was removed (B.3): an ordinary mutation, answered 404.
+        ("POST", "/api/v1/sources/polaris/reports", "write"),
         ("GET", "/api/v1/auth/api-keys", "admin"),
         ("POST", "/api/v1/auth/api-keys", "admin"),
         ("GET", "/api/v1/auth/me", None),

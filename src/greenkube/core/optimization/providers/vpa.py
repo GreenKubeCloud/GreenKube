@@ -508,8 +508,8 @@ class VpaSignalSource(RecommendationSourceAdapter):
     def _raw(self, vpa: Optional[VPARecommendation], rec: Recommendation) -> Dict[str, Any]:
         """Audit payload; ``maturity.state`` is ``unknown`` when no checkpoint said how mature the VPA is.
 
-        The consensus lets a VPA of unknown maturity hold or raise a value, never
-        push a decrease under a policy other than ``safest`` (roadmap A.5).
+        The consensus never counts a decrease from a VPA of unknown maturity
+        (roadmap A.5).
         """
         if vpa is None:
             return self.raw_payload(rec) or {}

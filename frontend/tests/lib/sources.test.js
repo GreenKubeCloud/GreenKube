@@ -36,7 +36,7 @@ describe('sources', () => {
 			{ capability: 'rightsizing', summary: '8/10 realized', mean: 0.75, decided: 10 }
 		]);
 		expect(trackRecordFor({ id: 'vpa' }, entries)).toEqual([{ capability: 'rightsizing', summary: '', mean: 0.5, decided: 2 }]);
-		expect(trackRecordFor({ id: 'kubecost' }, entries)).toEqual([]);
+		expect(trackRecordFor({ id: 'acme.sizer' }, entries)).toEqual([]);
 		expect(trackRecordFor({ id: 'vpa' }, null)).toEqual([]);
 	});
 });

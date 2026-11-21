@@ -1,9 +1,9 @@
 """Robusta KRR connector (roadmap G2).
 
 KRR (``krr simple -f json``) writes one JSON report per run. Users push it to
-``POST /api/v1/sources/krr/reports`` (from CI, or from the optional CronJob of
-the Helm chart); the report is parsed into signals at once and stored in the
-inbox, and the ``krr`` source replays them into each scan.
+``POST /api/v1/sources/krr/reports`` (from CI or a CronJob of their own, see
+``docs/sources/krr.md``); the report is parsed into signals at once and stored
+in the inbox, and the ``krr`` source reads them into each scan.
 
 Mapping, pinned against the report shape of KRR 1.x (``Result`` →
 ``scans[]`` of ``ResourceScan``; ``tests/sources/fixtures/krr_report.json``):
@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, ClassVar, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
-from greenkube.signals.connectors.replay import InboxSource
+from greenkube.signals.connectors.inbox import InboxSource
 from greenkube.signals.model import (
     AlgorithmInfo,
     Capability,
@@ -322,10 +322,10 @@ class KrrSource(InboxSource):
     capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.CONTAINER_REQUESTS})
     description: ClassVar[str] = (
         "Container request recommendations from KRR JSON reports pushed to POST /api/v1/sources/krr/reports "
-        "(from CI or the optional CronJob)."
+        "(from CI or a CronJob, see docs/sources/krr.md)."
     )
     inbox_source_id: ClassVar[Optional[str]] = KRR_SOURCE_ID
     push_hint: ClassVar[str] = (
-        "POST 'krr simple -f json' output to /api/v1/sources/krr/reports with a signals:write API key, "
-        "or enable sources.krr.job in the Helm chart"
+        "POST 'krr simple -f json' output to /api/v1/sources/krr/reports with a signals:report API key "
+        "(docs/sources/krr.md)"
     )

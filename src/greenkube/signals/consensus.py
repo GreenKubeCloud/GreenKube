@@ -13,7 +13,7 @@ the others (the former ``dedup.arbitrate``).
 * Sources that run the same engine vote once (:func:`engine_family`):
   Goldilocks runs the VPA recommender, so Goldilocks and VPA on the same VPA
   object are one vote, never two.
-* Pushed signals (``push:<client>`` and the KRR/Polaris report uploads,
+* Pushed signals (``push:<client>`` and the KRR report uploads,
   origin ``push``) are capped: one counted ballot per push client, a pushed
   ballot never stands for an engine family another source also voted in, and
   pushed signals alone never produce a deletion (:func:`admissible_ballots`).
@@ -22,38 +22,32 @@ the others (the former ``dedup.arbitrate``).
   several clients and upload reports, so pushed sources never corroborate
   each other (the auto-approval decrease guard needs two independent votes).
 * A :class:`VoteScreen` (roadmap A.5, F-12) sets aside the external numeric
-  ballots that are not signals of need before any policy runs: a value on a
+  ballots that are not signals of need before the consensus runs: a value on a
   known tool minimum (KRR ``simple`` 100 Mi, the Fairwinds VPA chart 100 Mi and
   15m) and a change below the minimum (5 % and 10m or 16 Mi). They are kept in
   :attr:`Consensus.ignored_votes`. A container-resources group without a
   native (GreenKube-measured) ballot never becomes a recommendation: an
   external source alone stays a signal.
+* One policy (roadmap B.3, ``native``): **GreenKube's measured value decides
+  the size**. In a numeric group the consolidated value is the native ballot's
+  (the highest when several native ballots share a group). External sources
+  never move the value: they move the confidence up or down
+  (:attr:`Consensus.confidence_factor`). Several independent sources that agree
+  raise it; sources that disagree on the direction of the change, or are far
+  apart, make the consensus contested and lower it.
 * A native increase with a ``floor_reason`` (``oom_kills``: an OOM kill proves
-  the need) is a lower bound under every policy: no external ballot can bring
-  the consolidated value below it (:func:`native_floor`). The floor is recorded
-  in :attr:`Consensus.floor`, with ``applied`` true when it raised the value.
-* A :class:`ConsensusPolicy` picks the consolidated proposal:
-
-  ``safest`` (default)
-      the least aggressive value: the highest proposed request.
-  ``median``
-      the median per resource (the upper median for an even count, so the
-      value is always one a source proposed, and the safer of the two).
-  ``weighted``
-      the (upper) median weighted by each source's measured track record.
-  ``priority``
-      the highest-priority source wins (``RECOMMENDATION_SOURCE_PRIORITY``),
-      the behavior before consensus.
-
+  the need) is a lower bound: the consolidated value is never below it
+  (:func:`native_floor`). The floor is recorded in :attr:`Consensus.floor`, with
+  ``applied`` true when it raised the value.
 * :class:`Consensus` records how the value was chosen: the supporting
   sources, the agreement ``1 - (max - min) / max`` over the independent
   proposals, whether the consensus is contested (agreement below 0.5 or
   sources disagreeing on the direction of the change) and the per-source
-  spread shown in the evidence ("VPA 300m · KRR 250m · GreenKube 280m → 300m").
+  spread shown in the evidence ("VPA 300m · KRR 250m · GreenKube 280m → 280m").
 
 Proposals that are not numeric (schedules, deletions, HPA settings, advisories)
-are compared by identity: the proposal supported by most independent sources
-wins, ties go to the higher-priority source.
+are compared by identity: a native proposal wins, else the proposal supported
+by most independent sources.
 
 This module is pure: it never reads storage or configuration.
 """
@@ -64,7 +58,6 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
-from enum import StrEnum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -78,21 +71,8 @@ from greenkube.signals.model import (
     proposal_identity,
 )
 
-
-class ConsensusPolicy(StrEnum):
-    """How the proposals of several sources on one target are combined."""
-
-    SAFEST = "safest"
-    MEDIAN = "median"
-    WEIGHTED = "weighted"
-    PRIORITY = "priority"
-
-
-#: Accepted spellings of the policies (the roadmap names them "trust-weighted" and "source-priority").
-POLICY_ALIASES: Dict[str, ConsensusPolicy] = {
-    "trust-weighted": ConsensusPolicy.WEIGHTED,
-    "source-priority": ConsensusPolicy.PRIORITY,
-}
+#: The one consensus policy (roadmap B.3): the native measured value decides the size.
+NATIVE_POLICY = "native"
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +82,8 @@ CONTESTED_AGREEMENT = 0.5
 AGREEMENT_BONUS_THRESHOLD = 0.8
 #: Confidence multiplier of a consensus of several independent sources that agree (capped at 1).
 AGREEMENT_CONFIDENCE_BONUS = 1.1
+#: Confidence multiplier of a contested consensus (independent sources disagree with each other).
+CONTESTED_CONFIDENCE_PENALTY = 0.8
 
 #: Engine of well-known algorithms: sources running the same engine vote once.
 ALGORITHM_ENGINE_FAMILIES: Dict[str, str] = {"vpa-recommender": "vpa"}
@@ -125,19 +107,6 @@ KIND_REQUEST_RESOURCES: Dict[str, str] = {kind: resource for resource, kind in R
 
 #: ``(target key, capability, kind)``: one consolidated recommendation per group.
 GroupKey = Tuple[str, str, str]
-
-
-def parse_policy(value: Any) -> ConsensusPolicy:
-    """The policy named by ``value`` (``safest`` when blank); ``ValueError`` when unknown."""
-    text = str(getattr(value, "value", value) or "").strip().lower().replace("_", "-")
-    if not text:
-        return ConsensusPolicy.SAFEST
-    if text in POLICY_ALIASES:
-        return POLICY_ALIASES[text]
-    try:
-        return ConsensusPolicy(text)
-    except ValueError:
-        raise ValueError("RECOMMENDATION_CONSENSUS_POLICY must be safest, median, weighted or priority") from None
 
 
 def engine_family(signal: SourceSignal) -> str:
@@ -182,7 +151,7 @@ class Ballot:
     """One source's proposal on one group (a container-resources proposal votes once per resource)."""
 
     signal: SourceSignal
-    #: Reconciliation and priority unit: the v1 source (``greenkube``, ``vpa``) or the source id.
+    #: Reconciliation unit: the v1 source (``greenkube``, ``vpa``) or the source id.
     source: str
     family: str
     kind: str
@@ -322,9 +291,9 @@ def is_native(ballot: "Ballot") -> bool:
 
     A native analyzer (``greenkube``, ``greenkube.<analyzer>``), or a value a
     built-in connector computed from GreenKube's usage data under a
-    ``greenkube.*`` engine family (the Polaris missing-request follow-up). A
-    pushed signal is never native, whatever engine family it declares, and the
-    source runner drops plugin signals that declare a ``greenkube.*`` family.
+    ``greenkube.*`` engine family. A pushed signal is never native, whatever
+    engine family it declares, and the source runner drops plugin signals that
+    declare a ``greenkube.*`` family.
     """
     if ballot.source == NATIVE_SOURCE or ballot.source.startswith(NATIVE_SOURCE + "."):
         return True
@@ -383,7 +352,7 @@ class VoteScreen:
         """Whether the ballot changes its current value by less than the minimum.
 
         A proposal equal to the current value is a "keep it" vote, not a small
-        change: it still counts (under ``safest`` it holds the current request).
+        change: it still counts in the agreement.
         """
         if ballot.value is None or not ballot.current:
             return False
@@ -393,22 +362,19 @@ class VoteScreen:
         minimum = max(self.min_change_ratio * ballot.current, float(self.min_change.get(str(ballot.resource), 0)))
         return delta < minimum
 
-    def reason(self, ballot: "Ballot", policy: Optional["ConsensusPolicy"] = None) -> Optional[str]:
+    def reason(self, ballot: "Ballot") -> Optional[str]:
         """Why an external numeric ballot is not counted as proposed, or None when it is a vote.
 
         ``maturity_unknown``: a decrease from a source whose maturity could not
-        be read (a VPA without checkpoints) may only hold or raise a value, so
-        it is dropped under every policy but ``safest`` (where a lower value
-        never wins anyway).
+        be read (a VPA without checkpoints) never corroborates a decrease, so it
+        is dropped.
         """
         if is_native(ballot) or not ballot.numeric:
             return None
         if self.on_floor(ballot):
             return IGNORED_TOOL_FLOOR
         if (
-            policy is not None
-            and policy != ConsensusPolicy.SAFEST
-            and maturity_unknown(ballot)
+            maturity_unknown(ballot)
             and ballot.value is not None
             and ballot.current is not None
             and ballot.value < ballot.current
@@ -443,9 +409,9 @@ class ConsensusFloor(BaseModel):
     value: int
     #: Why it is a floor (``oom_kills``).
     reason: str
-    #: The value the policy picked before the floor.
+    #: The value the consensus picked before the floor (field name kept for stored records).
     policy_value: Optional[int] = None
-    #: True when the floor raised the policy's value.
+    #: True when the floor raised the consensus value.
     applied: bool = False
 
 
@@ -465,7 +431,7 @@ class ConsensusVote(BaseModel):
     counted: bool = True
     #: Whether this signal supports the chosen proposal.
     supports_chosen: bool = False
-    #: Pushed through the API (``push:<client>``, KRR/Polaris reports): all pushed votes are one independent vote.
+    #: Pushed through the API (``push:<client>``, KRR reports): all pushed votes are one independent vote.
     pushed: bool = False
 
 
@@ -474,7 +440,8 @@ class Consensus(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    policy: str
+    #: ``native`` (roadmap B.3); records written before it keep the policy they were built with.
+    policy: str = NATIVE_POLICY
     #: Resource of a numeric consensus (``cpu_request_m``...); None for other proposals.
     resource: Optional[str] = None
     #: Consolidated value of a numeric consensus.
@@ -497,20 +464,28 @@ class Consensus(BaseModel):
     #: Sources that did not complete the scan and whose last known proposal (``{source_id: value}``)
     #: still supports the record (E8). Filled by the engine, never by :func:`combine`.
     last_known: Dict[str, int] = Field(default_factory=dict)
-    #: External proposals set aside before the policy ran (tool floors, insignificant changes, A.5).
+    #: External proposals set aside before the consensus ran (tool floors, insignificant changes, A.5).
     ignored_votes: List[IgnoredVote] = Field(default_factory=list)
     #: The native lower bound of the group (an OOM-driven increase), whether or not it changed the value.
     floor: Optional[ConsensusFloor] = None
 
     @property
-    def confidence_bonus(self) -> float:
-        """Confidence multiplier earned by agreement between several independent sources."""
-        if self.independent_votes >= 2 and not self.contested and self.agreement >= AGREEMENT_BONUS_THRESHOLD:
+    def confidence_factor(self) -> float:
+        """How the other sources move the confidence: up when they agree, down when they contest.
+
+        Only independent sources count: a group with one independent vote leaves
+        the confidence as the native analysis set it.
+        """
+        if self.independent_votes < 2:
+            return 1.0
+        if self.contested:
+            return CONTESTED_CONFIDENCE_PENALTY
+        if self.agreement >= AGREEMENT_BONUS_THRESHOLD:
             return AGREEMENT_CONFIDENCE_BONUS
         return 1.0
 
     def summary(self, format_value: Optional[Callable[[str, int], str]] = None) -> str:
-        """``vpa 300m · krr 250m · greenkube.rightsizing_cpu 280m → 300m (safest, agreement 0.83)``."""
+        """``vpa 300m · krr 250m · greenkube.rightsizing_cpu 280m → 280m (native, agreement 0.83)``."""
         fmt = format_value or _format_value
         if self.resource is None or self.value is None:
             sources = ", ".join(self.chosen_from) or "no source"
@@ -558,13 +533,9 @@ class ConsensusOutcome:
         return ordered
 
 
-def _priority(ballot: Ballot, priorities: Mapping[str, int]) -> int:
-    return int(priorities.get(ballot.source, priorities.get(ballot.source_id, 0)))
-
-
-def _preference(ballot: Ballot, priorities: Mapping[str, int]) -> tuple:
-    """Higher sorts first: priority, a v1 recommendation to build on, then a stable source order."""
-    return (_priority(ballot, priorities), ballot.payload is not None, _reverse_text(ballot.source_id))
+def _preference(ballot: Ballot) -> tuple:
+    """Higher sorts first: a native ballot, a v1 recommendation to build on, then a stable source order."""
+    return (is_native(ballot), ballot.payload is not None, _reverse_text(ballot.source_id))
 
 
 def _reverse_text(text: str) -> Tuple[int, ...]:
@@ -572,7 +543,7 @@ def _reverse_text(text: str) -> Tuple[int, ...]:
     return tuple(-ord(char) for char in text)
 
 
-def _representatives(ballots: Sequence[Ballot], priorities: Mapping[str, int]) -> List[Ballot]:
+def _representatives(ballots: Sequence[Ballot]) -> List[Ballot]:
     """One ballot per engine family, and at most one counted ballot per push client.
 
     A VPA object seen by VPA and Goldilocks is one vote. A pushed ballot never
@@ -591,7 +562,6 @@ def _representatives(ballots: Sequence[Ballot], priorities: Mapping[str, int]) -
             key=lambda ballot: (
                 not ballot.pushed,
                 ballot.payload is not None,
-                _priority(ballot, priorities),
                 ballot.value if ballot.value is not None else 0,
                 _reverse_text(ballot.source_id),
             ),
@@ -607,10 +577,10 @@ def _representatives(ballots: Sequence[Ballot], priorities: Mapping[str, int]) -
 def independent_vote_count(representatives: Sequence[Ballot]) -> int:
     """Independent votes among the counted ballots: every pushed ballot together counts once.
 
-    Push clients and the KRR/Polaris report endpoints share one trust boundary
+    Push clients and the KRR report endpoint share one trust boundary
     (any ``signals:write`` key, or the principal behind it), so they never
     corroborate each other: two clients of one key, or a client and a report,
-    are a single independent vote. Their proposals still shape the value.
+    are a single independent vote. They still move the confidence.
     """
     native = sum(1 for ballot in representatives if not ballot.pushed)
     return native + (1 if any(ballot.pushed for ballot in representatives) else 0)
@@ -635,46 +605,16 @@ def admissible_ballots(ballots: Sequence[Ballot]) -> List[Ballot]:
     return admitted
 
 
-def _upper_weighted_median(pairs: Sequence[Tuple[int, float]]) -> int:
-    """Smallest value such that the weight at or above it reaches half the total (the safer median)."""
-    ordered = sorted(pairs, key=lambda pair: pair[0], reverse=True)
-    total = sum(weight for _value, weight in ordered)
-    cumulative = 0.0
-    for value, weight in ordered:
-        cumulative += weight
-        if cumulative >= total / 2:
-            return value
-    return ordered[-1][0]
-
-
-def _weight(ballot: Ballot, weight_for: Optional[Callable[[Ballot], float]]) -> float:
-    if weight_for is None:
-        return 1.0
-    try:
-        weight = float(weight_for(ballot))
-    except Exception:
-        return 1.0
-    return weight if weight > 0 else 1e-6
-
-
-def combine(
-    ballots: Sequence[Ballot],
-    policy: ConsensusPolicy | str = ConsensusPolicy.SAFEST,
-    *,
-    priorities: Optional[Mapping[str, int]] = None,
-    weight_for: Optional[Callable[[Ballot], float]] = None,
-) -> ConsensusOutcome:
+def combine(ballots: Sequence[Ballot]) -> ConsensusOutcome:
     """The consensus of the ballots of one group (all ballots must share a group key)."""
     if not ballots:
         raise ValueError("a consensus needs at least one ballot")
-    policy = parse_policy(policy)
-    priorities = priorities or {}
-    representatives = _representatives(ballots, priorities)
+    representatives = _representatives(ballots)
     numeric = all(ballot.numeric for ballot in representatives)
     if numeric:
-        chosen, consensus = _numeric(representatives, ballots, policy, priorities, weight_for)
+        chosen, consensus = _numeric(representatives, ballots)
     else:
-        chosen, consensus = _categorical(representatives, ballots, policy, priorities, weight_for)
+        chosen, consensus = _categorical(representatives, ballots)
     consensus.source_ids = _unique([chosen.source_id, *(ballot.source_id for ballot in ballots)])
     return ConsensusOutcome(
         key=ballots[0].group_key,
@@ -703,28 +643,12 @@ def _votes(ballots: Sequence[Ballot], representatives: Sequence[Ballot], support
     ]
 
 
-def _numeric(
-    representatives: Sequence[Ballot],
-    ballots: Sequence[Ballot],
-    policy: ConsensusPolicy,
-    priorities: Mapping[str, int],
-    weight_for: Optional[Callable[[Ballot], float]],
-) -> Tuple[Ballot, Consensus]:
+def _numeric(representatives: Sequence[Ballot], ballots: Sequence[Ballot]) -> Tuple[Ballot, Consensus]:
     values = [int(ballot.value) for ballot in representatives if ballot.value is not None]
-    if policy == ConsensusPolicy.PRIORITY:
-        value = int(max(representatives, key=lambda ballot: _preference(ballot, priorities)).value or 0)
-    elif policy == ConsensusPolicy.MEDIAN:
-        value = sorted(values, reverse=True)[(len(values) - 1) // 2]
-    elif policy == ConsensusPolicy.WEIGHTED:
-        value = _upper_weighted_median(
-            [(int(ballot.value or 0), _weight(ballot, weight_for)) for ballot in representatives]
-        )
-    else:
-        value = max(values)
-    chosen = max(
-        (ballot for ballot in representatives if ballot.value == value),
-        key=lambda ballot: _preference(ballot, priorities),
-    )
+    native = [int(ballot.value) for ballot in representatives if ballot.value is not None and is_native(ballot)]
+    # The native measured value decides; without one (no vote screen), the least aggressive value.
+    value = max(native) if native else max(values)
+    chosen = max((ballot for ballot in representatives if ballot.value == value), key=_preference)
     highest, lowest = max(values), min(values)
     agreement = 1.0 if highest <= 0 else 1.0 - (highest - lowest) / highest
     agreement = round(max(0.0, min(1.0, agreement)), 4)
@@ -744,7 +668,7 @@ def _numeric(
         )
     resource = str(chosen.resource)
     consensus = Consensus(
-        policy=policy.value,
+        policy=NATIVE_POLICY,
         resource=resource,
         value=value,
         chosen_from=_unique(ballot.source_id for ballot in ballots if ballot.value == value),
@@ -758,24 +682,15 @@ def _numeric(
     return chosen, consensus
 
 
-def _categorical(
-    representatives: Sequence[Ballot],
-    ballots: Sequence[Ballot],
-    policy: ConsensusPolicy,
-    priorities: Mapping[str, int],
-    weight_for: Optional[Callable[[Ballot], float]],
-) -> Tuple[Ballot, Consensus]:
+def _categorical(representatives: Sequence[Ballot], ballots: Sequence[Ballot]) -> Tuple[Ballot, Consensus]:
     support: Dict[str, float] = {}
     for ballot in representatives:
-        weight = _weight(ballot, weight_for) if policy == ConsensusPolicy.WEIGHTED else 1.0
-        support[ballot.identity] = support.get(ballot.identity, 0.0) + weight
-    if policy == ConsensusPolicy.PRIORITY:
-        chosen = max(representatives, key=lambda ballot: _preference(ballot, priorities))
-    else:
-        chosen = max(
-            representatives,
-            key=lambda ballot: (support[ballot.identity], _preference(ballot, priorities)),
-        )
+        support[ballot.identity] = support.get(ballot.identity, 0.0) + 1.0
+    # A native proposal wins; among several (or none), the most supported one.
+    chosen = max(
+        representatives,
+        key=lambda ballot: (is_native(ballot), support[ballot.identity], _preference(ballot)),
+    )
     total = sum(support.values()) or 1.0
     agreement = round(support[chosen.identity] / total, 4)
     reasons = (
@@ -783,7 +698,7 @@ def _categorical(
     )
     identity = chosen.identity
     consensus = Consensus(
-        policy=policy.value,
+        policy=NATIVE_POLICY,
         chosen_from=_unique(ballot.source_id for ballot in ballots if ballot.identity == identity),
         agreement=agreement,
         contested=bool(reasons),
@@ -821,7 +736,7 @@ def native_floor(ballots: Sequence[Ballot]) -> Optional[Ballot]:
 
 
 def _apply_floor(outcome: ConsensusOutcome, floor: Ballot) -> None:
-    """Raises the outcome's value to the native floor when the policy chose less, and records the floor."""
+    """Raises the outcome's value to the native floor when the consensus chose less, and records the floor."""
     consensus = outcome.consensus
     if consensus.resource is None or consensus.resource != floor.resource or floor.value is None:
         return
@@ -848,9 +763,8 @@ def _apply_floor(outcome: ConsensusOutcome, floor: Ballot) -> None:
         vote.supports_chosen = vote.value == value
     consensus.source_ids = _unique([chosen.source_id, *consensus.source_ids])
     logger.info(
-        "Consensus for %s: the %s policy chose %s below the native %s floor %s; the floor holds.",
+        "Consensus for %s chose %s below the native %s floor %s; the floor holds.",
         outcome.key,
-        consensus.policy,
         policy_value,
         floor.floor_reason,
         value,
@@ -865,30 +779,21 @@ def group_ballots(ballots: Sequence[Ballot]) -> "OrderedDict[GroupKey, List[Ball
     return groups
 
 
-def consolidate(
-    ballots: Sequence[Ballot],
-    policy: ConsensusPolicy | str = ConsensusPolicy.SAFEST,
-    *,
-    priorities: Optional[Mapping[str, int]] = None,
-    weight_for: Optional[Callable[[Ballot], float]] = None,
-    screen: Optional[VoteScreen] = None,
-) -> List[ConsensusOutcome]:
+def consolidate(ballots: Sequence[Ballot], *, screen: Optional[VoteScreen] = None) -> List[ConsensusOutcome]:
     """One consensus per group of ballots.
 
     Pushed-only deletions are dropped (:func:`admissible_ballots`). With a
     ``screen``, external ballots that are not signals of need are listed in
-    ``ignored_votes``: a tool floor or a decrease of unknown maturity under a
-    policy other than ``safest`` is dropped, a change below the minimum votes
-    "keep the current value". A container-resources group without a native
-    ballot produces no outcome: its signals stay signals. In a request or
-    limit group with numeric ballots, a ballot without a value for the
-    resource is listed as ``not_numeric`` and dropped before the policy runs. A native increase
-    marked as a floor (an OOM-driven one, :func:`native_floor`) is a lower
-    bound of the value under every policy.
+    ``ignored_votes``: a tool floor or a decrease of unknown maturity is
+    dropped, a change below the minimum votes "keep the current value". A
+    container-resources group without a native ballot produces no outcome: its
+    signals stay signals. In a request or limit group with numeric ballots, a
+    ballot without a value for the resource is listed as ``not_numeric`` and
+    dropped before the consensus. A native increase marked as a floor (an
+    OOM-driven one, :func:`native_floor`) is a lower bound of the value.
     """
     outcomes = []
     source_only = 0
-    parsed_policy = parse_policy(policy)
     for members in group_ballots(ballots).values():
         admitted = admissible_ballots(members)
         if not admitted:
@@ -931,7 +836,7 @@ def consolidate(
                 for ballot in admitted
             )
             for ballot in admitted:
-                reason = screen.reason(ballot, parsed_policy)
+                reason = screen.reason(ballot)
                 if reason is None:
                     kept.append(ballot)
                     continue
@@ -950,7 +855,7 @@ def consolidate(
             admitted = kept
             if not admitted:
                 continue
-        outcome = combine(admitted, policy, priorities=priorities, weight_for=weight_for)
+        outcome = combine(admitted)
         outcome.consensus.ignored_votes = ignored
         floor = native_floor(admitted)
         if floor is not None:

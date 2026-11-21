@@ -51,7 +51,7 @@ def test_push_needs_the_signals_write_scope():
 
 
 def test_report_uploads_have_their_own_scope(tmp_path, monkeypatch):
-    """A signals:report key uploads KRR/Polaris reports and cannot push signals as a client."""
+    """A signals:report key uploads KRR reports and cannot push signals as a client."""
     inbox = MemoryInbox()
     with auth_harness(tmp_path, monkeypatch) as h:
         h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
@@ -66,7 +66,7 @@ def test_report_uploads_have_their_own_scope(tmp_path, monkeypatch):
 
 
 def test_a_signals_write_key_still_uploads_reports_with_a_deprecation_header(tmp_path, monkeypatch):
-    """Existing KRR/Polaris CronJob keys keep working for one minor release."""
+    """Existing KRR CronJob keys keep working for one minor release."""
     inbox = MemoryInbox()
     with auth_harness(tmp_path, monkeypatch) as h:
         h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
@@ -274,25 +274,13 @@ def test_signed_in_users_and_the_bootstrap_key_are_not_bound_to_one_client():
     assert push_client_of(None) is None
 
 
-POLARIS_FIXTURE = Path(__file__).resolve().parents[1] / "sources" / "fixtures" / "polaris_report.json"
-
-
-def test_polaris_report_needs_signals_write_and_is_stored(tmp_path, monkeypatch):
-    """G4: a Polaris audit pushed by a signals:write key becomes polaris hygiene signals."""
-    assert required_scope("POST", "/api/v1/sources/polaris/reports") == "signals:report"
+def test_the_removed_polaris_report_route_stores_nothing(tmp_path, monkeypatch):
+    """B.3: the Polaris connector is removed; its report upload route no longer exists."""
     inbox = MemoryInbox()
     with auth_harness(tmp_path, monkeypatch) as h:
         h.client.app.dependency_overrides[get_signal_inbox] = lambda: inbox
-        reader = _key(h, "read", "write", name="reader")
-        refused = h.client.post("/api/v1/sources/polaris/reports", content=POLARIS_FIXTURE.read_bytes(), headers=reader)
-        headers = _key(h, "signals:write", name="polaris-job")
-        stored = h.client.post("/api/v1/sources/polaris/reports", content=POLARIS_FIXTURE.read_bytes(), headers=headers)
-        invalid = h.client.post("/api/v1/sources/polaris/reports", json={"scans": []}, headers=headers)
+        headers = _key(h, "read", "write", name="polaris-job")
+        response = h.client.post("/api/v1/sources/polaris/reports", json={"results": []}, headers=headers)
 
-    assert refused.status_code == 403
-    assert stored.status_code == 200, stored.text
-    payload = stored.json()
-    assert payload["source_id"] == "polaris" and payload["accepted"] == 5 and payload["complete"] is True
-    assert {d["code"] for d in payload["diagnostics"]} >= {"passed", "ignored_severity", "invalid_entry"}
-    assert {source for source, _ in inbox.signals} == {"polaris"}
-    assert invalid.status_code == 422 and invalid.json()["errors"][0]["type"] == "polaris_report"
+    assert response.status_code in (404, 405)
+    assert inbox.signals == {}

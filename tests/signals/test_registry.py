@@ -30,7 +30,7 @@ NATIVE_IDS = [
     "greenkube.orphaned_lb",
 ]
 #: Signal-only connectors (roadmap G), after the native analyzers.
-CONNECTOR_IDS = ["krr", "kubecost", "push", "polaris", "gke", "azure_advisor"]
+CONNECTOR_IDS = ["krr", "push"]
 
 
 class AcmeSettings(SourceSettings):
@@ -114,6 +114,13 @@ class TestBuiltins:
         assert [p.code for p in registry.problems] == ["unknown_source"]
         ids = [s.source_id for s in build_signal_sources(config, entry_points=lambda: [])]
         assert "vpa" not in ids and "greenkube.rightsizing_cpu" in ids
+
+    def test_settings_of_removed_connectors_are_ignored_without_a_problem(self):
+        """B.3: SOURCES_CONFIG of kubecost, polaris, gke and azure_advisor is accepted and ignored."""
+        config = _config(SOURCES_CONFIG='{"kubecost": {"url": "http://kubecost"}, "gke": {}, "nope": {}}')
+        registry, configured = build_source_registry(config, entry_points=lambda: [])
+        assert [(p.code, p.source_id) for p in registry.problems] == [("unknown_source", "nope")]
+        assert not {"kubecost", "polaris", "gke", "azure_advisor"} & {item.id for item in configured}
 
 
 class TestPlugins:

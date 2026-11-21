@@ -1057,6 +1057,7 @@ def has_native_evidence(record: Any) -> bool:
 
 
 #: Sources whose signals arrive through the push API (report uploads); ``push:<client>`` too.
+#: ``polaris`` (removed in B.3) stays for the votes of records stored before the removal.
 _PUSHED_SOURCE_IDS = frozenset({"krr", "polaris"})
 
 
@@ -1076,7 +1077,7 @@ def _pushed_vote(vote: Any) -> bool:
 def independent_votes(record: Any) -> int:
     """Independent consensus votes behind a recommendation (one per engine family), 1 without consensus.
 
-    Every pushed vote (``push:<client>``, KRR and Polaris reports) together counts
+    Every pushed vote (``push:<client>``, KRR reports) together counts
     once: one ``signals:write`` key can push as several clients and upload reports,
     so pushed sources never corroborate each other. The count is recomputed from
     the stored votes, which also covers a consensus stored before that rule, and
