@@ -125,7 +125,7 @@ jobs:
           set -o pipefail
           mapfile -t paths < <(.github/scripts/test-shard.sh "${SHARD}")
           uv run pytest --cov=greenkube --cov-report= --cov-fail-under=0 \
-            --tb=short --no-header --color=no -rs "${paths[@]}" | tee pytest.log
+            --tb=short --no-header --color=no -rfEs "${paths[@]}" | tee pytest.log
 
       # The PostgreSQL service above must reach every live-PostgreSQL test (O8).
       - name: Check that the PostgreSQL tests ran

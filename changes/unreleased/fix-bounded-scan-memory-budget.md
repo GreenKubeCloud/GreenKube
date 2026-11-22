@@ -1,0 +1,2 @@
+### Fixed
+- The 500-pod scan acceptance test failed on the CI's Python 3.14 runner (344 MB peak RSS against 300 MB) although the scan itself grows by about 30 MB: the peak was mostly the fixed cost of the interpreter, imports and coverage tracer. The test now budgets the scan's own growth (peak minus the RSS once imports and the database connection are done, below 128 MB) and keeps a 512 MB absolute ceiling, well under the controller's 1 GiB limit. CI test shards now list failed and errored tests in the final summary (`-rfEs`).

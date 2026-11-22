@@ -2,9 +2,18 @@
 
 The rollup of 500 pods over 14 days (336 hours x 1000 rows) is stored, then a
 full native scan (context, analyzers, enrichment) runs in a fresh Python
-process whose peak RSS and duration are measured: below 300 MB and 60 s on
-SQLite and PostgreSQL. A fresh process keeps the measurement independent of
-the test runner's own memory.
+process whose peak RSS and duration are measured on SQLite and PostgreSQL.
+A fresh process keeps the measurement independent of the test runner's own
+memory.
+
+The budget is on the scan's own growth: peak RSS during the scan minus the
+peak RSS once the modules are imported and the database is connected. That
+fixed part (interpreter, imports, coverage tracer, allocator) differs by
+platform and Python version (about 175 MB on Linux x86_64, more on the CI
+runner with Python 3.14) and says nothing about whether the scan streams its
+data. Loading the 336,000 hourly rows into memory at once costs several
+hundred MB, far above the growth budget. A loose absolute ceiling stays, well
+under the controller's 1 GiB memory limit.
 """
 
 from __future__ import annotations
@@ -28,7 +37,8 @@ from greenkube.storage.base_workload_usage_repository import create_workload_usa
 
 MIB = 1024 * 1024
 HOURS = 14 * 24
-MAX_RSS_BYTES = 300 * 1024 * 1024
+MAX_SCAN_GROWTH_BYTES = 128 * MIB
+MAX_RSS_BYTES = 512 * MIB
 MAX_SECONDS = 60.0
 
 SCAN_SCRIPT = textwrap.dedent(
@@ -50,6 +60,7 @@ SCAN_SCRIPT = textwrap.dedent(
         cfg = Config()
         manager = DatabaseManager(cfg)
         await manager.connect()
+        base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         started = time.perf_counter()
         with (
             patch("greenkube.core.optimization.context_builder.get_active_k8s_namespaces",
@@ -64,11 +75,13 @@ SCAN_SCRIPT = textwrap.dedent(
         elapsed = time.perf_counter() - started
         await manager.close()
         peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        peak_bytes = peak if sys.platform == "darwin" else peak * 1024
+        unit = 1 if sys.platform == "darwin" else 1024
+        peak_bytes, base_bytes = peak * unit, base * unit
         summaries = sum(len(c) for c in context.usage_snapshot().summaries.values())
         print(json.dumps({
             "seconds": elapsed,
             "peak_rss_bytes": peak_bytes,
+            "base_rss_bytes": base_bytes,
             "recommendations": len(recs),
             "summaries": summaries,
             "baseline_rows": len(context.metrics) + len(context.container_metrics),
@@ -226,4 +239,5 @@ async def test_scan_of_500_pods_over_14_days_is_memory_and_time_bounded(scan_env
     assert result["summaries"] == 2 * len(targets)
     assert result["recommendations"] > 0
     assert result["seconds"] < MAX_SECONDS, result
+    assert result["peak_rss_bytes"] - result["base_rss_bytes"] < MAX_SCAN_GROWTH_BYTES, result
     assert result["peak_rss_bytes"] < MAX_RSS_BYTES, result
