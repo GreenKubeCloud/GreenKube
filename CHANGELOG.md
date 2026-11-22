@@ -400,6 +400,8 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - `DELETE /api/v1/auth/api-keys/{key_id}` refuses a key id that is not 8 lowercase letters or digits with a 404 before it reaches the audit log line (CodeQL log injection).
 - Dashboard durations (`5m`, `7d`...) and Prometheus steps accept at most 6 digits and 32 characters: an oversized value is a clean 400-class error instead of a slow regex, a 4300-digit `int()` error or a `timedelta` overflow (CodeQL polynomial regex).
 - The SPA fallback checks the resolved path with `os.path.realpath` and a prefix test on the frontend directory (behaviour unchanged, path traversal still refused), and the Flux `HelmRelease` match compares the `apiVersion` group exactly.
+- The SPA fallback serves only the files listed once from the frontend build at start (symlinks skipped): a request path is a key into that list and never becomes a filesystem path. Traversal attempts still get a 404.
+- Log lines that quote request data (API key revocation, single sign-on failures, user updates, the timeseries cache error) escape CR and LF with the new `greenkube.utils.log.log_safe`, so a forged line break cannot start a fake entry in the text log format.
 
 ## [0.3.1] — 2026-10-25
 
