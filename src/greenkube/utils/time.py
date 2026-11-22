@@ -50,7 +50,9 @@ def to_iso_z(value: UTCDateTime) -> str:
 
 def parse_duration(value: str) -> timedelta:
     """Parse dashboard durations such as ``5m``, ``2h``, ``7d``, or ``1y``."""
-    match = re.fullmatch(r"(\d+)(min|[hdwmy])", value.strip().lower())
+    # Bounded: a duration never needs more than 6 digits, and an unbounded input
+    # would reach int() (4300-digit limit) and timedelta (overflow) as a 500.
+    match = re.fullmatch(r"(\d{1,6})(min|[hdwmy])", value[:32].strip().lower())
     if not match:
         raise ValueError(
             f"Invalid duration format: '{value}'. Use format like '10min', '2h', '7d', '3w', '1m' (month), '1y'."
@@ -68,7 +70,7 @@ def parse_duration(value: str) -> timedelta:
 
 def parse_query_step_seconds(value: str, *, default: int = DEFAULT_QUERY_STEP_SECONDS) -> int:
     """Parse a Prometheus ``s``/``m``/``h`` step, using one explicit default."""
-    match = re.fullmatch(r"(\d+)([smh])", str(value).strip().lower())
+    match = re.fullmatch(r"(\d{1,6})([smh])", str(value)[:32].strip().lower())
     if not match:
         return default
     amount, unit = int(match.group(1)), match.group(2)

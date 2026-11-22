@@ -2141,7 +2141,7 @@ def _find_release_manifest(
             if (
                 document.get("kind") == "HelmRelease"
                 and isinstance(api_version, str)
-                and api_version.startswith("helm.toolkit.fluxcd.io/")
+                and api_version.partition("/")[0] == "helm.toolkit.fluxcd.io"
                 and metadata is not None
                 and metadata.get("name") == source.controller_name
                 and metadata.get("namespace") == source.controller_namespace

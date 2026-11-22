@@ -505,15 +505,13 @@ def _mount_frontend(app: FastAPI) -> None:
 
         # Resolve the candidate path and refuse anything outside the
         # frontend directory (path traversal).
-        frontend_root = FRONTEND_DIR.resolve()
-        candidate = (frontend_root / full_path).resolve()
-        try:
-            candidate.relative_to(frontend_root)
-        except ValueError:
+        frontend_root = os.path.realpath(FRONTEND_DIR)
+        candidate = os.path.realpath(os.path.join(frontend_root, full_path))
+        if candidate != frontend_root and not candidate.startswith(frontend_root + os.sep):
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
-        if candidate.is_file():
-            return FileResponse(str(candidate))
+        if os.path.isfile(candidate):
+            return FileResponse(candidate)
         return FileResponse(str(index_html))
 
 

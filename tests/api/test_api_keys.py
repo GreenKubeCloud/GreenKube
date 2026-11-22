@@ -177,3 +177,13 @@ def test_api_keys_cannot_use_session_only_endpoints(tmp_path, monkeypatch):
 
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "SESSION_REQUIRED"
+
+
+def test_revoke_refuses_a_malformed_key_id_before_logging_it(tmp_path, monkeypatch, caplog):
+    """CodeQL py/log-injection: a key id that cannot exist is a 404 and never reaches the log."""
+    with auth_harness(tmp_path, monkeypatch) as h:
+        h.login()
+        response = h.client.delete("/api/v1/auth/api-keys/abc%0Aforged", headers=h.csrf())
+
+    assert response.status_code == 404
+    assert "forged" not in caplog.text
