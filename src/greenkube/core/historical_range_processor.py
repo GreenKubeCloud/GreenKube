@@ -1396,13 +1396,6 @@ class HistoricalRangeProcessor:
         # of a pod that gets no row (no sample of any kind) is not stored, so it must be counted.
         attributed_cost_by_step: dict[int, float] = defaultdict(float)
 
-        # Per-pod persistent storage (PVC) request/usage — best-effort.
-        try:
-            pod_storage_map = await self.prometheus_collector.collect_pod_storage()
-        except Exception as e:
-            logger.warning("Failed to collect pod storage metrics: %s", e)
-            pod_storage_map = {}
-
         # Realization inputs (autoscalers, consolidation policies, disruption
         # blockers) are refreshed from the controller's collection cycle (B6).
         try:
@@ -1428,25 +1421,15 @@ class HistoricalRangeProcessor:
             # window so the watermark is not advanced over missing data.
             try:
                 (
-                    net_rx_results,
-                    net_tx_results,
-                    disk_read_results,
-                    disk_write_results,
                     restart_results,
                     memory_results,
                     memory_peak_results,
-                    ephemeral_usage_results,
                     pod_node_results,
                     pod_running_results,
                 ) = await asyncio.gather(
-                    self._query_range(chunk, promql.pod_network_receive()),
-                    self._query_range(chunk, promql.pod_network_transmit()),
-                    self._query_range(chunk, promql.pod_disk_read()),
-                    self._query_range(chunk, promql.pod_disk_write()),
                     self._query_range(chunk, promql.pod_restarts()),
                     self._collect_memory(chunk),
                     self._collect_memory_peak(chunk),
-                    self._query_range(chunk, promql.pod_ephemeral_storage_usage()),
                     self._query_range(chunk, promql.pod_node()),
                     self._query_range(chunk, promql.pod_running()),
                 )
@@ -1455,12 +1438,7 @@ class HistoricalRangeProcessor:
                     f"Prometheus resource queries failed for {chunk_start.isoformat()} -> {chunk_end.isoformat()}"
                 ) from error
 
-            net_rx_by_sample = self._pod_series_by_sample(net_rx_results, chunk)
-            net_tx_by_sample = self._pod_series_by_sample(net_tx_results, chunk)
-            disk_read_by_sample = self._pod_series_by_sample(disk_read_results, chunk)
-            disk_write_by_sample = self._pod_series_by_sample(disk_write_results, chunk)
             restart_by_sample = self._pod_series_by_sample(restart_results, chunk)
-            ephemeral_usage_by_sample = self._pod_series_by_sample(ephemeral_usage_results, chunk)
             memory_by_sample, container_memory_samples, memory_nodes = self._container_series_by_sample(
                 memory_results, chunk
             )
@@ -1479,13 +1457,13 @@ class HistoricalRangeProcessor:
                     pod_info_node_by_sample[sample_start][(series_ns, pod)] = node
                 pod_info_node_latest[(series_ns, pod)] = node
 
-            del net_rx_results, net_tx_results, disk_read_results, disk_write_results, restart_results
+            del restart_results
             # Running pods (kube-state-metrics): a pod without CPU or memory sample still has a row (COL-03).
             running_by_sample: dict[int, set[tuple[str, str]]] = defaultdict(set)
             for sample_start, by_pod in self._pod_series_by_sample(pod_running_results, chunk).items():
                 running_by_sample[sample_start].update(key for key, value in by_pod.items() if value >= 1)
 
-            del memory_results, memory_peak_results, ephemeral_usage_results, pod_node_results, pod_running_results
+            del memory_results, memory_peak_results, pod_node_results, pod_running_results
 
             # Parse CPU results into per-sample pod and container usage (cores).
             samples: dict[int, dict[tuple[str, str], float]] = defaultdict(lambda: defaultdict(float))
@@ -1638,12 +1616,7 @@ class HistoricalRangeProcessor:
                 range_memory_map = memory_by_sample.get(sample_key, {})
                 # Pod peak: its pod cgroup peak, or the sum of its container peaks (review 1, COL-12).
                 range_memory_peak_map = memory_peak_by_sample.get(sample_key, {})
-                range_net_rx_map = net_rx_by_sample.get(sample_key, {})
-                range_net_tx_map = net_tx_by_sample.get(sample_key, {})
-                range_disk_read_map = disk_read_by_sample.get(sample_key, {})
-                range_disk_write_map = disk_write_by_sample.get(sample_key, {})
                 range_restart_map = restart_by_sample.get(sample_key, {})
-                range_ephemeral_usage_map = ephemeral_usage_by_sample.get(sample_key, {})
                 zone = node_context.emaps_zone if node_context else self._config.DEFAULT_ZONE
                 provider = _ni.cloud_provider if _ni else None
                 pue = self._config.get_pue_for_provider(provider)
@@ -1782,24 +1755,6 @@ class HistoricalRangeProcessor:
                             memory_usage_max_bytes=(
                                 max(int(range_memory_peak_map[pod_key]), int(range_memory_map[pod_key]))
                                 if pod_key in range_memory_map and pod_key in range_memory_peak_map
-                                else None
-                            ),
-                            network_receive_bytes=range_net_rx_map.get(pod_key),
-                            network_transmit_bytes=range_net_tx_map.get(pod_key),
-                            disk_read_bytes=range_disk_read_map.get(pod_key),
-                            disk_write_bytes=range_disk_write_map.get(pod_key),
-                            storage_request_bytes=(
-                                int(pod_storage_map[pod_key]["request"]) or None if pod_key in pod_storage_map else None
-                            ),
-                            storage_usage_bytes=(
-                                int(pod_storage_map[pod_key]["usage"]) or None if pod_key in pod_storage_map else None
-                            ),
-                            ephemeral_storage_request_bytes=(
-                                sum(c.ephemeral_storage_request for c in pod_containers) or None
-                            ),
-                            ephemeral_storage_usage_bytes=(
-                                int(range_ephemeral_usage_map[pod_key])
-                                if pod_key in range_ephemeral_usage_map
                                 else None
                             ),
                             gpu_power_watts=gpu_power.by_pod.get(pod_key) if gpu_power else None,
@@ -1943,8 +1898,7 @@ class HistoricalRangeProcessor:
                         combined.extend(container_rows)
 
             del cpu_usage_by_sample, memory_by_sample, groups, gpu_power_by_group, counter_cpu_pods, node_cpu_by_group
-            del net_rx_by_sample, net_tx_by_sample, disk_read_by_sample, disk_write_by_sample
-            del restart_by_sample, ephemeral_usage_by_sample
+            del restart_by_sample
             del container_memory_samples, normalized_container_samples
 
         collection_telemetry.set_unknown_power_profile_nodes(len(unknown_power_nodes))

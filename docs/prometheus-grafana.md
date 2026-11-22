@@ -6,7 +6,7 @@ GreenKube has two distinct Prometheus integrations that serve different purposes
 
 | Direction | What it does | Required? |
 |---|---|---|
-| GreenKube → Prometheus | GreenKube queries your cluster's Prometheus for CPU and memory metrics | Strongly recommended |
+| GreenKube → Prometheus | GreenKube queries your cluster's Prometheus for CPU, memory, restart and pod placement metrics | Strongly recommended |
 | Prometheus → GreenKube | Prometheus scrapes GreenKube's `/prometheus/metrics` endpoints for GreenKube's own health (collection, loops, scans, measurement, ledger) and the savings ledger counters, for alerts and the operations dashboard | Optional |
 
 Footprint data (cost, CO₂e and energy per pod, namespace and node) is not exported to Prometheus: per-pod and per-namespace labels multiply the series Prometheus stores. Read it in the Footprint pages, `GET /api/v1/report/summary` and `GET /api/v1/report/export` (CSV or JSON).

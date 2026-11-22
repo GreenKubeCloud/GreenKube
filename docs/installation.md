@@ -11,7 +11,7 @@ You need a Kubernetes cluster you administer, Helm 3.10+ and `kubectl`. Promethe
 the cluster).
 
 **Why OpenCost.** Without it, GreenKube still prices every pod: it charges the pod's reservation at its node's list
-price (bundled catalogs for AWS, GCP, Azure, OVHcloud and Scaleway, `cost_source: pricing_catalog`) or at the rates
+price (bundled catalogs for AWS, Azure, OVHcloud and Scaleway, `cost_source: pricing_catalog`; the GCP catalog is still empty, so GCP nodes without OpenCost use the configured or default rates) or at the rates
 you configure (`impact.pricing.cpuCoreHour` / `ramGiBHour`, `cost_source: custom_rate`). Those are estimates, not
 an observed allocation. OpenCost observes the allocation itself (the larger of request and usage, idle and shared
 costs, and the asset costs of volumes and load balancers) and is what change measurements trust first. On clusters

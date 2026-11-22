@@ -24,8 +24,6 @@ Scoping rules (BUG-01 / roadmap A1):
   ``name`` label (kubelet ``/metrics/resource``, pod cgroups) keep the ``max``
   per container and are used only when no cAdvisor instance series exists.
   Memory is a gauge and keeps the ``max``.
-* **Pod-scoped series** (network) are only exported on the pod sandbox, never
-  per application container, so they are intentionally left unfiltered.
 * **kube-state-metrics series** (restarts, pod info) describe Kubernetes
   objects, not cgroups, and need no container filter.
 
@@ -217,40 +215,6 @@ class PromQLCatalog:
         """
         selector = _selector(POD_CGROUP_FILTER, *self.extra_matchers)
         return f"max(container_memory_working_set_bytes{selector}) by (namespace,pod,node)"
-
-    def pod_disk_read(self) -> str:
-        """Filesystem read rate summed over the pod's containers."""
-        return (
-            f"sum(rate({self._container('container_fs_reads_bytes_total')}[{self.rate_window}])) "
-            "by (namespace,pod,node)"
-        )
-
-    def pod_disk_write(self) -> str:
-        """Filesystem write rate summed over the pod's containers."""
-        return (
-            f"sum(rate({self._container('container_fs_writes_bytes_total')}[{self.rate_window}])) "
-            "by (namespace,pod,node)"
-        )
-
-    def pod_ephemeral_storage_usage(self) -> str:
-        """Writable-layer and log usage summed over the pod's containers."""
-        return f"sum({self._container('container_fs_usage_bytes')}) by (namespace,pod,node)"
-
-    # ------------------------------------------------------------------
-    # Pod-scoped (sandbox network namespace) — intentionally unfiltered
-    # ------------------------------------------------------------------
-
-    def pod_network_receive(self) -> str:
-        return (
-            f"sum(rate({self._pod('container_network_receive_bytes_total')}[{self.rate_window}])) "
-            "by (namespace,pod,node)"
-        )
-
-    def pod_network_transmit(self) -> str:
-        return (
-            f"sum(rate({self._pod('container_network_transmit_bytes_total')}[{self.rate_window}])) "
-            "by (namespace,pod,node)"
-        )
 
     # ------------------------------------------------------------------
     # kube-state-metrics

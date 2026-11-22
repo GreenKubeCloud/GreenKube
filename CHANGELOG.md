@@ -246,6 +246,7 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - **The chart's KRR and Polaris CronJobs** (`sources.krr.job.*`, `sources.polaris.job.*`, their ServiceAccounts, ClusterRoles and NetworkPolicy rules). The values are ignored with a NOTES warning. KRR stays a source: run it yourself (see `docs/sources/krr.md`).
 - Migration `0310` retires the active recommendations whose chosen source was a removed connector (`stale`, event reason `type_removed`); recommendations in a pull request, measured or in the ledger are untouched, and no table is dropped.
 - The unused direct dependency `anyio` (still installed through `httpx` and Starlette; no GreenKube code imports it).
+- Unused metric dimensions (roadmap B.4): network receive and transmit, disk read and write, ephemeral storage, and PVC request and usage are no longer collected, stored, rolled up or returned by the metrics API. The range collection sends 11 Prometheus range queries per chunk instead of 16, and no longer runs the 3 instant PVC queries per window. The measured-ledger input no longer records `traffic_ratio`. The columns `network_receive_bytes`, `network_transmit_bytes`, `disk_read_bytes`, `disk_write_bytes`, `storage_request_bytes`, `storage_usage_bytes`, `ephemeral_storage_request_bytes` and `ephemeral_storage_usage_bytes` keep their old values; migration 0320 marks them deprecated and a later migration drops them (see `docs/upgrading.md`, "Removed metric dimensions").
 
 ### Fixed
 
