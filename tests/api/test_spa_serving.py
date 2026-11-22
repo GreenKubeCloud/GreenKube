@@ -57,3 +57,23 @@ def test_unknown_api_route_returns_json_404(spa_client):
 def test_proxy_paths_return_404(spa_client):
     response = spa_client.get("/oauth2/callback")
     assert response.status_code == 404
+
+
+def test_spa_serves_a_root_level_built_file(spa_client, tmp_path):
+    response = spa_client.get("/_app/app.js")
+    assert response.status_code == 200
+    root_file = spa_client.get("/index.html")
+    assert "spa-index" in root_file.text
+
+
+def test_spa_never_serves_a_symlink_out_of_the_build(tmp_path, monkeypatch):
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("<html>spa-index</html>")
+    (tmp_path / "secret.txt").write_text("top-secret")
+    (frontend / "leak.txt").symlink_to(tmp_path / "secret.txt")
+    monkeypatch.setattr(app_module, "FRONTEND_DIR", frontend)
+
+    response = TestClient(app_module.create_app()).get("/leak.txt")
+
+    assert "top-secret" not in response.text

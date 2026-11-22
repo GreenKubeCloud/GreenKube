@@ -48,6 +48,7 @@ from greenkube.auth.settings import AuthSettings
 from greenkube.auth.throttle import LoginThrottle
 from greenkube.auth.tokens import constant_time_equals, parse_api_key, sha256_hex
 from greenkube.core.config import get_config
+from greenkube.utils.log import log_safe
 
 logger = logging.getLogger(__name__)
 
@@ -557,7 +558,7 @@ async def revoke_api_key(key_id: str, request: Request, principal: Principal = D
         raise HTTPException(status_code=404, detail="API key not found or already revoked.")
     if not await _service(request).revoke_api_key(key_id):
         raise HTTPException(status_code=404, detail="API key not found or already revoked.")
-    logger.info("API key gk_%s revoked by %s.", key_id, principal.actor)
+    logger.info("API key gk_%s revoked by %s.", log_safe(key_id), log_safe(principal.actor))
     return Response(status_code=204)
 
 
@@ -629,7 +630,7 @@ def _redirect_uri(request: Request, settings: AuthSettings) -> str:
 def _sso_failure(request: Request, settings: AuthSettings, code: str, detail: str = "") -> RedirectResponse:
     """Back to the sign-in page with a stable error code; the detail goes to the log only."""
     record_auth_failure("sso")
-    logger.warning("Single sign-on failed: %s (%s).", code, detail or code)
+    logger.warning("Single sign-on failed: %s (%s).", log_safe(code), log_safe(detail or code))
     response = RedirectResponse(f"{_app_root(request)}?sso_error={code}", status_code=303)
     response.headers.update(_NO_STORE)
     response.delete_cookie(_oidc_cookie_name(settings), path=_oidc_cookie_path(request))
@@ -835,6 +836,10 @@ async def update_user(
     except AuthError as error:
         raise _error(error) from None
     logger.info(
-        "User %s updated by %s (role=%s, disabled=%s).", user.username, principal.actor, body.role, body.disabled
+        "User %s updated by %s (role=%s, disabled=%s).",
+        log_safe(user.username),
+        log_safe(principal.actor),
+        log_safe(body.role),
+        body.disabled,
     )
     return _user_info(user)

@@ -24,6 +24,7 @@ from greenkube.storage.base_repository import (
     SummaryRepository,
     TimeseriesCacheRepository,
 )
+from greenkube.utils.log import log_safe
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ async def get_dashboard_timeseries(
     try:
         points = await ts_repo.get_points(window_slug=window_slug, namespace=namespace)
     except Exception as exc:
-        logger.error("Failed to read timeseries cache for slug='%s': %s", window_slug, exc)
+        logger.error("Failed to read timeseries cache for slug='%s': %s", log_safe(window_slug), log_safe(exc))
         raise HTTPException(status_code=500, detail="Failed to read timeseries cache.") from exc
 
     return DashboardTimeseriesResponse(
