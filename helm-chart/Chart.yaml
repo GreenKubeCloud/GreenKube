@@ -8,8 +8,8 @@ description: >-
   CO₂e savings each change realizes.
 type: application
 icon: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/greenkube-logo.png
-version: 0.3.1
-appVersion: 0.3.1
+version: 0.4.0
+appVersion: 0.4.0
 keywords:
 - greenkube
 - kubernetes
@@ -57,7 +57,7 @@ annotations:
       email: hugo.lelievre@greenkube.cloud
   artifacthub.io/images: |
     - name: greenkube
-      image: greenkube/greenkube:0.3.1
+      image: greenkube/greenkube:0.4.0
       platforms:
         - linux/amd64
         - linux/arm64
@@ -76,90 +76,124 @@ annotations:
       url: https://raw.githubusercontent.com/GreenKubeCloud/GreenKube/refs/heads/main/assets/demo-report.png
   artifacthub.io/changes: |
     - kind: added
-      description: "GitOps plan workflow: Persisted recommendation IDs now resolve to server-side GitOps bindings and render-validated raw-manifest, Kustomize, and a fail-closed subset of Helm plans."
+      description: "Gap-aware collection: collection runs on wall-clock steps behind a per-installation watermark and catches up missing windows oldest first."
     - kind: added
-      description: "Immutable provider archive snapshots: GitHub, GitLab, and Gitea source snapshots are fetched at a full resolved commit SHA through authorized provider calls, streamed under the compressed-size cap…"
+      description: "Collection coverage and health: every step is recorded as `collected`, `empty`, `failed` or `gap`; `GET /api/v1/collection/coverage` returns the coverage ratio and holes, and `GET /api/v1/health`…"
     - kind: added
-      description: "Isolated renderer service: Helm/Kustomize receive bounded repository snapshots in a separate Pod without database/provider Secrets or a service-account token."
+      description: "Provenance and metadata history: pod and container rows record the source of each dimension (`cost_source`, `usage_source`, `power_source`, `intensity_source`, ...), OpenCost cost components…"
     - kind: added
-      description: "GitOps automation policy: Plan creation and approval enforce configurable risk, confidence, sample/coverage, open-PR budget, cooldown and change-freeze gates, with the result persisted for review."
+      description: "Impact Model: reservation-aware allocation of energy, operational and embodied CO2e and cost, with an explicit `__idle__` row per node so pod and idle rows add up to node totals; memory power…"
     - kind: added
-      description: "Git provider lifecycle recovery: The signed webhook endpoint authenticates provider-native signatures/tokens, persists deduplicated events and reconciles closed PRs against provider state."
+      description: "Embodied emissions: values come from Boavizta, the node annotation `greenkube.io/embodied-kg` or `config.boavizta.embodiedKgByInstanceType`, with a per-vCPU fallback…"
     - kind: added
-      description: "Periodic controller discovery: Argo CD and Flux bindings refresh at startup and periodically."
+      description: "Node idle share in reports: `/metrics/summary`, `/metrics/timeseries` and `/report/summary` return the idle share and `cluster_total_*` (allocated + idle); `/report/export?include_idle=true` adds…"
     - kind: added
-      description: "Manual GitOps binding resolution: Operators can resolve an existing ambiguous/unresolved workload by approving one current server-provided candidate."
+      description: "Impact projections and cost fallback: every recommendation carries an `impact` projection (cost and CO2e, capacity released, unit prices and their source)."
     - kind: added
-      description: "GitOps sync and apply gating: A controller runtime compares exact Argo CD/Flux source revisions and health to the merged commit."
+      description: "Released capacity: projected (core-, GiB-, replica- and node-hours per year) on every recommendation and measured with a capacity verdict on each decided change, never converted to money."
     - kind: added
-      description: "GitOps operations telemetry: The API and dedicated production worker expose authenticated `/prometheus/metrics` endpoints for their process-local registries."
+      description: "Change records and measurement: every applied workload revision is stored as an immutable change with a frozen 7-day baseline (`GET /api/v2/changes[/{id}[/measurements]]`)."
     - kind: added
-      description: "Owner-aware recommendation identity: Active recommendation identity includes workload owner kind/name so same-named workloads do not collide."
+      description: "Drift and reliability fixes: a realized change moves to `regressed` when it loses `CHANGE_DRIFT_THRESHOLD` of its saving for `CHANGE_DRIFT_SUSTAINED_DAYS`."
     - kind: added
-      description: "Safer GitOps target identities: Flux post-render selectors escape resource-name regex characters while remaining compatible with older managed selectors."
+      description: "Savings ledger v2: append-only signed entries per method (`projected`, `measured_allocated`, `realized_billed`, `user_declared`) and accounting basis, with reversals and restatements once a…"
     - kind: added
-      description: "Live policy evidence: Argo CD, Flux and raw workload bindings now carry current workload labels, rollout state, GitOps controller suspend/health, and HPA/PDB interaction evidence."
+      description: "Ledger operations: `greenkube db ledger-rotate-key` records a chain key rotation; `greenkube db ledger-accept-head` accepts the ledger head after a restore or failover lost entries."
     - kind: added
-      description: "Configurable discovery cadence: `automation.discoveryInterval` (`GITOPS_DISCOVERY_INTERVAL`) and `automation.bindingTtl` (`GITOPS_BINDING_TTL`) are wired through Helm and the API, with matching…"
+      description: "Scheduled scans and optimization runs: leader-gated scans every `RECOMMENDATION_SCAN_INTERVAL` (`config.recommendations.scanInterval`); `POST /api/v1/optimization/runs`, `GET…"
     - kind: added
-      description: "Automation readiness detail: `GET /api/v1/automation/status` now reports worker heartbeat health, queue depth, plan backlog, discovery age/coverage, renderer configuration and provider…"
+      description: "Expected-value ranking and risk model: each recommendation carries a `value` block (annual value, success probability, incident and effort cost) tuned by `RECOMMENDATION_INCIDENT_COST`…"
     - kind: added
-      description: "Bounded recommendation scans: concurrent `refresh=true` requests coalesce into one active scan; the lookback window is shortened before loading when combined and container rows exceed…"
+      description: "Two-way rightsizing: reliability increases (`RIGHTSIZING_INCREASE_THRESHOLD`, capped by `RIGHTSIZING_MAX_INCREASE_FACTOR`), limit advice (`RECOMMENDATION_LIMITS_POLICY`), a coverage requirement for…"
     - kind: added
-      description: "Retention for audit events: automation retention now also prunes `recommendation_events` and `workload_binding_events`."
+      description: "Eligibility and recommendation v2 API: every recommendation carries server-side `eligibility` (`can_open_pr`, delivery modes, blockers and warnings with their fix…"
     - kind: added
-      description: "Validated rollback flow: RAW rollback is built in; Kustomize rollback requires an explicitly injected exact-target renderer; Argo CD `HELM_VALUES` rollback is supported only for the explicitly…"
+      description: "Recommendation sources: a source SDK and registry (built-in sources, third-party plugins from `greenkube.sources` entry points) with isolation, timeouts and persisted runs; `GET /api/v1/sources`…"
     - kind: added
-      description: "Apply detection & verification (optimization engine Phase 3): Recommendation lifecycle is split into \"apply succeeded\" (`applied_at`, `application_method`) and \"recommendation succeeded\"…"
+      description: "Deletion recommendations: orphaned LoadBalancers and PersistentVolumes must look unused for `DELETION_MIN_UNUSED_DAYS` and list their evidence; they become reviewed pull requests (never…"
     - kind: added
-      description: "GitOps PR bot (optimization engine Phase 4): `POST /api/v1/recommendations/{id}/apply-pr` now resolves sources from native Argo CD/Flux discovery and persisted workload bindings; workload Git…"
+      description: "Manual mode: `GET /api/v1/recommendations/{id}/manual` returns `kubectl` steps, a patch and a diff; `POST …/manual/applied` records a hand-applied change so it is measured; an Apply manually panel…"
     - kind: added
-      description: "Measured savings ledger (optimization engine Phase 5): Ledger rows now carry `measurement_method` (`prorated`/`measured`), baseline/actual values and confidence; verified recommendations write…"
+      description: "Always-on GitOps automation: Git providers are inferred from Argo CD and Flux sources and delivery activates when the Secret `greenkube-git-credentials` exists (a token, or a GitHub App with signed…"
     - kind: added
-      description: "Real VPA and Karpenter connectors (optimization engine Phase 6): The VPA source is enabled by default and auto-detects the CRD; the Karpenter source now produces NodePool consolidation…"
+      description: "Pull requests and plans: PR template v2 with configurable title, labels, drafts for high-risk plans, CODEOWNERS reviewers, a `greenkube/validation` commit status and one lifecycle comment…"
     - kind: added
-      description: "Optimization engine — unified recommendation orchestration: Recommendation generation is now centralized in a single `OptimizationEngine` (`src/greenkube/core/optimization/`) used by the API, the…"
+      description: "Git provider observability and setup: per-operation call budget, `greenkube_git_provider_*` metrics and the `GreenKubeGitProviderRateLimited` alert; a guided setup checklist (`GET…"
     - kind: added
-      description: "Multi-source recommendations with provenance: New `RecommendationSource` adapters."
+      description: "Accounts and sessions: `API_AUTH_MODE=session` with server-side sessions, `HttpOnly` cookies, CSRF protection and login rate limiting (`/api/v1/auth/*`, `auth.session.*`); `greenkube auth…"
     - kind: added
-      description: "Review-grade evidence on every recommendation: Each recommendation now includes a structured evidence block — observation window, sample count/coverage, current vs proposed requests, utilization…"
+      description: "API keys and single sign-on: scoped API keys (`read`, `write`, `approve`, `signals:write`, `signals:report`, `plans:deliver`, `metrics:read`, `admin`) and a generated scrape token…"
     - kind: added
-      description: "Multi-criteria ranking: Recommendations are scored on carbon/cost impact, confidence, risk, effort, actionability and source authority."
+      description: "Helm chart: a credentials bootstrap hook that generates credentials once and keeps them on uninstall; `values.schema.json`; Ingress and Gateway API HTTPRoute templates; per-component scheduling…"
     - kind: added
-      description: "Risk, confidence and effort assessment: New heuristics derive `risk_level` (low/medium/high) with explainable `risk_factors`, a 0–1 `confidence` based on samples/coverage/source authority, and…"
+      description: "Operations monitoring: controller metrics and health on `controller.metricsPort` (9102: `/healthz`, `/readyz`, `/loops`) with a ServiceMonitor; PrometheusRule groups for the controller, loops…"
     - kind: added
-      description: "Migrations `0010` (sources/provenance/owner) and `0011` (evidence/risk/ranking/patch/expiry): for both SQLite and PostgreSQL."
-    - kind: added
-      description: "Helm: new `config.recommendations` values (`vpaEnabled`, `karpenterEnabled`, `sourcePriority`, `ttlDays`, `rankingProfile`, `rankingWeights`, `minSamples`) and read-only RBAC for…"
-    - kind: added
-      description: "Helm image digest pinning: new `image.digest` value renders `repository@sha256:<digest>` and takes precedence over `image.tag`, so releases can be pinned to exact image bytes without splitting the…"
+      description: "UI and docs: a savings-first Overview, recommendation detail, Changes, Ledger, Sources, Setup and Footprint pages, and account, session, API key and user pages; recommendation cards show expected…"
     - kind: changed
-      description: "Documentation: Added a complete installation guide and a user-facing GitOps automation guide, updated the configuration/API/architecture/recommendation references, refreshed the README and frontend…"
+      description: "Process layout: collection, scans and plan execution run in the controller; the API is stateless and safe to scale (`api.replicas`, `controller.replicas`, optional `worker.replicas`)."
     - kind: changed
-      description: "Single orchestration path: The duplicated metric/side-input loading previously present in the API router, startup scan and CLI now lives in `OptimizationContext`/`ContextBuilder`."
+      description: "GreenKube's measured value decides the size: VPA, Goldilocks, KRR and pushed signals no longer replace the native rightsizing value; agreeing sources raise its confidence and contested ones lower…"
     - kind: changed
-      description: "SQLite/PostgreSQL recommendation repositories: Insert/update statements are generated from a shared column definition, removing placeholder drift between backends."
+      description: "Recommendations: a new `pr_open` status while a pull request is open; percentiles use per-step values and projections annualize over observed coverage; decreases no longer flap; OOM kills and…"
     - kind: changed
-      description: "Verification rates are sample-normalized: before/after cost and carbon rates now use the observed sample duration (sample count x query step) instead of the wall-clock window, so verification…"
+      description: "Verification: the previous (interim) verifier remains only with `CHANGE_MEASUREMENT_ENABLED=false` and its savings are reported apart; otherwise change measurement decides, with windows starting at…"
+    - kind: changed
+      description: "Savings API and metrics: `GET /api/v1/recommendations/savings` returns separate, never-summed blocks (`projected_annual`, `run_rate_annual`, `realized_to_date`, `projected_to_date`…"
+    - kind: changed
+      description: "Fail-closed behaviour: collection under a different cluster UID, decreases with unknown OOM/restart history, missing evidence, unmanaged or ambiguous resource bindings and remote GitOps destinations…"
+    - kind: changed
+      description: "GitOps delivery: previewing a workload again supersedes its unapproved plans; plan branches are created at the validated commit; HPA gates apply only to what an HPA scales; roles are enforced per…"
+    - kind: changed
+      description: "UI: navigation is Overview, Recommendations, Changes, Ledger, Footprint, Automation, Sources, Setup, Settings (`/report` and `/nodes` redirect under `/footprint`); savings read \"saves $X/yr\" and…"
+    - kind: changed
+      description: "Build and CI: the frontend moved to SvelteKit 3 and the image builds it with Node 22; CI pins every action by SHA, gates coverage at 80% and runs an end-to-end loop on Minikube…"
+    - kind: deprecated
+      description: "`refresh=true` on recommendation reads (it only queues a run)."
+    - kind: deprecated
+      description: "The bootstrap key `GREENKUBE_API_KEY` (still an admin key unless `auth.legacyApiKey` says otherwise); use accounts and scoped keys."
+    - kind: deprecated
+      description: "The flat `total_*`, `measured_*` and `prorated_*` fields of `GET /recommendations/savings`, `is_estimated`, `RECOMMENDATION_RANKING_WEIGHTS` and the worker's `--queue` option."
+    - kind: deprecated
+      description: "The Helm values listed in the upgrade notes (mapped for one minor release)."
     - kind: removed
-      description: "Elasticsearch storage backend: The experimental Elasticsearch backend has been removed, including `storage/elastic/`, the `setup_elasticsearch` wiring, the `ELASTICSEARCH_*` configuration and Helm…"
+      description: "Advisory analyzers: zombie pods, idle namespaces, off-peak scaling, autoscaling candidates, carbon-aware scheduling and over/under-provisioned nodes."
     - kind: removed
-      description: "Interactive CLI report and recommendation commands: `greenkube report` and `greenkube recommend` have been removed, together with the `exporters`, `reporters` and `models.cli` modules and the…"
+      description: "Karpenter NodePool connector and source priority: `RECOMMENDATION_KARPENTER_ENABLED` (`config.recommendations.karpenterEnabled`) and `RECOMMENDATION_SOURCE_PRIORITY`…"
+    - kind: removed
+      description: "Large Grafana dashboard: `dashboards/greenkube-grafana.json` (Grafana.com dashboard 25377); import `dashboards/greenkube-operations.json` instead."
+    - kind: removed
+      description: "Footprint and recommendation series on `/prometheus/metrics`: every `greenkube_pod_*`, `greenkube_namespace_*` and `greenkube_node_*` family, cluster footprint totals, grid intensity, PUE…"
+    - kind: removed
+      description: "Network, disk and storage dimensions: network receive/transmit, disk read/write, ephemeral storage and PVC request/usage are no longer collected or returned by the metrics API; their columns keep…"
+    - kind: removed
+      description: "Routes: `POST /api/v1/recommendations/{id}/apply-pr`, `GET …/apply-pr/eligibility`, `GET /api/v1/automation/operations/{operation_id}` (use the plans API and `eligibility`) and `POST…"
+    - kind: removed
+      description: "Settings and runtime configuration: `LOW_NODE_CPU_THRESHOLD`, `PROMETHEUS_QUERY_RANGE_MAX_SAMPLES` and `SERVICE_URL_ALLOWLIST` (and their Helm values), runtime configuration overrides stored in the…"
+    - kind: removed
+      description: "Helm: `values-production.yaml`, the standalone two-container pod, the production deployments, the migration Job, the credential-check and ServiceMonitor CRD hooks, and the…"
     - kind: fixed
-      description: "Exhausted operation recovery: a periodic plan reconciler now fails an `applying` plan and releases its recommendation action when the linked operation is terminal and no pull request exists, instead…"
+      description: "CPU and memory measurement: no more doubled CPU and memory from pod-cgroup or duplicate series; consecutive windows no longer share, skip or shift samples; NaN/Inf samples are dropped; CPU of…"
     - kind: fixed
-      description: "Consistent repository allowlists: discovery and provider authorization now share segment-aware glob matching, so `acme/*` no longer resolves `acme/team/repo` during discovery and then fail during…"
+      description: "Stored rows: windows with no data, re-collections and missing pods no longer erase or degrade stored rows; failed Kubernetes or carbon-intensity reads fail the window instead of dropping rows…"
     - kind: fixed
-      description: "Argo CD tracking-ID fallback: the fallback now reads the managed live resource annotation instead of only the Application metadata."
+      description: "Workload identity: pod owners follow the controller chain (a ReplicaSet resolves to its Deployment or Argo Rollout, a Job to its CronJob); static control-plane pods no longer receive…"
     - kind: fixed
-      description: "Apply detection no longer fires on missing requests: a live workload with no CPU/memory request (observed `0`) is not treated as an applied change."
+      description: "OpenCost costs: every request sends `OPENCOST_BEARER_TOKEN` or `OPENCOST_USERNAME`/`OPENCOST_PASSWORD` (an authenticated OpenCost yielded no cost); same-named pods in different namespaces or…"
     - kind: fixed
-      description: "Verified cost-only savings are attributed: a verified recommendation with zero measured CO2e but positive measured cost now writes a `measured` ledger row instead of being skipped."
+      description: "Carbon data: Boavizta values are used (every lookup failed and fell back to a flat 100 kg per node); stale or default intensities are no longer used as measured; the default zone gets live…"
     - kind: fixed
-      description: "Negligible carbon projections do not block verification: carbon projections below 1 gCO2e/year are treated as noise and skip the carbon gate."
+      description: "Recommendations: rightsizing prices CPU and memory separately and never claims more than the container costs; young workloads are no longer projected 168 times too low; OOM-killed containers get a…"
     - kind: fixed
-      description: "Helm: the collector waits for PostgreSQL: with an init container (`wait-for-postgres`) when the bundled database is enabled, instead of crash-looping on the first connection attempt during a fresh…"
+      description: "Verification and ledger: ledger compression no longer loses half of the savings; accrual no longer double counts on restart or failover; failed, inconclusive or reverted outcomes no longer accrue…"
     - kind: fixed
-      description: "Helm image references fail fast: a `sha256:` digest passed through `image.tag` (which Kubernetes reports as `InvalidImageName`) is rejected at render time with a pointer to `image.digest`; malformed…"
+      description: "GitOps delivery: GitLab merge requests can be opened again (approved plans went `stale`); sync is confirmed when a later commit contains the merge; GitHub PRs closed unmerged and GitLab fast-forward…"
     - kind: fixed
-      description: "Helm database credential safety: a pre-upgrade hook verifies `DB_CONNECTION_STRING` against the bundled PostgreSQL before rolling Pods, and a fresh install fails early when a retained PostgreSQL PVC…"
+      description: "Operations and UI: the bundled PostgreSQL runs without a root init container (Pod Security `restricted`); the API key is no longer asked after every reload; page loads no longer trigger full scans…"
+    - kind: security
+      description: "CORS and rate limiting: wildcard CORS is never combined with credentials and CORS is same-origin by default; rate limiting keys per route and on the rightmost untrusted `X-Forwarded-For` hop…"
+    - kind: security
+      description: "Git credentials: the default Git token is never sent to a host it was not issued for; remote chart fetches never follow cross-host redirects with tokens or reach loopback, link-local or metadata…"
+    - kind: security
+      description: "Secrets and keys: the credentials Secret is read through a Role limited to its name and the API can no longer patch it; no full-admin key is generated in browser modes; HSTS on HTTPS; PostgreSQL…"
+    - kind: security
+      description: "Code scanning: the frontend no longer depends on vulnerable `@sveltejs/kit` 2.x (`npm audit` is clean); log lines quoting request data escape line breaks; oversized durations and steps are rejected…"

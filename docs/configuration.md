@@ -76,7 +76,7 @@ Overriding the tag replaces the pin; set `digest: sha256:<64 hex>` next to a pla
 ```yaml
 image:
   repository: greenkube/greenkube
-  tag: 0.3.1
+  tag: 0.4.0
   # Optional: pin the exact image instead of using a tag.
   # digest: sha256:<64 hexadecimal characters>
   pullPolicy: IfNotPresent

@@ -216,7 +216,7 @@ automation:
   # "@discovered": repositories referenced by discovered Argo CD/Flux sources.
   # An explicit list of "owner/repo" names or globs narrows it.
   repositoryAllowlist:
-    - '@discovered'
+  - '@discovered'
   prPollIntervalSeconds: 120
   syncPollIntervalSeconds: 30
   # GitOps discovery refresh cadence and workload-binding freshness window.
@@ -344,7 +344,7 @@ image:
   pullPolicy: IfNotPresent
 
   # Overrides the image tag whose default is the chart appVersion.
-  tag: 0.3.1
+  tag: 0.4.0
 
   # Pin the image by digest instead of tag, for example:
   #   digest: sha256:31f209d1a74950e54e9f7ddfe6c8d8e366efca4184eee40689ffaf18e856eceb
@@ -359,7 +359,8 @@ initContainer:
     # Tag pinned to the multi-arch index digest of busybox:1.37: a re-pushed
     # tag cannot change it. Overriding the tag drops the pin; an explicit
     # "digest" key pins any tag.
-    tag: '1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec'
+    tag: 
+      1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
     pullPolicy: IfNotPresent
 
 serviceAccount:
@@ -755,8 +756,8 @@ impact:
   # to use the OpenCost default custom pricing (0.031611 per core-hour and
   # 0.004237 per GiB-hour, USD). Set both for on-premises or negotiated rates.
   pricing:
-    cpuCoreHour: null
-    ramGiBHour: null
+    cpuCoreHour:
+    ramGiBHour:
     # Currency of every projected cost (custom rates and observed OpenCost
     # costs). Only bundled catalogs in this currency are used: set EUR for the
     # OVHcloud and Scaleway catalogs. GreenKube never converts currencies.
@@ -765,12 +766,12 @@ impact:
   # billable node-hours. Leave null to derive it per node pool from the
   # cluster (Cluster Autoscaler status, Karpenter consolidation policies,
   # do-not-disrupt annotations and blocking PDBs); set a value to pin it.
-  realizationFactor: null
+  realizationFactor:
   # Autoscaler of the nodes outside Karpenter pools when detection cannot see it
   # (a Cluster Autoscaler with another status ConfigMap, a managed autoscaler
   # that publishes nothing): none | cluster_autoscaler | karpenter. Empty:
   # detected from kube-system/cluster-autoscaler-status and Karpenter NodePools.
-  autoscalerHint: ""
+  autoscalerHint: ''
   # Memory power per GiB of node memory (W/GiB). Default: the Cloud Carbon
   # Footprint memory coefficient.
   memoryWattsPerGiB: 0.392
@@ -1018,7 +1019,8 @@ postgres:
     # change the database under a running release. Bump both together
     # (Renovate understands "tag@digest"). Overriding the tag (e.g.
     # "18-alpine") drops the pin; an explicit "digest" key pins any tag.
-    tag: 18-alpine@sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95
+    tag: 
+      18-alpine@sha256:1018733457011bf88d81db98cf43aac6d5150afc18787dbe204771fedf80ff95
     pullPolicy: IfNotPresent
   auth:
     username: greenkube
@@ -1066,7 +1068,7 @@ postgres:
   # object-store variant).
   backup:
     enabled: false
-    schedule: '17 3 * * *'
+    schedule: 17 3 * * *
     keep: 7
     # Abort a dump that runs longer than this.
     activeDeadlineSeconds: 3600
