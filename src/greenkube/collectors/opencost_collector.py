@@ -101,6 +101,8 @@ _REBUILD_TOLERANCE = 0.02
 NODE_PRICE_LOOKBACK_SECONDS = 24 * 3600
 #: Node unit prices are re-read once per hour of collection time.
 _NODE_PRICE_CACHE_SECONDS = 3600
+#: How long a price set missing a node's CPU or RAM price is reused before it is re-read.
+_INCOMPLETE_NODE_PRICE_RETRY_SECONDS = 300
 _OTHER_COST_KEYS = (
     "pvCost",
     "pvCostAdjustment",
@@ -504,7 +506,8 @@ class OpenCostCollector(BaseCollector):
         # Reusable HTTP client (lazily initialized)
         self._client: Optional[httpx.AsyncClient] = None
         # OpenCost node unit prices with the hour of collection time they were read for.
-        self._node_prices: Optional[tuple[int, Dict[str, NodeUnitPrices]]] = None
+        #: (hour bucket, collection time of the read, prices per node).
+        self._node_prices: Optional[tuple[int, int, Dict[str, NodeUnitPrices]]] = None
         #: Outcome of the last allocation request (``OPENCOST_STATUS_*``; ``None`` after an error).
         self.last_status: Optional[str] = None
 
@@ -701,15 +704,24 @@ class OpenCostCollector(BaseCollector):
 
         One ``aggregate=node`` query: a node's cost over a day is large enough
         for OpenCost's 5-decimal rounding to be negligible. The result is
-        reused within the same hour of collection time while it covers every
-        node in ``nodes`` (a fresh cluster or a new node is re-read). Any
-        failure yields no prices, so sub-precision zeros stay untrusted (fail
-        closed).
+        reused within the same hour of collection time while it gives every
+        node in ``nodes`` both a CPU and a RAM price. A node without one (a new
+        node, or a cluster whose OpenCost history is too short for a precise
+        RAM price) is re-read after ``_INCOMPLETE_NODE_PRICE_RETRY_SECONDS``:
+        caching it for the hour kept every small pod's cost untrusted for that
+        hour. Any failure yields no prices, so sub-precision zeros stay
+        untrusted (fail closed).
         """
         end_ts = int(end.timestamp())
         bucket = end_ts // _NODE_PRICE_CACHE_SECONDS
-        if self._node_prices is not None and self._node_prices[0] == bucket and nodes <= set(self._node_prices[1]):
-            return self._node_prices[1]
+        if self._node_prices is not None and self._node_prices[0] == bucket:
+            _bucket, read_at, cached = self._node_prices
+            complete = all(
+                node in cached and cached[node].cpu_core_hour is not None and cached[node].ram_byte_hour is not None
+                for node in nodes
+            )
+            if complete or (nodes <= set(cached) and 0 <= end_ts - read_at < _INCOMPLETE_NODE_PRICE_RETRY_SECONDS):
+                return cached
         params = {
             "window": f"{end_ts - NODE_PRICE_LOOKBACK_SECONDS},{end_ts}",
             "aggregate": "node",
@@ -731,7 +743,7 @@ class OpenCostCollector(BaseCollector):
         for allocation_set in data:
             if isinstance(allocation_set, dict):
                 prices.update(node_unit_prices(_own_cluster(allocation_set)))
-        self._node_prices = (bucket, prices)
+        self._node_prices = (bucket, end_ts, prices)
         return prices
 
     async def _asset_allocations(self, window_days: int, what: str) -> Optional[List[dict]]:
