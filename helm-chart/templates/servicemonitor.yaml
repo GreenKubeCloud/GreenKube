@@ -41,27 +41,13 @@ spec:
           {{- end }}
           {{- end }}
       metricRelabelings:
-        # Prometheus renames metric labels that conflict with Kubernetes discovery
-        # labels (namespace, pod, cluster, region) by prefixing them with "exported_".
-        # For GreenKube metrics the original labels carry the meaningful data
-        # (the actual K8s namespace / pod being measured), so we restore them.
-        - sourceLabels: [exported_namespace]
-          targetLabel: namespace
-          regex: (.+)
-          action: replace
-        - sourceLabels: [exported_pod]
-          targetLabel: pod
-          regex: (.+)
-          action: replace
+        # The API series carry the GreenKube cluster name in "cluster"; Prometheus renames
+        # it "exported_cluster" when the target already has a "cluster" label, so restore it.
         - sourceLabels: [exported_cluster]
           targetLabel: cluster
           regex: (.+)
           action: replace
-        - sourceLabels: [exported_region]
-          targetLabel: region
-          regex: (.+)
-          action: replace
-        - regex: exported_namespace|exported_pod|exported_cluster|exported_region
+        - regex: exported_cluster
           action: labeldrop
         # Safety net: if cluster label is still empty after relabeling, set it to
         # "default" so Prometheus does not drop the label silently.

@@ -192,7 +192,6 @@ async def _populate_database(days: int) -> dict[str, int]:
 
     # 6. Pre-compute dashboard summary and timeseries cache for all windows
     logger.info("⚡ Pre-computing dashboard summary and timeseries cache...")
-    from greenkube.api.metrics_endpoint import update_dashboard_summary_metrics
     from greenkube.core.factory import get_summary_repository, get_timeseries_cache_repository
     from greenkube.core.summary_refresher import SummaryRefresher
 
@@ -203,10 +202,6 @@ async def _populate_database(days: int) -> dict[str, int]:
         timeseries_cache_repo=get_timeseries_cache_repository(),
     )
     counts["timeseries_cache_rows"] = await refresher.run()
-    try:
-        update_dashboard_summary_metrics(await summary_repo.get_rows(namespace=None), reset=True)
-    except Exception as exc:
-        logger.warning("Unable to publish demo dashboard summary metrics: %s", exc)
 
     return counts
 

@@ -18,7 +18,6 @@ from greenkube.api.dependencies import (
     get_timeseries_cache_repository,
     validate_namespace,
 )
-from greenkube.api.metrics_endpoint import update_dashboard_summary_metrics
 from greenkube.api.schemas import DashboardSummaryResponse, DashboardTimeseriesResponse
 from greenkube.storage.base_repository import (
     CombinedMetricsRepository,
@@ -48,7 +47,6 @@ async def get_dashboard_summary(
     """
     try:
         rows = await summary_repo.get_rows(namespace=namespace)
-        update_dashboard_summary_metrics(rows, reset=namespace is None)
     except Exception as exc:
         logger.error("Failed to read dashboard summary: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to read dashboard summary.") from exc
@@ -121,8 +119,6 @@ async def refresh_dashboard_summary(
     async def _run():
         try:
             count = await refresher.run()
-            rows = await summary_repo.get_rows(namespace=namespace)
-            update_dashboard_summary_metrics(rows, reset=namespace is None)
             logger.info("On-demand dashboard refresh complete: %d rows upserted.", count)
         except Exception as exc:
             logger.error("On-demand dashboard refresh failed: %s", exc)

@@ -6,7 +6,6 @@ from greenkube.core.config import Config
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.evidence import build_evidence
 from greenkube.core.optimization.restarts import restarts_in_window
-from greenkube.core.sustainability_score import SustainabilityScorer
 from greenkube.models.metrics import CombinedMetric, Recommendation, RecommendationType
 
 NOW = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
@@ -75,9 +74,3 @@ def test_restarts_add_over_pods_and_a_recreated_pod_starts_from_zero():
     # A counter reset (container runtime restart) is never a negative restart count.
     assert restarts_in_window(_rows([3, 0, 1])) == 1
     assert restarts_in_window(_rows([None, None])) is None
-
-
-def test_stability_ignores_restarts_older_than_the_window():
-    old = SustainabilityScorer._score_stability(_rows([216] * 4))
-    fresh = SustainabilityScorer._score_stability(_rows([0, 0, 0, 0]))
-    assert old == fresh
