@@ -6,6 +6,7 @@ The engine runs Source SDK sources (:mod:`greenkube.signals`):
   built by the analyzer adapter;
 * ``vpa``, the VPA connector;
 * ``greenkube.nodepool``, the NodePool consolidation heuristic over Karpenter objects;
+* ``krr`` and ``push``, the signal-only sources that read pushed reports and batches;
 * third-party sources registered under the ``greenkube.sources`` entry points.
 
 :func:`build_sources` (v1 ``RecommendationSource`` connectors) is kept for
@@ -27,24 +28,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SOURCE_PRIORITY = "vpa,karpenter,greenkube"
-
-
-def parse_source_priority(value: str | None) -> Dict[str, int]:
-    """Parses the priority string into a ``{source: weight}`` map.
-
-    The first source in the list has the highest weight so that arbitration
-    picks it when multiple sources own the same capability.
-    """
-    order = [item.strip().lower() for item in (value or "").split(",") if item.strip()]
-    if not order:
-        order = DEFAULT_SOURCE_PRIORITY.split(",")
-    size = len(order)
-    return {name: size - index for index, name in enumerate(order)}
-
 
 def build_sources(config: "Config") -> List[RecommendationSource]:
-    """Instantiates the enabled v1 recommendation connectors with their priorities."""
+    """Instantiates the enabled v1 recommendation connectors."""
     sources: List[RecommendationSource] = []
 
     if getattr(config, "RECOMMENDATION_VPA_ENABLED", False):
@@ -55,14 +41,7 @@ def build_sources(config: "Config") -> List[RecommendationSource]:
     # Native analysis is always enabled.
     sources.append(NativeSource(config))
 
-    priorities = parse_source_priority(getattr(config, "RECOMMENDATION_SOURCE_PRIORITY", DEFAULT_SOURCE_PRIORITY))
-    for source in sources:
-        source.priority = priorities.get(source.name, 0)
-
-    logger.debug(
-        "Optimization sources: %s",
-        ", ".join(f"{s.name}(p={s.priority})" for s in sources),
-    )
+    logger.debug("Optimization sources: %s", ", ".join(s.name for s in sources))
     return sources
 
 
@@ -70,23 +49,15 @@ def builtin_source_classes() -> List[type[Source]]:
     """Built-in sources, in execution order (VPA, NodePool, the native analyzers, then the signal-only connectors)."""
     from greenkube.core.optimization.analyzers import DEFAULT_ANALYZERS
     from greenkube.signals.adapters import analyzer_source_class
-    from greenkube.signals.connectors.azure_advisor import AzureAdvisorSource
-    from greenkube.signals.connectors.gke import GkeRecommenderSource
     from greenkube.signals.connectors.krr import KrrSource
-    from greenkube.signals.connectors.kubecost import KubecostSource
-    from greenkube.signals.connectors.polaris import PolarisSource
-    from greenkube.signals.connectors.replay import PushSignalSource
+    from greenkube.signals.connectors.push import PushSignalSource
 
     return [
         VpaSignalSource,
         NodePoolSignalSource,
         *(analyzer_source_class(cls) for cls in DEFAULT_ANALYZERS),
         KrrSource,
-        KubecostSource,
         PushSignalSource,
-        PolarisSource,
-        GkeRecommenderSource,
-        AzureAdvisorSource,
     ]
 
 

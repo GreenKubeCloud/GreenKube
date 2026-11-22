@@ -114,6 +114,69 @@ ACCELERATED_MIN_POST_WINDOW_DAYS = 1 / 48
 #: Clamped window settings already reported (name, configured value): warn once per process.
 _CLAMP_WARNED: set[tuple[str, float]] = set()
 
+#: Settings removed in phase B (roadmap B.0): accepted and ignored for one release, with one
+#: warning at start naming them. Values say what replaced them.
+REMOVED_SETTINGS: dict[str, str] = {
+    # B.3: consensus has one policy, the native measured value decides the size.
+    "RECOMMENDATION_CONSENSUS_POLICY": "GreenKube's measured value decides the size; other sources move confidence",
+    "RECOMMENDATION_SOURCE_PRIORITY": "GreenKube's measured value decides the size; other sources move confidence",
+}
+#: Removed settings already reported: warn once per process.
+_REMOVED_WARNED: set[str] = set()
+
+
+def _env_file_values(path: str) -> dict[str, str]:
+    """``NAME=value`` pairs of a dotenv file (the ``.env`` the configuration loads); empty when unreadable."""
+    values: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        name, _, value = text.removeprefix("export ").partition("=")
+        values[name.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def removed_settings_in_use(
+    environ: Optional[dict[str, str]] = None, sources_config: Any = "", env_file: Optional[str] = ".env"
+) -> list[str]:
+    """The removed settings (and ``SOURCES_CONFIG`` entries of removed sources) still configured.
+
+    Read from the environment and from ``env_file`` (the ``.env`` file :class:`Config` loads).
+    """
+    env = {**(_env_file_values(env_file) if env_file else {}), **(os.environ if environ is None else environ)}
+    names = [name for name in REMOVED_SETTINGS if str(env.get(name) or "").strip()]
+    try:
+        from greenkube.signals.registry import REMOVED_SOURCE_IDS, parse_sources_config
+
+        configured = parse_sources_config(sources_config)
+    except (ValueError, TypeError):
+        return names
+    names.extend(f"SOURCES_CONFIG.{source_id}" for source_id in sorted(set(configured) & REMOVED_SOURCE_IDS))
+    return names
+
+
+def warn_removed_settings(environ: Optional[dict[str, str]] = None, sources_config: Any = "") -> list[str]:
+    """Logs one warning naming the removed settings still configured (once per name and process)."""
+    names = [name for name in removed_settings_in_use(environ, sources_config) if name not in _REMOVED_WARNED]
+    if names:
+        _REMOVED_WARNED.update(names)
+        reasons = "; ".join(
+            f"{name} ({REMOVED_SETTINGS.get(name, 'connector removed: push its advice to POST /api/v1/signals')})"
+            for name in names
+        )
+        logging.getLogger(__name__).warning(
+            "Ignoring removed setting(s), they have no effect and will be refused in a later release "
+            "(see docs/upgrading.md): %s",
+            reasons,
+        )
+    return names
+
 
 #: Resource keys accepted in ``SIGNAL_TOOL_FLOORS`` and the consensus resource each sets.
 _FLOOR_RESOURCES = {"cpu": "cpu_request_m", "memory": "memory_request_bytes"}
@@ -550,12 +613,6 @@ class Config(BaseSettings):
     # Karpenter NodePool consolidation recommendations. Enabled by default and
     # skipped gracefully when the Karpenter CRDs are absent.
     RECOMMENDATION_KARPENTER_ENABLED: bool = True
-    # Source precedence for capability arbitration, highest priority first.
-    RECOMMENDATION_SOURCE_PRIORITY: str = "vpa,karpenter,greenkube"
-    # How the proposals of several sources on one target are combined (roadmap
-    # E6): safest (least aggressive), median, weighted (track-record weighted
-    # median) or priority (RECOMMENDATION_SOURCE_PRIORITY wins).
-    RECOMMENDATION_CONSENSUS_POLICY: str = "safest"
     # Known minimum each tool proposes, per engine family or source id (roadmap A.5): a value
     # equal to it is the tool's floor, not a signal of need, and is not counted as a vote.
     # JSON object; blank means the built-in KRR simple and Fairwinds VPA chart floors.
@@ -926,13 +983,6 @@ class Config(BaseSettings):
             raise ValueError("RECOMMENDATION_LIMITS_POLICY must be keep, remove_cpu or memory_equals_request")
         return normalized
 
-    @field_validator("RECOMMENDATION_CONSENSUS_POLICY", mode="after")
-    @classmethod
-    def _validate_recommendation_consensus_policy(cls, value: str) -> str:
-        from greenkube.signals.consensus import parse_policy
-
-        return parse_policy(value).value
-
     @field_validator("SIGNAL_TOOL_FLOORS", mode="after")
     @classmethod
     def _validate_signal_tool_floors(cls, value: str) -> str:
@@ -1134,6 +1184,12 @@ class Config(BaseSettings):
     # ------------------------------------------------------------------ #
     # Model validators (cross-field & computed fields)                    #
     # ------------------------------------------------------------------ #
+
+    @model_validator(mode="after")
+    def _warn_removed_settings(self) -> "Config":
+        """Removed settings are accepted and ignored for one release, with one warning (roadmap B.0)."""
+        warn_removed_settings(sources_config=self.SOURCES_CONFIG)
+        return self
 
     @model_validator(mode="after")
     def _validate_compression_age(self) -> "Config":

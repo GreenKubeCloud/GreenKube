@@ -21,7 +21,7 @@ class Scope(StrEnum):
     WRITE = "write"
     APPROVE = "approve"
     SIGNALS_WRITE = "signals:write"
-    #: Upload KRR and Polaris reports only (``/api/v1/sources/{krr,polaris}/reports``).
+    #: Upload KRR reports only (``/api/v1/sources/krr/reports``).
     SIGNALS_REPORT = "signals:report"
     PLANS_DELIVER = "plans:deliver"
     METRICS_READ = "metrics:read"
@@ -100,8 +100,8 @@ _APPROVE_PATHS = (re.compile(r"^/api/v1/automation/plans/[^/]+/approve$"),)
 # Reports that a plan was delivered outside GreenKube (``patch`` and ``ci`` modes, roadmap F4):
 # a CI job holds ``read`` + ``plans:deliver``, never ``write`` or ``approve``.
 _DELIVERY_PATHS = (re.compile(r"^/api/v1/automation/plans/[^/]+/delivery$"),)
-# Connector reports pushed like signals (KRR, Polaris: roadmap G2, G4).
-REPORT_PATHS = frozenset({"/api/v1/sources/krr/reports", "/api/v1/sources/polaris/reports"})
+# Connector reports pushed like signals (KRR: roadmap G2).
+REPORT_PATHS = frozenset({"/api/v1/sources/krr/reports"})
 #: Scopes still accepted in place of a required one, for one minor release: report
 #: uploads moved from ``signals:write`` to their own ``signals:report`` scope.
 DEPRECATED_SCOPE_FALLBACKS: dict[str, str] = {Scope.SIGNALS_REPORT.value: Scope.SIGNALS_WRITE.value}
@@ -115,8 +115,8 @@ def required_scope(method: str, path: str) -> str | None:
     """Return the scope a request needs, or ``None`` when authentication suffices.
 
     The table is coarse on purpose: reads need ``read``, mutations ``write``,
-    plan approvals ``approve``, delivery reports ``plans:deliver``, signal pushes ``signals:write``, KRR and
-    Polaris report uploads ``signals:report``, the Prometheus endpoint ``metrics:read``, and user or API-key
+    plan approvals ``approve``, delivery reports ``plans:deliver``, signal pushes ``signals:write``, KRR
+    report uploads ``signals:report``, the Prometheus endpoint ``metrics:read``, and user or API-key
     administration ``admin``.
     """
     method = method.upper()

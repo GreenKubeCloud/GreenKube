@@ -187,10 +187,25 @@ production block included) keeps the single-replica sizes. */ -}}
 
 {{- /* Sources grouped under sources.* (N3, E5). */ -}}
 {{- $sources := $values.sources | default dict -}}
-{{- $sourcePriority := $sources.priority | default "vpa,karpenter,greenkube" -}}
-{{- if hasKey $recommendations "sourcePriority" -}}
-  {{- $sourcePriority = $recommendations.sourcePriority -}}
-  {{- $deprecations = append $deprecations "config.recommendations.sourcePriority is mapped to sources.priority." -}}
+{{- /* Removed in roadmap B.3: accepted and ignored for one release. */ -}}
+{{- range $key := list "sourcePriority" "consensusPolicy" -}}
+  {{- if hasKey $recommendations $key -}}
+    {{- $deprecations = append $deprecations (printf "config.recommendations.%s is removed and ignored: GreenKube's measured value decides the size, other sources move the confidence." $key) -}}
+  {{- end -}}
+{{- end -}}
+{{- if hasKey $sources "priority" -}}
+  {{- $deprecations = append $deprecations "sources.priority is removed and ignored: GreenKube's measured value decides the size, other sources move the confidence." -}}
+{{- end -}}
+{{- if hasKey $sources "krr" -}}
+  {{- $deprecations = append $deprecations "sources.krr is removed and ignored: the chart no longer runs KRR; run it yourself and push its report (docs/sources/krr.md)." -}}
+{{- end -}}
+{{- if hasKey $sources "polaris" -}}
+  {{- $deprecations = append $deprecations "sources.polaris is removed and ignored: the Polaris connector was removed." -}}
+{{- end -}}
+{{- range $id := list "kubecost" "polaris" "gke" "azure_advisor" -}}
+  {{- if hasKey ($sources.settings | default dict) $id -}}
+    {{- $deprecations = append $deprecations (printf "sources.settings.%s is ignored: the %s connector was removed; push its advice to POST /api/v1/signals (docs/sources/push.md)." $id $id) -}}
+  {{- end -}}
 {{- end -}}
 {{- $vpaEnabled := "true" -}}
 {{- $karpenterEnabled := "true" -}}
@@ -218,7 +233,6 @@ production block included) keeps the single-replica sizes. */ -}}
     "minSamples" $minSamples
     "policyMinSamples" $policyMinSamples
     "verificationMinSamples" $verificationMinSamples
-    "sourcePriority" $sourcePriority
     "vpaEnabled" $vpaEnabled
     "karpenterEnabled" $karpenterEnabled
     "deprecations" $deprecations

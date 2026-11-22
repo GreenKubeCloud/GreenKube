@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 #: Maximum length of a problem message kept for the API.
 _MESSAGE_LIMIT = 300
 
+#: Built-in connectors removed in roadmap B.3: their ``SOURCES_CONFIG`` entries are
+#: accepted and ignored for one release, with a warning (roadmap B.0).
+REMOVED_SOURCE_IDS = frozenset({"kubecost", "polaris", "gke", "azure_advisor"})
+
 
 def parse_sources_config(value: Any) -> Dict[str, Dict[str, Any]]:
     """Parse ``SOURCES_CONFIG``: a JSON object of objects keyed by source id."""
@@ -200,7 +204,11 @@ class SourceRegistry:
                 continue
             enabled = settings.enabled or defaults.get(descriptor.id) or cls.default_enabled
             configured.append(ConfiguredSource(descriptor=descriptor, enabled=EnabledMode(enabled), settings=settings))
-        for unknown in sorted(set(settings_by_id) - set(self._descriptors)):
+        removed = sorted((set(settings_by_id) & REMOVED_SOURCE_IDS) - set(self._descriptors))
+        if removed:
+            # Warned once at start by the configuration (removed_settings_in_use).
+            logger.debug("Ignoring SOURCES_CONFIG of removed source(s) %s.", ", ".join(removed))
+        for unknown in sorted(set(settings_by_id) - set(self._descriptors) - REMOVED_SOURCE_IDS):
             self.problems.append(
                 RegistryProblem(
                     code="unknown_source",

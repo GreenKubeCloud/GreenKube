@@ -20,9 +20,8 @@ from greenkube.core.config import Config
 from greenkube.core.db import DatabaseManager
 from greenkube.core.optimization.context import OptimizationContext
 from greenkube.core.optimization.engine import OptimizationEngine
-from greenkube.signals.connectors.inbox import InboxBatch
+from greenkube.signals.connectors.inbox import InboxBatch, InboxSettings
 from greenkube.signals.connectors.krr import KrrReportError, KrrSource, parse_krr_report
-from greenkube.signals.connectors.replay import InboxSettings
 from greenkube.signals.model import ContainerResourcesProposal
 from greenkube.signals.runtime import SourceRunStatus
 from greenkube.signals.sdk import SourceDeps

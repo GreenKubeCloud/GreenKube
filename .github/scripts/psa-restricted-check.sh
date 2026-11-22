@@ -48,7 +48,6 @@ scenarios=(
   "defaults|"
   "no-persistence|--set postgres.persistence.enabled=false"
   "dedicated-worker|--set worker.replicas=1 --set api.replicas=2 --set controller.replicas=2"
-  "krr-job|--set sources.krr.job.enabled=true --set sources.krr.job.apiKeySecret.name=gk-krr"
   "external-postgres|--set postgres.enabled=false --set secrets.dbConnectionString=postgresql://u:p@db:5432/greenkube"
   "ingress|--set ingress.enabled=true --set ingress.hosts[0]=greenkube.example.com"
   "network-policy|--set monitoring.networkPolicy.enabled=true"

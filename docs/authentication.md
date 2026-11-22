@@ -369,7 +369,7 @@ curl -X POST https://greenkube.example.com/api/v1/auth/api-keys \
 | `approve` | Plan approval, which opens pull requests: `POST /api/v1/automation/plans/{id}/approve` |
 | `plans:deliver` | Report that an approved plan was delivered outside GreenKube (`POST /api/v1/automation/plans/{id}/delivery`, `patch` and `ci` delivery modes). A CI job needs `read` + `plans:deliver` only |
 | `signals:write` | Pushing signals: `POST /api/v1/signals` ([Push API](sources/push.md)). A key pushes batches only as `push:<key name>` (`403 push_client_mismatch` otherwise) |
-| `signals:report` | Uploading reports: `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)) and `POST /api/v1/sources/polaris/reports` ([Polaris](sources/polaris.md)). A `signals:write` key is still accepted there for one minor release, with a `Deprecation: true` response header and a warning in the API log |
+| `signals:report` | Uploading reports: `POST /api/v1/sources/krr/reports` ([KRR](sources/krr.md)). A `signals:write` key is still accepted there for one minor release, with a `Deprecation: true` response header and a warning in the API log |
 | `metrics:read` | Only the Prometheus endpoint `/prometheus/metrics` |
 | `admin` | Everything, including API keys |
 
@@ -377,7 +377,7 @@ User roles map to the same scopes: `viewer` (`read`, `metrics:read`), `operator`
 `admin` (everything). See [Roles](#roles).
 
 Pushed signals never corroborate each other: every signal that arrives through the push API (`push:<client>`
-batches, KRR and Polaris reports) counts as at most **one** independent consensus vote together, whatever the key and
+batches, KRR reports) counts as at most **one** independent consensus vote together, whatever the key and
 the client name. One `signals:write` key could otherwise push as two clients, or as a client plus a report, and meet
 the "two independent sources" condition that lets [auto-approval](automation.md) approve a request decrease.
 

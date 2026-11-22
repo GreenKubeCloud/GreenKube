@@ -45,28 +45,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $v.api.port }}
-    {{- if $root.Values.sources.krr.job.enabled }}
-    # Allow the optional KRR job to push its report (docs/sources/krr.md).
-    - from:
-        - podSelector:
-            matchLabels:
-              {{- include "greenkube.selectorLabels" $root | nindent 14 }}
-              app.kubernetes.io/component: krr
-      ports:
-        - protocol: TCP
-          port: {{ $v.api.port }}
-    {{- end }}
-    {{- if dig "polaris" "job" "enabled" false ($root.Values.sources | default dict) }}
-    # Allow the optional Polaris job to push its audit (docs/sources/polaris.md).
-    - from:
-        - podSelector:
-            matchLabels:
-              {{- include "greenkube.selectorLabels" $root | nindent 14 }}
-              app.kubernetes.io/component: polaris
-      ports:
-        - protocol: TCP
-          port: {{ $v.api.port }}
-    {{- end }}
     {{- end }}
     {{- if $workerIngress }}
     - from:

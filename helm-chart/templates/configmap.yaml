@@ -231,8 +231,6 @@ data:
   RECOMMENDATION_APPLY_TOLERANCE: {{ .applyTolerance | default 0.25 | quote }}
   RECOMMENDATION_VPA_ENABLED: {{ $v.vpaEnabled | quote }}
   RECOMMENDATION_KARPENTER_ENABLED: {{ $v.karpenterEnabled | quote }}
-  RECOMMENDATION_SOURCE_PRIORITY: {{ $v.sourcePriority | quote }}
-  RECOMMENDATION_CONSENSUS_POLICY: {{ .consensusPolicy | default "safest" | quote }}
   RECOMMENDATION_TTL_DAYS: {{ .ttlDays | default 14 | int | quote }}
   RECOMMENDATION_RANKING_PROFILE: {{ .rankingProfile | default "balanced" | quote }}
   RECOMMENDATION_RANKING_WEIGHTS: {{ .rankingWeights | default "" | quote }}

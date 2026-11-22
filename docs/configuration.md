@@ -238,7 +238,6 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 | `config.recommendations.minDecreaseCoverageDays` | `RECOMMENDATION_MIN_DECREASE_COVERAGE_DAYS` | `7` | Observed days required before a request decrease is recommended. Increases need no minimum. |
 | `config.recommendations.deletionMinUnusedDays` | `DELETION_MIN_UNUSED_DAYS` | `7` | Days a LoadBalancer Service or PersistentVolume must look unused continuously, and days of idle observations for zombie workloads and idle namespaces, before a deletion is recommended. See [Why GreenKube thinks a resource is unused](recommendation.md#why-greenkube-thinks-a-resource-is-unused). |
 | `config.recommendations.limitsPolicy` | `RECOMMENDATION_LIMITS_POLICY` | `keep` | Limits advice of native rightsizing: `keep` (only when a limit would be invalid or unsafe), `remove_cpu`, or `memory_equals_request`. See [Two-way rightsizing](recommendation.md#two-way-rightsizing-and-limits). |
-| `config.recommendations.consensusPolicy` | `RECOMMENDATION_CONSENSUS_POLICY` | `safest` | How the proposals of several sources on one target are combined: `safest` (least aggressive value), `median`, `weighted` (median weighted by each source's measured track record) or `priority` (the highest `sources.priority` source wins, the behavior before consensus). Sources sharing an engine (Goldilocks and VPA) count once. See [Consensus across sources](recommendation.md#consensus-across-sources). |
 | `config.recommendations.ttlDays` | `RECOMMENDATION_TTL_DAYS` | `14` | Recommendation expiry. |
 | `config.recommendations.rankingProfile` | `RECOMMENDATION_RANKING_PROFILE` | `balanced` | Default ranking profile: `balanced`, `cost_first`, `carbon_first`, `low_risk` or `quick_wins`, presets over the carbon price, risk aversion and effort weight of the expected value. Requests override it with `?profile=`. See [ranking](recommendation.md#sources-evidence-and-ranking). |
 | `config.recommendations.rankingWeights` | `RECOMMENDATION_RANKING_WEIGHTS` | `""` | Deprecated and ignored: weights of the former batch-normalized score. |
@@ -268,50 +267,31 @@ Analyzer thresholds and source selection live under `config.recommendations`. Th
 
 ### Recommendation sources (`sources`)
 
-Sources produce the signals recommendations are built from: one per native analyzer (`greenkube.rightsizing_cpu`, `greenkube.orphaned_lb`...), `vpa` (with Goldilocks provenance), `greenkube.nodepool`, the signal-only connectors `krr`, `kubecost` and `push`, and third-party plugins. `GET /api/v1/sources` lists them with their status. See [Recommendation sources](sources.md).
+Sources produce the signals recommendations are built from: one per native analyzer (`greenkube.rightsizing_cpu`, `greenkube.orphaned_lb`...), `vpa` (with Goldilocks provenance), `greenkube.nodepool`, the signal-only connectors `krr` and `push`, and third-party plugins. `GET /api/v1/sources` lists them with their status. GreenKube's measured value decides every size; the other sources move the confidence ([Consensus across sources](recommendation.md#consensus-across-sources)). See [Recommendation sources](sources.md).
 
 | Helm value | Environment variable | Default | Description |
 |---|---|---|---|
 | `sources.pluginsEnabled` | `SOURCES_PLUGINS_ENABLED` | `true` | Load third-party sources installed in the image and registered under the `greenkube.sources` Python entry points. A plugin that fails to load is reported in `GET /api/v1/sources` (`problems`) and never stops the other sources. |
 | `sources.settings` | `SOURCES_CONFIG` | `{}` | Per-source settings keyed by source id, rendered as a JSON object. `enabled` is `true`, `false` or `auto` (run when the source's prerequisites are detected, the default for `vpa` and `greenkube.nodepool`); other keys are validated by the source (unknown keys disable that source and are reported). Invalid JSON is rejected at startup. Do not put credentials here: the map is stored in the ConfigMap. The 0.3.x `config.recommendations.vpaEnabled`/`karpenterEnabled` flags are still honoured for one minor release. |
-| `sources.priority` | `RECOMMENDATION_SOURCE_PRIORITY` | `vpa,karpenter,greenkube` | Arbitration precedence (highest first). Replaces `config.recommendations.sourcePriority`. |
 | `sources.toolFloors` | `SIGNAL_TOOL_FLOORS` | `{krr: {cpu: 10m, memory: 100Mi}, vpa: {cpu: 15m, memory: 100Mi}}` | Known minimum each tool proposes, keyed by engine family or source id (a source id such as `goldilocks` overrides its family `vpa`; a key without the resource falls through), with `cpu` and/or `memory` quantities (rendered as JSON). A proposal on the floor is not counted as a consensus vote; the `vpa` floor is per pod and split between its containers. Set a key to `null` to drop it. Invalid JSON or quantities are rejected at startup. See [Votes that are not counted](recommendation.md#consensus-across-sources). |
 | `sources.minChange.percent` | `SIGNAL_MIN_CHANGE_PERCENT` | `5` | Smallest relative change (percent of the current request) an external source must propose to vote for its own value; a smaller change votes to keep the current request. |
 | `sources.minChange.cpuMillicores` | `SIGNAL_MIN_CHANGE_CPU_MILLICORES` | `10` | Smallest absolute CPU change of an external vote; both minimums must be reached. |
 | `sources.minChange.memoryBytes` | `SIGNAL_MIN_CHANGE_MEMORY_BYTES` | `16777216` | Smallest absolute memory change (bytes, 16 MiB) of an external vote. |
 | `sources.vpa.minSampleHours` | `VPA_MIN_SAMPLE_HOURS` | `24` | Hours of samples (VPA checkpoint `firstSampleStart`..`lastSampleStart`, else `totalSamplesCount` at one a minute) before a VPA votes; a VPA with `LowConfidence=True` never votes. `0` disables the check. See [VPA maturity](sources/vpa.md#maturity). |
 
-| `sources.krr.job.enabled` | — | `false` | Run [Robusta KRR](sources/krr.md) as a CronJob that pushes its report to `POST /api/v1/sources/krr/reports`. Needs `sources.krr.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:report`; `signals:write` is accepted, deprecated). The API is always deployed. |
-| `sources.krr.job.schedule` | — | `17 3 * * *` | Cron schedule of the KRR job. |
-| `sources.krr.job.strategy` | — | `simple` | KRR strategy (`krr <strategy>`). |
-| `sources.krr.job.image.*` | — | `robustadev/krr` v1.31.1 by digest | KRR image; `digest` is required (`sha256:<64 hex>`). |
-| `sources.krr.job.prometheusUrl` | — | `""` | Prometheus URL passed to KRR (`-p`); empty lets KRR discover it. |
-| `sources.krr.job.extraArgs` | — | `[]` | Extra KRR arguments (`--namespace`, `--history_duration`...). |
-| `sources.krr.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:report` API key. |
-| `sources.krr.job.resources`, `activeDeadlineSeconds` | — | `100m`/`512Mi` requests, `2Gi` limit; `3600` | KRR container resources and job deadline. |
-| `sources.polaris.job.enabled` | — | `false` | Run [Fairwinds Polaris](sources/polaris.md) as a CronJob that pushes its audit to `POST /api/v1/sources/polaris/reports`. Needs `sources.polaris.job.apiKeySecret.name` (a Secret holding an API key with scope `signals:report`; `signals:write` is accepted, deprecated). The API is always deployed. |
-| `sources.polaris.job.schedule` | — | `37 3 * * *` | Cron schedule of the Polaris job. |
-| `sources.polaris.job.image.*` | — | `quay.io/fairwinds/polaris` 10.1.8 by digest | Polaris image; `digest` is required (`sha256:<64 hex>`). |
-| `sources.polaris.job.extraArgs` | — | `[]` | Extra `polaris audit` arguments. |
-| `sources.polaris.job.complete` | — | `true` | `true`: each audit replaces every earlier Polaris finding. Set `false` when `extraArgs` narrows the audit (for example one namespace): the job posts with `?complete=false` and adds or refreshes findings. |
-| `sources.polaris.job.apiKeySecret` | — | `{name: "", key: api-key}` | Secret and key of the `signals:report` API key. |
-| `sources.polaris.job.resources`, `activeDeadlineSeconds` | — | `50m`/`128Mi` requests, `512Mi` limit; `1800` | Polaris container resources and job deadline. |
-| `sources.polaris.job.rbac.create`, `serviceAccountName` | — | `true`, `""` | Create the job's read-only ServiceAccount and ClusterRole, or bring your own. |
-| `sources.krr.job.rbac.create`, `serviceAccountName` | — | `true`, `""` | Create the job's ServiceAccount and read-only ClusterRole, or use an existing ServiceAccount. |
+The chart runs no KRR job: run KRR yourself (CI or a CronJob of your own) and push its report, see [Robusta KRR](sources/krr.md).
 
 Connector settings in `sources.settings` (all optional, validated by each source):
 
 | Source | Keys |
 |---|---|
 | `krr`, `push` | `max_age_hours` (default `168`): pushed signals older than this are no longer used. |
-| `kubecost` | `url` (default: the chart service `kubecost-cost-analyzer.kubecost`, probed in-cluster only), `version` (`"2"`/`"3"`, probed), `window` (`7d`), `algorithm_cpu`/`algorithm_ram` (`max`/`quantile`), `q_cpu`/`q_ram`, `target_cpu_utilization`/`target_ram_utilization` (`0.7`), `filter`, `cluster_id` (required when Kubecost reports several clusters), `abandoned_workloads`/`node_group_sizing` (`true`), `paths` (per-endpoint overrides), `timeout_seconds` (`30`). See [Kubecost](sources/kubecost.md). |
 
 ```yaml
 sources:
   settings:
     greenkube.carbon_aware: { enabled: false }   # turn one native analyzer off (its active advice goes stale)
     vpa: { enabled: auto }
-    kubecost: { url: "http://kubecost-cost-analyzer.kubecost:9090", cluster_id: "prod-eu" }
     push: { max_age_hours: 72 }
 ```
 
