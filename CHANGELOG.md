@@ -397,6 +397,9 @@ GreenKube is now an optimization loop: aggregate recommendations, deliver them a
 - Only a last-line PR footer and comments written by GreenKube's own identity are trusted.
 - No full-admin key is generated in browser modes; `auth.legacyApiKey` restricts the legacy key; HSTS on HTTPS; PostgreSQL NetworkPolicy on by default (`postgres.networkPolicy.enabled`, `additionalIngress`); install notes warn about an accepted admin key or an exposure with empty `config.trustedProxyIps`. Release images and the chart are signed with provenance and SBOM (`SECURITY.md` explains verification).
 - The frontend no longer depends on vulnerable `@sveltejs/kit` 2.x (GHSA-pfhg-q3qv-9q6r, GHSA-27mw-82g8-phjj, GHSA-3r8g-jcqq-3p5j, GHSA-6cf5-gc4q-fm3x) or on the jest, glob and minimatch chain of `svelte-jester`: `npm audit` reports no vulnerabilities.
+- `DELETE /api/v1/auth/api-keys/{key_id}` refuses a key id that is not 8 lowercase letters or digits with a 404 before it reaches the audit log line (CodeQL log injection).
+- Dashboard durations (`5m`, `7d`...) and Prometheus steps accept at most 6 digits and 32 characters: an oversized value is a clean 400-class error instead of a slow regex, a 4300-digit `int()` error or a `timedelta` overflow (CodeQL polynomial regex).
+- The SPA fallback checks the resolved path with `os.path.realpath` and a prefix test on the frontend directory (behaviour unchanged, path traversal still refused), and the Flux `HelmRelease` match compares the `apiVersion` group exactly.
 
 ## [0.3.1] — 2026-10-25
 
