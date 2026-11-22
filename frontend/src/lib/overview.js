@@ -47,8 +47,8 @@ export function currencyOf(recommendations = []) {
 	return getDisplayCurrency();
 }
 
-/** Label of the de-duplicated opportunity (IMP-07), shown on every page that renders it. */
-export const OPPORTUNITY_LABEL = 'Projected (not additive across overlapping recommendations)';
+/** Label of the server opportunity (IMP-07), shown on every page that renders it. */
+export const OPPORTUNITY_LABEL = 'Projected (sum of the active recommendations)';
 
 /**
  * The opportunity the server computed once (`opportunity` of
@@ -75,9 +75,8 @@ export function serverOpportunity(savings) {
 /**
  * Projected opportunity of active recommendations (savings lane only).
  * Reliability recommendations cost money on purpose and are counted apart.
- * With the server's de-duplicated opportunity (`server`, from
- * {@link serverOpportunity}) its totals replace the client-side sums, which
- * would add overlapping recommendations.
+ * With the server's opportunity (`server`, from
+ * {@link serverOpportunity}) its totals replace the client-side sums.
  */
 export function opportunityOf(recommendations = [], server = null) {
 	let cost = 0;

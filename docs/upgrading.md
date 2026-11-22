@@ -52,7 +52,7 @@ data is preserved: the bundled PostgreSQL StatefulSet, its volume and its Secret
 | Renderer only with automation | Renderer always deployed (25m / 96Mi) |
 | SQLite in Helm (`config.db.type`, `config.db.path`, `config.persistence`) | PostgreSQL only; SQLite stays for `greenkube demo` and local development |
 | Three `minSamples` knobs | One: `config.recommendations.minSamples` |
-| `config.recommendations.sourcePriority`, `vpaEnabled`, `karpenterEnabled` | `sources.settings.<id>.enabled`; the source priority is removed (see [Removed connectors](#removed-connectors-and-consensus-policies)) |
+| `config.recommendations.sourcePriority`, `vpaEnabled`, `karpenterEnabled` | `sources.settings.vpa.enabled` for `vpaEnabled`; `karpenterEnabled` and the source priority are removed (see [Removed connectors](#removed-connectors-and-consensus-policies)) |
 | ConfigMap `<release>` (a Helm hook) | ConfigMap `<release>-config` (a regular release resource) |
 
 ### Metric measures in double precision (PostgreSQL)
@@ -158,7 +158,8 @@ PersistentVolume detection stay. On upgrade:
 
 - migration 0300 marks the open recommendations of the retired types (`ZOMBIE_POD`, `IDLE_NAMESPACE`,
   `OFF_PEAK_SCALING`, `AUTOSCALING_CANDIDATE`, `CARBON_AWARE_SCHEDULING`, `OVERPROVISIONED_NODE`,
-  `UNDERUTILIZED_NODE`), active or ignored, `stale` with a `stale` event of reason `type_removed`. No row is
+  `UNDERUTILIZED_NODE`), active or ignored, `stale` with a `stale` event of reason `type_removed` (an ignored
+  row keeps its `ignored_at` and `ignored_reason`, and the event records `from_status`). No row is
   deleted, applied and measured ones keep their status, and the savings ledger is not touched;
 - `RECOMMENDATION_KARPENTER_ENABLED` and the analyzer thresholds (`ZOMBIE_COST_THRESHOLD`,
   `ZOMBIE_ENERGY_THRESHOLD`, `AUTOSCALING_CV_THRESHOLD`, `AUTOSCALING_SPIKE_RATIO`, `OFF_PEAK_IDLE_THRESHOLD`,

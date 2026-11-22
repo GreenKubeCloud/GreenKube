@@ -25,7 +25,7 @@ During scans, workloads that no longer run are left out of rightsizing (REC-05):
 
 Static pods are never advised on (F-04): the mirror pod of a static pod (etcd, kube-apiserver, kube-scheduler and kube-controller-manager on kubeadm, kind, minikube or k3s control planes) is owned by its `Node` (annotation `kubernetes.io/config.mirror`), its manifest lives in the node's manifest directory and not in Git, and the rollup would merge a node's static pods into one fake workload `Node/<node>`. Every analyzer leaves these targets out, no source may store a recommendation whose owner kind is `Node`, the memory rightsizing source run reports the count as the diagnostic `static_pods_excluded`, and recommendations stored by earlier versions are marked `stale` with the reason `static_pod`.
 
-During scans, metrics from Kubernetes namespaces that no longer exist are filtered out when the Kubernetes API is reachable. This lets reconciliation mark old active recommendations from deleted namespaces as stale instead of regenerating them forever. On SQLite and PostgreSQL the filter is applied in SQL, so the history of deleted namespaces also counts neither in per-node averages (node and Karpenter analyses) nor in the observed window used to annualize savings.
+During scans, metrics from Kubernetes namespaces that no longer exist are filtered out when the Kubernetes API is reachable. This lets reconciliation mark old active recommendations from deleted namespaces as stale instead of regenerating them forever. On SQLite and PostgreSQL the filter is applied in SQL, so the history of deleted namespaces also does not count in the observed window used to annualize savings.
 
 ## Usage Summaries (Memory-Bounded Scans)
 
@@ -128,7 +128,7 @@ The controller is the only process that runs and persists scans; the API reads p
 
 ## Sources, Evidence And Ranking
 
-**Sources.** Each recommendation carries `source` (the source whose proposal the consensus chose: `greenkube` for a container request or limit, else `greenkube`, `vpa` or the id of a signal-only source such as `krr` or `push:<client>`), an optional `source_ref` (e.g. `namespace/vpa-name`), a `sources` list of every supporting source (the chosen one first), a `consensus` block and a `capability`. The VPA and Karpenter connectors are enabled by default (`RECOMMENDATION_VPA_ENABLED`, `RECOMMENDATION_KARPENTER_ENABLED`) and skip cleanly when their CRDs are absent.
+**Sources.** Each recommendation carries `source` (the source whose proposal the consensus chose: `greenkube` for a container request or limit, else `greenkube`, `vpa` or the id of a signal-only source such as `krr` or `push:<client>`), an optional `source_ref` (e.g. `namespace/vpa-name`), a `sources` list of every supporting source (the chosen one first), a `consensus` block and a `capability`. The VPA connector is enabled by default (`RECOMMENDATION_VPA_ENABLED`) and skips cleanly when its CRD is absent.
 
 ### Consensus across sources
 

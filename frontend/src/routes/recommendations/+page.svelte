@@ -373,8 +373,8 @@
 		sortMode = mode;
 	}
 
-	// IMP-07: the server's de-duplicated opportunity, the same figure as the dashboard. The client-side
-	// sums (which add overlapping recommendations and net increases) are only a fallback.
+	// IMP-07: the server's opportunity, the same figure as the dashboard. The client-side
+	// sums (which net increases) are only a fallback.
 	// The server figure covers every active recommendation: with source/risk filters the page sums the matches.
 	$: opportunity = serverFiltersActive ? null : serverOpportunity(savings);
 	// Fallback (filters on): the matching savings recommendations only, never increases or negatives.

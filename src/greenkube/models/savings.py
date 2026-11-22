@@ -329,8 +329,8 @@ class SavingsReport(BaseModel):
     opportunity: Optional["OpportunitySummary"] = Field(
         None,
         description=(
-            "Projected opportunity of the active recommendations, de-duplicated across overlapping "
-            "recommendations (IMP-07): the one figure the dashboard and the recommendations page show. Null when "
+            "Projected opportunity of the active recommendations (IMP-07): the one figure the dashboard and "
+            "the recommendations page show, request increases counted apart. Null when "
             "the active recommendations could not be read."
         ),
     )

@@ -46,7 +46,7 @@ rules:
   verbs:
   - get
   - list
-   # Karpenter connector (node pool consolidation).
+   # The realization factor reads Karpenter NodePools and NodeClaims (autoscaler collector).
 - apiGroups: ["karpenter.sh"]
   resources:
   - nodepools

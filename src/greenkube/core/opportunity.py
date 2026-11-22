@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from greenkube.models.metrics import RecommendationRecord
 
 #: Label every page shows next to the opportunity.
-OPPORTUNITY_LABEL = "Projected (not additive across overlapping recommendations)"
+OPPORTUNITY_LABEL = "Projected (sum of the active recommendations)"
 
 #: Metrics summed independently: billable cost, allocated cost, CO2e grams.
 _Metrics = Tuple[float, float, float]
@@ -34,11 +34,11 @@ _ZERO: _Metrics = (0.0, 0.0, 0.0)
 class OpportunitySummary(BaseModel):
     """De-duplicated projected opportunity of the active recommendations (IMP-07)."""
 
-    cost_annual: float = Field(0.0, description="Projected billable cost saving per year, de-duplicated.")
+    cost_annual: float = Field(0.0, description="Projected billable cost saving per year.")
     allocated_cost_annual: float = Field(
-        0.0, description="Projected allocated cost saving per year (Impact Model allocated basis), de-duplicated."
+        0.0, description="Projected allocated cost saving per year (Impact Model allocated basis)."
     )
-    co2e_grams_annual: float = Field(0.0, description="Projected CO2e saving per year in grams, de-duplicated.")
+    co2e_grams_annual: float = Field(0.0, description="Projected CO2e saving per year in grams.")
     reliability_cost_annual: float = Field(
         0.0, description="Projected yearly cost of the reliability fixes (request increases), positive, never netted."
     )

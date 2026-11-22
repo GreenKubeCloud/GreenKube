@@ -215,7 +215,7 @@ def assemble_savings_report(
     decided by the interim verifier (MEA-16): their measured amounts are
     reported in ``interim_run_rate_annual``/``interim_realized_to_date`` and
     left out of every measured figure. ``active`` are the active
-    recommendations: their de-duplicated projected opportunity is reported in
+    recommendations: their projected opportunity is reported in
     ``opportunity`` (IMP-07).
     """
     interim_records = [record for record in applied_records if is_interim(record)]
