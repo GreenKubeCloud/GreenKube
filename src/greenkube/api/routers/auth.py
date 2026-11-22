@@ -11,6 +11,7 @@ administration.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -50,6 +51,7 @@ from greenkube.core.config import get_config
 
 logger = logging.getLogger(__name__)
 
+_KEY_ID_RE = re.compile(r"[a-z0-9]{8}")
 router = APIRouter(prefix="/auth")
 
 _NO_STORE = {"Cache-Control": "no-store"}
@@ -549,6 +551,10 @@ async def create_api_key(
 async def revoke_api_key(key_id: str, request: Request, principal: Principal = Depends(get_principal)):
     """Revoke a key immediately."""
     _require_admin(principal)
+    # Key ids are 8 lowercase letters or digits: anything else is unknown, and is
+    # refused before it reaches the log line below (log injection).
+    if not _KEY_ID_RE.fullmatch(key_id):
+        raise HTTPException(status_code=404, detail="API key not found or already revoked.")
     if not await _service(request).revoke_api_key(key_id):
         raise HTTPException(status_code=404, detail="API key not found or already revoked.")
     logger.info("API key gk_%s revoked by %s.", key_id, principal.actor)
